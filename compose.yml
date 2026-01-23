@@ -1,0 +1,35 @@
+services:
+  # Fulloch AI
+  app:
+    build:
+      context: .    
+    env_file:
+      - .env
+    container_name: fulloch-ai
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - audio
+    volumes:
+      - ./data:/app/data:rw
+
+  # Web Search - Searxng
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./searxng_data:/etc/searxng:rw
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+
+volumes:
+  searxng_data: {}
+  app_data: {}

@@ -1,0 +1,162 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fulloch"
+version = "0.1.0"
+description = "A fully local, privacy-focused AI voice home assistant"
+readme = "readme.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Fulloch Contributors"}
+]
+keywords = [
+    "voice-assistant",
+    "home-automation",
+    "speech-recognition",
+    "text-to-speech",
+    "local-ai",
+    "privacy",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Home Automation",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Core dependencies required for basic operation
+dependencies = [
+    "numpy>=1.22.0",
+    "setuptools>=80.0.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    # Audio
+    "sounddevice>=0.5.0",
+    "soundfile>=0.13.0",
+    # AI/ML Core
+    "torch>=2.0.0",
+    "transformers>=4.40.0",
+    "kokoro>=0.9.0",
+    "accelerate>=1.0.0",
+    "llama-cpp-python>=0.3.0",
+]
+
+[project.optional-dependencies]
+# Smart home integrations
+smart-home = [
+    "phue>=1.1.0",              # Philips Hue
+    "spotipy>=2.25.0",          # Spotify
+    "pyairtouch>=3.0.0",        # Airtouch HVAC
+    "thinqconnect>=1.0.0",      # LG ThinQ
+    "bscpylgtv>=0.5.0",         # LG WebOS TV
+]
+
+# Google services
+google = [
+    "google-auth>=2.0.0",
+    "google-auth-oauthlib>=0.4.0",
+    "google-api-python-client>=2.0.0",
+]
+
+# Web search
+search = [
+    "beautifulsoup4>=4.12.0",
+    "requests>=2.31.0",
+]
+
+# Utilities
+utils = [
+    "xmltodict>=0.13.0",        # Weather XML parsing
+    "word2number>=1.1",         # Timer duration parsing
+]
+
+# Development tools
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+# All optional dependencies
+all = [
+    "fulloch[smart-home,google,search,utils]",
+]
+
+[project.scripts]
+fulloch = "app:main"
+
+[project.urls]
+Homepage = "https://github.com/liampetti/fulloch"
+Documentation = "https://github.com/liampetti/fulloch#readme"
+Repository = "https://github.com/liampetti/fulloch"
+Issues = "https://github.com/liampetti/fulloch/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "tools*", "utils*", "audio*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.txt", "*.yml", "*.yaml"]
+
+# Pytest configuration
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = [
+    "-v",
+    "--tb=short",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+# Ruff linter configuration
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+# MyPy configuration
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+# Coverage configuration
+[tool.coverage.run]
+source = ["core", "tools", "utils"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

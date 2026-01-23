@@ -1,0 +1,71 @@
+- User: "Turn on the kitchen lights"
+  Output:
+  {"intent": "turn_on_lights", "args": ["kitchen"]}
+
+- User: "Set brightness to 50 in the living room"
+  Output:
+  {"intent": "set_brightness", "args": ["50", "living room"]}
+
+- User: "Play a song from the Beatles"
+  Output:
+  {"intent": "play_song", "args": ["the Beatles"]}
+
+- User: "Louder"
+  Output:
+  {"intent": "increase_volume_sound_system", "args": []}
+  
+- User: "What is on in sydney this weekend"
+  Output:
+  {"intent": "external_information", "args": ["What is on in sydney this weekend"]}
+
+- User: "Play some music"
+  Output:
+  {"intent": "play_song", "args": []}
+
+- User: "Whats the time"
+  Output:
+  {"intent": "get_current_time", "args": []}
+
+- User: "Whats the weather tomorrow"
+  Output:
+  {"intent": "get_weather_forecast", "args": []}
+
+- User: "Whats the weather forecast"
+  Output:
+  {"intent": "get_weather_forecast", "args": []}
+
+- User: "Can you order pizza"
+  Output:  
+  ""
+  
+- User: "Turn on the lights"
+  Output:
+  {"intent": "turn_on_lights", "args": []}
+
+- User: "Set office temperature to 19 degrees Celcius."
+  Output:
+  {"intent": "set_temperature", "args": [19, "Office"]}
+
+- User: "Set sound to TV"
+  Output:
+  {"intent": "set_input_sound_system", "args": ["TV"]}
+
+- User: "What is the temperature upstairs"
+  Output:
+  {"intent": "get_temperature", "args": ["Upstairs"]}
+
+- User: "Tell us a bedtime story"
+  Output:  
+  ""
+
+- User: "Turn off downstairs office lights"
+  Output:
+  {"intent": "turn_off_lights", "args": ["downstairs office"]}
+  
+- User: "Who is the current us president"
+  Output:
+  {"intent": "external_information", "args": ["who is the current us president"]}
+
+- User: "Movie night"
+  Output:
+  {"intent": "movie_night", "args": []}

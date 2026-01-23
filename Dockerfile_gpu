@@ -1,0 +1,45 @@
+# Use NVIDIA CUDA base image (includes nvcc compiler for building)
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+# Avoid interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python 3.12 and build tools
+RUN apt-get update && apt-get install -y \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
+    python3-pip \
+    git \
+    build-essential \
+    cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.12 as default
+RUN ln -s /usr/bin/python3.12 /usr/bin/python
+
+WORKDIR /app
+
+# 2. Set Environment Variables to force CUDA build
+# -DGGML_CUDA=on is the flag for recent llama-cpp-python versions (0.3.x)
+ENV CMAKE_ARGS="-DGGML_CUDA=on"
+ENV FORCE_CMAKE=1
+
+COPY requirements.txt .
+
+# 3. Install dependencies
+# This will now compile llama-cpp-python with CUDA support
+RUN python3.12 -m pip install --upgrade pip && \
+    python3.12 -m pip install --no-cache-dir -r requirements.txt
+
+# Copy application files (ignoring __pycache__ via .dockerignore)
+COPY app.py .
+COPY tools/ tools/
+COPY utils/ utils/
+COPY wav/ wav/
+COPY audio/ audio/
+
+CMD ["python3.12", "app.py"]

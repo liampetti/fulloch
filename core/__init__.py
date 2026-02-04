@@ -15,8 +15,8 @@ from .audio import (
     SAMPLE_RATE,
     SILENCE_THRESHOLD,
 )
-from .asr import load_moonshine, stream_generator
-from .tts import speak_stream, kpipeline
+from .asr import load_asr_model, stream_generator
+from .tts import speak_stream
 from .slm import load_slm, generate_slm
 from .assistant import Assistant
 
@@ -27,11 +27,10 @@ __all__ = [
     "SAMPLE_RATE",
     "SILENCE_THRESHOLD",
     # ASR
-    "load_moonshine",
+    "load_asr_model",
     "stream_generator",
     # TTS
     "speak_stream",
-    "kpipeline",
     # SLM
     "load_slm",
     "generate_slm",

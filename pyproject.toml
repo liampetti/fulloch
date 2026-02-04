@@ -100,10 +100,10 @@ all = [
 fulloch = "app:main"
 
 [project.urls]
-Homepage = "https://github.com/liampetti/fulloch"
-Documentation = "https://github.com/liampetti/fulloch#readme"
-Repository = "https://github.com/liampetti/fulloch"
-Issues = "https://github.com/liampetti/fulloch/issues"
+Homepage = "https://github.com/yourusername/fulloch"
+Documentation = "https://github.com/yourusername/fulloch#readme"
+Repository = "https://github.com/yourusername/fulloch"
+Issues = "https://github.com/yourusername/fulloch/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -21,6 +21,7 @@ parts/
 sdist/
 var/
 wheels/
+media/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -33,6 +34,7 @@ wheels/
 htmlcov/
 .tox/
 .nox/
+archives/
 
 # =============================================================================
 # IDE and Editors
@@ -87,6 +89,7 @@ Thumbs.db
 # Old/Archive Folders
 # =============================================================================
 0ld/
+dev/
 
 # =============================================================================
 # Keep Example Configs (negation patterns)

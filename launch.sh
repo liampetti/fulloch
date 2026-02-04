@@ -11,8 +11,9 @@ QWEN_REPO="unsloth/Qwen3-4B-Instruct-2507-GGUF"
 QWEN_FILE="Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
 
 # Define the cache folders
-KOKORO_DIR="$HUB_DIR/models--hexgrad--Kokoro-82M"
-MOONSHINE_DIR="$HUB_DIR/models--UsefulSensors--moonshine-tiny"
+ASR_TINY_DIR="$HUB_DIR/models--UsefulSensors--moonshine-tiny"
+ASR_DIR="$HUB_DIR/models--Qwen--Qwen3-ASR-0.6B"
+TTS_DIR="$HUB_DIR/models--hexgrad--Kokoro-82M"
 
 # 1. Ensure Dependencies are installed
 if ! command -v huggingface-cli &> /dev/null; then
@@ -22,16 +23,15 @@ fi
 
 # 2. Create Directory Structure
 echo "📂 Checking directory structure..."
-mkdir -p "$GRAMMAR_DIR"
 mkdir -p "$HUB_DIR"
 
 # 3. Check and Download json.gbnf
 if [ ! -f "$GRAMMAR_DIR/json.gbnf" ]; then
-    echo "⬇️ Downloading json.gbnf..."
-    wget -q --show-progress -O "$GRAMMAR_DIR/json.gbnf" \
-        "https://raw.githubusercontent.com/ggml-org/llama.cpp/master/grammars/json.gbnf"
+echo "⬇️ Downloading json.gbnf..."
+wget -q --show-progress -O "$GRAMMAR_DIR/json.gbnf" \
+"https://raw.githubusercontent.com/ggml-org/llama.cpp/master/grammars/json.gbnf"
 else
-    echo "✅ json.gbnf exists."
+echo "✅ json.gbnf exists."
 fi
 
 # 4. Check and Download Qwen3 GGUF
@@ -45,21 +45,30 @@ else
 fi
 
 # 5. Check and Download Kokoro-82M (TTS)
-if [ ! -d "$KOKORO_DIR" ]; then
-    echo "⬇️ Downloading Kokoro-82M..."
-    huggingface-cli download hexgrad/Kokoro-82M \
-        --cache-dir "$HUB_DIR"
+if [ ! -d "$TTS_DIR" ]; then
+echo "⬇️ Downloading Kokoro-82M..."
+huggingface-cli download hexgrad/Kokoro-82M \
+--cache-dir "$HUB_DIR"
 else
-    echo "✅ Kokoro-82M exists."
+echo "✅ Kokoro-82M exists."
 fi
 
-# 6. Check and Download Moonshine Tiny (STT)
-if [ ! -d "$MOONSHINE_DIR" ]; then
-    echo "⬇️ Downloading Moonshine Tiny..."
-    huggingface-cli download UsefulSensors/moonshine-tiny \
+# 6. Check and Download Qwen3 ASR model
+if [ ! -d "$ASR_DIR" ]; then
+    echo "⬇️ Downloading Qwen3 ASR..."
+    huggingface-cli download Qwen/Qwen3-ASR-0.6B \
         --cache-dir "$HUB_DIR"
 else
-    echo "✅ Moonshine-tiny exists."
+    echo "✅ ASR model exists."
+fi
+
+# 6a. Check and Download Moonshine Tiny ASR model
+if [ ! -d "$ASR_TINY_DIR" ]; then
+echo "⬇️ Downloading Moonshine Tiny..."
+huggingface-cli download UsefulSensors/moonshine-tiny \
+--cache-dir "$HUB_DIR"
+else
+echo "✅ Moonshine-tiny exists."
 fi
 
 # 7. Prompt the user

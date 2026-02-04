@@ -14,7 +14,7 @@ from llama_cpp import Llama, LlamaGrammar
 logger = logging.getLogger(__name__)
 
 # Model configuration
-SLM_MODEL = "./data/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+MODEL_PATH = "./data/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"#"./data/models/Qwen3-0.6B-Q4_K_M.gguf"
 GRAMMAR_FILE = "./data/models/grammars/json.gbnf"
 
 N_CONTEXT = 8192
@@ -26,7 +26,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def load_slm(
-    model_path: str = SLM_MODEL,
+    model_path: str = MODEL_PATH,
     grammar_path: str = GRAMMAR_FILE,
     n_ctx: int = N_CONTEXT,
     n_threads: int = N_THREADS,

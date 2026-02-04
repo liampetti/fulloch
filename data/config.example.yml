@@ -9,6 +9,10 @@ general:
   # Wakeword to activate the assistant (case-insensitive)
   # Other examples: "alexa", "jeeves", "mycroft"
   wakeword: "computer" 
+  # Use a small language model for extra capabilities
+  use_ai: True
+  # Use the Moonshine Tiny ASR if running on very small edge devices
+  use_tiny_asr: False
 
 # =============================================================================
 # Spotify Integration

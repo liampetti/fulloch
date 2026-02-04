@@ -11,9 +11,9 @@ import threading
 from typing import Optional
 
 from .audio import AudioCapture
-from .asr import load_moonshine, stream_generator
+from .asr import load_asr_model, stream_generator
 from .tts import speak_stream, remove_emoji
-from .slm import load_slm, generate_slm, SLM_MODEL
+from .slm import load_slm, generate_slm
 
 from utils.system_prompts import getIntentSystemPrompt, getChatSystemPrompt
 from utils.intent_catch import catchAll
@@ -34,7 +34,7 @@ class Assistant:
         grammar: JSON grammar for structured output
     """
 
-    def __init__(self, wakeword: str, slm_model_path: str = SLM_MODEL):
+    def __init__(self, wakeword: str, use_ai: bool):
         """
         Initialize the assistant.
 
@@ -43,7 +43,7 @@ class Assistant:
             slm_model_path: Path to SLM model (empty to disable AI)
         """
         self.wakeword = wakeword.lower()
-        self.slm_model_path = slm_model_path
+        self.use_ai = use_ai
         self.audio_capture = AudioCapture()
 
         # Models loaded lazily in transcriber thread
@@ -55,10 +55,10 @@ class Assistant:
 
     def _load_models(self):
         """Load ASR and optionally SLM models."""
-        self.asr_pipe = load_moonshine()
+        self.asr_pipe = load_asr_model()
 
-        if self.slm_model_path:
-            self.grammar, self.slm_model = load_slm(self.slm_model_path)
+        if self.use_ai:
+            self.grammar, self.slm_model = load_slm()
             self.intent_prompt = getIntentSystemPrompt()
             self.chat_prompt = getChatSystemPrompt()
 

@@ -38,12 +38,11 @@ from core.assistant import Assistant
 
 # Configuration
 WAKEWORD = config['general']['wakeword']
-SLM_MODEL = "./data/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
-
+USE_AI = config['general']['use_ai']
 
 def main():
     """Main entry point for the voice assistant."""
-    assistant = Assistant(wakeword=WAKEWORD, slm_model_path=SLM_MODEL)
+    assistant = Assistant(wakeword=WAKEWORD, use_ai=USE_AI)
     assistant.run()
 
 

@@ -68,7 +68,7 @@ A privacy-focused voice assistant that runs speech recognition, text-to-speech, 
 ### 1. Clone and Install
 
 ```bash
-git clone https://github.com/liampetti/fulloch.git
+git clone https://github.com/yourusername/fulloch.git
 cd fulloch
 pip install -r requirements.txt
 ```

@@ -32,6 +32,9 @@ EMOJI_PATTERN = re.compile(
     flags=re.UNICODE,
 )
 
+# Thinking removal pattern
+THINK_PATTERN = r"<think>.*?</think>"
+
 # Create global pipeline (loads model once)
 logger.info(f"Loading {TTS_MODEL_NAME} on {DEVICE}...")
 kpipeline = KPipeline(
@@ -41,8 +44,12 @@ kpipeline = KPipeline(
 )
 
 
-def remove_emoji(text: str) -> str:
-    """Remove emoji characters from text."""
+def remove_emoji(text: str, rem_think: bool = True) -> str:
+    """Remove emoji characters and thinking from text."""
+    if rem_think:
+        text = re.sub(THINK_PATTERN, "", text, flags=re.DOTALL)
+        text = text.strip()
+
     return EMOJI_PATTERN.sub("", text)
 
 

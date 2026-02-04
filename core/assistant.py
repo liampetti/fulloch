@@ -11,7 +11,6 @@ import threading
 from typing import Optional
 
 from .audio import AudioCapture
-from .asr import load_asr_model, stream_generator
 from .tts import speak_stream, remove_emoji
 from .slm import load_slm, generate_slm
 
@@ -34,20 +33,23 @@ class Assistant:
         grammar: JSON grammar for structured output
     """
 
-    def __init__(self, wakeword: str, use_ai: bool):
+    def __init__(self, wakeword: str, use_ai: bool, use_tiny_asr: bool = False):
         """
         Initialize the assistant.
 
         Args:
             wakeword: Activation phrase to listen for
-            slm_model_path: Path to SLM model (empty to disable AI)
+            use_ai: Whether to use the SLM for intent detection
+            use_tiny_asr: Whether to use Moonshine Tiny ASR instead of Qwen ASR
         """
         self.wakeword = wakeword.lower()
         self.use_ai = use_ai
+        self.use_tiny_asr = use_tiny_asr
         self.audio_capture = AudioCapture()
 
         # Models loaded lazily in transcriber thread
         self.asr_pipe = None
+        self.asr_stream_generator = None
         self.slm_model = None
         self.grammar = None
         self.intent_prompt = None
@@ -55,7 +57,15 @@ class Assistant:
 
     def _load_models(self):
         """Load ASR and optionally SLM models."""
+        if self.use_tiny_asr:
+            from .asr_tiny import load_asr_model, stream_generator
+            logger.info("Using Moonshine Tiny ASR")
+        else:
+            from .asr import load_asr_model, stream_generator
+            logger.info("Using Qwen ASR")
+
         self.asr_pipe = load_asr_model()
+        self.asr_stream_generator = stream_generator
 
         if self.use_ai:
             self.grammar, self.slm_model = load_slm()
@@ -151,7 +161,7 @@ class Assistant:
         logger.info("Transcriber started")
 
         for result in self.asr_pipe(
-            stream_generator(self.audio_capture.audio_queue),
+            self.asr_stream_generator(self.audio_capture.audio_queue),
             batch_size=1,
             generate_kwargs={"max_new_tokens": 256}
         ):

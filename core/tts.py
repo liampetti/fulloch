@@ -50,6 +50,7 @@ model = Qwen3TTSModel.from_pretrained(
     "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
     torch_dtype=torch.bfloat16,
     device_map=DEVICE,
+    attn_implementation="flash_attention_2",
 )
 
 # Enable optimizations (recommended)
@@ -79,6 +80,7 @@ def speak_stream(text: str, voice: str = "cori", speed: float = 1.0):
         text=text,
         language="english",
         voice_clone_prompt=prompt,
+        overlap_samples=512,
         # Phase 2 settings (stable)
         emit_every_frames=12,
         decode_window_frames=80,

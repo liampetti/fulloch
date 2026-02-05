@@ -4,7 +4,9 @@ Text-to-Speech module using Optimised Qwen3 TTS with two-phase latency & Hann cr
 Handles loading and running the Kokoro text-to-speech model.
 """
 import logging
+import queue
 import re
+import threading
 import torch
 import sounddevice as sd
 from qwen_tts import Qwen3TTSModel
@@ -66,6 +68,23 @@ prompt = model.create_voice_clone_prompt(
     ref_text=ref_text,
 )
 
+# Warmup: run dummy generation to initialize torch.compile and CUDA graphs
+logger.info("Warming up TTS model...")
+for _ in model.stream_generate_voice_clone(
+    # Reference text must be longer to properly initialise model
+    text="A rainbow is a meteorological phenomenon that is caused by reflection, refraction and dispersion of light in water droplets resulting in a spectrum of light appearing in the sky.",
+    language="english",
+    voice_clone_prompt=prompt,
+    overlap_samples=512,
+    emit_every_frames=12,
+    decode_window_frames=80,
+    first_chunk_emit_every=5,
+    first_chunk_decode_window=48,
+    first_chunk_frames=48,
+):
+    pass  # Discard output
+logger.info("TTS model ready")
+
 def speak_stream(text: str, voice: str = "cori", speed: float = 1.0):
     """
     Generate speech from text using stream optimised Qwen3 TTS from rekuenkdr
@@ -75,19 +94,48 @@ def speak_stream(text: str, voice: str = "cori", speed: float = 1.0):
         voice: Not used
         speed: Not used
     """
-    # Stream audio with two-phase settings
-    for audio_chunk, sample_rate in model.stream_generate_voice_clone(
-        text=text,
-        language="english",
-        voice_clone_prompt=prompt,
-        overlap_samples=512,
-        # Phase 2 settings (stable)
-        emit_every_frames=12,
-        decode_window_frames=80,
-        # Phase 1 settings (fast first chunk)
-        first_chunk_emit_every=5,
-        first_chunk_decode_window=48,
-        first_chunk_frames=48,
-    ):
-        
-        sd.play(audio_chunk, samplerate=sample_rate, blocking=True)
+    audio_queue = queue.Queue(maxsize=5)  # Buffer chunks ahead
+    sample_rate_holder = [None]  # To capture sample rate from producer
+
+    def producer():
+        """Generate audio chunks into queue."""
+        try:
+            for audio_chunk, sample_rate in model.stream_generate_voice_clone(
+                text=text,
+                language="english",
+                voice_clone_prompt=prompt,
+                overlap_samples=512,
+                # Phase 2 settings (stable)
+                emit_every_frames=12,
+                decode_window_frames=80,
+                # Phase 1 settings (fast first chunk)
+                first_chunk_emit_every=5,
+                first_chunk_decode_window=48,
+                first_chunk_frames=48,
+            ):
+                if sample_rate_holder[0] is None:
+                    sample_rate_holder[0] = sample_rate
+                audio_queue.put(audio_chunk)
+        except Exception as e:
+            logger.exception(f"TTS generation error for text '{text[:50]}': {type(e).__name__}: {e}")
+        finally:
+            audio_queue.put(None)  # Sentinel to signal completion
+
+    # Start generation in background thread
+    gen_thread = threading.Thread(target=producer, daemon=True)
+    gen_thread.start()
+
+    # Wait for first chunk to get sample rate
+    first_chunk = audio_queue.get()
+    if first_chunk is None:
+        return
+
+    # Use a single continuous output stream
+    with sd.OutputStream(
+        samplerate=sample_rate_holder[0],
+        channels=1,
+        dtype="float32",
+    ) as stream:
+        stream.write(first_chunk)
+        while (chunk := audio_queue.get()) is not None:
+            stream.write(chunk)

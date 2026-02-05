@@ -3,9 +3,9 @@ Core package for Fulloch voice assistant.
 
 This package contains the core components:
 - audio: Audio capture and silence detection
-- asr: Automatic speech recognition (Moonshine)
-- tts: Text-to-speech synthesis (Kokoro)
-- slm: Small language model inference (Qwen)
+- asr: Automatic speech recognition
+- tts: Text-to-speech synthesis
+- slm: Small language model inference
 - assistant: Main orchestration and wakeword detection
 """
 

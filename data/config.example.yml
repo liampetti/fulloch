@@ -13,6 +13,8 @@ general:
   use_ai: True
   # Use the Moonshine Tiny ASR if running on very small edge devices
   use_tiny_asr: False
+  # Use the Kokoro TTS for faster voice streaming (voice cloning not available)
+  use_tiny_tts: False
 
 # =============================================================================
 # Spotify Integration

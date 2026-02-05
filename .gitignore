@@ -84,6 +84,7 @@ Thumbs.db
 *.tmp
 *.temp
 .cache/
+publish.sh
 
 # =============================================================================
 # Old/Archive Folders

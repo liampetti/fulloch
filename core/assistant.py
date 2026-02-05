@@ -8,10 +8,8 @@ import json
 import logging
 import random
 import threading
-from typing import Optional
 
 from .audio import AudioCapture
-from .tts import speak_stream, remove_emoji
 from .slm import load_slm, generate_slm
 
 from utils.system_prompts import getIntentSystemPrompt, getChatSystemPrompt
@@ -33,7 +31,7 @@ class Assistant:
         grammar: JSON grammar for structured output
     """
 
-    def __init__(self, wakeword: str, use_ai: bool, use_tiny_asr: bool = False):
+    def __init__(self, wakeword: str, use_ai: bool, use_tiny_asr: bool = False, use_tiny_tts: bool = False):
         """
         Initialize the assistant.
 
@@ -41,10 +39,12 @@ class Assistant:
             wakeword: Activation phrase to listen for
             use_ai: Whether to use the SLM for intent detection
             use_tiny_asr: Whether to use Moonshine Tiny ASR instead of Qwen ASR
+            use_tiny_tts: Whether to use Kokoro TTS instead of Qwen TTS
         """
         self.wakeword = wakeword.lower()
         self.use_ai = use_ai
         self.use_tiny_asr = use_tiny_asr
+        self.use_tiny_tts = use_tiny_tts
         self.audio_capture = AudioCapture()
 
         # Models loaded lazily in transcriber thread
@@ -56,7 +56,7 @@ class Assistant:
         self.chat_prompt = None
 
     def _load_models(self):
-        """Load ASR and optionally SLM models."""
+        """Load ASR, TTS and SLM models."""
         if self.use_tiny_asr:
             from .asr_tiny import load_asr_model, stream_generator
             logger.info("Using Moonshine Tiny ASR")
@@ -66,6 +66,16 @@ class Assistant:
 
         self.asr_pipe = load_asr_model()
         self.asr_stream_generator = stream_generator
+
+        if self.use_tiny_tts:
+            from .tts_tiny import speak_stream, remove_emoji
+            logger.info("Using Kokoro TTS")
+        else:
+            from .tts import speak_stream, remove_emoji
+            logger.info("Using Qwen TTS")
+        
+        self.remove_emoji = remove_emoji
+        self.speak_stream = speak_stream
 
         if self.use_ai:
             self.grammar, self.slm_model = load_slm()
@@ -127,7 +137,7 @@ class Assistant:
 
             if run_chat:
                 # Provide feedback while processing
-                speak_stream(random.choice([
+                self.speak_stream(random.choice([
                     "Okay, let me think about that.",
                     "Just a second.",
                     "Got it, let me think.",
@@ -187,8 +197,8 @@ class Assistant:
 
                 # Process and respond
                 answer = self._handle_wakeword(user_prompt)
-                cleaned = remove_emoji(answer.replace('"', '').replace('*', ''))
-                speak_stream(cleaned)
+                cleaned = self.remove_emoji(answer.replace('"', '').replace('*', ''))
+                self.speak_stream(cleaned)
 
                 # Resume transcription
                 self.audio_capture.transcribing = True

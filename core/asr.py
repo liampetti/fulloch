@@ -7,7 +7,7 @@ from qwen_asr import Qwen3ASRModel
 logger = logging.getLogger(__name__)
 
 # Model configuration
-ASR_MODEL_NAME = "Qwen/Qwen3-ASR-0.6B"
+ASR_MODEL_NAME = "Qwen/Qwen3-ASR-1.7B"
 SAMPLE_RATE = 16000 # Qwen3-ASR standard sample rate
 
 # Device configuration

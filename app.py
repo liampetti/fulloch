@@ -40,10 +40,11 @@ from core.assistant import Assistant
 WAKEWORD = config['general']['wakeword']
 USE_AI = config['general']['use_ai']
 USE_TINY_ASR = config['general'].get('use_tiny_asr', False)
+USE_TINY_TTS = config['general'].get('use_tiny_tts', False)
 
 def main():
     """Main entry point for the voice assistant."""
-    assistant = Assistant(wakeword=WAKEWORD, use_ai=USE_AI, use_tiny_asr=USE_TINY_ASR)
+    assistant = Assistant(wakeword=WAKEWORD, use_ai=USE_AI, use_tiny_asr=USE_TINY_ASR, use_tiny_tts=USE_TINY_TTS)
     assistant.run()
 
 

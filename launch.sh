@@ -12,8 +12,9 @@ QWEN_FILE="Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
 
 # Define the cache folders
 ASR_TINY_DIR="$HUB_DIR/models--UsefulSensors--moonshine-tiny"
-ASR_DIR="$HUB_DIR/models--Qwen--Qwen3-ASR-0.6B"
-TTS_DIR="$HUB_DIR/models--hexgrad--Kokoro-82M"
+ASR_DIR="$HUB_DIR/models--Qwen--Qwen3-ASR-1.7B"
+TTS_TINY_DIR="$HUB_DIR/models--hexgrad--Kokoro-82M"
+TTS_DIR="$HUB_DIR/models--Qwen--Qwen3-TTS-12Hz-1.7B-Base"
 
 # 1. Ensure Dependencies are installed
 if ! command -v huggingface-cli &> /dev/null; then
@@ -44,8 +45,17 @@ else
     echo "✅ $QWEN_FILE exists."
 fi
 
-# 5. Check and Download Kokoro-82M (TTS)
+# 5. Check and Download Qwen3 TTS model
 if [ ! -d "$TTS_DIR" ]; then
+echo "⬇️ Downloading Qwen3 TTS..."
+huggingface-cli download Qwen/Qwen3-TTS-12Hz-1.7B-Base \
+--cache-dir "$HUB_DIR"
+else
+echo "✅ Qwen3 TTS model exists."
+fi
+
+# 5a. Check and Download Kokoro-82M (TTS)
+if [ ! -d "$TTS_TINY_DIR" ]; then
 echo "⬇️ Downloading Kokoro-82M..."
 huggingface-cli download hexgrad/Kokoro-82M \
 --cache-dir "$HUB_DIR"
@@ -56,10 +66,10 @@ fi
 # 6. Check and Download Qwen3 ASR model
 if [ ! -d "$ASR_DIR" ]; then
     echo "⬇️ Downloading Qwen3 ASR..."
-    huggingface-cli download Qwen/Qwen3-ASR-0.6B \
+    huggingface-cli download Qwen/Qwen3-ASR-1.7B \
         --cache-dir "$HUB_DIR"
 else
-    echo "✅ ASR model exists."
+    echo "✅ Qwen3 ASR model exists."
 fi
 
 # 6a. Check and Download Moonshine Tiny ASR model
@@ -71,19 +81,19 @@ else
 echo "✅ Moonshine-tiny exists."
 fi
 
-# 7. Prompt the user
-read -p "Are you using a GPU? (y/n): " response
-response=${response,,}
-if [[ "$response" == "y" || "$response" == "yes" ]]; then
-    mv Dockerfile Dockerfile_cpu
-    mv Dockerfile_gpu Dockerfile
-    mv compose.yml compose_cpu.yml
-    mv compose_gpu.yml compose.yml
-    echo "✅ Using GPU enabled containers"
-else
-    echo "✅ Using default containers"
-fi
+# # 7. Prompt the user
+# read -p "Are you using a GPU? (y/n): " response
+# response=${response,,}
+# if [[ "$response" == "y" || "$response" == "yes" ]]; then
+#     mv Dockerfile Dockerfile_cpu
+#     mv Dockerfile_gpu Dockerfile
+#     mv compose.yml compose_cpu.yml
+#     mv compose_gpu.yml compose.yml
+#     echo "✅ Using GPU enabled containers"
+# else
+#     echo "✅ Using default containers"
+# fi
 
-# 8. Launch Docker Compose
-echo "🚀 All files checked. Starting services..."
-docker compose up -d
+# # 8. Launch Docker Compose
+# echo "🚀 All files checked. Starting services..."
+# docker compose up -d

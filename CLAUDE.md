@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Fulloch (the **Full**y **Loc**al **H**ome voice assistant) is a fully local, privacy-focused AI voice home assistant. It runs speech recognition (Moonshine ASR), text-to-speech (Kokoro TTS), and a small language model (Qwen 3 4B) entirely on-device with no cloud dependencies.
+Fulloch (the **Full**y **Loc**al **H**ome voice assistant) is a fully local, privacy-focused AI voice home assistant. It runs speech recognition (Qwen3 ASR), text-to-speech (Qwen3 TTS with voice cloning), and a small language model (Qwen 3 4B) entirely on-device with no cloud dependencies.
 
 ## Build and Run Commands
 
@@ -20,7 +20,7 @@ python app.py
 ./launch.sh  # Downloads models, configures GPU/CPU, starts services
 ```
 
-The launch script handles model downloads (Qwen GGUF, Kokoro, Moonshine) and Docker Compose setup.
+The launch script handles model downloads (Qwen GGUF, Qwen3 ASR, Qwen3 TTS, Kokoro, Moonshine) and Docker Compose setup.
 
 ### Testing
 ```bash
@@ -41,14 +41,16 @@ python utils/intents.py        # Test intent handler with tool registry
 The main assistant logic is split into focused modules:
 
 - `core/audio.py` - AudioCapture class, silence detection, recorder thread
-- `core/asr.py` - Moonshine ASR loading and pipeline
-- `core/tts.py` - Kokoro TTS loading and speak_stream()
+- `core/asr.py` - Qwen3 ASR loading and pipeline (default)
+- `core/asr_tiny.py` - Moonshine Tiny ASR for edge devices
+- `core/tts.py` - Qwen3 TTS with voice cloning (default)
+- `core/tts_tiny.py` - Kokoro TTS for edge devices
 - `core/slm.py` - Qwen SLM loading and generate_slm()
 - `core/assistant.py` - Main orchestration, transcriber thread, wakeword detection
 
 ### Audio Pipeline (Two Threads)
 - **Recorder thread** (`core/audio.py`): Captures microphone input, detects silence/speech via RMS threshold, enqueues complete utterances
-- **Transcriber thread** (`core/assistant.py`): Runs Moonshine ASR, detects wakeword, processes intents
+- **Transcriber thread** (`core/assistant.py`): Runs ASR (Qwen3 or Moonshine Tiny), detects wakeword, processes intents
 
 ### Intent Resolution (Three-Tier Fallback)
 1. **Regex catch** (`utils/intent_catch.py`): Fast pattern matching for common commands (play, stop, pause, timer, time)
@@ -86,7 +88,7 @@ SILENCE_THRESHOLD = 0.001    # RMS threshold (lower = more sensitive)
 ### Config Files (not in git)
 - `data/config.yml`: Service endpoints, wakeword, integration settings
 - `.env`: Credentials (Spotify, Google, etc.)
-- `data/models/`: Local model cache (~2-3GB)
+- `data/models/`: Local model cache (~4-5GB)
 
 ### Example Config Files (in git)
 - `data/config.example.yml`: Template with all settings documented
@@ -107,8 +109,10 @@ fulloch/
 ├── core/               # Core modules
 │   ├── __init__.py
 │   ├── audio.py        # Audio capture
-│   ├── asr.py          # Speech recognition
-│   ├── tts.py          # Text-to-speech
+│   ├── asr.py          # Qwen3 ASR (default)
+│   ├── asr_tiny.py     # Moonshine Tiny ASR (edge)
+│   ├── tts.py          # Qwen3 TTS (default)
+│   ├── tts_tiny.py     # Kokoro TTS (edge)
 │   ├── slm.py          # Language model
 │   └── assistant.py    # Orchestration
 ├── tools/              # Smart home tools

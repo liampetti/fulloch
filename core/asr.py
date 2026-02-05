@@ -76,6 +76,7 @@ def load_asr_model():
         ASR_MODEL_NAME,
         device_map=DEVICE,
         dtype=DTYPE,
+        attn_implementation="flash_attention_2",
     )
 
     return QwenASRPipelineWrapper(model)

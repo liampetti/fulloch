@@ -47,7 +47,7 @@ A privacy-focused voice assistant that runs speech recognition, text-to-speech, 
                            +--------+---------+
                                     |
                            +--------v---------+
-                           |   Kokoro TTS     |
+                           |    Qwen3 TTS     |
                            |  (Text→Speech)   |
                            +--------+---------+
                                     |
@@ -92,7 +92,7 @@ The launch script handles model downloads automatically:
 
 Or manually download:
 - [Qwen3-4B-Instruct GGUF](https://huggingface.co/Qwen) → `data/models/`
-- Qwen3-ASR, Moonshine Tiny, and Kokoro download automatically on first run
+- Qwen3-ASR, Qwen3-TTS, Moonshine Tiny, and Kokoro download automatically on first run
 
 ### 4. Run
 
@@ -122,11 +122,16 @@ general:
   wakeword: "computer"       # Activation phrase
   use_ai: true               # Enable SLM for intent detection
   use_tiny_asr: false        # Use Moonshine Tiny ASR for edge devices
+  use_tiny_tts: false        # Use Kokoro TTS for edge devices
 ```
 
 **ASR Options:**
 - `use_tiny_asr: false` (default) — Uses Qwen3-ASR-0.6B for higher accuracy
 - `use_tiny_asr: true` — Uses Moonshine Tiny for low-resource edge devices
+
+**TTS Options:**
+- `use_tiny_tts: false` (default) — Uses Qwen3-TTS with voice cloning for natural speech
+- `use_tiny_tts: true` — Uses Kokoro TTS for faster synthesis on low-resource edge devices
 
 ### Spotify
 
@@ -234,7 +239,8 @@ fulloch/
 │   ├── audio.py        # Audio capture and silence detection
 │   ├── asr.py          # Qwen3 ASR (default)
 │   ├── asr_tiny.py     # Moonshine Tiny ASR (edge devices)
-│   ├── tts.py          # Kokoro text-to-speech
+│   ├── tts.py          # Qwen3 TTS with voice cloning (default)
+│   ├── tts_tiny.py     # Kokoro TTS (edge devices)
 │   ├── slm.py          # Qwen language model
 │   └── assistant.py    # Main orchestration
 ├── tools/              # Smart home integrations

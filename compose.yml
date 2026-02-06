@@ -6,6 +6,7 @@ services:
     env_file:
       - .env
     container_name: fulloch-ai
+    network_mode: host
     devices:
       - /dev/snd:/dev/snd
     group_add:

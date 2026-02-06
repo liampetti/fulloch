@@ -11,15 +11,22 @@ RUN apt-get update && apt-get install -y \
     libsox-dev \
     libsox-fmt-all \
     ffmpeg \
+    libportaudio2 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Point HuggingFace cache at the mounted data volume so from_pretrained()
+# finds models downloaded by launch.sh into data/models/hub/
+ENV HF_HOME=/app/data/models
+ENV HF_HUB_OFFLINE=1
 
 # Set Environment Variables for llama-cpp-python CUDA build
 ENV CMAKE_ARGS="-DGGML_CUDA=on"
 ENV FORCE_CMAKE=1
 
-# Install Python dependencies
+# Install Python dependencies (Force transformers 4.57.3 for offline Qwen3 ASR to work)
+RUN pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu130
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
     pip install --no-deps git+https://github.com/rekuenkdr/Qwen3-TTS-streaming.git@97da215 && \

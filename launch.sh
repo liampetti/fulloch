@@ -25,14 +25,54 @@ TTS_TINY_DIR="$HUB_DIR/models--hexgrad--Kokoro-82M"
 TTS_DIR="$HUB_DIR/models--Qwen--Qwen3-TTS-12Hz-1.7B-Base"
 
 # 1. Ensure Dependencies are installed
-if ! command -v huggingface-cli &> /dev/null; then
-    echo "⬇️ huggingface-cli not found. Installing..."
-    pip install -U "huggingface_hub[cli]"
+echo "🔍 Checking dependencies..."
+
+# Check for curl
+if ! command -v curl &> /dev/null; then
+    echo "❌ curl not found. Please install curl first."
+    echo "   e.g. sudo apt install curl"
+    exit 1
 fi
+
+# Check for wget
+if ! command -v wget &> /dev/null; then
+    echo "❌ wget not found. Please install wget first."
+    echo "   e.g. sudo apt install wget"
+    exit 1
+fi
+
+# Check for docker and docker compose
+if ! command -v docker &> /dev/null; then
+    echo "❌ docker not found. Please install Docker first."
+    echo "   See https://docs.docker.com/engine/install/"
+    exit 1
+fi
+
+if ! docker compose version &> /dev/null; then
+    echo "❌ docker compose not found. Please install the Docker Compose plugin."
+    echo "   See https://docs.docker.com/compose/install/"
+    exit 1
+fi
+
+# Check for hf (install via standalone installer if missing)
+if ! command -v hf &> /dev/null; then
+    echo "⬇️ hf not found. Installing via standalone installer..."
+    curl -LsSf https://hf.co/cli/install.sh | bash
+    # Source updated PATH so hf is available in this session
+    export PATH="$HOME/.local/bin:$PATH"
+    if ! command -v hf &> /dev/null; then
+        echo "❌ hf still not found after install."
+        echo "   Try running: curl -LsSf https://hf.co/cli/install.sh | bash"
+        echo "   Then restart your shell and run ./launch.sh again."
+        exit 1
+    fi
+fi
+
+echo "✅ All dependencies found."
 
 # 2. Create Directory Structure
 echo "📂 Checking directory structure..."
-mkdir -p "$HUB_DIR"
+mkdir -p "$HUB_DIR" "$GRAMMAR_DIR"
 
 # 2a. Check for config.yml
 CONFIG_FILE="$(pwd)/data/config.yml"
@@ -49,6 +89,23 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 0
 else
     echo "✅ config.yml exists."
+fi
+
+# 2b. Check for .env
+ENV_FILE="$(pwd)/.env"
+ENV_EXAMPLE="$(pwd)/.env.example"
+
+if [ ! -f "$ENV_FILE" ]; then
+    echo "📝 .env not found. Creating from template..."
+    cp "$ENV_EXAMPLE" "$ENV_FILE"
+    echo ""
+    echo "⚠️  Please edit .env with your credentials before continuing."
+    echo "   See .env.example for documentation on each variable."
+    echo ""
+    echo "   Run ./launch.sh again when ready."
+    exit 0
+else
+    echo "✅ .env exists."
 fi
 
 # 3. Check and Download json.gbnf
@@ -68,9 +125,8 @@ fi
 if [ ! -f "$BASE_DIR/$QWEN_FILE" ]; then
     if ask_download "Qwen3 4B SLM (2.5GB)"; then
         echo "⬇️ Downloading $QWEN_FILE..."
-        huggingface-cli download "$QWEN_REPO" "$QWEN_FILE" \
-            --local-dir "$BASE_DIR" \
-            --local-dir-use-symlinks False
+        hf download "$QWEN_REPO" "$QWEN_FILE" \
+            --local-dir "$BASE_DIR"
     else
         echo "⏭️ Skipping Qwen3 SLM"
     fi
@@ -82,7 +138,7 @@ fi
 if [ ! -d "$TTS_DIR" ]; then
     if ask_download "Qwen3 TTS (3.4GB)"; then
         echo "⬇️ Downloading Qwen3 TTS..."
-        huggingface-cli download Qwen/Qwen3-TTS-12Hz-1.7B-Base \
+        hf download Qwen/Qwen3-TTS-12Hz-1.7B-Base \
             --cache-dir "$HUB_DIR"
     else
         echo "⏭️ Skipping Qwen3 TTS"
@@ -95,7 +151,7 @@ fi
 if [ ! -d "$TTS_TINY_DIR" ]; then
     if ask_download "Kokoro-82M TTS Tiny (200MB)"; then
         echo "⬇️ Downloading Kokoro-82M..."
-        huggingface-cli download hexgrad/Kokoro-82M \
+        hf download hexgrad/Kokoro-82M \
             --cache-dir "$HUB_DIR"
     else
         echo "⏭️ Skipping Kokoro-82M"
@@ -108,7 +164,7 @@ fi
 if [ ! -d "$ASR_DIR" ]; then
     if ask_download "Qwen3 ASR (3.4GB)"; then
         echo "⬇️ Downloading Qwen3 ASR..."
-        huggingface-cli download Qwen/Qwen3-ASR-1.7B \
+        hf download Qwen/Qwen3-ASR-1.7B \
             --cache-dir "$HUB_DIR"
     else
         echo "⏭️ Skipping Qwen3 ASR"
@@ -121,7 +177,7 @@ fi
 if [ ! -d "$ASR_TINY_DIR" ]; then
     if ask_download "Moonshine Tiny ASR (60MB)"; then
         echo "⬇️ Downloading Moonshine Tiny..."
-        huggingface-cli download UsefulSensors/moonshine-tiny \
+        hf download UsefulSensors/moonshine-tiny \
             --cache-dir "$HUB_DIR"
     else
         echo "⏭️ Skipping Moonshine Tiny"
@@ -134,15 +190,13 @@ fi
 read -p "Are you using a GPU? (y/n): " response
 response=${response,,}
 if [[ "$response" == "y" || "$response" == "yes" ]]; then
-    mv Dockerfile Dockerfile_cpu
-    mv Dockerfile_gpu Dockerfile
-    mv compose.yml compose_cpu.yml
-    mv compose_gpu.yml compose.yml
+    COMPOSE_FILE="compose_gpu.yml"
     echo "✅ Using GPU enabled containers"
 else
+    COMPOSE_FILE="compose.yml"
     echo "✅ Using default containers"
 fi
 
 # 8. Launch Docker Compose
 echo "🚀 All files checked. Starting services..."
-docker compose up -d
+docker compose -f "$COMPOSE_FILE" up -d

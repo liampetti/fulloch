@@ -4,17 +4,17 @@ setuptools==80.9.0
 xmltodict==1.0.2
 word2number==1.1
 beautifulsoup4==4.14.2
+python-dotenv==1.2.1
 
 # Audio processing
 sounddevice>=0.5.0
 soundfile>=0.13.0
 
 # AI and ML
-torch>=2.4.0
-torchaudio>=2.4.0
-transformers==4.57.3
+transformers==4.57.6
 kokoro>=0.9.4
 accelerate==1.12.0
+onnxruntime>=1.18.0
 llama_cpp_python>=0.3.16
 qwen-asr==0.0.6
 
@@ -28,6 +28,6 @@ spotipy==2.25.1
 pyairtouch==3.1.0
 thinqconnect==1.0.8
 bscpylgtv==0.5.0
-google-auth==2.0.0
-google-auth-oauthlib==0.4.0
-google-api-python-client==2.0.0
+google-api-python-client==2.187.0
+google-auth==2.41.1
+google-auth-oauthlib==1.2.3

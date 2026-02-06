@@ -3,6 +3,13 @@
 # See README.md for detailed setup instructions for each integration.
 
 # =============================================================================
+# Tool Activation
+# =============================================================================
+# Each section below corresponds to an integration/tool. To disable a tool,
+# comment out its entire section. Only configured (uncommented) tools are
+# loaded on launch.
+
+# =============================================================================
 # General Settings
 # =============================================================================
 general:
@@ -23,22 +30,22 @@ general:
 # =============================================================================
 # Register your app at https://developer.spotify.com/dashboard
 # Required scopes: user-read-playback-state, user-modify-playback-state, user-read-currently-playing
-spotify:
-  client_id: "your_spotify_client_id"
-  client_secret: "your_spotify_client_secret"
-  redirect_uri: "http://localhost:8888/callback"
-  # Device name as shown in Spotify Connect
-  device_id: "Your Speaker Name"
-  # Enable Pioneer AVR integration for audio output switching
-  # Set to false if not using an AVR
-  use_avr: false
+# spotify:
+#   client_id: "your_spotify_client_id"
+#   client_secret: "your_spotify_client_secret"
+#   redirect_uri: "http://localhost:8888/callback"
+#   # Device name as shown in Spotify Connect
+#   device_id: "Your Speaker Name"
+#   # Enable Pioneer AVR integration for audio output switching
+#   # Set to false if not using an AVR
+#   use_avr: false
 
 # =============================================================================
 # Philips Hue Lighting
 # =============================================================================
 # Press the button on your Hue Bridge before first connection
-philips:
-  hue_hub_ip: "192.168.1.100"
+# philips:
+#   hue_hub_ip: "192.168.1.100"
 
 # =============================================================================
 # Home Assistant Integration
@@ -47,29 +54,26 @@ philips:
 # 1. Go to your HA profile: http://your-ha:8123/profile
 # 2. Scroll to "Long-Lived Access Tokens" and create a token
 #
-# IMPORTANT: This integration must be explicitly enabled. When enabled, it
-# registers generic tool names like "turn_on" and "turn_off" which may conflict
-# with other integrations (e.g., Philips Hue lighting). Only enable if you want
-# Home Assistant to be your primary home automation controller.
-home_assistant:
-  # Set to true to enable Home Assistant tools (disabled by default)
-  enabled: false
-  # URL to your Home Assistant instance
-  url: "http://192.168.1.50:8123"
-  # Long-lived access token from your HA profile
-  token: "your_long_lived_access_token"
-  # Request timeout in seconds
-  timeout: 10
-  # Map friendly names to entity IDs for easier voice control
-  # Keys are lowercase, values are full entity IDs
-  entity_aliases:
-    living room lights: "light.living_room"
-    bedroom lights: "light.bedroom"
-    front door: "lock.front_door"
-    garage: "cover.garage_door"
-    thermostat: "climate.main"
-    movie time: "scene.movie_time"
-    bedtime: "script.bedtime"
+# NOTE: This registers generic tool names like "turn_on" and "turn_off" which
+# may conflict with other integrations (e.g., Philips Hue lighting). Comment
+# out this entire section if you don't use Home Assistant.
+# home_assistant:
+#   # URL to your Home Assistant instance
+#   url: "http://192.168.1.50:8123"
+#   # Long-lived access token from your HA profile
+#   token: "your_long_lived_access_token"
+#   # Request timeout in seconds
+#   timeout: 10
+#   # Map friendly names to entity IDs for easier voice control
+#   # Keys are lowercase, values are full entity IDs
+#   entity_aliases:
+#     living room lights: "light.living_room"
+#     bedroom lights: "light.bedroom"
+#     front door: "lock.front_door"
+#     garage: "cover.garage_door"
+#     thermostat: "climate.main"
+#     movie time: "scene.movie_time"
+#     bedtime: "script.bedtime"
 
 # =============================================================================
 # Weather - Bureau of Meteorology (Australia)
@@ -88,20 +92,20 @@ bom:
 # 1. Create credentials at https://console.cloud.google.com/
 # 2. Enable Google Calendar API
 # 3. Download OAuth 2.0 credentials JSON file
-google:
-  # Path to OAuth client credentials file
-  cred_file: "./data/credentials.json"
-  # Path to store OAuth token (auto-generated on first auth)
-  token_file: "./data/token.json"
+# google:
+#   # Path to OAuth client credentials file
+#   cred_file: "./data/credentials.json"
+#   # Path to store OAuth token (auto-generated on first auth)
+#   token_file: "./data/token.json"
 
 # =============================================================================
 # LG ThinQ (Smart Appliances)
 # =============================================================================
 # Get credentials from LG ThinQ developer portal
-thinq:
-  access_token: "your_thinq_access_token"
-  country_code: "AU"
-  client_id: "your_thinq_client_id"
+# thinq:
+#   access_token: "your_thinq_access_token"
+#   country_code: "AU"
+#   client_id: "your_thinq_client_id"
 
 # =============================================================================
 # Web Search - SearXNG
@@ -115,26 +119,26 @@ search:
 # =============================================================================
 # Find TV IP in TV settings: Network > Wi-Fi Connection > Advanced
 # Find MAC address in TV settings: Network > Wi-Fi Connection > Advanced
-webos:
-  ip_address: "192.168.1.101"
-  mac_address: "AA:BB:CC:DD:EE:FF"
+# webos:
+#   ip_address: "192.168.1.101"
+#   mac_address: "AA:BB:CC:DD:EE:FF"
 
 # =============================================================================
 # Pioneer/Onkyo AVR (Audio Receiver)
 # =============================================================================
 # Uses eISCP protocol over network
 # Default port is 60128 for most Pioneer/Onkyo receivers
-pioneer:
-  avr_host: "192.168.1.102"
-  avr_port: 60128
+# pioneer:
+#   avr_host: "192.168.1.102"
+#   avr_port: 60128
 
 # =============================================================================
 # Airtouch HVAC Control
 # =============================================================================
 # Map zone names to zone IDs (0-indexed)
 # Zone IDs correspond to the order in your Airtouch system
-airtouch:
-  living room: 0
-  bedroom: 1
-  office: 2
-  upstairs: 3
+# airtouch:
+#   living room: 0
+#   bedroom: 1
+#   office: 2
+#   upstairs: 3

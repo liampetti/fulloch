@@ -3,8 +3,11 @@ Weather and time information tool using the centralized tool registry.
 """
 import yaml
 
-with open("./data/config.yml", "r") as f:
-    config = yaml.safe_load(f)
+try:
+    with open("./data/config.yml", "r") as f:
+        config = yaml.safe_load(f) or {}
+except FileNotFoundError:
+    config = {}
 
 from datetime import datetime
 import re
@@ -75,14 +78,10 @@ def summarize_today_tomorrow(forecast_data, location):
 
 
 def load_weather_config():
-    try:
-        return config['bom']
-    except Exception as e:
-        # Fallback to default values if config file is not available
-        return {
-            "host": "ftp.bom.gov.au",
-            "path": "/anon/gen/fwo/IDN11060.xml"
-        }
+    return config.get('bom', {
+        "host": "ftp.bom.gov.au",
+        "path": "/anon/gen/fwo/IDN11060.xml"
+    })
 
 
 @tool(
@@ -90,18 +89,20 @@ def load_weather_config():
     description="Get weather forecast for a location",
     aliases=["weather", "forecast", "get_weather"]
 )
-def get_weather_forecast(location: str = config['bom']['default']) -> str:
+def get_weather_forecast(location: str = None) -> str:
     """
     Get weather forecast for the specified location.
-    
+
     Args:
         location: The location for weather forecast
-        
+
     Returns:
         Weather forecast summary
     """
     # Load FTP configuration
     ftp_config = load_weather_config()
+    if location is None:
+        location = ftp_config.get('default', 'Sydney')
     
     # Connect to FTP and retrieve file into memory
     ftp = FTP(ftp_config['host'])

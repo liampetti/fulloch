@@ -3,8 +3,9 @@
 Connects to a Home Assistant instance via REST API for home automation control.
 Requires a long-lived access token configured in data/config.yml.
 
-This integration must be explicitly enabled in config.yml to prevent conflicts
-with other home automation tools (e.g., Philips Hue lighting).
+This module is only loaded when 'home_assistant' is present in config.yml.
+Note: This registers generic tool names like "turn_on" and "turn_off" which
+may conflict with other integrations (e.g., Philips Hue lighting).
 """
 
 import requests
@@ -14,31 +15,14 @@ from typing import Optional
 from .tool_registry import tool
 
 # Load configuration
-try:
-    with open("./data/config.yml", "r") as f:
-        config = yaml.safe_load(f)
-    HA_CONFIG = config.get('home_assistant', {})
-except FileNotFoundError:
-    HA_CONFIG = {}
-
-# Check if Home Assistant integration is enabled
-HA_ENABLED = HA_CONFIG.get('enabled', False)
+with open("./data/config.yml", "r") as f:
+    config = yaml.safe_load(f)
+HA_CONFIG = config.get('home_assistant', {})
 
 # Home Assistant connection settings
 HA_URL = HA_CONFIG.get('url', 'http://localhost:8123')
 HA_TOKEN = HA_CONFIG.get('token', '')
 TIMEOUT = HA_CONFIG.get('timeout', 10)
-
-
-def _noop_decorator(name=None, description=None, aliases=None):
-    """No-op decorator when Home Assistant integration is disabled."""
-    def decorator(func):
-        return func
-    return decorator
-
-
-# Use real tool decorator only when enabled
-ha_tool = tool if HA_ENABLED else _noop_decorator
 
 
 def _get_headers() -> dict:
@@ -112,7 +96,7 @@ def _resolve_entity(name: str, domain: str = None) -> str:
     return name
 
 
-@ha_tool(
+@tool(
     name="turn_on",
     description="Turn on a device, light, switch, or other Home Assistant entity",
     aliases=["ha_turn_on", "switch_on", "turn_on_device"]
@@ -137,7 +121,7 @@ def turn_on(entity: str, brightness: Optional[int] = None) -> str:
     return _call_service(domain, "turn_on", entity_id, data if data else None)
 
 
-@ha_tool(
+@tool(
     name="turn_off",
     description="Turn off a device, light, switch, or other Home Assistant entity",
     aliases=["ha_turn_off", "switch_off", "turn_off_device"]
@@ -154,7 +138,7 @@ def turn_off(entity: str) -> str:
     return _call_service(domain, "turn_off", entity_id)
 
 
-@ha_tool(
+@tool(
     name="toggle",
     description="Toggle a Home Assistant entity on or off",
     aliases=["ha_toggle", "toggle_device"]
@@ -171,7 +155,7 @@ def toggle(entity: str) -> str:
     return _call_service(domain, "toggle", entity_id)
 
 
-@ha_tool(
+@tool(
     name="ha_set_brightness",
     description="Set the brightness of a light in Home Assistant",
     aliases=["ha_brightness", "ha_dim_light"]
@@ -192,7 +176,7 @@ def set_ha_brightness(entity: str, brightness: int) -> str:
     return _call_service("light", "turn_on", entity_id, {"brightness": brightness_255})
 
 
-@ha_tool(
+@tool(
     name="ha_set_color",
     description="Set the color of a light in Home Assistant using color name or RGB",
     aliases=["ha_color", "change_light_color"]
@@ -240,7 +224,7 @@ def set_color(entity: str, color: str) -> str:
     return _call_service("light", "turn_on", entity_id, {"rgb_color": rgb})
 
 
-@ha_tool(
+@tool(
     name="get_entity_state",
     description="Get the current state of a Home Assistant entity",
     aliases=["ha_state", "check_state", "is_on"]
@@ -275,7 +259,7 @@ def get_entity_state(entity: str) -> str:
     return ", ".join(details)
 
 
-@ha_tool(
+@tool(
     name="ha_service",
     description="Call any Home Assistant service with custom data",
     aliases=["call_service", "ha_call"]
@@ -303,7 +287,7 @@ def call_ha_service(domain: str, service: str, entity: str, data: Optional[str] 
     return _call_service(domain, service, entity_id, extra_data)
 
 
-@ha_tool(
+@tool(
     name="ha_set_climate",
     description="Set the temperature of a climate/thermostat entity in Home Assistant",
     aliases=["ha_climate", "ha_thermostat"]
@@ -325,7 +309,7 @@ def set_climate(entity: str, temperature: float, hvac_mode: Optional[str] = None
     return _call_service("climate", "set_temperature", entity_id, data)
 
 
-@ha_tool(
+@tool(
     name="ha_lock",
     description="Lock a lock entity in Home Assistant",
     aliases=["lock_door"]
@@ -340,7 +324,7 @@ def lock(entity: str) -> str:
     return _call_service("lock", "lock", entity_id)
 
 
-@ha_tool(
+@tool(
     name="ha_unlock",
     description="Unlock a lock entity in Home Assistant",
     aliases=["unlock_door"]
@@ -355,7 +339,7 @@ def unlock(entity: str) -> str:
     return _call_service("lock", "unlock", entity_id)
 
 
-@ha_tool(
+@tool(
     name="ha_open_cover",
     description="Open a cover/blind/garage in Home Assistant",
     aliases=["ha_open", "open_blind", "open_garage"]
@@ -370,7 +354,7 @@ def open_cover(entity: str) -> str:
     return _call_service("cover", "open_cover", entity_id)
 
 
-@ha_tool(
+@tool(
     name="ha_close_cover",
     description="Close a cover/blind/garage in Home Assistant",
     aliases=["ha_close", "close_blind", "close_garage"]
@@ -385,7 +369,7 @@ def close_cover(entity: str) -> str:
     return _call_service("cover", "close_cover", entity_id)
 
 
-@ha_tool(
+@tool(
     name="ha_run_script",
     description="Run a Home Assistant script or automation",
     aliases=["ha_script", "run_automation"]
@@ -400,7 +384,7 @@ def run_script(script_name: str) -> str:
     return _call_service("script", "turn_on", entity_id)
 
 
-@ha_tool(
+@tool(
     name="ha_activate_scene",
     description="Activate a Home Assistant scene",
     aliases=["ha_scene", "set_scene"]

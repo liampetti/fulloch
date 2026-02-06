@@ -11,8 +11,11 @@ Usage:
 """
 
 import os
+import warnings
 import yaml
 from pathlib import Path
+
+warnings.filterwarnings("ignore", message="Setting `pad_token_id` to `eos_token_id`")
 
 # Load configuration
 with open("./data/config.yml", "r") as f:

@@ -10,7 +10,7 @@ from phue import Bridge
 
 from .tool_registry import tool, tool_registry
 
-b = Bridge(config['philips']['hue_hub_ip'])
+b = Bridge(config['philips']['hue_hub_ip'], config_file_path="./data/.python_hue")
 
 
 @tool(

@@ -11,6 +11,9 @@ Fulloch (the **Full**y **Loc**al **H**ome voice assistant) is a fully local, pri
 ### Development
 ```bash
 pip install -r requirements.txt
+# Install special packages (see requirements.txt for details)
+pip install --no-deps git+https://github.com/rekuenkdr/Qwen3-TTS-streaming.git@97da215
+# GPU only: pip install --no-build-isolation --no-deps git+https://github.com/Dao-AILab/flash-attention.git@ef9e6a6
 pip install -e ".[dev]"  # Install with dev dependencies
 python app.py
 ```
@@ -86,9 +89,10 @@ SILENCE_THRESHOLD = 0.001    # RMS threshold (lower = more sensitive)
 ```
 
 ### Config Files (not in git)
-- `data/config.yml`: Service endpoints, wakeword, integration settings
+- `data/config.yml`: Service endpoints, wakeword, voice_clone, integration settings
 - `.env`: Credentials (Spotify, Google, etc.)
 - `data/models/`: Local model cache (~4-5GB)
+- `data/voices/`: Voice clone reference files (wav/txt pairs)
 
 ### Example Config Files (in git)
 - `data/config.example.yml`: Template with all settings documented

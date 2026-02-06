@@ -8,13 +8,16 @@ import queue
 import re
 import threading
 import torch
+
+# Set precision before any CUDA operations
+torch.set_float32_matmul_precision('high')
+
 import sounddevice as sd
 from qwen_tts import Qwen3TTSModel
 
 logger = logging.getLogger(__name__)
 
-REF_AUDIO = "./data/voices/cori.wav"
-REF_TEXT = "./data/voices/cori.txt"
+VOICES_DIR = "./data/voices"
 
 # Device configuration
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -43,10 +46,7 @@ def remove_emoji(text: str, rem_think: bool = True) -> str:
 
     return EMOJI_PATTERN.sub("", text)
 
-# Get reference audio text
-with open(REF_TEXT) as f:
-    ref_text = f.read()
- 
+
 # Load model
 model = Qwen3TTSModel.from_pretrained(
     "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
@@ -62,35 +62,52 @@ model.enable_streaming_optimizations(
     compile_mode="reduce-overhead",  # Includes CUDA graphs automatically
 )
 
-# Create voice clone prompt from reference audio
-prompt = model.create_voice_clone_prompt(
-    ref_audio=REF_AUDIO,
-    ref_text=ref_text,
-)
+
+def set_voice(voice_name: str):
+    """
+    Load voice clone prompt from audio/text files to use for TTS.
+
+    Args:
+        voice_name: Name of the voice (matches wav/txt files in data/voices)
+    """
+    ref_audio = f"{VOICES_DIR}/{voice_name}.wav"
+    ref_text_path = f"{VOICES_DIR}/{voice_name}.txt"
+
+    with open(ref_text_path) as f:
+        ref_text = f.read()
+
+    logger.info(f"Setting voice clone to: {voice_name}")
+    return model.create_voice_clone_prompt(
+        ref_audio=ref_audio,
+        ref_text=ref_text,
+    )
+
 
 # Warmup: run dummy generation to initialize torch.compile and CUDA graphs
-logger.info("Warming up TTS model...")
-for _ in model.stream_generate_voice_clone(
-    # Reference text must be longer to properly initialise model
-    text="A rainbow is a meteorological phenomenon that is caused by reflection, refraction and dispersion of light in water droplets resulting in a spectrum of light appearing in the sky.",
-    language="english",
-    voice_clone_prompt=prompt,
-    overlap_samples=512,
-    emit_every_frames=12,
-    decode_window_frames=80,
-    first_chunk_emit_every=5,
-    first_chunk_decode_window=48,
-    first_chunk_frames=48,
-):
-    pass  # Discard output
-logger.info("TTS model ready")
+def warmup_model(prompt):
+    logger.info("Warming up TTS model...")
+    for _ in model.stream_generate_voice_clone(
+        # Reference text must be longer to properly initialise model
+        text="A rainbow is a meteorological phenomenon that is caused by reflection, refraction and dispersion of light in water droplets.",
+        language="english",
+        voice_clone_prompt=prompt,
+        overlap_samples=512,
+        emit_every_frames=12,
+        decode_window_frames=80,
+        first_chunk_emit_every=5,
+        first_chunk_decode_window=48,
+        first_chunk_frames=48,
+    ):
+        pass  # Discard output
+    logger.info("TTS model ready")
 
-def speak_stream(text: str, voice: str = "cori", speed: float = 1.0):
+def speak_stream(text: str, prompt, voice: str = "cori", speed: float = 1.0):
     """
     Generate speech from text using stream optimised Qwen3 TTS from rekuenkdr
 
     Args:
         text: Text to synthesize
+        prompt: Prepared voice cloning prompt
         voice: Not used
         speed: Not used
     """

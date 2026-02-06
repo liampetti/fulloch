@@ -4,9 +4,9 @@
 
 Fulloch is designed with privacy as a core principle. All processing happens locally on your device:
 
-- **Speech Recognition**: Moonshine ASR runs entirely on-device
-- **Text-to-Speech**: Kokoro TTS runs entirely on-device
-- **Language Model**: Qwen runs entirely on-device via llama.cpp
+- **Speech Recognition**: Qwen3 ASR runs entirely on-device (or Moonshine Tiny for edge devices)
+- **Text-to-Speech**: Qwen3 TTS with voice cloning runs entirely on-device (or Kokoro for edge devices)
+- **Language Model**: Qwen 3 4B runs entirely on-device via llama.cpp
 - **No Cloud Dependencies**: No data is sent to external servers for AI processing
 
 ## Reporting a Vulnerability

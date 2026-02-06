@@ -96,5 +96,5 @@ data/voices/private
 # Keep Example Configs (negation patterns)
 # =============================================================================
 !data/config.example.yml
-!.env.example
+!.env.example\
 publish.sh

@@ -15,6 +15,8 @@ general:
   use_tiny_asr: False
   # Use the Kokoro TTS for faster voice streaming (voice cloning not available)
   use_tiny_tts: False
+  # Set name of wav/txt file if using voice cloning
+  voice_clone: "cori"
 
 # =============================================================================
 # Spotify Integration

@@ -71,6 +71,9 @@ A privacy-focused voice assistant that runs speech recognition, text-to-speech, 
 git clone https://github.com/yourusername/fulloch.git
 cd fulloch
 pip install -r requirements.txt
+# Install special packages (see requirements.txt for details)
+pip install --no-deps git+https://github.com/rekuenkdr/Qwen3-TTS-streaming.git@97da215
+# GPU only: pip install --no-build-isolation --no-deps git+https://github.com/Dao-AILab/flash-attention.git@ef9e6a6
 ```
 
 ### 2. Configure
@@ -123,6 +126,7 @@ general:
   use_ai: true               # Enable SLM for intent detection
   use_tiny_asr: false        # Use Moonshine Tiny ASR for edge devices
   use_tiny_tts: false        # Use Kokoro TTS for edge devices
+  voice_clone: "cori"        # Voice clone name for Qwen3 TTS
 ```
 
 **ASR Options:**
@@ -132,6 +136,9 @@ general:
 **TTS Options:**
 - `use_tiny_tts: false` (default) — Uses Qwen3-TTS with voice cloning for natural speech
 - `use_tiny_tts: true` — Uses Kokoro TTS for faster synthesis on low-resource edge devices
+
+**Voice Cloning:**
+- `voice_clone: "name"` — Specifies which voice to clone for Qwen3 TTS. Place your reference audio (`name.wav`) and transcript (`name.txt`) in `data/voices/`. Only used when `use_tiny_tts: false`.
 
 ### Spotify
 

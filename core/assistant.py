@@ -31,7 +31,7 @@ class Assistant:
         grammar: JSON grammar for structured output
     """
 
-    def __init__(self, wakeword: str, use_ai: bool, use_tiny_asr: bool = False, use_tiny_tts: bool = False):
+    def __init__(self, wakeword: str, use_ai: bool, use_tiny_asr: bool = False, use_tiny_tts: bool = False, voice_clone: str = "cori"):
         """
         Initialize the assistant.
 
@@ -40,11 +40,13 @@ class Assistant:
             use_ai: Whether to use the SLM for intent detection
             use_tiny_asr: Whether to use Moonshine Tiny ASR instead of Qwen ASR
             use_tiny_tts: Whether to use Kokoro TTS instead of Qwen TTS
+            voice_clone: Name of the voice clone wav/txt file to use for TTS
         """
         self.wakeword = wakeword.lower()
         self.use_ai = use_ai
         self.use_tiny_asr = use_tiny_asr
         self.use_tiny_tts = use_tiny_tts
+        self.voice_clone = voice_clone
         self.audio_capture = AudioCapture()
 
         # Models loaded lazily in transcriber thread
@@ -54,6 +56,7 @@ class Assistant:
         self.grammar = None
         self.intent_prompt = None
         self.chat_prompt = None
+        self.voice_prompt = None
 
     def _load_models(self):
         """Load ASR, TTS and SLM models."""
@@ -71,8 +74,10 @@ class Assistant:
             from .tts_tiny import speak_stream, remove_emoji
             logger.info("Using Kokoro TTS")
         else:
-            from .tts import speak_stream, remove_emoji
-            logger.info("Using Qwen TTS")
+            from .tts import speak_stream, remove_emoji, set_voice, warmup_model
+            self.voice_prompt = set_voice(self.voice_clone)
+            logger.info(f"Using Qwen TTS with voice clone: {self.voice_clone}")
+            warmup_model(self.voice_prompt)
         
         self.remove_emoji = remove_emoji
         self.speak_stream = speak_stream
@@ -142,7 +147,7 @@ class Assistant:
                     "Just a second.",
                     "Got it, let me think.",
                     "Let's see."
-                ]))
+                ]), self.voice_prompt)
 
                 logger.info(f"AI chat query: {user_prompt}")
                 answer = generate_slm(
@@ -198,7 +203,7 @@ class Assistant:
                 # Process and respond
                 answer = self._handle_wakeword(user_prompt)
                 cleaned = self.remove_emoji(answer.replace('"', '').replace('*', ''))
-                self.speak_stream(cleaned)
+                self.speak_stream(cleaned, self.voice_prompt)
 
                 # Resume transcription
                 self.audio_capture.transcribing = True

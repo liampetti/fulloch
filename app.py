@@ -31,7 +31,10 @@ os.environ["VLLM_NO_USAGE_STATS"] = "1"
 
 import logging
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 from core.assistant import Assistant
@@ -41,10 +44,11 @@ WAKEWORD = config['general']['wakeword']
 USE_AI = config['general']['use_ai']
 USE_TINY_ASR = config['general'].get('use_tiny_asr', False)
 USE_TINY_TTS = config['general'].get('use_tiny_tts', False)
+VOICE_CLONE = config['general'].get('voice_clone', None)
 
 def main():
     """Main entry point for the voice assistant."""
-    assistant = Assistant(wakeword=WAKEWORD, use_ai=USE_AI, use_tiny_asr=USE_TINY_ASR, use_tiny_tts=USE_TINY_TTS)
+    assistant = Assistant(wakeword=WAKEWORD, use_ai=USE_AI, use_tiny_asr=USE_TINY_ASR, use_tiny_tts=USE_TINY_TTS, voice_clone=VOICE_CLONE)
     assistant.run()
 
 

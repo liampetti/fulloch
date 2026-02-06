@@ -53,12 +53,13 @@ def remove_emoji(text: str, rem_think: bool = True) -> str:
     return EMOJI_PATTERN.sub("", text)
 
 
-def speak_stream(text: str, voice: str = "af_bella", speed: float = 1.2):
+def speak_stream(text: str, prompt=None, voice: str = "af_bella", speed: float = 1.2):
     """
     Generate speech from text using Kokoro and stream to speakers.
 
     Args:
         text: Text to synthesize
+        prompt: Not used
         voice: Voice model to use (default: af_bella)
         speed: Speech speed multiplier (default: 1.2)
     """

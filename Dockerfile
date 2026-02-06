@@ -2,16 +2,25 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install dependencies first to leverage Docker cache
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    sox \
+    libsox-dev \
+    libsox-fmt-all \
+    ffmpeg \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
 COPY requirements.txt .
-RUN apt install sox libsox-dev libsox-fmt-all ffmpeg
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-deps git+https://github.com/rekuenkdr/Qwen3-TTS-streaming.git@97da215
 
 # Copy application code
 COPY app.py .
+COPY core/ core/
 COPY tools/ tools/
 COPY utils/ utils/
-COPY wav/ wav/
 COPY audio/ audio/
 
 # Run the app

@@ -59,6 +59,7 @@ data/token.json
 # Local Data and Models (mount separately)
 # =============================================================================
 data/models/
+data/voices/
 data/cache/
 *.gguf
 

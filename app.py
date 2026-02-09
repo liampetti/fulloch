@@ -11,11 +11,12 @@ Usage:
 """
 
 import os
-import warnings
+import logging
 import yaml
 from pathlib import Path
 
-warnings.filterwarnings("ignore", message="Setting `pad_token_id` to `eos_token_id`")
+# Suppress noisy "Setting pad_token_id to eos_token_id" from transformers
+logging.getLogger("transformers.generation.utils").setLevel(logging.ERROR)
 
 # Load configuration
 with open("./data/config.yml", "r") as f:
@@ -31,8 +32,6 @@ os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 os.environ["DO_NOT_TRACK"] = "1"
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 os.environ["VLLM_NO_USAGE_STATS"] = "1"
-
-import logging
 
 logging.basicConfig(
     level=logging.INFO,

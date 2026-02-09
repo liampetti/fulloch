@@ -99,3 +99,4 @@ data/voices/private
 !data/config.example.yml
 !.env.example\
 publish.sh
+searxng_data/settings.yml.new

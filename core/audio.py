@@ -85,11 +85,10 @@ class AudioCapture:
         self.transcribing = True
 
     def _audio_callback(self, indata, frames, time_info, status):
-        """Callback for sounddevice InputStream."""
+        """Callback for sounddevice InputStream. Must be fast — no resampling here."""
         if status:
             logger.info(status)
-        chunk = indata[:, 0].astype(np.float32)
-        self.audio_buffer.append(chunk)
+        self.audio_buffer.append(indata[:, 0].copy())
 
     def recorder_thread(self):
         """
@@ -106,6 +105,7 @@ class AudioCapture:
             samplerate=self.sample_rate,
             dtype="float32",
             blocksize=self.frames_per_chunk,
+            latency="low",
             callback=self._audio_callback,
         ):
             while self.running:
@@ -123,7 +123,7 @@ class AudioCapture:
                         silence_counter = 0
 
                     # Check if we've hit silence threshold or max length
-                    buffer_samples = len(self.audio_buffer) * self.frames_per_chunk
+                    buffer_samples = sum(c.size for c in self.audio_buffer)
                     if (silence_counter < self.silence_chunks_needed and
                         buffer_samples <= self.max_utterance_samples):
                         continue
@@ -133,7 +133,7 @@ class AudioCapture:
 
                     # Only enqueue if minimum length met
                     if buf.size >= self.min_utterance_samples:
-                        self.audio_queue.put(buf.copy())
+                        self.audio_queue.put(buf)
                         secs = buf.size / self.sample_rate
                         logger.debug(f"Enqueued {secs:.2f}s for transcription")
 

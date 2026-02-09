@@ -15,6 +15,15 @@ A privacy-focused voice assistant that runs speech recognition, text-to-speech, 
 - **Low Latency**: Optimized for real-time voice interaction
 - **Extensible**: Easy to add new smart home integrations
 
+## Video
+
+Example video showing response times of the full Qwen3 pipeline with voice cloning using a Morgan Freeman recording. In this example the SearXNG server is not running so it shows the model reverting to it's own knowledge when unable to obtain web search information.
+
+
+https://github.com/user-attachments/assets/44e5fe84-bfa0-4463-9818-538676f3ba1c
+
+
+
 ## Architecture
 
 ```

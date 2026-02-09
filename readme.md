@@ -58,6 +58,7 @@ A privacy-focused voice assistant that runs speech recognition, text-to-speech, 
 
 ## Prerequisites
 
+- Linux-based OS
 - Python 3.10+
 - CUDA-capable GPU (recommended) or CPU
 - ~4GB disk space for models

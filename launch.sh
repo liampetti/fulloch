@@ -74,38 +74,42 @@ echo "✅ All dependencies found."
 echo "📂 Checking directory structure..."
 mkdir -p "$HUB_DIR" "$GRAMMAR_DIR"
 
-# 2a. Check for config.yml
+# 2a. Check for config.yml and .env, create from templates if missing
 CONFIG_FILE="$(pwd)/data/config.yml"
 CONFIG_EXAMPLE="$(pwd)/data/config.example.yml"
+ENV_FILE="$(pwd)/.env"
+ENV_EXAMPLE="$(pwd)/.env.example"
+
+CREATED_FILES=()
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "📝 config.yml not found. Creating from template..."
     cp "$CONFIG_EXAMPLE" "$CONFIG_FILE"
-    echo ""
-    echo "⚠️  Please edit data/config.yml with your settings before continuing."
-    echo "   See data/config.example.yml for documentation on each option."
-    echo ""
-    echo "   Run ./launch.sh again when ready."
-    exit 0
+    CREATED_FILES+=("data/config.yml")
 else
     echo "✅ config.yml exists."
 fi
 
-# 2b. Check for .env
-ENV_FILE="$(pwd)/.env"
-ENV_EXAMPLE="$(pwd)/.env.example"
-
 if [ ! -f "$ENV_FILE" ]; then
     echo "📝 .env not found. Creating from template..."
     cp "$ENV_EXAMPLE" "$ENV_FILE"
-    echo ""
-    echo "⚠️  Please edit .env with your credentials before continuing."
-    echo "   See .env.example for documentation on each variable."
-    echo ""
-    echo "   Run ./launch.sh again when ready."
-    exit 0
+    CREATED_FILES+=(".env")
 else
     echo "✅ .env exists."
+fi
+
+if [ ${#CREATED_FILES[@]} -gt 0 ]; then
+    echo ""
+    echo "📄 Created: ${CREATED_FILES[*]}"
+    echo ""
+    read -p "Continue with defaults or exit to edit these files first? (c)ontinue / (e)xit: " response
+    response=${response,,}
+    if [[ "$response" == "e" || "$response" == "exit" ]]; then
+        echo ""
+        echo "   Edit the files and run ./launch.sh again when ready."
+        exit 0
+    fi
+    echo "✅ Continuing with defaults."
 fi
 
 # 3. Check and Download json.gbnf
@@ -187,7 +191,7 @@ else
 fi
 
 # 7. Prompt the user
-read -p "Are you using a GPU? (y/n): " response
+read -p "Are you using an NVIDIA GPU? (y/n): " response
 response=${response,,}
 if [[ "$response" == "y" || "$response" == "yes" ]]; then
     COMPOSE_FILE="compose_gpu.yml"
@@ -197,6 +201,14 @@ else
     echo "✅ Using default containers"
 fi
 
-# 8. Launch Docker Compose
+# 8. Prepare runtime environment
+# Ensure XDG_RUNTIME_DIR is set with the correct UID (compose files reference it)
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+# Ensure PulseAudio cookie exists (PipeWire systems may not create one)
+mkdir -p "${HOME}/.config/pulse"
+[ -f "${HOME}/.config/pulse/cookie" ] || touch "${HOME}/.config/pulse/cookie"
+
+# 9. Launch Docker Compose
 echo "🚀 All files checked. Starting services..."
 docker compose -f "$COMPOSE_FILE" up -d

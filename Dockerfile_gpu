@@ -1,42 +1,49 @@
-# Use PyTorch image with CUDA support (includes Python 3.11, PyTorch, CUDA)
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+# Stage 1: Build compiled CUDA extensions
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel AS builder
 
-# Avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CMAKE_ARGS="-DGGML_CUDA=on"
+ENV FORCE_CMAKE=1
+
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
+    pip install --no-deps git+https://github.com/rekuenkdr/Qwen3-TTS-streaming.git@97da215 && \
+    pip install flash-attn --no-build-isolation
+
+# Stage 2: Runtime (no CUDA compilers/headers)
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
+
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
+WORKDIR /app
+
+ENV HF_HOME=/app/data/models
+ENV HF_HUB_OFFLINE=1
+
+# Install runtime system dependencies
 RUN apt-get update && apt-get install -y \
-    git \
     sox \
     libsox-dev \
     libsox-fmt-all \
     ffmpeg \
     libportaudio2 \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Copy Python environment with compiled packages from builder
+COPY --from=builder /opt/conda /opt/conda
 
-# Point HuggingFace cache at the mounted data volume so from_pretrained()
-# finds models downloaded by launch.sh into data/models/hub/
-ENV HF_HOME=/app/data/models
-ENV HF_HUB_OFFLINE=1
-
-# Set Environment Variables for llama-cpp-python CUDA build
-ENV CMAKE_ARGS="-DGGML_CUDA=on"
-ENV FORCE_CMAKE=1
-
-# Install Python dependencies (Force transformers 4.57.3 for offline Qwen3 ASR to work)
-RUN pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu130
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-deps git+https://github.com/rekuenkdr/Qwen3-TTS-streaming.git@97da215 && \
-    pip install flash-attn --no-build-isolation
+# Create non-root user
+RUN useradd -m -u 1000 -s /bin/bash appuser
+USER appuser
 
 # Copy application code
-COPY app.py .
-COPY core/ core/
-COPY tools/ tools/
-COPY utils/ utils/
-COPY audio/ audio/
+COPY --chown=appuser:appuser app.py .
+COPY --chown=appuser:appuser core/ core/
+COPY --chown=appuser:appuser tools/ tools/
+COPY --chown=appuser:appuser utils/ utils/
+COPY --chown=appuser:appuser audio/ audio/
 
 CMD ["python", "app.py"]

@@ -8,12 +8,23 @@ services:
       - .env
     container_name: fulloch-ai
     network_mode: host
+    restart: unless-stopped
     devices:
       - /dev/snd:/dev/snd
     group_add:
       - audio
+    environment:
+      - PULSE_SERVER=unix:${XDG_RUNTIME_DIR}/pulse/native
     volumes:
       - ./data:/app/data:rw
+      - ${XDG_RUNTIME_DIR}/pulse:${XDG_RUNTIME_DIR}/pulse:ro
+      - ${HOME}/.config/pulse/cookie:/home/appuser/.config/pulse/cookie:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'python app.py' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     deploy:
       resources:
         reservations:
@@ -38,7 +49,3 @@ services:
       - SETGID
       - SETUID
       - DAC_OVERRIDE
-
-volumes:
-  searxng_data: {}
-  app_data: {}

@@ -96,15 +96,15 @@ def external_information(query: str = "get me the latest news stories") -> str:
     
     today = datetime.now().strftime("%B %d, %Y")
 
-    prompt = f"""
-Today is {today}.
+    lines = [f"Today is {today}.", ""]
+    if website_snippets:
+        lines.append("A web search has retrieved the following information:")
+        lines.extend(website_snippets)
+        lines.append("")
+    lines.append("User question:")
+    lines.append(query)
 
-{f"A web search has retrieved the following information:\n{chr(10).join(website_snippets)}" if len(website_snippets) > 0 else ""}
-
-User question: 
-{query}
-"""
-    return prompt.strip()
+    return "\n".join(lines)
 
 if __name__ == "__main__":
     print("Web Search")

@@ -15,12 +15,22 @@ A privacy-focused voice assistant that runs speech recognition, text-to-speech, 
 - **Low Latency**: Optimized for real-time voice interaction
 - **Extensible**: Easy to add new smart home integrations
 
-## Video
+## Videos
+
+#### AI and Voice Latency on NVIDIA GeForce RTX 5060 Ti 16 GB
 
 Example video showing response times of the full Qwen3 pipeline with voice cloning using a Morgan Freeman recording. In this example the SearXNG server is not running so it shows the model reverting to it's own knowledge when unable to obtain web search information.
 
 
 https://github.com/user-attachments/assets/44e5fe84-bfa0-4463-9818-538676f3ba1c
+
+
+#### Intent and Home Automation Latency on NVIDIA GeForce RTX 5060 Ti 16 GB
+
+Example video showing response times for turning on Philips Hue lights and playing music through Spotify. Old mobile phone running AudioRelay is used as remote microphone and speaker.
+
+
+https://github.com/user-attachments/assets/8e044b03-5a1f-40d3-8c3c-3f35a9ea1687
 
 
 

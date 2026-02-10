@@ -30,8 +30,7 @@ https://github.com/user-attachments/assets/44e5fe84-bfa0-4463-9818-538676f3ba1c
 Example video showing response times for turning on Philips Hue lights and playing music through Spotify. Old mobile phone running AudioRelay is used as remote microphone and speaker.
 
 
-https://github.com/user-attachments/assets/8e044b03-5a1f-40d3-8c3c-3f35a9ea1687
-
+https://github.com/user-attachments/assets/b06fe935-c5bf-4b50-a931-7799cb787801
 
 
 ## Architecture

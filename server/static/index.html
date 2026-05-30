@@ -1,0 +1,1458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<title>Fulloch</title>
+<link rel="icon" href="/logo.png" type="image/png">
+<link rel="apple-touch-icon" href="/logo.png">
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --surface-2: #f1f3f6;
+    --text: #0f172a;
+    --text-muted: #64748b;
+    --border: rgba(15, 23, 42, 0.08);
+    --primary: #10b981;
+    --primary-press: #059669;
+    --bubble-user: #10b981;
+    --bubble-user-text: #ffffff;
+    --bubble-assist: #f1f5f9;
+    --bubble-assist-text: #0f172a;
+    --tag-voice: #f59e0b;
+    --tag-text:  #6366f1;
+    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
+    --shadow-md: 0 4px 16px rgba(15, 23, 42, 0.06);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b1220;
+      --surface: #111827;
+      --surface-2: #1a2233;
+      --text: #e5e7eb;
+      --text-muted: #94a3b8;
+      --border: rgba(255, 255, 255, 0.07);
+      --bubble-assist: #1e293b;
+      --bubble-assist-text: #e5e7eb;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+      --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
+    }
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg);
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter,
+                 system-ui, sans-serif;
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+    max-width: 760px;
+    margin: 0 auto;
+    background: var(--bg);
+  }
+
+  /* Card layout on roomy screens — centred, capped height, soft chrome.
+     Falls back to the full-viewport mobile/tablet layout below the breakpoint. */
+  @media (min-width: 800px) and (min-height: 700px) {
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+    }
+    .app {
+      width: 100%;
+      max-width: 1100px;
+      height: min(900px, calc(100dvh - 48px));
+      border-radius: 18px;
+      border: 1px solid var(--border);
+      overflow: hidden;
+      box-shadow: var(--shadow-md);
+    }
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 18px;
+    padding-top: calc(14px + env(safe-area-inset-top));
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+    flex-shrink: 0;
+  }
+
+  header .logo {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    background: var(--surface-2);
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  header .logo img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  header .meta { flex: 1; min-width: 0; }
+  header .name { font-size: 1.1rem; font-weight: 600; line-height: 1.15; }
+  header .sub  { font-size: 0.78rem; color: var(--text-muted); margin-top: 1px; }
+
+  #status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    text-transform: lowercase;
+  }
+
+  #status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: background 0.3s;
+  }
+
+  #status-dot.live {
+    background: var(--primary);
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55); }
+    70%  { box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+  }
+
+  main {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+  }
+
+  .view {
+    flex: 1;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    scroll-behavior: smooth;
+  }
+
+  .view[hidden] { display: none; }
+
+  nav.tabs {
+    display: flex;
+    gap: 4px;
+    padding: 8px 14px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .tab {
+    padding: 6px 14px;
+    border-radius: 8px;
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+  }
+  .tab:hover { color: var(--text); background: var(--surface-2); }
+  .tab.active { color: var(--primary); background: var(--surface-2); }
+
+  /* Facts panel */
+  #facts-form {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  #fact-input {
+    flex: 1;
+    border: 1px solid var(--border);
+    border-radius: 22px;
+    padding: 10px 14px;
+    font: inherit;
+    font-size: 0.95rem;
+    background: var(--surface-2);
+    color: var(--text);
+    transition: border-color 0.15s, background 0.15s;
+  }
+  #fact-input:focus {
+    outline: none;
+    border-color: var(--primary);
+    background: var(--surface);
+  }
+  .add-fact {
+    flex-shrink: 0;
+    padding: 0 16px;
+    border-radius: 22px;
+    border: 0;
+    background: var(--primary);
+    color: white;
+    font: inherit;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+  }
+  .add-fact:hover { background: var(--primary-press); }
+  .add-fact:disabled { opacity: 0.45; cursor: wait; }
+
+  .facts-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .fact-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow-sm);
+    animation: bubbleIn 0.22s ease-out;
+  }
+  .fact-body { flex: 1; min-width: 0; }
+  .fact-date {
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    margin-bottom: 3px;
+    letter-spacing: 0.02em;
+  }
+  .fact-text {
+    font-size: 0.92rem;
+    line-height: 1.4;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+  .fact-edit {
+    width: 100%;
+    border: 1px solid var(--primary);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font: inherit;
+    font-size: 0.92rem;
+    background: var(--bg);
+    color: var(--text);
+    resize: vertical;
+    min-height: 56px;
+  }
+  .fact-actions {
+    display: flex;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+  .fact-btn {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    transition: color 0.15s, background 0.15s;
+  }
+  .fact-btn:hover { background: var(--surface-2); color: var(--text); }
+  .fact-btn.danger:hover { color: #ef4444; }
+  .fact-btn svg { width: 15px; height: 15px; fill: currentColor; }
+
+  .facts-hint {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    text-align: center;
+    margin: 4px 0 0;
+    line-height: 1.5;
+  }
+
+  .facts-empty {
+    margin: auto;
+    text-align: center;
+    color: var(--text-muted);
+    padding: 24px 16px;
+    font-size: 0.9rem;
+    line-height: 1.5;
+  }
+
+  /* Notes panel */
+  .notes-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .note-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow-sm);
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+    color: var(--text);
+    transition: background 0.15s, border-color 0.15s;
+    animation: bubbleIn 0.22s ease-out;
+  }
+  .note-row:hover { background: var(--surface-2); border-color: var(--primary); }
+  .note-row .note-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.95rem;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-transform: capitalize;
+  }
+  .note-row .chev { color: var(--text-muted); flex-shrink: 0; }
+  .note-row .chev svg { width: 16px; height: 16px; fill: currentColor; display: block; }
+
+  .note-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    flex: 1;
+    min-height: 0;
+  }
+  .note-detail-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .note-back {
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 6px 8px;
+    border-radius: 8px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .note-back:hover { color: var(--text); background: var(--surface-2); }
+  .note-detail-actions { display: flex; gap: 6px; }
+  .note-action {
+    padding: 6px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+  }
+  .note-action:hover { background: var(--surface-2); }
+  .note-action.primary {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: #fff;
+  }
+  .note-action.primary:hover { background: var(--primary-press); }
+  .note-action:disabled { opacity: 0.45; cursor: wait; }
+
+  .note-title {
+    font-size: 1.05rem;
+    font-weight: 600;
+    text-transform: capitalize;
+    flex-shrink: 0;
+  }
+  .note-content, .note-editor {
+    flex: 1;
+    min-height: 200px;
+    margin: 0;
+    padding: 12px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow-sm);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.88rem;
+    line-height: 1.5;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    overflow-y: auto;
+  }
+  .note-editor {
+    width: 100%;
+    resize: none;
+  }
+  .note-editor:focus {
+    outline: none;
+    border-color: var(--primary);
+  }
+
+  .empty {
+    margin: auto;
+    text-align: center;
+    color: var(--text-muted);
+    padding: 24px 16px;
+    animation: fadeIn 0.4s ease-out;
+  }
+
+  .empty .logo-lg {
+    width: 96px;
+    height: 96px;
+    border-radius: 22px;
+    background: var(--surface);
+    margin: 0 auto 14px;
+    display: grid;
+    place-items: center;
+    box-shadow: var(--shadow-md);
+    overflow: hidden;
+  }
+  .empty .logo-lg img { width: 100%; height: 100%; object-fit: cover; }
+  .empty h2 { font-size: 1.05rem; margin: 0 0 6px; color: var(--text); font-weight: 600; }
+  .empty p { margin: 0; font-size: 0.88rem; line-height: 1.5; }
+
+  .msg {
+    display: flex;
+    flex-direction: column;
+    max-width: 80%;
+    animation: bubbleIn 0.22s ease-out;
+  }
+
+  @keyframes bubbleIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+  .msg.user      { align-self: flex-end;   align-items: flex-end; }
+  .msg.assistant { align-self: flex-start; align-items: flex-start; }
+
+  .bubble {
+    padding: 10px 14px;
+    border-radius: 18px;
+    line-height: 1.45;
+    font-size: 0.95rem;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .msg.user .bubble {
+    background: var(--bubble-user);
+    color: var(--bubble-user-text);
+    border-bottom-right-radius: 5px;
+  }
+
+  .msg.assistant .bubble {
+    background: var(--bubble-assist);
+    color: var(--bubble-assist-text);
+    border-bottom-left-radius: 5px;
+  }
+
+  .meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    margin-top: 4px;
+    padding: 0 6px;
+  }
+
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.65rem;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    background: transparent;
+    border: 1px solid currentColor;
+    text-transform: lowercase;
+  }
+  .tag.voice { color: var(--tag-voice); }
+  .tag.text  { color: var(--tag-text); }
+
+  .stats-btn {
+    margin-left: auto;
+    cursor: pointer;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 999px;
+    font-size: 0.65rem;
+    padding: 1px 8px;
+    font-family: inherit;
+    line-height: 1.4;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .stats-btn:hover { color: var(--text); border-color: var(--text-muted); }
+
+  .stats-panel {
+    align-self: stretch;
+    margin: 4px 6px 0;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    background: var(--bubble-assist);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px 10px;
+    white-space: pre;
+    overflow-x: auto;
+    animation: fadeIn 0.18s ease-out;
+  }
+  .stats-panel.hidden { display: none; }
+
+  .trace {
+    align-self: flex-start;
+    max-width: 92%;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    padding: 2px 10px;
+    border-left: 2px solid var(--border);
+    margin-left: 6px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    animation: fadeIn 0.18s ease-out;
+  }
+  .trace.plan        { color: var(--primary); }
+  .trace.step        { color: var(--tag-text); }
+  .trace.observation { color: var(--text-muted); }
+  .trace .label {
+    display: inline-block;
+    min-width: 64px;
+    font-weight: 600;
+    text-transform: lowercase;
+    margin-right: 6px;
+  }
+
+  /* Per-turn collapsible trace group. Sits between the user bubble and the
+     assistant bubble; collapsed by default so the conversation stays clean. */
+  .trace-group {
+    align-self: flex-start;
+    max-width: 92%;
+    margin-left: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .trace-group > summary {
+    cursor: pointer;
+    list-style: none;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    padding: 3px 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    user-select: none;
+    border-radius: 6px;
+    transition: color 0.15s, background 0.15s;
+    width: fit-content;
+  }
+  .trace-group > summary:hover {
+    color: var(--text);
+    background: var(--surface-2);
+  }
+  .trace-group > summary::-webkit-details-marker { display: none; }
+  .trace-group > summary::before {
+    content: '▸';
+    display: inline-block;
+    transition: transform 0.15s;
+    font-size: 0.65rem;
+  }
+  .trace-group[open] > summary::before { transform: rotate(90deg); }
+  .trace-group > .trace {
+    align-self: stretch;
+    max-width: none;
+    margin-left: 0;
+  }
+  .trace-group:not([open]) > .trace { display: none; }
+  .trace-group.empty { display: none; }
+
+  .typing {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 12px 16px;
+    background: var(--bubble-assist);
+    border-radius: 18px;
+    border-bottom-left-radius: 5px;
+    align-self: flex-start;
+    box-shadow: var(--shadow-sm);
+    animation: bubbleIn 0.22s ease-out;
+  }
+
+  .typing span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    animation: dot 1.2s infinite ease-in-out;
+  }
+  .typing span:nth-child(2) { animation-delay: 0.15s; }
+  .typing span:nth-child(3) { animation-delay: 0.3s; }
+
+  @keyframes dot {
+    0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+    30%           { opacity: 1;   transform: translateY(-3px); }
+  }
+
+  footer {
+    padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  form {
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+  }
+
+  textarea {
+    flex: 1;
+    border: 1px solid var(--border);
+    border-radius: 22px;
+    padding: 11px 16px;
+    font: inherit;
+    font-size: 1rem;
+    background: var(--surface-2);
+    color: var(--text);
+    resize: none;
+    line-height: 1.4;
+    max-height: 140px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  textarea:focus {
+    outline: none;
+    border-color: var(--primary);
+    background: var(--surface);
+  }
+
+  textarea::placeholder { color: var(--text-muted); }
+
+  button.send {
+    flex-shrink: 0;
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    border: 0;
+    background: var(--primary);
+    color: white;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    transition: background 0.15s, transform 0.1s, opacity 0.15s;
+    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.35);
+  }
+  button.send:hover  { background: var(--primary-press); }
+  button.send:active { transform: scale(0.94); }
+  button.send:disabled { opacity: 0.45; cursor: wait; box-shadow: none; }
+
+  button.send svg {
+    width: 20px;
+    height: 20px;
+    fill: white;
+    transform: translateX(1px);
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="logo"><img src="/logo.png" alt=""></div>
+    <div class="meta">
+      <div class="name">Fulloch</div>
+      <div class="sub">fully-local home assistant</div>
+    </div>
+    <div id="status" aria-live="polite">
+      <span id="status-dot"></span>
+      <span id="status-text">connecting</span>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="chat" role="tab" aria-selected="true">Chat</button>
+    <button class="tab" data-tab="facts" role="tab" aria-selected="false">Facts</button>
+    <button class="tab" data-tab="notes" role="tab" aria-selected="false">Notes</button>
+  </nav>
+
+  <main>
+    <section id="chat" class="view">
+      <div class="empty" id="empty">
+        <div class="logo-lg"><img src="/logo.png" alt=""></div>
+        <h2>Say hi to Fulloch</h2>
+        <p>Ask me to turn off the lights, set a timer, or just chat.</p>
+      </div>
+    </section>
+
+    <section id="facts" class="view" hidden>
+      <form id="facts-form" autocomplete="off">
+        <input id="fact-input" type="text" placeholder="Add a long-term fact…" maxlength="500">
+        <button class="add-fact" id="add-fact" type="submit">Add</button>
+      </form>
+      <div id="facts-list" class="facts-list"></div>
+      <p class="facts-hint">Facts the assistant carries between sessions — visible on every turn.</p>
+    </section>
+
+    <section id="notes" class="view" hidden>
+      <div id="notes-list" class="notes-list"></div>
+
+      <div id="note-detail" class="note-detail" hidden>
+        <div class="note-detail-head">
+          <button class="note-back" id="note-back" type="button">← Notes</button>
+          <div class="note-detail-actions">
+            <button class="note-action" id="note-edit" type="button">Edit</button>
+            <button class="note-action primary" id="note-save" type="button" hidden>Save</button>
+            <button class="note-action" id="note-cancel" type="button" hidden>Cancel</button>
+          </div>
+        </div>
+        <div class="note-title" id="note-title"></div>
+        <pre class="note-content" id="note-content"></pre>
+        <textarea class="note-editor" id="note-editor" hidden spellcheck="false"></textarea>
+      </div>
+
+      <p class="facts-hint" id="notes-hint">Markdown notes Fulloch keeps locally — tap one to read or edit.</p>
+    </section>
+  </main>
+
+  <footer id="chat-footer">
+    <form id="form">
+      <textarea id="input" rows="1" placeholder="Message Fulloch…" autocomplete="off"></textarea>
+      <button class="send" id="send" type="submit" aria-label="Send">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3.4 20.4 22 12 3.4 3.6 3 10l13 2-13 2z"/>
+        </svg>
+      </button>
+    </form>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const chat = document.getElementById('chat');
+  const empty = document.getElementById('empty');
+  const form = document.getElementById('form');
+  const input = document.getElementById('input');
+  const sendBtn = document.getElementById('send');
+  const statusDot = document.getElementById('status-dot');
+  const statusText = document.getElementById('status-text');
+
+  let typingEl = null;
+  let waiting = false;
+  let lastTs = 0;
+  let typingTimer = null;   // live typewriter tick handle
+  let finishActive = null;  // finalises the in-flight typewriter, if any
+  const statsMsgs = new Map();  // assistant ts -> {stats, panel, btn}
+  // Per-turn trace group. Reset on every user event so the next batch of
+  // agent events (plan/step/observation) gets gathered under its own
+  // collapsible <details> block placed right after the user bubble.
+  let activeTraceGroup = null;
+  let activeTraceSummary = null;
+  let activeTraceCount = 0;
+
+  // Reverse TTS-friendly word forms back to a natural display.
+  // Mirrors the inverse of `tools/time_tools.py:get_current_time` and
+  // `core/datetime_utils.py:tts_friendly_event_summary`. Anything that
+  // doesn't match falls through unchanged.
+  const WORD_NUM = {
+    zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7,
+    eight:8, nine:9, ten:10, eleven:11, twelve:12, thirteen:13,
+    fourteen:14, fifteen:15, sixteen:16, seventeen:17, eighteen:18,
+    nineteen:19, twenty:20, thirty:30, forty:40, fifty:50,
+  };
+  const ALL_NUM = { ...WORD_NUM };
+  for (const [t, tv] of Object.entries(WORD_NUM)) {
+    if (tv >= 20 && tv % 10 === 0) {
+      for (const [o, ov] of Object.entries(WORD_NUM)) {
+        if (ov >= 1 && ov <= 9) ALL_NUM[`${t}-${o}`] = tv + ov;
+      }
+    }
+  }
+  const NUM_PAT = Object.keys(ALL_NUM).sort((a,b) => b.length - a.length).join('|');
+  const DAY_ORD = {
+    first:1, second:2, third:3, fourth:4, fifth:5, sixth:6, seventh:7,
+    eighth:8, ninth:9, tenth:10, eleventh:11, twelfth:12, thirteenth:13,
+    fourteenth:14, fifteenth:15, sixteenth:16, seventeenth:17,
+    eighteenth:18, nineteenth:19, twentieth:20, 'twenty-first':21,
+    'twenty-second':22, 'twenty-third':23, 'twenty-fourth':24,
+    'twenty-fifth':25, 'twenty-sixth':26, 'twenty-seventh':27,
+    'twenty-eighth':28, 'twenty-ninth':29, thirtieth:30, 'thirty-first':31,
+  };
+  const ORD_PAT = Object.keys(DAY_ORD).sort((a,b) => b.length - a.length).join('|');
+  const CENTURY = 'eighteen|nineteen|twenty';
+
+  const naturalize = (text) => {
+    if (typeof text !== 'string' || !text) return text;
+    let s = text;
+    s = s.replace(/\b([ap]) m\b/g, (_, c) => c.toUpperCase() + 'M');
+    s = s.replace(new RegExp(`\\b(${CENTURY}) hundred\\b`, 'g'),
+      (_, c) => String(ALL_NUM[c] * 100));
+    s = s.replace(new RegExp(`\\b(${CENTURY}) oh (${NUM_PAT})\\b`, 'g'),
+      (m, c, r) => {
+        const rv = ALL_NUM[r];
+        return (rv >= 1 && rv <= 9) ? `${ALL_NUM[c]}0${rv}` : m;
+      });
+    s = s.replace(new RegExp(`\\b(${CENTURY}) (${NUM_PAT})\\b`, 'g'),
+      (m, c, r) => {
+        const rv = ALL_NUM[r];
+        return (rv >= 10 && rv <= 99) ? `${ALL_NUM[c]}${rv}` : m;
+      });
+    s = s.replace(new RegExp(`\\b(${NUM_PAT}) oh (${NUM_PAT}) (AM|PM)\\b`, 'g'),
+      (m, h, mw, ap) => {
+        const hv = ALL_NUM[h], mv = ALL_NUM[mw];
+        return (hv >= 1 && hv <= 12 && mv >= 1 && mv <= 9)
+          ? `${hv}:0${mv} ${ap}` : m;
+      });
+    s = s.replace(new RegExp(`\\b(${NUM_PAT}) (${NUM_PAT}) (AM|PM)\\b`, 'g'),
+      (m, h, mw, ap) => {
+        const hv = ALL_NUM[h], mv = ALL_NUM[mw];
+        return (hv >= 1 && hv <= 12 && mv >= 10 && mv <= 59)
+          ? `${hv}:${String(mv).padStart(2,'0')} ${ap}` : m;
+      });
+    s = s.replace(new RegExp(`\\b(${NUM_PAT}) (AM|PM)\\b`, 'g'),
+      (m, h, ap) => {
+        const hv = ALL_NUM[h];
+        return (hv >= 1 && hv <= 12) ? `${hv} ${ap}` : m;
+      });
+    s = s.replace(/\b(\d{1,2}) (\d{2}) (AM|PM)\b/g,
+      (_, h, m, ap) => `${h}:${m} ${ap}`);
+    s = s.replace(new RegExp(`\\b(${NUM_PAT}) o'clock\\b`, 'g'),
+      (m, h) => {
+        const hv = ALL_NUM[h];
+        return (hv >= 1 && hv <= 12) ? `${hv} o'clock` : m;
+      });
+    s = s.replace(new RegExp(`\\b(${ORD_PAT})\\b`, 'g'),
+      (m) => String(DAY_ORD[m]));
+    return s;
+  };
+
+  const fmtTime = (ts) => {
+    const d = new Date(ts * 1000);
+    return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  };
+
+  const clearEmpty = () => empty?.remove();
+
+  const removeTyping = () => {
+    typingEl?.remove();
+    typingEl = null;
+  };
+
+  const showTyping = () => {
+    removeTyping();
+    typingEl = document.createElement('div');
+    typingEl.className = 'typing';
+    typingEl.innerHTML = '<span></span><span></span><span></span>';
+    chat.appendChild(typingEl);
+    scrollEnd();
+  };
+
+  const renderTrace = (ev) => {
+    const wrap = document.createElement('div');
+    wrap.className = `trace ${ev.kind}`;
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = ev.kind;
+    wrap.appendChild(label);
+
+    const body = document.createElement('span');
+    const p = ev.payload || {};
+    if (ev.kind === 'plan') {
+      if (Array.isArray(p.actions)) {
+        const names = p.actions.map(a => {
+          const args = Array.isArray(a.args) ? a.args : [];
+          return `${a.intent}(${args.map(JSON.stringify).join(', ')})`;
+        });
+        body.textContent = names.length
+          ? names.join(' → ')
+          : '(empty actions — falling through to stall)';
+      } else if (typeof p.reply === 'string') {
+        const truncated = p.reply.length > 200 ? p.reply.slice(0, 200) + '…' : p.reply;
+        body.textContent = `reply: ${truncated}`;
+      } else {
+        body.textContent = JSON.stringify(p);
+      }
+    } else if (ev.kind === 'step') {
+      const args = Array.isArray(p.args) ? p.args : [];
+      body.textContent = `${p.intent}(${args.map(JSON.stringify).join(', ')})`;
+    } else if (ev.kind === 'observation') {
+      const r = naturalize(p.result || '');
+      body.textContent = `${p.intent} → ${r.length > 180 ? r.slice(0, 180) + '…' : r}`;
+    } else {
+      body.textContent = JSON.stringify(p);
+    }
+    wrap.appendChild(body);
+    return wrap;
+  };
+
+  const resetTraceGroup = () => {
+    activeTraceGroup = null;
+    activeTraceSummary = null;
+    activeTraceCount = 0;
+  };
+
+  const ensureTraceGroup = () => {
+    if (activeTraceGroup) return activeTraceGroup;
+    activeTraceGroup = document.createElement('details');
+    activeTraceGroup.className = 'trace-group';
+    activeTraceSummary = document.createElement('summary');
+    activeTraceSummary.textContent = 'trace';
+    activeTraceGroup.appendChild(activeTraceSummary);
+    chat.appendChild(activeTraceGroup);
+    return activeTraceGroup;
+  };
+
+  const updateTraceSummary = () => {
+    if (!activeTraceSummary) return;
+    activeTraceSummary.textContent = activeTraceCount === 1
+      ? 'trace · 1 event'
+      : `trace · ${activeTraceCount} events`;
+  };
+
+  // Finalise any in-flight typewriter immediately (show the full text).
+  const finishTyping = () => { if (finishActive) finishActive(); };
+
+  // Reveal `text` into `bubble` progressively to mimic a live stream, paced to
+  // roughly track speech (~165 wpm). Used only for live turns, never history
+  // replay. A new message finalises any in-flight animation via finishTyping().
+  const typeInto = (bubble, text) => {
+    finishTyping();
+    const words = text.trim().split(/\s+/).length || 1;
+    const speechMs = (words / 165) * 60000;            // est. spoken duration
+    const perChar = Math.min(60, Math.max(12, speechMs / text.length));
+    let i = 0;
+    const step = () => {
+      i = Math.min(text.length, i + 1);
+      bubble.textContent = text.slice(0, i);
+      scrollEnd();
+      if (i < text.length) {
+        typingTimer = setTimeout(step, perChar);
+      } else {
+        typingTimer = null;
+        finishActive = null;
+      }
+    };
+    finishActive = () => {
+      if (typingTimer) { clearTimeout(typingTimer); typingTimer = null; }
+      bubble.textContent = text;
+      finishActive = null;
+    };
+    step();
+  };
+
+  const fmtSecs = (s) => (s == null ? '—' : `${s.toFixed(2)}s`);
+
+  // Build the monospace inference-stats block, adaptively (rows for stages
+  // that didn't run this turn are omitted by the backend payload).
+  const formatStats = (s) => {
+    const L = ['Inference Stats', '-'.repeat(50)];
+    L.push(`Total Response Time : ${fmtSecs(s.total)}`);
+    if (s.stt)
+      L.push(`↳ Audio Input (STT) : ${fmtSecs(s.stt.seconds)} (${s.stt.model})`);
+    if (s.retrieval) {
+      const c = s.retrieval.chunks != null ? ` / ${s.retrieval.chunks} chunks` : '';
+      L.push(`↳ Context Retrieval : ${fmtSecs(s.retrieval.seconds)} (${s.retrieval.model}${c})`);
+    }
+    if (s.llm) {
+      const m = s.llm;
+      L.push(`↳ LLM Generation    : ${fmtSecs(m.seconds)} (${m.model})`);
+      L.push(`  ├─ TTFT           : ${fmtSecs(m.ttft)}`);
+      L.push(`  ├─ Tokens / sec   : ${m.tps != null ? m.tps.toFixed(1) + ' t/s' : '—'}`);
+      L.push(`  ├─ Token Count    : ${m.prompt_tokens} prompt | ${m.output_tokens} output`);
+      L.push(`  └─ Agent Loop     : ${m.calls} call${m.calls === 1 ? '' : 's'} | ${m.tools} tool${m.tools === 1 ? '' : 's'}`);
+    }
+    if (s.tts)
+      L.push(`↳ Audio Output(TTS) : ${fmtSecs(s.tts.seconds)} (${s.tts.model})`);
+    L.push('-'.repeat(50));
+    if (s.vram)
+      L.push(`VRAM Usage          : ${s.vram.used.toFixed(1)} GB / ${s.vram.total.toFixed(1)} GB`);
+    return L.join('\n');
+  };
+
+  // Tiny muted button (bottom-right of the meta row) + collapsible detail panel.
+  const attachStats = (wrap, ev) => {
+    const meta = wrap.querySelector('.meta');
+    const btn = document.createElement('button');
+    btn.className = 'stats-btn';
+    btn.type = 'button';
+    const panel = document.createElement('div');
+    panel.className = 'stats-panel hidden';
+    const entry = { stats: ev.stats, panel, btn };
+    entry.refresh = () => {
+      btn.textContent = fmtSecs(entry.stats.total);
+      panel.textContent = formatStats(entry.stats);
+    };
+    statsMsgs.set(ev.ts, entry);
+    entry.refresh();
+    btn.addEventListener('click', () => {
+      panel.classList.toggle('hidden');
+      scrollEnd();
+    });
+    meta.appendChild(btn);
+    wrap.appendChild(panel);
+  };
+
+  const appendMessage = (ev, live = false) => {
+    // Stats patch (e.g. TTS time, known only after playback): merge into the
+    // already-rendered assistant message keyed by ref_ts. Handled before the
+    // dedup guard since it carries its own later ts.
+    if (ev.role === 'stats') {
+      const entry = statsMsgs.get(ev.ref_ts);
+      if (entry && ev.patch) {
+        Object.assign(entry.stats, ev.patch);
+        entry.refresh();
+      }
+      return;
+    }
+    if (ev.ts <= lastTs && lastTs > 0) return; // duplicate (history replay)
+    lastTs = ev.ts;
+    finishTyping();  // a new event ends any prior turn's animation
+    clearEmpty();
+
+    if (ev.role === 'agent') {
+      ensureTraceGroup();
+      activeTraceGroup.appendChild(renderTrace(ev));
+      activeTraceCount++;
+      updateTraceSummary();
+      scrollEnd();
+      return;
+    }
+
+    if (ev.role === 'user') resetTraceGroup();
+    if (ev.role === 'assistant') removeTyping();
+
+    const wrap = document.createElement('div');
+    wrap.className = `msg ${ev.role}`;
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    const text = ev.role === 'assistant' ? naturalize(ev.content) : ev.content;
+    const animate = ev.role === 'assistant' && live && !!text;
+    bubble.textContent = animate ? '' : text;
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const tag = document.createElement('span');
+    tag.className = `tag ${ev.source}`;
+    tag.textContent = ev.source;
+    const time = document.createElement('span');
+    time.textContent = fmtTime(ev.ts);
+    meta.append(tag, time);
+
+    wrap.append(bubble, meta);
+    chat.appendChild(wrap);
+    if (ev.role === 'assistant' && ev.stats) attachStats(wrap, ev);
+    if (animate) typeInto(bubble, text);
+    scrollEnd();
+
+    if (ev.role === 'assistant' && waiting) {
+      waiting = false;
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  };
+
+  const scrollEnd = () => {
+    requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+  };
+
+  const setLive = (on) => {
+    statusDot.classList.toggle('live', !!on);
+    statusText.textContent = on ? 'live' : 'reconnecting';
+  };
+
+  const autosize = () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+  };
+
+  const loadHistory = async () => {
+    try {
+      const r = await fetch('/history');
+      const items = await r.json();
+      if (!items.length) return;
+      clearEmpty();
+      for (const ev of items) appendMessage(ev);
+    } catch (e) {
+      console.warn('history failed', e);
+    }
+  };
+
+  const startStream = () => {
+    const es = new EventSource('/stream');
+    es.onopen = () => setLive(true);
+    es.onmessage = (e) => {
+      if (!e.data) return;
+      try { appendMessage(JSON.parse(e.data), true); } catch (err) { console.warn(err); }
+    };
+    es.onerror = () => {
+      setLive(false);
+      es.close();
+      setTimeout(startStream, 2000);
+    };
+  };
+
+  input.addEventListener('input', autosize);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text || waiting) return;
+    waiting = true;
+    sendBtn.disabled = true;
+    input.value = '';
+    autosize();
+    showTyping();
+    try {
+      await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+    } catch (err) {
+      console.error(err);
+      removeTyping();
+      waiting = false;
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  });
+
+  // ---- Tabs + facts viewer ----
+  const tabs = document.querySelectorAll('.tab');
+  const views = {
+    chat: document.getElementById('chat'),
+    facts: document.getElementById('facts'),
+    notes: document.getElementById('notes'),
+  };
+  const chatFooter = document.getElementById('chat-footer');
+  const factsList = document.getElementById('facts-list');
+  const factsForm = document.getElementById('facts-form');
+  const factInput = document.getElementById('fact-input');
+  const addFactBtn = document.getElementById('add-fact');
+
+  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  const renderFacts = (facts) => {
+    factsList.innerHTML = '';
+    if (!facts.length) {
+      const empty = document.createElement('div');
+      empty.className = 'facts-empty';
+      empty.textContent = 'No facts saved yet. Add one above, or say "remember that …" to Fulloch.';
+      factsList.appendChild(empty);
+      return;
+    }
+    for (const f of facts) factsList.appendChild(renderFactRow(f));
+  };
+
+  const renderFactRow = (f) => {
+    const row = document.createElement('div');
+    row.className = 'fact-row';
+    row.dataset.index = f.index;
+    row.innerHTML = `
+      <div class="fact-body">
+        <div class="fact-date">${escapeHtml(f.date)}</div>
+        <div class="fact-text"></div>
+      </div>
+      <div class="fact-actions">
+        <button class="fact-btn edit" type="button" aria-label="Edit" title="Edit">
+          <svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75l11.06-11.06-3.75-3.75L3 17.25zm17.71-10.04a1 1 0 0 0 0-1.41l-2.5-2.5a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+        </button>
+        <button class="fact-btn danger delete" type="button" aria-label="Delete" title="Delete">
+          <svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+        </button>
+      </div>`;
+    row.querySelector('.fact-text').textContent = f.text;
+    row.querySelector('.edit').addEventListener('click', () => startEdit(row, f));
+    row.querySelector('.delete').addEventListener('click', () => deleteFact(f));
+    return row;
+  };
+
+  const startEdit = (row, f) => {
+    const body = row.querySelector('.fact-body');
+    body.innerHTML = `
+      <div class="fact-date">${escapeHtml(f.date)}</div>
+      <textarea class="fact-edit"></textarea>`;
+    const ta = body.querySelector('.fact-edit');
+    ta.value = f.text;
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+
+    const actions = row.querySelector('.fact-actions');
+    actions.innerHTML = `
+      <button class="fact-btn save" type="button" aria-label="Save" title="Save">
+        <svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg>
+      </button>
+      <button class="fact-btn cancel" type="button" aria-label="Cancel" title="Cancel">
+        <svg viewBox="0 0 24 24"><path d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg>
+      </button>`;
+    actions.querySelector('.save').addEventListener('click', () => saveEdit(f.index, ta.value));
+    actions.querySelector('.cancel').addEventListener('click', loadFacts);
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) saveEdit(f.index, ta.value);
+      else if (e.key === 'Escape') loadFacts();
+    });
+  };
+
+  const loadFacts = async () => {
+    try {
+      const r = await fetch('/facts');
+      const data = await r.json();
+      renderFacts(data.facts || []);
+    } catch (e) {
+      console.warn('facts load failed', e);
+      factsList.innerHTML = '<div class="facts-empty">Couldn\'t load facts.</div>';
+    }
+  };
+
+  const saveEdit = async (idx, text) => {
+    text = text.trim();
+    if (!text) return;
+    try {
+      const r = await fetch(`/facts/${idx}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      const data = await r.json();
+      renderFacts(data.facts || []);
+    } catch (e) {
+      console.error('save failed', e);
+      loadFacts();
+    }
+  };
+
+  const deleteFact = async (f) => {
+    if (!confirm(`Forget this fact?\n\n${f.text}`)) return;
+    try {
+      const r = await fetch(`/facts/${f.index}`, { method: 'DELETE' });
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      const data = await r.json();
+      renderFacts(data.facts || []);
+    } catch (e) {
+      console.error('delete failed', e);
+      loadFacts();
+    }
+  };
+
+  factsForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = factInput.value.trim();
+    if (!text) return;
+    addFactBtn.disabled = true;
+    try {
+      const r = await fetch('/facts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      const data = await r.json();
+      factInput.value = '';
+      renderFacts(data.facts || []);
+    } catch (e) {
+      console.error('add failed', e);
+    } finally {
+      addFactBtn.disabled = false;
+      factInput.focus();
+    }
+  });
+
+  // ---- Notes viewer ----
+  const notesList = document.getElementById('notes-list');
+  const notesHint = document.getElementById('notes-hint');
+  const noteDetail = document.getElementById('note-detail');
+  const noteTitle = document.getElementById('note-title');
+  const noteContent = document.getElementById('note-content');
+  const noteEditor = document.getElementById('note-editor');
+  const noteBack = document.getElementById('note-back');
+  const noteEdit = document.getElementById('note-edit');
+  const noteSave = document.getElementById('note-save');
+  const noteCancel = document.getElementById('note-cancel');
+
+  let currentNote = null; // { name, content }
+
+  const showNotesList = () => {
+    currentNote = null;
+    noteDetail.hidden = true;
+    notesList.hidden = false;
+    notesHint.hidden = false;
+  };
+
+  const renderNotesList = (notes) => {
+    notesList.innerHTML = '';
+    if (!notes.length) {
+      const e = document.createElement('div');
+      e.className = 'facts-empty';
+      e.textContent = 'No notes saved yet. Ask Fulloch to "make a note" to create one.';
+      notesList.appendChild(e);
+      return;
+    }
+    for (const n of notes) {
+      const row = document.createElement('button');
+      row.className = 'note-row';
+      row.type = 'button';
+      const name = document.createElement('span');
+      name.className = 'note-name';
+      name.textContent = n.title;
+      const chev = document.createElement('span');
+      chev.className = 'chev';
+      chev.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8.6 16.6 13.2 12 8.6 7.4 10 6l6 6-6 6z"/></svg>';
+      row.append(name, chev);
+      row.addEventListener('click', () => openNote(n));
+      notesList.appendChild(row);
+    }
+  };
+
+  const setEditMode = (editing) => {
+    noteContent.hidden = editing;
+    noteEditor.hidden = !editing;
+    noteEdit.hidden = editing;
+    noteSave.hidden = !editing;
+    noteCancel.hidden = !editing;
+    if (editing) {
+      noteEditor.value = currentNote.content;
+      noteEditor.focus();
+    }
+  };
+
+  const openNote = async (n) => {
+    try {
+      const r = await fetch(`/notes/${encodeURI(n.name)}`);
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      const data = await r.json();
+      currentNote = { name: n.name, content: data.content || '' };
+      noteTitle.textContent = n.title;
+      noteContent.textContent = currentNote.content;
+      setEditMode(false);
+      notesList.hidden = true;
+      notesHint.hidden = true;
+      noteDetail.hidden = false;
+      views.notes.scrollTop = 0;
+    } catch (e) {
+      console.error('note open failed', e);
+    }
+  };
+
+  const saveNote = async () => {
+    if (!currentNote) return;
+    const content = noteEditor.value;
+    noteSave.disabled = true;
+    try {
+      const r = await fetch(`/notes/${encodeURI(currentNote.name)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      const data = await r.json();
+      currentNote.content = data.content || '';
+      noteContent.textContent = currentNote.content;
+      setEditMode(false);
+    } catch (e) {
+      console.error('note save failed', e);
+    } finally {
+      noteSave.disabled = false;
+    }
+  };
+
+  const loadNotes = async () => {
+    showNotesList();
+    try {
+      const r = await fetch('/notes');
+      const data = await r.json();
+      renderNotesList(data.notes || []);
+    } catch (e) {
+      console.warn('notes load failed', e);
+      notesList.innerHTML = '<div class="facts-empty">Couldn\'t load notes.</div>';
+    }
+  };
+
+  noteBack.addEventListener('click', showNotesList);
+  noteEdit.addEventListener('click', () => setEditMode(true));
+  noteSave.addEventListener('click', saveNote);
+  noteCancel.addEventListener('click', () => setEditMode(false));
+  noteEditor.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveNote(); }
+    else if (e.key === 'Escape') setEditMode(false);
+  });
+
+  const setTab = (name) => {
+    tabs.forEach((t) => {
+      const on = t.dataset.tab === name;
+      t.classList.toggle('active', on);
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    for (const [k, el] of Object.entries(views)) el.hidden = k !== name;
+    chatFooter.hidden = name !== 'chat';
+    if (name === 'facts') loadFacts();
+    if (name === 'notes') loadNotes();
+  };
+
+  tabs.forEach((t) => t.addEventListener('click', () => setTab(t.dataset.tab)));
+
+  loadHistory().then(startStream);
+})();
+</script>
+</body>
+</html>

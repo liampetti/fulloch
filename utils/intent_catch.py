@@ -1,134 +1,164 @@
-'''
-Regex Intent Catch 
+"""Regex fast-path for common voice intents (play / stop / time / timer).
 
-Optional functions for catching simple intent based queries quickly before sending on to LLM
-'''
-
-import re
+Returns an agent emission dict `{"actions": [{"intent": ..., "args": ...}]}`
+from `catchAll` when matched, or the original string unchanged. Individual
+`extract_*` helpers remain importable for tests.
+"""
 
 import logging
+import re
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Special regex to just directly send intent without ai check for music control and time checks
-def extract_after_play(command):
-    pattern = r'play\s+(.+)$'
-    match = re.search(pattern, command, re.IGNORECASE)
+
+def _match(label: str, pattern: re.Pattern, command: str):
+    match = pattern.search(command)
     if match:
-        logger.debug(f"Caught Play Match: {match}")
-        return match.group(1).strip()
+        logger.debug(f"Caught {label} match: {match}")
+    return match
+
+
+_PLAY_RE = re.compile(r'play\s+(.+)$', re.IGNORECASE)
+_STOP_RE = re.compile(r'^\s*(stop|pause|halt)\b', re.IGNORECASE)
+_SKIP_RE = re.compile(r'^\s*skip\b', re.IGNORECASE)
+_RESUME_RE = re.compile(r'^\s*resume\b', re.IGNORECASE)
+_TIME_QUERY_RE = re.compile(r"(what time is it|what'?s the time|what time it is)", re.IGNORECASE)
+_TIMER_RE = re.compile(
+    r'(?:start|set)\s+(?:a\s+)?(?:timer|time)\s+(?:for\s+)?(.+?)(?:\s+please)?$',
+    re.IGNORECASE,
+)
+_LIST_TIMERS_RE = re.compile(
+    r'get\s+(?:a\s+)?(?:timers|timer|time)(?:\s+(.*?))?(?:\s+status)?$',
+    re.IGNORECASE,
+)
+
+
+def extract_after_play(command: str) -> Optional[str]:
+    m = _match("Play", _PLAY_RE, command)
+    return m.group(1).strip() if m else None
+
+
+def extract_stop(command: str) -> Optional[bool]:
+    return True if _match("Stop", _STOP_RE, command) else None
+
+
+def extract_skip(command: str) -> Optional[bool]:
+    return True if _match("Skip", _SKIP_RE, command) else None
+
+
+def extract_resume(command: str) -> Optional[bool]:
+    return True if _match("Resume", _RESUME_RE, command) else None
+
+
+def has_time_query(command: str) -> Optional[bool]:
+    return True if _match("Time", _TIME_QUERY_RE, command) else None
+
+
+def extract_timer(command: str) -> Optional[str]:
+    m = _match("Timer", _TIMER_RE, command)
+    return m.group(1).strip() if m else None
+
+
+def list_timers(command: str) -> Optional[bool]:
+    return True if _match("List Timers", _LIST_TIMERS_RE, command) else None
+
+
+# Match explicit asks for deeper thought, not casual uses like "I think it's
+# raining". Anchored to start of utterance and requires the topic preposition
+# (about/on/over/through) so "consider" alone won't catch "consider it done".
+_DEEP_THINK_PATTERNS = [
+    re.compile(
+        r"^\s*(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?"
+        r"(?:think|consider|reflect|ponder)\s+"
+        r"(?:carefully\s+|deeply\s+|hard\s+)?"
+        r"(?:about|on|over|through)\s+(.+)$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:please\s+)?(?:let\s+me|let\'?s)\s+think\s+"
+        r"(?:about\s+|through\s+|over\s+)(.+)$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:please\s+)?what\s+do\s+you\s+think\s+about\s+(.+)$",
+        re.IGNORECASE,
+    ),
+]
+
+
+def extract_deep_think(command: str) -> Optional[str]:
+    """Return the topic if `command` is asking for thinking-mode reasoning."""
+    for pattern in _DEEP_THINK_PATTERNS:
+        match = pattern.search(command)
+        if not match:
+            continue
+        topic = match.group(1).strip(' .,?!').strip()
+        if topic:
+            logger.debug(f"Caught Deep Think Match: {topic}")
+            return topic
     return None
 
-def extract_stop(command):
-    # pattern to match "stop", "pause", or "halt" commands
-    # This will match any of these words at the start of the command
-    # and ignore case sensitivity.
-    # It will also ignore any leading or trailing whitespace and any punctuation.
-    # Example matches: "stop", " pause ", "halt now", "stop."
-    pattern = r'^\s*(stop|pause|halt)\b'
-    match = re.match(pattern, command, re.IGNORECASE)
-    if match:
-        logger.debug(f"Caught Stop Match: {match}")
-        return True
+
+# Anchored asks to surface the partial thinking from a cancelled thinking turn,
+# so passing mentions ("we discussed this so far") don't trigger.
+_SUMMARIZE_THINKING_PATTERNS = [
+    re.compile(
+        r"^\s*(?:please\s+)?summari[sz]e"
+        r"(?:\s+(?:your\s+thoughts|what\s+you('?ve|\s+have)\s+got|so\s+far))?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:so\s+)?what(?:'?s)?\s+(?:have\s+you\s+got|do\s+you\s+have|"
+        r"are\s+you\s+thinking|have\s+you\s+been\s+thinking)"
+        r"(?:\s+so\s+far|\s+now)?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:please\s+)?(?:give|tell)\s+me\s+(?:your\s+thoughts|"
+        r"what\s+you('?ve|\s+have)\s+got)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:please\s+)?(?:stop\s+thinking|give\s+up\s+thinking|"
+        r"that('?s|\s+is)\s+enough)",
+        re.IGNORECASE,
+    ),
+]
+
+
+def extract_summarize_thinking(command: str) -> Optional[bool]:
+    for pattern in _SUMMARIZE_THINKING_PATTERNS:
+        if pattern.search(command):
+            logger.debug(f"Caught Summarize Thinking match: {command!r}")
+            return True
     return None
 
-def extract_skip(command):
-    pattern = r'^\s*skip\b'
-    match = re.match(pattern, command, re.IGNORECASE)
-    if match:
-        logger.debug(f"Caught Skip Match: {match}")
-        return True
-    return None
 
-def extract_resume(command):
-    pattern = r'^\s*resume\b'
-    match = re.match(pattern, command, re.IGNORECASE)
-    if match:
-        logger.debug(f"Caught Resume Match: {match}")
-        return True
-    return None
+# Each rule: (extractor, intent_dict_builder). The builder receives the
+# extractor's return value (string or True). Order matters — summarize_thinking
+# is listed before deep_think so "summarise what you've been thinking" doesn't
+# slip into the deep_think 'think about' family.
+_INTENT_RULES = [
+    (extract_after_play, lambda v: {"intent": "play_song", "args": [v]}),
+    (extract_stop, lambda _: {"intent": "pause", "args": []}),
+    (has_time_query, lambda _: {"intent": "get_time", "args": []}),
+    (extract_skip, lambda _: {"intent": "skip", "args": []}),
+    (extract_resume, lambda _: {"intent": "resume", "args": []}),
+    (extract_timer, lambda v: {"intent": "start_countdown", "args": [v]}),
+    (list_timers, lambda _: {"intent": "list_timers", "args": []}),
+    (extract_summarize_thinking, lambda _: {"intent": "summarize_thinking", "args": []}),
+    (extract_deep_think, lambda v: {"intent": "deep_think", "args": [v]}),
+]
 
-def has_time_query(text):
-    pattern = r"(what time is it|what'?s the time|what time it is)"
-    match = re.search(pattern, text, re.IGNORECASE)
-    if match:
-        logger.debug(f"Caught Time Match: {match}")
-        return True
-    return None
 
-def extract_timer(command):
-    """Extract timer duration from commands like 'start timer ten minutes'."""
-    pattern = r'(?:start|set)\s+(?:a\s+)?(?:timer|time)\s+(?:for\s+)?(.+?)(?:\s+please)?$'
-
-    match = re.search(pattern, command, re.IGNORECASE)
-    if match:
-        logger.debug(f"Caught Timer Match: {match}")
-        return match.group(1).strip()
-    return None
-
-def list_timers(command):
-    """Get list of current timers"""
-    pattern = r'get\s+(?:a\s+)?(?:timers|timer|time)(?:\s+(.*?))?(?:\s+status)?$'
-
-    match = re.search(pattern, command, re.IGNORECASE)
-    if match:
-        logger.debug(f"Caught List Timers Match: {match}")
-        return True
-    return None
-
-def catchAll(user_message):
-    """Catch all intents from user message."""
-    to_play = extract_after_play(user_message)
-    if to_play is not None:
-        return {"intent": "play_song", "args": [to_play]}
-        
-    to_stop = extract_stop(user_message)
-    if to_stop is not None:
-        return {"intent": "pause", "args": []}
-        
-    time_query = has_time_query(user_message)
-    if time_query is not None:
-        return {"intent": "get_time", "args": []}
-        
-    to_skip = extract_skip(user_message)
-    if to_skip is not None:
-        return {"intent": "skip", "args": []}
-        
-    to_resume = extract_resume(user_message)
-    if to_resume is not None:
-        return {"intent": "resume", "args": []}
-        
-    timer_duration = extract_timer(user_message)
-    if timer_duration is not None:
-        return {"intent": "start_countdown", "args": [timer_duration]}
-        
-    timer_list = list_timers(user_message)
-    if timer_list is not None:
-        return {"intent": "list_timers", "args": []}
-    
+def catchAll(user_message: str):
+    """Run regex catchers in order. On match, return an agent emission
+    `{"actions": [{"intent": ..., "args": ...}]}`; otherwise return the
+    original message string unchanged for the SLM to handle.
+    """
+    for extract, build in _INTENT_RULES:
+        value = extract(user_message)
+        if value is not None:
+            return {"actions": [build(value)]}
     return user_message
-
-if __name__ == "__main__":
-    # Test cases for different intents
-    test_messages = [
-        "play some rock music",
-        "stop",
-        "what time is it",
-        "skip",
-        "resume",
-        "start timer ten minutes",
-        "set timer for 2 hours",
-        "start a timer thirty seconds please",
-        "random message that shouldn't match",
-        "get time or status",
-        "get timers "
-    ]
-    
-    print("Testing intent detection:")
-    print("-" * 40)
-    
-    for message in test_messages:
-        result = catchAll(message)
-        print(f"Input: {message!r}")
-        print(f"Output: {result}")
-        print("-" * 40)

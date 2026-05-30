@@ -1,27 +1,17 @@
 #!/bin/bash
 set -e
 
-# Helper function to ask user for confirmation
-ask_download() {
-    local model_name="$1"
-    read -p "Download $model_name? (y/n): " response
-    response=${response,,}
-    [[ "$response" == "y" || "$response" == "yes" ]]
-}
-
 # Directory definitions
 BASE_DIR="$(pwd)/data/models"
 GRAMMAR_DIR="$BASE_DIR/grammars"
 HUB_DIR="$BASE_DIR/hub"
 
 # Model specific variables
-QWEN_REPO="unsloth/Qwen3-4B-Instruct-2507-GGUF"
-QWEN_FILE="Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+QWEN_REPO="unsloth/Qwen3.5-9B-GGUF"
+QWEN_FILE="Qwen3.5-9B-Q5_K_M.gguf"
 
 # Define the cache folders
-ASR_TINY_DIR="$HUB_DIR/models--UsefulSensors--moonshine-tiny"
 ASR_DIR="$HUB_DIR/models--Qwen--Qwen3-ASR-1.7B"
-TTS_TINY_DIR="$HUB_DIR/models--hexgrad--Kokoro-82M"
 TTS_DIR="$HUB_DIR/models--Qwen--Qwen3-TTS-12Hz-1.7B-Base"
 
 # 1. Ensure Dependencies are installed
@@ -114,94 +104,53 @@ fi
 
 # 3. Check and Download json.gbnf
 if [ ! -f "$GRAMMAR_DIR/json.gbnf" ]; then
-    if ask_download "json.gbnf (grammar file)"; then
-        echo "⬇️ Downloading json.gbnf..."
-        wget -q --show-progress -O "$GRAMMAR_DIR/json.gbnf" \
-        "https://raw.githubusercontent.com/ggml-org/llama.cpp/master/grammars/json.gbnf"
-    else
-        echo "⏭️ Skipping json.gbnf"
-    fi
+    echo "⬇️ Downloading json.gbnf (grammar file)..."
+    wget -q --show-progress -O "$GRAMMAR_DIR/json.gbnf" \
+    "https://raw.githubusercontent.com/ggml-org/llama.cpp/master/grammars/json.gbnf"
 else
     echo "✅ json.gbnf exists."
 fi
 
 # 4. Check and Download Qwen3 GGUF
 if [ ! -f "$BASE_DIR/$QWEN_FILE" ]; then
-    if ask_download "Qwen3 4B SLM (2.5GB)"; then
-        echo "⬇️ Downloading $QWEN_FILE..."
-        hf download "$QWEN_REPO" "$QWEN_FILE" \
-            --local-dir "$BASE_DIR"
-    else
-        echo "⏭️ Skipping Qwen3 SLM"
-    fi
+    echo "⬇️ Downloading Qwen3.5 9B SLM (6.6GB)..."
+    hf download "$QWEN_REPO" "$QWEN_FILE" \
+        --local-dir "$BASE_DIR"
 else
     echo "✅ $QWEN_FILE exists."
 fi
 
-# 5. Check and Download Qwen3 TTS model
+# 5. Check and Download Qwen3 TTS model (Base variant — voice cloning,
+# conditioned on the reference pair named in general.voice_clone)
 if [ ! -d "$TTS_DIR" ]; then
-    if ask_download "Qwen3 TTS (3.4GB)"; then
-        echo "⬇️ Downloading Qwen3 TTS..."
-        hf download Qwen/Qwen3-TTS-12Hz-1.7B-Base \
-            --cache-dir "$HUB_DIR"
-    else
-        echo "⏭️ Skipping Qwen3 TTS"
-    fi
+    echo "⬇️ Downloading Qwen3 TTS Base (3.4GB)..."
+    hf download Qwen/Qwen3-TTS-12Hz-1.7B-Base \
+        --cache-dir "$HUB_DIR"
 else
-    echo "✅ Qwen3 TTS model exists."
-fi
-
-# 5a. Check and Download Kokoro-82M (TTS)
-if [ ! -d "$TTS_TINY_DIR" ]; then
-    if ask_download "Kokoro-82M TTS Tiny (200MB)"; then
-        echo "⬇️ Downloading Kokoro-82M..."
-        hf download hexgrad/Kokoro-82M \
-            --cache-dir "$HUB_DIR"
-    else
-        echo "⏭️ Skipping Kokoro-82M"
-    fi
-else
-    echo "✅ Kokoro-82M exists."
+    echo "✅ Qwen3 TTS Base model exists."
 fi
 
 # 6. Check and Download Qwen3 ASR model
 if [ ! -d "$ASR_DIR" ]; then
-    if ask_download "Qwen3 ASR (3.4GB)"; then
-        echo "⬇️ Downloading Qwen3 ASR..."
-        hf download Qwen/Qwen3-ASR-1.7B \
-            --cache-dir "$HUB_DIR"
-    else
-        echo "⏭️ Skipping Qwen3 ASR"
-    fi
+    echo "⬇️ Downloading Qwen3 ASR (3.4GB)..."
+    hf download Qwen/Qwen3-ASR-1.7B \
+        --cache-dir "$HUB_DIR"
 else
     echo "✅ Qwen3 ASR model exists."
 fi
 
-# 6a. Check and Download Moonshine Tiny ASR model
-if [ ! -d "$ASR_TINY_DIR" ]; then
-    if ask_download "Moonshine Tiny ASR (60MB)"; then
-        echo "⬇️ Downloading Moonshine Tiny..."
-        hf download UsefulSensors/moonshine-tiny \
-            --cache-dir "$HUB_DIR"
-    else
-        echo "⏭️ Skipping Moonshine Tiny"
-    fi
+# 6b. Check and Download BGE embedding model
+BGE_DIR="$HUB_DIR/models--BAAI--bge-small-en-v1.5"
+if [ ! -d "$BGE_DIR" ]; then
+    echo "⬇️ Downloading BGE-small-en-v1.5 for semantic note search (~130MB)..."
+    hf download BAAI/bge-small-en-v1.5 \
+        --cache-dir "$HUB_DIR"
 else
-    echo "✅ Moonshine-tiny exists."
+    echo "✅ BGE-small-en-v1.5 model exists."
 fi
 
-# 7. Prompt the user
-read -p "Are you using an NVIDIA GPU? (y/n): " response
-response=${response,,}
-if [[ "$response" == "y" || "$response" == "yes" ]]; then
-    COMPOSE_FILE="compose_gpu.yml"
-    echo "✅ Using GPU enabled containers"
-else
-    COMPOSE_FILE="compose.yml"
-    echo "✅ Using default containers"
-fi
 
-# 8. Prepare runtime environment
+# 7. Prepare runtime environment
 # Ensure XDG_RUNTIME_DIR is set with the correct UID (compose files reference it)
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
@@ -209,6 +158,53 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 mkdir -p "${HOME}/.config/pulse"
 [ -f "${HOME}/.config/pulse/cookie" ] || touch "${HOME}/.config/pulse/cookie"
 
+# 7b. Load PulseAudio echo-cancellation module (required for usable barge-in
+# on speakerphone setups). Idempotent. Opt out with FULLOCH_SKIP_AEC=1.
+if [ "${FULLOCH_SKIP_AEC:-0}" = "1" ]; then
+    echo "ℹ️  FULLOCH_SKIP_AEC=1 — skipping module-echo-cancel load."
+elif command -v pactl &> /dev/null && pactl info &> /dev/null; then
+    if pactl list short modules | grep -q "module-echo-cancel"; then
+        echo "✅ module-echo-cancel already loaded."
+    else
+        echo "🎙️  Loading PulseAudio module-echo-cancel (webrtc backend)..."
+        if pactl load-module module-echo-cancel \
+            source_name=echocancel_source \
+            sink_name=echocancel_sink \
+            aec_method=webrtc \
+            source_properties=device.description=Echo-Cancelled\ Source \
+            sink_properties=device.description=Echo-Cancelled\ Sink \
+            > /dev/null 2>&1; then
+            echo "✅ module-echo-cancel loaded."
+            echo "   compose.yml routes the container through it via PULSE_SOURCE / PULSE_SINK."
+        else
+            echo "⚠️  Failed to load module-echo-cancel. Continuing without echo cancellation."
+            echo "   Barge-in may self-trigger from the assistant's own voice."
+        fi
+    fi
+else
+    echo "ℹ️  pactl not found or no PulseAudio server — skipping echo-cancel load."
+fi
+
+# 8. Optional rebuild
+read -p "Rebuild image before starting? (y/N): " response
+response=${response,,}
+if [[ "$response" == "y" || "$response" == "yes" ]]; then
+    BUILD_FLAG="--build"
+    echo "🔨 Rebuilding image"
+else
+    BUILD_FLAG=""
+fi
+
+# 8. Optional detach
+read -p "Detach the containers? (y/N): " response
+response=${response,,}
+if [[ "$response" == "y" || "$response" == "yes" ]]; then
+    DETACH_FLAG="-d"
+    echo "Detaching containers"
+else
+    DETACH_FLAG=""
+fi
+
 # 9. Launch Docker Compose
 echo "🚀 All files checked. Starting services..."
-docker compose -f "$COMPOSE_FILE" up -d
+docker compose up $DETACH_FLAG $BUILD_FLAG

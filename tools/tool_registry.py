@@ -1,229 +1,158 @@
-"""
-Centralized tool registry with schema definitions.
-
-This module provides a unified interface for tool registration and schema management
-using the model context protocol for function calling.
-"""
+"""Registry of callable tools exposed to the SLM via intent prompts."""
 
 import inspect
-import json
-from typing import Dict, List, Any, Callable, Optional, Union
-from dataclasses import dataclass, asdict
-from enum import Enum
 import logging
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
-class ParameterType(Enum):
-    """Parameter types for function schemas."""
-    STRING = "string"
-    INTEGER = "integer"
-    FLOAT = "number"
-    BOOLEAN = "boolean"
-    ARRAY = "array"
-    OBJECT = "object"
+class UnknownToolError(KeyError):
+    """Raised when execute_tool is called with a name the registry doesn't know.
+
+    Distinct from generic errors so callers can fall back to chat mode when
+    the SLM hallucinates a tool name.
+    """
 
 
 @dataclass
-class ParameterSchema:
-    """Schema definition for a function parameter."""
+class Param:
     name: str
-    type: ParameterType
-    description: str
-    required: bool = True
-    default: Optional[Any] = None
-    enum: Optional[List[str]] = None
+    required: bool
+    default: Any = None
 
 
 @dataclass
-class FunctionSchema:
-    """Schema definition for a tool function."""
+class ToolSchema:
     name: str
     description: str
-    parameters: List[ParameterSchema]
-    returns: str
+    params: List[Param]
+
+
+def _extract_params(func: Callable) -> List[Param]:
+    params = []
+    for name, p in inspect.signature(func).parameters.items():
+        if name == "self":
+            continue
+        required = p.default is inspect.Parameter.empty
+        params.append(Param(
+            name=name,
+            required=required,
+            default=None if required else p.default,
+        ))
+    return params
 
 
 class ToolRegistry:
-    """Centralized registry for all available tools."""
-    
     def __init__(self):
         self._tools: Dict[str, Callable] = {}
-        self._schemas: Dict[str, FunctionSchema] = {}
+        self._schemas: Dict[str, ToolSchema] = {}
         self._aliases: Dict[str, str] = {}
-    
+
     def register_tool(
         self,
         func: Callable,
         name: Optional[str] = None,
         description: Optional[str] = None,
-        aliases: Optional[List[str]] = None
+        aliases: Optional[List[str]] = None,
     ) -> Callable:
-        """
-        Decorator to register a tool function with schema information.
-        
-        Args:
-            func: The function to register
-            name: Function name (defaults to func.__name__)
-            description: Function description
-            aliases: List of alias names for this function
-        """
-        func_name = name or func.__name__
-        
-        # Extract parameter information
-        sig = inspect.signature(func)
-        parameters = []
-        
-        for param_name, param in sig.parameters.items():
-            if param_name == 'self':
-                continue
-                
-            # Determine parameter type
-            param_type = ParameterType.STRING  # Default
-            if param.annotation == int:
-                param_type = ParameterType.INTEGER
-            elif param.annotation == float:
-                param_type = ParameterType.FLOAT
-            elif param.annotation == bool:
-                param_type = ParameterType.BOOLEAN
-            elif param.annotation == list:
-                param_type = ParameterType.ARRAY
-            
-            # Get parameter description from docstring
-            param_desc = f"Parameter {param_name}"
-            
-            # Check if parameter has default
-            required = param.default == inspect.Parameter.empty
-            
-            parameters.append(ParameterSchema(
-                name=param_name,
-                type=param_type,
-                description=param_desc,
-                required=required,
-                default=param.default if not required else None
-            ))
-        
-        # Create function schema
-        schema = FunctionSchema(
-            name=func_name,
-            description=description or func.__doc__ or f"Function {func_name}",
-            parameters=parameters,
-            returns="string"
+        tool_name = name or func.__name__
+
+        if tool_name in self._tools or tool_name in self._aliases:
+            # Two integrations registering the same name (e.g. lighting and
+            # home_assistant both wanting `turn_on`) — first one wins so the
+            # assistant still starts. User can disambiguate via config.
+            logger.warning(
+                "Tool name collision: '%s' already registered; skipping new registration",
+                tool_name,
+            )
+            return func
+
+        self._tools[tool_name] = func
+        self._schemas[tool_name] = ToolSchema(
+            name=tool_name,
+            description=description or func.__doc__ or f"Function {tool_name}",
+            params=_extract_params(func),
         )
-        
-        # Register the function
-        self._tools[func_name] = func
-        self._schemas[func_name] = schema
-        
-        # Register aliases
-        if aliases:
-            for alias in aliases:
-                self._aliases[alias] = func_name
-        
-        logger.info(f"Registered tool: {func_name}")
+
+        for alias in aliases or []:
+            if alias in self._aliases or alias in self._tools:
+                # Existing alias/name collision is a real bug — log loudly but
+                # don't raise: tool modules import at startup and one bad
+                # decorator shouldn't break the whole assistant.
+                logger.warning(
+                    "Alias collision: '%s' already maps to '%s'; ignoring on '%s'",
+                    alias, self._aliases.get(alias, alias), tool_name,
+                )
+                continue
+            self._aliases[alias] = tool_name
+
+        logger.info(f"Registered tool: {tool_name}")
         return func
-    
+
     def get_tool(self, name: str) -> Optional[Callable]:
-        """Get a tool function by name (including aliases)."""
-        # Check direct name
         if name in self._tools:
             return self._tools[name]
-        
-        # Check aliases
         if name in self._aliases:
             return self._tools[self._aliases[name]]
-        
         return None
-    
-    def get_schema(self, name: str) -> Optional[FunctionSchema]:
-        """Get schema for a tool function."""
-        if name in self._schemas:
-            return self._schemas[name]
-        
-        # Check aliases
-        if name in self._aliases:
-            return self._schemas[self._aliases[name]]
-        
-        return None
-    
-    def get_all_schemas(self) -> List[FunctionSchema]:
-        """Get all available function schemas."""
-        return list(self._schemas.values())
-    
-    def get_all_tools(self) -> Dict[str, Callable]:
-        """Get all available tools (including aliases)."""
-        tools = self._tools.copy()
-        # Add aliases
-        for alias, original_name in self._aliases.items():
-            tools[alias] = self._tools[original_name]
-        return tools
-    
-    def to_openai_schema(self) -> List[Dict[str, Any]]:
-        """Convert to OpenAI function calling schema format."""
-        schemas = []
-        
-        for schema in self._schemas.values():
-            # Convert parameters to OpenAI format
-            properties = {}
-            required_params = []
-            
-            for param in schema.parameters:
-                properties[param.name] = {
-                    "type": param.type.value,
-                    "description": param.description
-                }
-                
-                if param.enum:
-                    properties[param.name]["enum"] = param.enum
-                
-                if param.default is not None:
-                    properties[param.name]["default"] = param.default
-                
-                if param.required:
-                    required_params.append(param.name)
-            
-            openai_schema = {
-                "name": schema.name,
-                "description": schema.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required_params
-                }
-            }
-            
-            schemas.append(openai_schema)
-        
-        return schemas
-    
-    def execute_tool(self, name: str, args: List[Any] = None, kwargs: Dict[str, Any] = None) -> str:
-        """Execute a tool function."""
-        tool = self.get_tool(name)
-        if not tool:
-            raise ValueError(f"Unknown tool: {name}")
-        
-        args = args or []
-        kwargs = kwargs or {}
-        
+
+    def canonical_name(self, name: str) -> Optional[str]:
+        """Resolve a name or alias to its canonical registered tool name.
+
+        Returns None when the name isn't a known tool or alias. Lets callers
+        recognise a tool the agent invoked under any of its aliases without
+        re-implementing the alias lookup.
+        """
+        if name in self._tools:
+            return name
+        return self._aliases.get(name)
+
+    def execute_tool(
+        self,
+        name: str,
+        args: Optional[List[Any]] = None,
+        kwargs: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        func = self.get_tool(name)
+        if not func:
+            raise UnknownToolError(name)
         try:
-            result = tool(*args, **kwargs)
+            result = func(*(args or []), **(kwargs or {}))
             return result if result is not None else ""
-        except Exception as e:
-            logger.error(f"Error executing tool {name}: {e}")
-            return f"Error executing {name}: {str(e)}"
+        except Exception:
+            logger.exception(f"Error executing tool {name}")
+            return ""
+
+    def describe_tools(self) -> str:
+        """Render the registered tools as a human-readable block for the intent prompt."""
+        lines = []
+        for schema in self._schemas.values():
+            line = f"- {schema.name}: {schema.description}"
+            if schema.params:
+                parts = []
+                for p in schema.params:
+                    s = p.name
+                    if not p.required:
+                        s += " (optional)"
+                        if p.default is not None:
+                            s += f" (default: {p.default})"
+                    parts.append(s)
+                line += f" - Parameters: {', '.join(parts)}"
+            lines.append(line)
+        return "\n".join(lines)
 
 
-# Global tool registry instance
 tool_registry = ToolRegistry()
 
 
 def tool(
     name: Optional[str] = None,
     description: Optional[str] = None,
-    aliases: Optional[List[str]] = None
+    aliases: Optional[List[str]] = None,
 ):
-    """Decorator to register a tool function."""
+    """Decorator: register a function as a tool callable by the SLM."""
     def decorator(func):
         return tool_registry.register_tool(func, name, description, aliases)
-    return decorator 
+    return decorator

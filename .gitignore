@@ -35,6 +35,7 @@ htmlcov/
 .tox/
 .nox/
 archives/
+ha_test/
 
 # =============================================================================
 # IDE and Editors
@@ -57,11 +58,16 @@ data/token.json
 *.pem
 *.key
 .python_hue
+data/notes
+data/notes_index.json
+data/notes_index.npy
 
 # =============================================================================
 # Local Data and Models
 # =============================================================================
-data/models/
+data/models/**
+!data/models/grammars/
+!data/models/grammars/agent.gbnf
 data/cache/
 *.gguf
 
@@ -85,6 +91,7 @@ Thumbs.db
 *.tmp
 *.temp
 .cache/
+.cache
 
 # =============================================================================
 # Old/Archive Folders
@@ -98,5 +105,6 @@ data/voices/private
 # =============================================================================
 !data/config.example.yml
 !.env.example\
+!data/models/grammars/agent.gbnf
 publish.sh
 searxng_data/settings.yml.new

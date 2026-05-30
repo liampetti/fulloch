@@ -16,6 +16,8 @@ from utils.intent_catch import (
     extract_skip,
     extract_resume,
     extract_timer,
+    extract_deep_think,
+    extract_summarize_thinking,
     has_time_query,
     list_timers,
 )
@@ -32,9 +34,10 @@ class TestExtractAfterPlay:
         result = extract_after_play("play Taylor Swift")
         assert result == "Taylor Swift"
 
-    def test_play_with_extra_words(self):
+    def test_play_with_leading_words(self):
+        # extract_after_play uses re.search, so leading words are tolerated.
         result = extract_after_play("please play the Beatles")
-        assert result is None  # Doesn't match pattern starting with play
+        assert result == "the Beatles"
 
     def test_no_play_command(self):
         result = extract_after_play("what's the weather")
@@ -147,31 +150,31 @@ class TestCatchAll:
 
     def test_catch_play(self):
         result = catchAll("play some jazz")
-        assert result == {"intent": "play_song", "args": ["some jazz"]}
+        assert result == {"actions": [{"intent": "play_song", "args": ["some jazz"]}]}
 
     def test_catch_stop(self):
         result = catchAll("stop")
-        assert result == {"intent": "pause", "args": []}
+        assert result == {"actions": [{"intent": "pause", "args": []}]}
 
     def test_catch_time(self):
         result = catchAll("what time is it")
-        assert result == {"intent": "get_time", "args": []}
+        assert result == {"actions": [{"intent": "get_time", "args": []}]}
 
     def test_catch_skip(self):
         result = catchAll("skip")
-        assert result == {"intent": "skip", "args": []}
+        assert result == {"actions": [{"intent": "skip", "args": []}]}
 
     def test_catch_resume(self):
         result = catchAll("resume")
-        assert result == {"intent": "resume", "args": []}
+        assert result == {"actions": [{"intent": "resume", "args": []}]}
 
     def test_catch_timer(self):
         result = catchAll("start timer ten minutes")
-        assert result == {"intent": "start_countdown", "args": ["ten minutes"]}
+        assert result == {"actions": [{"intent": "start_countdown", "args": ["ten minutes"]}]}
 
     def test_catch_list_timers(self):
         result = catchAll("get timers")
-        assert result == {"intent": "list_timers", "args": []}
+        assert result == {"actions": [{"intent": "list_timers", "args": []}]}
 
     def test_no_match_returns_original(self):
         original = "tell me a joke"
@@ -182,3 +185,87 @@ class TestCatchAll:
         original = "what's the weather forecast for tomorrow"
         result = catchAll(original)
         assert result == original
+
+    def test_catch_deep_think(self):
+        result = catchAll("think about whether I should switch banks")
+        assert result == {"actions": [{"intent": "deep_think", "args": ["whether I should switch banks"]}]}
+
+
+class TestExtractDeepThink:
+    """Regex-fast-path for thinking-mode queries.
+
+    Conservative: must be an explicit ask for thought, not a casual 'I think'.
+    """
+
+    @pytest.mark.parametrize("utterance,topic", [
+        ("think about whether to switch banks", "whether to switch banks"),
+        ("Think About my career options.", "my career options"),
+        ("please think over the new schedule", "the new schedule"),
+        ("consider carefully about my retirement plan", "my retirement plan"),
+        ("reflect on the meeting", "the meeting"),
+        ("ponder over the proposal", "the proposal"),
+        ("let me think about my next steps", "my next steps"),
+        ("let's think through this problem", "this problem"),
+        ("what do you think about electric cars", "electric cars"),
+        ("can you think about my workout routine", "my workout routine"),
+    ])
+    def test_matches(self, utterance, topic):
+        assert extract_deep_think(utterance) == topic
+
+    @pytest.mark.parametrize("utterance", [
+        "i think it's raining",
+        "i don't think so",
+        "think fast",
+        "consider it done",
+        "think",
+        "let me reflect for a second",  # no preposition + topic
+        "what's the weather",
+    ])
+    def test_non_matches(self, utterance):
+        assert extract_deep_think(utterance) is None
+
+
+class TestExtractSummarizeThinking:
+    """Regex catch for 'what do you have so far'-style follow-ups during
+    a thinking turn that just got interrupted."""
+
+    @pytest.mark.parametrize("utterance", [
+        "summarise",
+        "summarize your thoughts",
+        "summarise what you've got",
+        "summarise what you have so far",
+        "what have you got so far",
+        "what do you have so far",
+        "what are you thinking so far",
+        "what have you been thinking",
+        "so what have you got so far",
+        "give me your thoughts",
+        "tell me what you have got",
+        "tell me your thoughts",
+        "stop thinking",
+        "give up thinking",
+        "that's enough",
+    ])
+    def test_matches(self, utterance):
+        assert extract_summarize_thinking(utterance) is True
+
+    @pytest.mark.parametrize("utterance", [
+        "we discussed this so far",  # 'so far' alone shouldn't match
+        "tell me a joke",
+        "think about the weather",   # belongs to deep_think
+        "what time is it",
+        "play some music",
+        "stop",                       # belongs to existing stop intent
+    ])
+    def test_non_matches(self, utterance):
+        assert extract_summarize_thinking(utterance) is None
+
+    def test_catch_all_routes_to_summarize_thinking(self):
+        result = catchAll("summarise your thoughts")
+        assert result == {"actions": [{"intent": "summarize_thinking", "args": []}]}
+
+    def test_catch_all_summarize_takes_priority_over_deep_think(self):
+        # "summarise what you've been thinking" mentions 'thinking' but
+        # is asking for a summary, not a fresh deep_think.
+        result = catchAll("summarise what you've been thinking")
+        assert result == {"actions": [{"intent": "summarize_thinking", "args": []}]}

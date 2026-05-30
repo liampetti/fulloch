@@ -4,9 +4,9 @@
 
 Fulloch is designed with privacy as a core principle. All processing happens locally on your device:
 
-- **Speech Recognition**: Qwen3 ASR runs entirely on-device (or Moonshine Tiny for edge devices)
-- **Text-to-Speech**: Qwen3 TTS with voice cloning runs entirely on-device (or Kokoro for edge devices)
-- **Language Model**: Qwen 3 4B runs entirely on-device via llama.cpp
+- **Speech Recognition**: Qwen3 ASR runs entirely on-device
+- **Text-to-Speech**: Qwen3 TTS Base runs entirely on-device (voice cloned from a local `data/voices/<name>.{wav,txt}` reference pair; no audio leaves your machine)
+- **Language Model**: Qwen3.5 9B runs entirely on-device via llama.cpp
 - **No Cloud Dependencies**: No data is sent to external servers for AI processing
 
 ## Reporting a Vulnerability
@@ -20,26 +20,23 @@ If you discover a security vulnerability, please report it responsibly:
 
 ## Security Considerations
 
-### Configuration Files
+### Configuration and User Data
 
 - `data/config.yml` contains service credentials and should never be committed
 - `.env` files contain sensitive environment variables
-- Both files are excluded from git via `.gitignore`
+- `data/notes/` holds user-volunteered notes — including `facts.md` (long-term personal facts auto-injected into the chat prompt) and any daily journal entries
+- All of the above are excluded from git via `.gitignore`
 
 ### Network Services
 
-Fulloch connects to external services for smart home control:
+Fulloch connects to a small number of external services:
 
 | Service | Connection Type | Data Sent |
 |---------|----------------|-----------|
-| Spotify | HTTPS API | Playback commands |
-| Philips Hue | Local HTTP | Light commands |
-| Google Calendar | HTTPS API | Calendar queries |
-| SearXNG | Local HTTP | Search queries |
-| LG ThinQ | HTTPS API | Appliance queries |
-| WebOS TV | Local WebSocket | TV commands |
-| Pioneer AVR | Local TCP | Audio commands |
-| Airtouch | Local Discovery | HVAC commands |
+| Home Assistant | Local HTTP (REST) | Entity commands, calendar queries, weather forecasts |
+| SearXNG | Local HTTP | Search queries (only when `search:` is configured) |
+
+Home Assistant is the sole smart-home backend; all third-party device protocols (Spotify, Hue, Calendar, etc.) terminate inside HA, not Fulloch.
 
 ### Best Practices
 
@@ -48,11 +45,9 @@ Fulloch connects to external services for smart home control:
 3. **Minimal Permissions**: Use read-only API access where possible
 4. **Update Dependencies**: Keep dependencies updated for security patches
 
-### OAuth Tokens
+### Credentials
 
-- Google Calendar tokens are stored in `data/token.json`
-- Spotify tokens are managed by the spotipy library
-- Tokens should be treated as secrets and not shared
+- The Home Assistant long-lived access token in `data/config.yml` is the only credential Fulloch holds. Treat it as a secret.
 
 ## Supported Versions
 

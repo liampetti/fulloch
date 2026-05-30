@@ -1,127 +1,179 @@
-"""
-Web Search using SearXNG
-"""
-import yaml
-
-with open("./data/config.yml", "r") as f:
-    config = yaml.safe_load(f)
-
-import re
-import requests
-# import utils.system_prompts
-from datetime import datetime
-from bs4 import BeautifulSoup
-
-from .tool_registry import tool, tool_registry
+"""Web search via a local SearXNG instance."""
 
 import logging
+import re
+from datetime import datetime
+
+import requests
+from bs4 import BeautifulSoup
+
+from ._config import config
+from .tool_registry import tool
 
 logger = logging.getLogger(__name__)
 
 SEARXNG_URL = config['search']['searxng_url']
 
-def searxng_search(query, num_results=3):
-    """
-    Runs a search query against the local SearxNG instance and returns top result URLs.
-    """
-    payload = {
-        'q': query,
-        'format': 'json',
-        'categories': 'general'
-    }
-    resp = requests.get(SEARXNG_URL, params=payload)
-    resp.raise_for_status()
-    results = resp.json().get('results', [])
-    top_urls = [r['url'] for r in results[:num_results]]
-    return top_urls
+# Per-snippet cap. Wide enough to give the agent rich source material to
+# triangulate from; the inline summariser (see core/assistant.py) does the
+# compression downstream.
+SNIPPET_CHAR_CAP = 3000
+NUM_RESULTS = 3
+# Hard ceiling on the SearXNG round-trip. Without it the call inherits no
+# timeout, so a slow / overloaded instance can hang an entire voice turn
+# (observed ~90s). Engines that miss the window are simply dropped.
+SEARXNG_TIMEOUT_S = 12
+# Below this, extracted page text is treated as a failed extraction (a
+# JS-only shell or a nav/link dump) and the caller falls back to the search
+# engine's own result snippet rather than summarising boilerplate.
+MIN_BODY_CHARS = 200
 
-def extract_main_text(html):
-    # Extract visible text from main body
+
+def _results_from_json(query, num_results):
+    """Parse the SearXNG JSON API into `{url, content}` dicts.
+
+    Raises on an empty / non-JSON body so `searxng_search` can fall back to
+    the HTML endpoint — some deployments serve an empty `200 text/html` for
+    `format=json` even though the HTML results page works fine.
+    """
+    resp = requests.get(
+        SEARXNG_URL,
+        params={'q': query, 'format': 'json', 'categories': 'general'},
+        timeout=SEARXNG_TIMEOUT_S,
+    )
+    resp.raise_for_status()
+    if not resp.text.strip():
+        raise ValueError("empty JSON response from SearXNG")
+    results = resp.json().get('results', [])
+    return [
+        {"url": r["url"], "content": (r.get("content") or "").strip()}
+        for r in results[:num_results] if r.get("url")
+    ]
+
+
+def _results_from_html(query, num_results):
+    """Scrape the SearXNG HTML results page into `{url, content}` dicts.
+
+    Fallback for instances whose JSON API is disabled or mis-served. Each
+    result is an `article.result` with the link in `a.url_header` and the
+    description snippet in `p.content`.
+    """
+    resp = requests.get(
+        SEARXNG_URL,
+        params={'q': query, 'categories': 'general'},
+        timeout=SEARXNG_TIMEOUT_S,
+    )
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    out = []
+    for art in soup.select("article.result"):
+        link = art.select_one("a.url_header") or art.select_one("h3 a")
+        if not link or not link.get("href"):
+            continue
+        content_el = art.select_one("p.content")
+        out.append({
+            "url": link["href"],
+            "content": content_el.get_text(" ", strip=True) if content_el else "",
+        })
+        if len(out) >= num_results:
+            break
+    return out
+
+
+def searxng_search(query, num_results=NUM_RESULTS):
+    """Top results as `{url, content}` dicts from the local SearXNG instance.
+
+    Tries the JSON API first and falls back to scraping the HTML results
+    page when JSON is unavailable. `content` is SearXNG's own short
+    description for each result, used as a snippet fallback when the page
+    body itself can't be fetched.
+    """
+    try:
+        return _results_from_json(query, num_results)
+    except Exception as e:
+        logger.warning(f"SearXNG JSON search failed ({e}); falling back to HTML")
+        return _results_from_html(query, num_results)
+
+
+def extract_main_text(html: str) -> str:
+    """Visible body text of an HTML page, or "" when there's no real content.
+
+    Collects paragraph and list-item text (dropping short fragments that are
+    almost always nav/menu chrome) instead of dumping the whole DOM. A
+    JS-rendered shell has no substantial <p>/<li> body, so this returns ""
+    and the caller falls back to the search-engine snippet rather than
+    summarising boilerplate.
+    """
     soup = BeautifulSoup(html, "html.parser")
     for bad in soup(["script", "style", "noscript", "footer", "header", "nav", "aside", "form"]):
         bad.decompose()
-    # Combine text from all paragraphs
-    p_texts = [p.get_text(" ", strip=True) for p in soup.find_all("p") if len(p.get_text(strip=True)) > 40]
-    if not p_texts:
-        text = soup.get_text(separator=" ", strip=True)
-    else:
-        text = "\n".join(p_texts)
-    # Clean whitespace
-    text = re.sub(r"\s+", " ", text)
-    return text
+    blocks = [el.get_text(" ", strip=True) for el in soup.find_all(["p", "li"])]
+    texts = [t for t in blocks if len(t) > 40]
+    text = re.sub(r"\s+", " ", "\n".join(texts))
+    return text if len(text) >= MIN_BODY_CHARS else ""
 
-def fetch_website_summary(url, max_length=3000):
+
+def fetch_website_summary(url: str, fallback: str = "", max_length: int = SNIPPET_CHAR_CAP) -> str:
+    """Main text of `url` truncated to `max_length`.
+
+    Falls back to `fallback` (the search engine's own result snippet) when
+    the page body can't be extracted — JS-only pages, paywalls, timeouts —
+    and returns "" only when both are empty.
     """
-    Fetches the main text from a URL and returns a summary.
-    """
-    text = ""
     try:
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
-        html = resp.text
+        body = extract_main_text(resp.text)
+        if body:
+            return body[:max_length]
+    except Exception:
+        pass
+    return fallback[:max_length]
 
-        # Extract main readable content
-        text = extract_main_text(html)
-
-        # TODO: LLM summarization option? Bart or Pegasus?
-        text = text[:max_length]
-
-        return text
-    except Exception as e:
-        return text
 
 @tool(
     name="external_information",
-    description="Retrieve news and current event information through web search",
+    description=(
+        "Web search. ONLY use when the query is about time-sensitive current "
+        "events (news, scores, prices, today's headlines) OR when the user "
+        "explicitly asks to search/look up/google something. Do NOT use for "
+        "general knowledge, math, definitions, history, science, opinions, "
+        "jokes, or anything the assistant can answer from its own training."
+    ),
     aliases=["web_search", "current_events", "fact_search"]
 )
 def external_information(query: str = "get me the latest news stories") -> str:
-    """
-    Get latest information regarding news, facts and current events using SearXNG
-    
-    Args:
-        query: the web search query
-        
-    Returns:
-        LLM Response on retrieved information
-    """
+    """Fetch top SearXNG snippets and wrap them with a `User question:` sentinel
+    that `_handle_wakeword` routes to the chat fallback."""
     website_snippets = []
     try:
-        top_urls = searxng_search(query, num_results=3)
-        for url in top_urls:
-            snippet = fetch_website_summary(url)
-            website_snippets.append(f"\n\nFrom {url}: {snippet}...")
+        for result in searxng_search(query, num_results=NUM_RESULTS):
+            snippet = fetch_website_summary(result["url"], fallback=result["content"])
+            if snippet:
+                website_snippets.append(f"\n\nFrom {result['url']}: {snippet}")
     except Exception as e:
         logger.error(f"Unable to search web: {e}")
-    
-    today = datetime.now().strftime("%B %d, %Y")
 
-    lines = [f"Today is {today}.", ""]
+    # `User question:` must be the leading sentinel so the assistant's
+    # inline summariser (and `should_replan`) recognises this payload and
+    # compresses it into a short spoken answer — otherwise the raw snippet
+    # blob is joined into the spoken result and read out verbatim.
+    lines = [f"User question: {query}", ""]
+    lines.append(f"Today is {datetime.now().strftime('%B %d, %Y')}.")
     if website_snippets:
+        lines.append("")
         lines.append("A web search has retrieved the following information:")
         lines.extend(website_snippets)
+    else:
+        # No usable snippets (engine down, JSON+HTML both failed, or every
+        # result page was unfetchable). Be explicit so the summariser tells
+        # the user nothing was found instead of fabricating an answer — and
+        # so the agent never saves the non-finding as note content.
         lines.append("")
-    lines.append("User question:")
-    lines.append(query)
+        lines.append(
+            "The web search returned no usable results. Tell the user you "
+            "couldn't find anything on this right now; do not invent an "
+            "answer and do not save this as a note."
+        )
 
     return "\n".join(lines)
-
-if __name__ == "__main__":
-    print("Web Search")
-    
-    # Print available tools
-    print("\nAvailable tools:")
-    for schema in tool_registry.get_all_schemas():
-        print(f"  {schema.name}: {schema.description}")
-        for param in schema.parameters:
-            print(f"    - {param.name} ({param.type.value}): {param.description}")
-    
-    # Test function calling
-    print("\nTesting function calling:")
-    queries = ["who is the current us president", "who is top of the formula 1 driver championship", "summarise the latest research on autism"]
-
-    for query in queries:
-        result = tool_registry.execute_tool("external_information", kwargs={"query": query})
-        print(f"Query: {query}, Result: {result}")
-
-

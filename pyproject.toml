@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "fulloch"
 version = "0.1.0"
 description = "A fully local, privacy-focused AI voice home assistant"
-readme = "readme.md"
+readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
@@ -36,56 +36,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# Core dependencies required for basic operation
-# Note: qwen-tts and flash-attn require special install flags, see requirements.txt
-dependencies = [
-    "numpy>=1.24.0",
-    "setuptools>=80.0.0",
-    "pyyaml>=6.0",
-    "python-dotenv>=1.0.0",
-    # Audio
-    "sounddevice>=0.5.0",
-    "soundfile>=0.13.0",
-    "torchaudio>=2.0.0",
-    # AI/ML Core
-    "torch>=2.0.0",
-    "transformers>=4.40.0",
-    "kokoro>=0.9.0",
-    "accelerate>=1.0.0",
-    "llama-cpp-python>=0.3.0",
-    "qwen-asr>=0.0.6",
-]
+dynamic = ["dependencies"]
 
 [project.optional-dependencies]
-# Smart home integrations
-smart-home = [
-    "phue>=1.1.0",              # Philips Hue
-    "spotipy>=2.25.0",          # Spotify
-    "pyairtouch>=3.0.0",        # Airtouch HVAC
-    "thinqconnect>=1.0.0",      # LG ThinQ
-    "bscpylgtv>=0.5.0",         # LG WebOS TV
-]
-
-# Google services
-google = [
-    "google-auth>=2.0.0",
-    "google-auth-oauthlib>=0.4.0",
-    "google-api-python-client>=2.0.0",
-]
-
-# Web search
-search = [
-    "beautifulsoup4>=4.12.0",
-    "requests>=2.31.0",
-]
-
-# Utilities
-utils = [
-    "xmltodict>=0.13.0",        # Weather XML parsing
-    "word2number>=1.1",         # Timer duration parsing
-]
-
-# Development tools
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -94,10 +47,10 @@ dev = [
     "mypy>=1.10.0",
 ]
 
-# All optional dependencies
-all = [
-    "fulloch[smart-home,google,search,utils]",
-]
+[tool.setuptools.dynamic]
+# Runtime deps live in requirements.txt (single source of truth — the Docker
+# build uses the same file, with the same pins).
+dependencies = {file = ["requirements.txt"]}
 
 [project.scripts]
 fulloch = "app:main"

@@ -10,6 +10,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Skip the HA alias-fetch retry loop at module import time. The retry budget
+# is for cold-start in compose where HA takes a few seconds to be ready —
+# in tests we either don't have HA at all or have it mocked, so burning
+# 30s of retries on each test session is wasted. Must set this BEFORE any
+# test module imports tools.home_assistant (conftest is loaded first).
+os.environ.setdefault("FULLOCH_HA_ALIAS_RETRIES", "0")
+
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -30,45 +37,9 @@ def mock_config():
             "wakeword": "hey test"
         },
         "default": "Sydney",
-        "use_avr": False,
-        "spotify": {
-            "client_id": "test_client_id",
-            "client_secret": "test_client_secret",
-            "redirect_uri": "http://localhost:8888/callback",
-            "device_id": "Test Device"
-        },
-        "philips": {
-            "hue_hub_ip": "192.168.1.100"
-        },
-        "bom": {
-            "host": "ftp.bom.gov.au",
-            "path": "/anon/gen/fwo/IDN11060.xml"
-        },
-        "google": {
-            "cred_file": "./data/credentials.json",
-            "token_file": "./data/token.json"
-        },
-        "thinq": {
-            "access_token": "test_token",
-            "country_code": "AU",
-            "client_id": "test_client"
-        },
         "search": {
             "searxng_url": "http://localhost:8080/search"
         },
-        "webos": {
-            "ip_address": "192.168.1.101",
-            "mac_address": "AA:BB:CC:DD:EE:FF"
-        },
-        "pioneer": {
-            "avr_host": "192.168.1.102",
-            "avr_port": 60128
-        },
-        "airtouch": {
-            "living room": 0,
-            "bedroom": 1,
-            "office": 2
-        }
     }
 
 

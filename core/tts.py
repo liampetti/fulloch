@@ -1,53 +1,91 @@
-"""
-Text-to-Speech module using Optimised Qwen3 TTS with two-phase latency & Hann crossfade for streaming: https://github.com/rekuenkdr/Qwen3-TTS-streaming
+"""Qwen3 TTS with voice cloning, streaming via rekuenkdr/Qwen3-TTS-streaming.
 
-Handles loading and running the Kokoro text-to-speech model.
+All generation runs on a single long-lived worker thread (`_worker_thread`).
+Two things this buys us:
+
+  - `torch.compile` with `compile_mode="reduce-overhead"` uses CUDA graphs,
+    and Inductor's tree manager is stored in thread-local storage. The
+    previous per-call producer thread design hit the
+    `assert torch._C._is_key_in_tls(attr_name)` in
+    `torch/_inductor/cudagraph_trees.py` because every turn ran on a fresh
+    thread that had never registered a tree manager. One worker = one TLS
+    context = CUDA graphs work.
+  - CUDA graphs pre-allocate + reuse the activation buffers across every
+    decode step. Without them, Inductor re-allocates intermediates each
+    forward, costing ~4-5 GB more VRAM at steady state. On the 16 GB
+    card with the 9B SLM behind us that's the difference between fitting
+    and OOM-ing.
+
+Callers (`synthesize`, `speak_stream`, `warmup_model`) post a `_TtsJob`
+to `_job_queue` and consume chunks via the job's own output queue. The
+worker generates chunks sequentially and pumps them into that queue,
+respecting the job's `TtsSession.cancelled` flag for barge-in.
 """
+
 import logging
 import queue
-import re
 import threading
-import torch
-
-# Set precision before any CUDA operations
-torch.set_float32_matmul_precision('high')
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
 
 import sounddevice as sd
+import torch
 from qwen_tts import Qwen3TTSModel
+
+from .tts_session import TtsSession
+from .turn_stats import TurnStats
 
 logger = logging.getLogger(__name__)
 
-VOICES_DIR = "./data/voices"
+torch.set_float32_matmul_precision('high')
 
-# Device configuration
+VOICES_DIR = "./data/voices"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Emoji removal pattern
-EMOJI_PATTERN = re.compile(
-    "["
-    "\U0001F600-\U0001F64F"  # emoticons
-    "\U0001F300-\U0001F5FF"  # symbols & pictographs
-    "\U0001F680-\U0001F6FF"  # transport & map symbols
-    "\U0001F1E0-\U0001F1FF"  # flags
-    "\u2600-\u26FF"          # misc symbols
-    "\u2700-\u27BF"          # dingbats
-    "]+",
-    flags=re.UNICODE,
+# Output device for sd.OutputStream. None = system default. Set via
+# `set_output_device()` once at startup so play_chunks/speak_stream pick it
+# up consistently (e.g. to route through PulseAudio's echocancel_sink).
+_OUTPUT_DEVICE: Optional[str] = None
+
+# Event the recorder thread reads to switch to a stricter silence threshold
+# while we're producing audio (AEC residue otherwise prevents silence
+# detection). Registered once at startup by Assistant via
+# `set_tts_active_event` — kept module-level so play_chunks/speak_stream
+# can toggle it without needing an AudioCapture reference.
+_TTS_ACTIVE_EVENT: Optional[threading.Event] = None
+
+# Shared kwargs for every `stream_generate_voice_clone` call — warmup,
+# pre-render, and live streaming all use the same generation cadence so the
+# voice clone sounds consistent across them.
+_STREAM_KWARGS = dict(
+    language="english",
+    overlap_samples=512,
+    # The codec runs at 12 Hz, so each frame encodes ~83ms of audio. At
+    # emit_every_frames=6 (~500ms chunks) the worker checks
+    # `session.cancelled` twice per second, so a mid-TTS barge-in waits
+    # at most ~500ms for the current chunk to finish.
+    emit_every_frames=6,
+    decode_window_frames=80,
+    first_chunk_emit_every=5,
+    first_chunk_decode_window=48,
+    first_chunk_frames=48,
 )
 
-# Thinking removal pattern
-THINK_PATTERN = r"<think>.*?</think>"
 
-def remove_emoji(text: str, rem_think: bool = True) -> str:
-    """Remove emoji characters and thinking from text."""
-    if rem_think:
-        text = re.sub(THINK_PATTERN, "", text, flags=re.DOTALL)
-        text = text.strip()
-
-    return EMOJI_PATTERN.sub("", text)
+def set_output_device(device: Optional[str]) -> None:
+    """Set the sounddevice output device used by speak_stream/play_chunks."""
+    global _OUTPUT_DEVICE
+    _OUTPUT_DEVICE = device
+    logger.info(f"TTS output device: {device or 'system default'}")
 
 
-# Load model
+def set_tts_active_event(event: Optional[threading.Event]) -> None:
+    """Register the event toggled by play_chunks/speak_stream during playback."""
+    global _TTS_ACTIVE_EVENT
+    _TTS_ACTIVE_EVENT = event
+
+
 model = Qwen3TTSModel.from_pretrained(
     "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
     torch_dtype=torch.bfloat16,
@@ -55,104 +93,243 @@ model = Qwen3TTSModel.from_pretrained(
     attn_implementation="flash_attention_2",
 )
 
-# Enable optimizations (recommended)
 model.enable_streaming_optimizations(
-    decode_window_frames=80,         # Must match streaming parameter
-    use_compile=True,                # torch.compile the decoder
-    compile_mode="reduce-overhead",  # Includes CUDA graphs automatically
+    decode_window_frames=80,
+    use_compile=True,
+    compile_mode="reduce-overhead",
 )
 
 
-def set_voice(voice_name: str):
+@dataclass
+class _TtsJob:
+    """A single generation job processed by the TTS worker.
+
+    `out` carries `(chunk, sample_rate)` tuples; the worker pushes `None`
+    when the job is finished (either completed or cancelled mid-stream).
     """
-    Load voice clone prompt from audio/text files to use for TTS.
+    text: str
+    voice_clone_prompt: Any
+    out: "queue.Queue"
+    session: TtsSession
 
-    Args:
-        voice_name: Name of the voice (matches wav/txt files in data/voices)
+
+_job_queue: "queue.Queue[_TtsJob]" = queue.Queue()
+
+
+def _worker_loop() -> None:
+    """Consume `_TtsJob`s and run generation on this thread only.
+
+    Pinning every `stream_generate_voice_clone` call to this thread is
+    what lets `compile_mode="reduce-overhead"` work — the CUDA graph
+    tree manager registers in this thread's TLS on the first call and
+    every subsequent call reuses it.
     """
-    ref_audio = f"{VOICES_DIR}/{voice_name}.wav"
-    ref_text_path = f"{VOICES_DIR}/{voice_name}.txt"
+    while True:
+        job = _job_queue.get()
+        try:
+            for chunk, sample_rate in model.stream_generate_voice_clone(
+                text=job.text,
+                voice_clone_prompt=job.voice_clone_prompt,
+                **_STREAM_KWARGS,
+            ):
+                if job.session.cancelled:
+                    break
+                job.out.put((chunk, sample_rate))
+        except Exception as e:
+            logger.exception(
+                f"TTS generation error for text '{job.text[:50]}': "
+                f"{type(e).__name__}: {e}"
+            )
+        finally:
+            job.out.put(None)
 
-    with open(ref_text_path) as f:
-        ref_text = f.read()
 
-    logger.info(f"Setting voice clone to: {voice_name}")
-    return model.create_voice_clone_prompt(
-        ref_audio=ref_audio,
-        ref_text=ref_text,
-    )
+# Daemon so the worker dies with the main process. The first job that
+# lands (warmup) is what triggers torch.compile — anchored on this
+# thread, so reduce-overhead's CUDA graphs register against the right
+# TLS context and every following job hits the cached graph.
+_worker_thread = threading.Thread(target=_worker_loop, daemon=True, name="tts-worker")
+_worker_thread.start()
 
 
-# Warmup: run dummy generation to initialize torch.compile and CUDA graphs
-def warmup_model(prompt):
-    logger.info("Warming up TTS model...")
-    for _ in model.stream_generate_voice_clone(
-        # Reference text must be longer to properly initialise model
-        text="A rainbow is a meteorological phenomenon that is caused by reflection, refraction and dispersion of light in water droplets.",
-        language="english",
+def _submit(text: str, prompt, session: TtsSession, maxsize: int = 0) -> "queue.Queue":
+    """Post a generation job and return the output queue to read chunks from."""
+    out: "queue.Queue" = queue.Queue(maxsize=maxsize)
+    _job_queue.put(_TtsJob(
+        text=text,
         voice_clone_prompt=prompt,
-        overlap_samples=512,
-        emit_every_frames=12,
-        decode_window_frames=80,
-        first_chunk_emit_every=5,
-        first_chunk_decode_window=48,
-        first_chunk_frames=48,
-    ):
-        pass  # Discard output
+        out=out,
+        session=session,
+    ))
+    return out
+
+
+def _drain_job(out: "queue.Queue") -> None:
+    """Read and discard until the worker's `None` sentinel.
+
+    A cancelled consumer MUST keep draining rather than walk away. The TTS
+    worker is a single thread shared by every job, and it blocks on
+    `job.out.put(...)` whenever a bounded output queue fills. If the consumer
+    stopped reading mid-stream the worker would wedge on its next put — most
+    insidiously the final `None` in its `finally` — and since that one worker
+    serves all future speech, the assistant would go permanently mute after
+    the first barge-in. Draining lets the worker break out of its generation
+    loop and return to `_job_queue`. Bounded by one generation step: the
+    worker checks `session.cancelled` before each put, so it emits `None`
+    almost immediately once cancelled.
+    """
+    while out.get() is not None:
+        pass
+
+
+def set_voice(voice_name: str):
+    """Build a voice-clone prompt from data/voices/<voice_name>.{wav,txt}."""
+    ref_audio = f"{VOICES_DIR}/{voice_name}.wav"
+    with open(f"{VOICES_DIR}/{voice_name}.txt") as f:
+        ref_text = f.read()
+    logger.info(f"Setting voice clone to: {voice_name}")
+    return model.create_voice_clone_prompt(ref_audio=ref_audio, ref_text=ref_text)
+
+
+def warmup_model(prompt):
+    """Run one dummy generation so torch.compile + CUDA graphs are ready.
+
+    The reference text must be long enough that the clone settles before
+    live use — short warmup phrases leave the first real utterance sounding
+    generic. Pairs with the greeting pre-render in `Assistant._warm_and_announce`
+    which absorbs the still-locking-in first buffered pass. This is also
+    the call that anchors the CUDA-graph tree manager on the worker
+    thread; later jobs inherit it.
+    """
+    logger.info("Warming up TTS model...")
+    out = _submit(
+        text=(
+            "A rainbow is a meteorological phenomenon that is caused by "
+            "reflection, refraction and dispersion of light in water droplets."
+        ),
+        prompt=prompt,
+        session=TtsSession(),
+    )
+    while out.get() is not None:
+        pass
     logger.info("TTS model ready")
 
-def speak_stream(text: str, prompt, voice: str = "cori", speed: float = 1.0):
-    """
-    Generate speech from text using stream optimised Qwen3 TTS from rekuenkdr
 
-    Args:
-        text: Text to synthesize
-        prompt: Prepared voice cloning prompt
-        voice: Not used
-        speed: Not used
-    """
-    audio_queue = queue.Queue(maxsize=5)  # Buffer chunks ahead
-    sample_rate_holder = [None]  # To capture sample rate from producer
+def synthesize(text: str, prompt):
+    """Run TTS to completion and return (chunks, sample_rate).
 
-    def producer():
-        """Generate audio chunks into queue."""
+    For phrases pre-rendered once and replayed via `play_chunks` — the stall
+    phrases and the startup greeting. Pre-rendering hides the "clone hasn't
+    locked in" generic-sounding output that short live phrases get.
+    """
+    out = _submit(text=text, prompt=prompt, session=TtsSession())
+    chunks = []
+    sample_rate = None
+    while True:
+        item = out.get()
+        if item is None:
+            break
+        chunk, sr = item
+        chunks.append(chunk)
+        sample_rate = sr
+    return chunks, sample_rate
+
+
+def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
+    """Play a pre-synthesized chunk list with TtsSession cancellation support."""
+    if session is None:
+        session = TtsSession()
+    session.stop_event.clear()
+    session.active = True
+    try:
+        if not chunks or session.cancelled:
+            return
+        if _TTS_ACTIVE_EVENT is not None:
+            _TTS_ACTIVE_EVENT.set()
         try:
-            for audio_chunk, sample_rate in model.stream_generate_voice_clone(
-                text=text,
-                language="english",
-                voice_clone_prompt=prompt,
-                overlap_samples=512,
-                # Phase 2 settings (stable)
-                emit_every_frames=12,
-                decode_window_frames=80,
-                # Phase 1 settings (fast first chunk)
-                first_chunk_emit_every=5,
-                first_chunk_decode_window=48,
-                first_chunk_frames=48,
-            ):
-                if sample_rate_holder[0] is None:
-                    sample_rate_holder[0] = sample_rate
-                audio_queue.put(audio_chunk)
-        except Exception as e:
-            logger.exception(f"TTS generation error for text '{text[:50]}': {type(e).__name__}: {e}")
+            with sd.OutputStream(
+                samplerate=sample_rate,
+                channels=1,
+                dtype="float32",
+                device=_OUTPUT_DEVICE,
+            ) as stream:
+                for chunk in chunks:
+                    if session.cancelled:
+                        stream.abort()
+                        return
+                    stream.write(chunk)
         finally:
-            audio_queue.put(None)  # Sentinel to signal completion
+            if _TTS_ACTIVE_EVENT is not None:
+                _TTS_ACTIVE_EVENT.clear()
+    finally:
+        session.active = False
 
-    # Start generation in background thread
-    gen_thread = threading.Thread(target=producer, daemon=True)
-    gen_thread.start()
 
-    # Wait for first chunk to get sample rate
-    first_chunk = audio_queue.get()
-    if first_chunk is None:
-        return
+def speak_stream(
+    text: str,
+    prompt,
+    session: Optional[TtsSession] = None,
+    stats: Optional[TurnStats] = None,
+    on_first_audio: Optional[Callable[[], None]] = None,
+):
+    """Synthesise `text` with the given voice-clone prompt and play it back.
 
-    # Use a single continuous output stream
-    with sd.OutputStream(
-        samplerate=sample_rate_holder[0],
-        channels=1,
-        dtype="float32",
-    ) as stream:
-        stream.write(first_chunk)
-        while (chunk := audio_queue.get()) is not None:
-            stream.write(chunk)
+    Generation runs on the worker thread; this caller thread reads chunks
+    off the worker's output queue and writes them to the output device.
+    The two run concurrently bounded by the queue's maxsize. If `session`
+    is supplied, another thread can call `session.stop()` to abort within
+    ~one chunk (~500ms) — the worker breaks out of its generation loop
+    and this loop calls `stream.abort()` to drop buffered audio.
+
+    `on_first_audio` fires once, right after the first chunk is ready (and
+    `stats.tts_seconds` is set) — before playback runs to completion — so the
+    dashboard can show the TTS time without waiting for the voice to finish.
+    """
+    if session is None:
+        session = TtsSession()
+    session.stop_event.clear()
+    session.active = True
+
+    t_submit = time.monotonic()
+    out = _submit(text=text, prompt=prompt, session=session, maxsize=5)
+    try:
+        first_item = out.get()
+        if stats is not None:
+            stats.tts_seconds = time.monotonic() - t_submit  # time to first audio
+        if first_item is None:
+            return
+        if session.cancelled:
+            _drain_job(out)  # let the shared worker finish; don't wedge it
+            return
+        if on_first_audio is not None:
+            try:
+                on_first_audio()
+            except Exception as e:
+                logger.warning(f"on_first_audio hook failed: {e}")
+        first_chunk, sample_rate = first_item
+
+        if _TTS_ACTIVE_EVENT is not None:
+            _TTS_ACTIVE_EVENT.set()
+        try:
+            with sd.OutputStream(
+                samplerate=sample_rate,
+                channels=1,
+                dtype="float32",
+                device=_OUTPUT_DEVICE,
+            ) as stream:
+                stream.write(first_chunk)
+                while True:
+                    item = out.get()
+                    if item is None:
+                        break
+                    if session.cancelled:
+                        stream.abort()  # discard buffered audio
+                        _drain_job(out)  # keep reading so the worker unwedges
+                        break
+                    chunk, _ = item
+                    stream.write(chunk)
+        finally:
+            if _TTS_ACTIVE_EVENT is not None:
+                _TTS_ACTIVE_EVENT.clear()
+    finally:
+        session.active = False

@@ -1,0 +1,33 @@
+# Fulloch agent grammar — every SLM emission is exactly one of:
+#   {"actions": [<up to 3 actions>]}    -- dispatch tools, no spoken reply yet
+#   {"reply": "<spoken response>"}      -- final answer / chat / proposal
+# Mutually exclusive — never both fields in a single emission.
+# Synthesis happens by the agent emitting `reply` on a replan turn
+# after observing tool results in history.
+#
+# Note on syntax: llama.cpp's GBNF parser treats `|` at the start of a new
+# line as the start of a new rule definition. Multi-line alternations must
+# live inside parentheses or be folded onto one line.
+
+root ::= actions-obj | reply-obj
+
+actions-obj ::= "{" ws "\"actions\"" ws ":" ws actions-array "}" ws
+
+reply-obj ::= "{" ws "\"reply\"" ws ":" ws string "}" ws
+
+# 0–3 actions per emission. Cap of 3 enforced at the grammar level so the
+# SLM cannot emit a four-step plan even if its prompt drifts.
+actions-array ::= "[" ws (action ("," ws action){0,2})? "]" ws
+
+action ::= "{" ws "\"intent\"" ws ":" ws string "," ws "\"args\"" ws ":" ws args "}" ws
+
+# Args are primitive values only — no nested arrays or objects in v1.
+args ::= "[" ws (arg-value ("," ws arg-value)*)? "]" ws
+
+arg-value ::= string | number | ("true" | "false" | "null") ws
+
+string ::= "\"" ( [^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4}) )* "\"" ws
+
+number ::= ("-"? ([0-9] | [1-9] [0-9]{0,15})) ("." [0-9]+)? ([eE] [-+]? [0-9] [1-9]{0,15})? ws
+
+ws ::= | " " | "\n" [ \t]{0,20}

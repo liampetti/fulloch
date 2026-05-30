@@ -1,144 +1,47 @@
-# Fulloch Configuration Example
-# Copy this file to config.yml and update with your values.
-# See README.md for detailed setup instructions for each integration.
-
-# =============================================================================
-# Tool Activation
-# =============================================================================
-# Each section below corresponds to an integration/tool. To disable a tool,
-# comment out its entire section. Only configured (uncommented) tools are
-# loaded on launch.
+# Fulloch Configuration Example — copy to config.yml and fill in your values.
 
 # =============================================================================
 # General Settings
 # =============================================================================
 general:
-  # Wakeword to activate the assistant (case-insensitive)
-  # Other examples: "alexa", "jeeves", "mycroft"
-  wakeword: "computer" 
-  # Use a small language model for extra capabilities
-  use_ai: True
-  # Use the Moonshine Tiny ASR for faster speech transcription (English only)
-  use_tiny_asr: False
-  # Use the Kokoro TTS for faster voice streaming (voice cloning not available)
-  use_tiny_tts: False
-  # Set name of wav/txt file if using voice cloning
-  voice_clone: "cori"
+  wakeword: "hey atticus"       # Activation phrase (case-insensitive; multi-word ok; s↔z tolerant), also acts as fallback if regex option is enabled and fails
+  wakeword_pattern: '\b(?:hey|hay|hi)\W+attic\W*u[sz]\b' # Optional regex override (compiled case-insensitive); tolerates the "attic us" split the ASR sometimes emits for "atticus"
+  voice_clone: "atticus"         # data/voices/<name>.{wav,txt} reference pair
+  barge_in: "wakeword"             # "off" (half-duplex) | "wakeword" (needs AEC)
+  follow_up_time: "5s"        # "0s" | "<N>s" wakeword-free window after TTS, allows for conversational discussions in quieter environments
+
+  log_level: "info"           # "debug" | "info" | "warning" | "error" (debug = verbose project-side logs)
+
+  # ALSA device substrings; null = system default. AEC routing for
+  # barge-in is configured via PULSE_SOURCE / PULSE_SINK in compose.yml.
+  # input_device: null
+  # output_device: null
+
+  # Web chat UI. Set port to enable; unset disables.
+  dashboard_port: 8765
+  dashboard_host: "0.0.0.0"   # 127.0.0.1 (default) = local-only
 
 # =============================================================================
-# Spotify Integration
+# Home Assistant — smart-home backend
 # =============================================================================
-# Register your app at https://developer.spotify.com/dashboard
-# Required scopes: user-read-playback-state, user-modify-playback-state, user-read-currently-playing
-# spotify:
-#   client_id: "your_spotify_client_id"
-#   client_secret: "your_spotify_client_secret"
-#   redirect_uri: "http://localhost:8888/callback"
-#   # Device name as shown in Spotify Connect
-#   device_id: "Your Speaker Name"
-#   # Enable Pioneer AVR integration for audio output switching
-#   # Set to false if not using an AVR
-#   use_avr: false
+# Create a long-lived token at http://<your-ha>:8123/profile.
+# Rename entities in the HA UI to change the spoken name, then restart Fulloch.
 
-# =============================================================================
-# Philips Hue Lighting
-# =============================================================================
-# Press the button on your Hue Bridge before first connection
-# philips:
-#   hue_hub_ip: "192.168.1.100"
-
-# =============================================================================
-# Home Assistant Integration
-# =============================================================================
-# Connect to your Home Assistant instance via REST API
-# 1. Go to your HA profile: http://your-ha:8123/profile
-# 2. Scroll to "Long-Lived Access Tokens" and create a token
-#
-# NOTE: This registers generic tool names like "turn_on" and "turn_off" which
-# may conflict with other integrations (e.g., Philips Hue lighting). Comment
-# out this entire section if you don't use Home Assistant.
 # home_assistant:
-#   # URL to your Home Assistant instance
 #   url: "http://192.168.1.50:8123"
-#   # Long-lived access token from your HA profile
 #   token: "your_long_lived_access_token"
-#   # Request timeout in seconds
 #   timeout: 10
-#   # Map friendly names to entity IDs for easier voice control
-#   # Keys are lowercase, values are full entity IDs
-#   entity_aliases:
-#     living room lights: "light.living_room"
-#     bedroom lights: "light.bedroom"
-#     front door: "lock.front_door"
-#     garage: "cover.garage_door"
-#     thermostat: "climate.main"
-#     movie time: "scene.movie_time"
-#     bedtime: "script.bedtime"
 
 # =============================================================================
-# Weather - Bureau of Meteorology (Australia)
+# Always-Available Tools
 # =============================================================================
-# BOM FTP server for weather data (Australian locations only)
-# Find your local XML file at ftp://ftp.bom.gov.au/anon/gen/fwo/
-bom:
-  host: "ftp.bom.gov.au"
-  path: "/anon/gen/fwo/IDN11060.xml"
-  # Default location for weather forecasts
-  default: "Sydney"
 
-# =============================================================================
-# Google Calendar Integration
-# =============================================================================
-# 1. Create credentials at https://console.cloud.google.com/
-# 2. Enable Google Calendar API
-# 3. Download OAuth 2.0 credentials JSON file
-# google:
-#   # Path to OAuth client credentials file
-#   cred_file: "./data/credentials.json"
-#   # Path to store OAuth token (auto-generated on first auth)
-#   token_file: "./data/token.json"
+# Notes — local markdown store (read / write / append / search).
+# Leave commented to use the default ./data/notes folder. Point `path` at an
+# existing Obsidian vault (or any markdown folder) to use that instead.
+# notes:
+#   path: "./data/notes"      # where notes are stored
+#   daily_subdir: "daily"     # optional: daily-journal notes go here as YYYY-MM-DD.md
 
-# =============================================================================
-# LG ThinQ (Smart Appliances)
-# =============================================================================
-# Get credentials from LG ThinQ developer portal
-# thinq:
-#   access_token: "your_thinq_access_token"
-#   country_code: "AU"
-#   client_id: "your_thinq_client_id"
-
-# =============================================================================
-# Web Search - SearXNG
-# =============================================================================
-# Local SearXNG instance for web search (started via docker-compose)
 search:
   searxng_url: "http://localhost:8080/search"
-
-# =============================================================================
-# LG WebOS TV Control
-# =============================================================================
-# Find TV IP in TV settings: Network > Wi-Fi Connection > Advanced
-# Find MAC address in TV settings: Network > Wi-Fi Connection > Advanced
-# webos:
-#   ip_address: "192.168.1.101"
-#   mac_address: "AA:BB:CC:DD:EE:FF"
-
-# =============================================================================
-# Pioneer/Onkyo AVR (Audio Receiver)
-# =============================================================================
-# Uses eISCP protocol over network
-# Default port is 60128 for most Pioneer/Onkyo receivers
-# pioneer:
-#   avr_host: "192.168.1.102"
-#   avr_port: 60128
-
-# =============================================================================
-# Airtouch HVAC Control
-# =============================================================================
-# Map zone names to zone IDs (0-indexed)
-# Zone IDs correspond to the order in your Airtouch system
-# airtouch:
-#   living room: 0
-#   bedroom: 1
-#   office: 2
-#   upstairs: 3

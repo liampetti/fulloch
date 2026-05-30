@@ -1,5 +1,5 @@
 services:
-  # Fulloch AI
+  # Fulloch AI - GPU
   app:
     build:
       context: .
@@ -8,22 +8,42 @@ services:
     container_name: fulloch-ai
     network_mode: host
     restart: unless-stopped
+    depends_on:
+      searxng:
+        condition: service_started
     devices:
       - /dev/snd:/dev/snd
     group_add:
       - audio
     environment:
       - PULSE_SERVER=unix:${XDG_RUNTIME_DIR}/pulse/native
+      # Route the container's "default" audio through the host's
+      # module-echo-cancel devices (loaded by launch.sh / pactl). Scopes AEC
+      # to Fulloch — other host apps stay on the system default sink/source.
+      - PULSE_SOURCE=echocancel_source
+      - PULSE_SINK=echocancel_sink
     volumes:
       - ./data:/app/data:rw
       - ${XDG_RUNTIME_DIR}/pulse:${XDG_RUNTIME_DIR}/pulse:ro
       - ${HOME}/.config/pulse/cookie:/home/appuser/.config/pulse/cookie:ro
+      # Inherit the host's timezone so `datetime.now()` in time_tools /
+      # datetime_utils reports local wall-clock time (not UTC, which Docker
+      # defaults to).
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f 'python app.py' || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   # Web Search - Searxng
   searxng:
@@ -31,6 +51,10 @@ services:
     container_name: searxng
     ports:
       - "8080:8080"
+    environment:
+      # Overrides server.secret_key in searxng_data/settings.yml. Set in .env.
+      # Only this var is passed (not env_file) to avoid leaking app creds here.
+      - SEARXNG_SECRET=${SEARXNG_SECRET:?set SEARXNG_SECRET in .env}
     volumes:
       - ./searxng_data:/etc/searxng:rw
     restart: unless-stopped

@@ -1,59 +1,43 @@
-"""
-Tools package for the voice assistant.
+"""Tools package.
 
-This package contains all the tools that can be used by the voice assistant.
-Tools are conditionally loaded based on which integrations are configured
-in data/config.yml. Commenting out or removing a config section disables
-that tool entirely.
+Loads each tool module conditionally based on the keys present in
+data/config.yml — commenting out an integration's config block disables it.
 """
 
-import yaml
-import logging
 import importlib
+import logging
+
+from ._config import config
+from .tool_registry import tool, tool_registry  # noqa: F401  (public surface)
 
 logger = logging.getLogger(__name__)
 
-# Load configuration to determine which tools to activate
-try:
-    with open("./data/config.yml", "r") as f:
-        _config = yaml.safe_load(f) or {}
-except FileNotFoundError:
-    _config = {}
-
-# Mapping of tool module names to their required config key.
-# A tool is only loaded if its config key is present in config.yml.
-_TOOL_CONFIG_MAP = {
-    'spotify': 'spotify',
-    'lighting': 'philips',
-    'google_calendar': 'google',
-    'airtouch': 'airtouch',
-    'thinq': 'thinq',
-    'webos': 'webos',
-    'search_web': 'search',
-    'pioneer_avr': 'pioneer',
+# Tools that load whenever their top-level config key is present.
+_OPTIONAL_TOOLS = {
     'home_assistant': 'home_assistant',
+    'search': 'search_web',
 }
 
-# Always load these tools (no config dependency)
-_ALWAYS_LOAD = ['weather_time']
+# Tools that are always loaded — no config dependency.
+_ALWAYS_LOAD = ['time_tools', 'thinking', 'notes']
 
-for _module_name in _ALWAYS_LOAD:
+
+def _load(module_name: str) -> None:
     try:
-        importlib.import_module(f'.{_module_name}', package=__name__)
+        importlib.import_module(f'.{module_name}', package=__name__)
+        logger.info(f"Loaded tool: {module_name}")
     except Exception as e:
-        logger.error(f"Failed to load tool {_module_name}: {e}")
+        logger.error(f"Failed to load tool {module_name}: {e}")
 
-for _module_name, _config_key in _TOOL_CONFIG_MAP.items():
-    if _config_key in _config:
-        try:
-            importlib.import_module(f'.{_module_name}', package=__name__)
-            logger.info(f"Loaded tool: {_module_name}")
-        except Exception as e:
-            logger.error(f"Failed to load tool {_module_name}: {e}")
+
+for _name in _ALWAYS_LOAD:
+    _load(_name)
+
+for _key, _name in _OPTIONAL_TOOLS.items():
+    if _key in config:
+        _load(_name)
     else:
-        logger.info(f"Skipping tool {_module_name} ('{_config_key}' not in config)")
+        logger.info(f"Skipping tool {_name} ('{_key}' not in config)")
 
-# Import the tool registry
-from .tool_registry import tool_registry, tool
 
 __all__ = ['tool_registry', 'tool']

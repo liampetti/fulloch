@@ -1,71 +1,150 @@
-- User: "Turn on the kitchen lights"
-  Output:
-  {"intent": "turn_on_lights", "args": ["kitchen"]}
+# Each emission is exactly one of {"actions": [...]} or {"reply": "..."}.
+# Examples below cover: single-tool dispatch, multi-tool dispatch (≤3),
+# chat-only replies, propose-then-confirm flows, agentic chains where
+# the agent reacts to prior tool output in history.
 
-- User: "Set brightness to 50 in the living room"
-  Output:
-  {"intent": "set_brightness", "args": ["50", "living room"]}
+# ----- Single-tool dispatch -----
 
-- User: "Play a song from the Beatles"
+- User: "Turn on the lights"
   Output:
-  {"intent": "play_song", "args": ["the Beatles"]}
+  {"actions": [{"intent": "turn_on", "args": ["lights"]}]}
+
+- User: "Set the office temperature to 19 degrees"
+  Output:
+  {"actions": [{"intent": "ha_set_climate", "args": ["Office", 19]}]}
 
 - User: "Louder"
   Output:
-  {"intent": "increase_volume_sound_system", "args": []}
-  
-- User: "What is on in sydney this weekend"
-  Output:
-  {"intent": "external_information", "args": ["What is on in sydney this weekend"]}
+  {"actions": [{"intent": "ha_volume_up", "args": []}]}
 
-- User: "Play some music"
+- User: "What's the weather forecast"
   Output:
-  {"intent": "play_song", "args": []}
+  {"actions": [{"intent": "get_weather_forecast", "args": []}]}
 
-- User: "Whats the time"
+- User: "What's on today"
   Output:
-  {"intent": "get_current_time", "args": []}
+  {"actions": [{"intent": "whats_on_today", "args": []}]}
 
-- User: "Whats the weather tomorrow"
+- User: "Who is the current US president"
   Output:
-  {"intent": "get_weather_forecast", "args": []}
+  {"actions": [{"intent": "external_information", "args": ["who is the current US president"]}]}
 
-- User: "Whats the weather forecast"
+# ----- Chat-only replies (no tool needed) -----
+
+- User: "What's the capital of France"
   Output:
-  {"intent": "get_weather_forecast", "args": []}
+  {"reply": "Paris is the capital of France."}
+
+- User: "What's two plus two"
+  Output:
+  {"reply": "Four."}
+
+- User: "Why is the sky blue"
+  Output:
+  {"reply": "Short-wavelength blue light scatters more in the atmosphere than other colours, so the sky looks blue."}
 
 - User: "Can you order pizza"
-  Output:  
-  ""
-  
-- User: "Turn on the lights"
   Output:
-  {"intent": "turn_on_lights", "args": []}
+  {"reply": "I can't place orders, but I can add 'order pizza' to your shopping list if you'd like."}
 
-- User: "Set office temperature to 19 degrees Celcius."
-  Output:
-  {"intent": "set_temperature", "args": [19, "Office"]}
+# ----- Propose-then-confirm (open-ended request → suggestion) -----
 
-- User: "Set sound to TV"
+- User: "I need to relax"
   Output:
-  {"intent": "set_input_sound_system", "args": ["TV"]}
-
-- User: "What is the temperature upstairs"
-  Output:
-  {"intent": "get_temperature", "args": ["Upstairs"]}
-
-- User: "Tell us a bedtime story"
-  Output:  
-  ""
-
-- User: "Turn off downstairs office lights"
-  Output:
-  {"intent": "turn_off_lights", "args": ["downstairs office"]}
-  
-- User: "Who is the current us president"
-  Output:
-  {"intent": "external_information", "args": ["who is the current us president"]}
+  {"reply": "I can dim the lights and play some calming music for you?"}
 
 - User: "Movie night"
   Output:
-  {"intent": "movie_night", "args": []}
+  {"reply": "I can dim the lounge lights and put on the TV — want me to go ahead?"}
+
+# ----- Follow-up after a proposal (agent looks at conversation history) -----
+
+- Conversation context:
+    Assistant: "I can dim the lights and play some calming music for you?"
+  User: "yes"
+  Output:
+  {"actions": [
+    {"intent": "ha_set_brightness", "args": ["Lounge", 20]},
+    {"intent": "play_song", "args": ["Calm Evening"]}
+  ]}
+
+- Conversation context:
+    Assistant: "I can dim the lounge lights and put on the TV — want me to go ahead?"
+  User: "go for it"
+  Output:
+  {"actions": [
+    {"intent": "ha_set_brightness", "args": ["Lounge", 30]},
+    {"intent": "turn_on", "args": ["TV"]}
+  ]}
+
+- User: "Set the office to 22 and turn off the AC in the bedroom"
+  Output:
+  {"actions": [
+    {"intent": "ha_set_climate", "args": ["Office", 22]},
+    {"intent": "turn_off", "args": ["bedroom AC"]}
+  ]}
+
+# ----- Notes -----
+
+- User: "Remember that bin night is Thursday"
+  Output:
+  {"actions": [{"intent": "remember_fact", "args": ["Bin night is Thursday"]}]}
+
+- User: "Add eggs to the shopping list"
+  Output:
+  {"actions": [{"intent": "append_to_note", "args": ["shopping list", "eggs"]}]}
+
+- User: "Add a section about Darwin to my Australia climate note"
+  Output:
+  {"actions": [{"intent": "append_to_note", "args": ["Australia climate", "Darwin has a tropical savanna climate with a hot, humid wet season from November to April and a dry season from May to October. Climate change is bringing more extreme heat and stronger cyclones to the region."]}]}
+
+- User: "Find anything I wrote about the dishwasher"
+  Output:
+  {"actions": [{"intent": "search_notes_semantic", "args": ["dishwasher"]}]}
+
+- User: "What did I write about Darwin in my notes"
+  Output:
+  {"actions": [{"intent": "search_notes", "args": ["Darwin"]}]}
+
+- User: "Get my notes regarding climate change in Australia"
+  Output:
+  {"actions": [{"intent": "read_note", "args": ["climate change in Australia"]}]}
+
+# ----- Thinking mode -----
+
+- User: "Think about whether I should switch to solar"
+  Output:
+  {"actions": [{"intent": "deep_think", "args": ["whether I should switch to solar"]}]}
+
+# ----- Reactive-tool follow-up: agent sees a sentinel result and summarises -----
+
+- Conversation context:
+    User: "find anything I wrote about the dishwasher"
+    Tool — search_notes_semantic: "Reactive question: These are the 2 notes closest in topic to 'dishwasher' by meaning; they may not actually contain 'dishwasher'. in 'dishwasher manual': descaling cycle every three months...; in 'kitchen reno': replaced the old appliances..."
+  Output:
+  {"reply": "Your dishwasher manual note covers the descaling cycle, and a kitchen reno note touches on the appliances. Want me to read the manual note?"}
+
+# ----- Agentic chain: search returns dated info, agent searches again -----
+
+- Conversation context:
+    User: "Research whether the Apple Watch Ultra 2 supports blood oxygen in the US and save the verdict to a note"
+    Tool — external_information: "Reactive question: As of late 2023, Apple disabled blood oxygen tracking on US Apple Watch models due to a Masimo patent ruling. Legal appeals are ongoing..."
+  Output:
+  {"actions": [{"intent": "external_information", "args": ["Apple Watch Ultra 2 blood oxygen US update 2026"]}]}
+
+- Conversation context:
+    User: "Research whether the Apple Watch Ultra 2 supports blood oxygen in the US and save the verdict to a note"
+    Tool — external_information: "...2023 patent ban..."
+    Tool — external_information: "Reactive question: In late 2025 the US Federal Circuit ruled in Apple's favour and the blood oxygen feature was re-enabled via software update."
+  Output:
+  {"actions": [{"intent": "write_note", "args": ["apple-watch-blood-oxygen", "As of 2026, blood oxygen tracking is enabled on US Apple Watch Ultra 2 units following a 2025 Federal Circuit ruling that reversed the 2023 Masimo patent ban."]}]}
+
+# ----- Scene requests prefer the user's pre-configured HA scenes -----
+
+- User: "Set up a movie scene"
+  Output:
+  {"actions": [{"intent": "ha_activate_scene", "args": ["movie"]}]}
+
+- User: "Movie night, go"
+  Output:
+  {"actions": [{"intent": "ha_activate_scene", "args": ["movie night"]}]}

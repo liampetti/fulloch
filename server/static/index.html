@@ -123,6 +123,23 @@
   header .name { font-size: 1.1rem; font-weight: 600; line-height: 1.15; }
   header .sub  { font-size: 0.78rem; color: var(--text-muted); margin-top: 1px; }
 
+  #reset-btn {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+    margin-right: 6px;
+  }
+  #reset-btn:hover { color: #ef4444; border-color: #ef4444; background: var(--surface-2); }
+  #reset-btn svg { width: 16px; height: 16px; fill: currentColor; }
+
   #status {
     display: flex;
     align-items: center;
@@ -451,6 +468,9 @@
   .empty .logo-lg img { width: 100%; height: 100%; object-fit: cover; }
   .empty h2 { font-size: 1.05rem; margin: 0 0 6px; color: var(--text); font-weight: 600; }
   .empty p { margin: 0; font-size: 0.88rem; line-height: 1.5; }
+  .empty p + p { margin-top: 8px; }
+  .empty .wake-hint { color: var(--text); font-weight: 500; }
+  .empty .wake-hint b { color: var(--primary); font-weight: 600; }
 
   .msg {
     display: flex;
@@ -716,6 +736,9 @@
       <div class="name">Fulloch</div>
       <div class="sub">fully-local home assistant</div>
     </div>
+    <button id="reset-btn" type="button" aria-label="Clear conversation" title="Clear conversation">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+    </button>
     <div id="status" aria-live="polite">
       <span id="status-dot"></span>
       <span id="status-text">connecting</span>
@@ -732,8 +755,8 @@
     <section id="chat" class="view">
       <div class="empty" id="empty">
         <div class="logo-lg"><img src="/logo.png" alt=""></div>
-        <h2>Say hi to Fulloch</h2>
-        <p>Ask me to turn off the lights, set a timer, or just chat.</p>
+        <p class="wake-hint" id="wake-hint" hidden></p>
+        <p>Ask me to turn off the lights, set a timer, or just chat — by voice or right here.</p>
       </div>
     </section>
 
@@ -788,6 +811,7 @@
   const sendBtn = document.getElementById('send');
   const statusDot = document.getElementById('status-dot');
   const statusText = document.getElementById('status-text');
+  const resetBtn = document.getElementById('reset-btn');
 
   let typingEl = null;
   let waiting = false;
@@ -884,6 +908,47 @@
   };
 
   const clearEmpty = () => empty?.remove();
+
+  const resetUI = () => {
+    // Remove all message/trace/typing elements, restore the empty state
+    [...chat.children].forEach(el => {
+      if (el !== empty) el.remove();
+    });
+    if (!chat.contains(empty)) {
+      // Re-create the empty state node if it was removed
+      const div = document.createElement('div');
+      div.className = 'empty';
+      div.id = 'empty';
+      div.innerHTML = `
+        <div class="logo-lg"><img src="/logo.png" alt=""></div>
+        <p class="wake-hint" id="wake-hint" hidden></p>
+        <p>Ask me to turn off the lights, set a timer, or just chat — by voice or right here.</p>`;
+      chat.prepend(div);
+      loadWakeHint();
+    }
+    lastTs = 0;
+    statsMsgs.clear();
+    resetTraceGroup();
+    removeTyping();
+    waiting = false;
+    sendBtn.disabled = false;
+  };
+
+  // Show the wakeword prompt in the empty state, pulled from config so it
+  // tracks whatever `general.wakeword` is set to.
+  const loadWakeHint = async () => {
+    const hint = document.getElementById('wake-hint');
+    if (!hint) return;
+    try {
+      const r = await fetch('/config');
+      const { wakeword } = await r.json();
+      if (!wakeword) return;
+      hint.innerHTML = `Just say <b>“${escapeHtml(wakeword)}”</b> to talk to your personal assistant.`;
+      hint.hidden = false;
+    } catch (e) {
+      console.warn('config load failed', e);
+    }
+  };
 
   const removeTyping = () => {
     typingEl?.remove();
@@ -1048,6 +1113,7 @@
     // Stats patch (e.g. TTS time, known only after playback): merge into the
     // already-rendered assistant message keyed by ref_ts. Handled before the
     // dedup guard since it carries its own later ts.
+    if (ev.role === 'reset') { resetUI(); return; }
     if (ev.role === 'stats') {
       const entry = statsMsgs.get(ev.ref_ts);
       if (entry && ev.patch) {
@@ -1451,6 +1517,16 @@
 
   tabs.forEach((t) => t.addEventListener('click', () => setTab(t.dataset.tab)));
 
+  resetBtn.addEventListener('click', async () => {
+    try {
+      await fetch('/reset', { method: 'POST' });
+      resetUI();
+    } catch (e) {
+      console.error('reset failed', e);
+    }
+  });
+
+  loadWakeHint();
   loadHistory().then(startStream);
 })();
 </script>

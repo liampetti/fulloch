@@ -195,6 +195,70 @@ If `general.dashboard_port` is set, a browser chat UI runs alongside the voice l
 
 It scales to a phone screen — add it to your home screen for a one-tap client.
 
+## Home Assistant integration
+
+Fulloch ships a HACS-installable HA integration in `custom_components/fulloch/`. It turns Fulloch into a proper HA device — you can trigger it from automations, react to its events, and control it from any HA dashboard.
+
+**Setup:** copy `custom_components/fulloch/` into your HA config directory, restart HA, then go to Settings → Integrations → Add → Fulloch and enter your Fulloch host and dashboard port.
+
+### Entities
+
+| Entity | Type | Description |
+|--------|------|-------------|
+| `sensor.fulloch_status` | Sensor | `idle` / `thinking` / `speaking` |
+| `sensor.fulloch_last_utterance` | Sensor | Last thing the user said |
+| `sensor.fulloch_last_response` | Sensor | Last thing Fulloch said (full text in `full_text` attribute) |
+| `switch.fulloch_mic` | Switch | Mute / unmute the microphone |
+| `text.fulloch_speak` | Text | Type a message and submit → Fulloch speaks it |
+| `text.fulloch_chat` | Text | Type a query → runs the full agent loop and speaks the result |
+
+### Actions
+
+| Action | Fields | Description |
+|--------|--------|-------------|
+| `fulloch.speak` | `text` | Speak a message through the cloned voice |
+| `fulloch.chat` | `text` | Run a full agent-loop query and speak the result |
+| `fulloch.mic` | `enabled` | Turn the mic on or off |
+
+### HA events
+
+| Event | Payload | When |
+|-------|---------|------|
+| `fulloch_wakeword_detected` | `utterance`, `source` | Wakeword heard or voice turn starts |
+| `fulloch_turn_ended` | `response`, `source` | Fulloch finishes speaking a response |
+
+Use these in automations — e.g. dim lights when `fulloch_wakeword_detected` fires, restore them on `fulloch_turn_ended`.
+
+### Proactive speech from automations
+
+Any HA automation can make Fulloch speak:
+
+```yaml
+action: fulloch.speak
+data:
+  message: "The front door just opened."
+```
+
+For agent-loop queries (calendar, weather, news briefings):
+
+```yaml
+action: fulloch.chat
+data:
+  text: "Tell me today's calendar and weather."
+```
+
+If Fulloch is mid-conversation when an automation fires, the proactive message waits politely for the current turn to finish rather than talking over it.
+
+### Lovelace
+
+Embed the existing Fulloch chat dashboard in any HA dashboard with the built-in **Webpage card**:
+
+```yaml
+type: webpage
+url: http://<fulloch-host>:8765
+title: Fulloch
+```
+
 ## Troubleshooting
 
 **No audio detected** — check the mic is the default input device; lower `SILENCE_THRESHOLD` in `core/audio.py` if it's not picking up speech.

@@ -167,14 +167,13 @@ def _get_index():
 
 
 def _after_write(path: Path) -> None:
-    """Re-embed a single note after a successful write. Best-effort."""
-    try:
-        _get_index().index_file(path)
-    except Exception as e:
-        # Indexing failure must never break the user-facing write — log and
-        # carry on; the next semantic search will pick the file up via the
-        # mtime-based scan.
-        logger.error(f"Failed to re-index {path}: {e}")
+    """Re-embed a single note after a successful write. Runs in background."""
+    def _run():
+        try:
+            _get_index().index_file(path)
+        except Exception as e:
+            logger.error(f"Failed to re-index {path}: {e}")
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def warm_index() -> bool:

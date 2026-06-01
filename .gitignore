@@ -106,5 +106,4 @@ data/voices/private
 !data/config.example.yml
 !.env.example\
 !data/models/grammars/agent.gbnf
-publish.sh
 searxng_data/settings.yml.new

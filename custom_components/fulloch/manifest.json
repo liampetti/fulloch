@@ -2,11 +2,11 @@
     "domain": "fulloch",
     "name": "Fulloch",
     "version": "2.1.0",
-    "documentation": "https://github.com/liampettigrew/fulloch",
-    "issue_tracker": "https://github.com/liampettigrew/fulloch/issues",
+    "documentation": "https://github.com/liampetti/fulloch",
+    "issue_tracker": "https://github.com/liampetti/fulloch/issues",
     "requirements": [],
     "dependencies": [],
-    "codeowners": [],
+    "codeowners": ["@liampetti"],
     "iot_class": "local_polling",
     "config_flow": true
 }

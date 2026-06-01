@@ -118,6 +118,7 @@ BARGE_IN = _GENERAL.get('barge_in', 'off')
 FOLLOW_UP_TIME = _GENERAL.get('follow_up_time', '0s')
 INPUT_DEVICE = _GENERAL.get('input_device', None)
 OUTPUT_DEVICE = _GENERAL.get('output_device', None)
+ASR_LANGUAGE = _GENERAL.get('asr_language', None)
 DASHBOARD_PORT = _GENERAL.get('dashboard_port', None)
 DASHBOARD_HOST = _GENERAL.get('dashboard_host', '127.0.0.1')
 
@@ -132,6 +133,7 @@ def main():
         follow_up_time=FOLLOW_UP_TIME,
         input_device=INPUT_DEVICE,
         output_device=OUTPUT_DEVICE,
+        asr_language=ASR_LANGUAGE,
     )
     if DASHBOARD_PORT:
         try:

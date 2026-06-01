@@ -11,6 +11,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from pathlib import Path
 
 import uvicorn
@@ -35,6 +36,14 @@ SUBSCRIBER_IDLE_KEEPALIVE_S = 15
 
 class ChatRequest(BaseModel):
     text: str
+
+
+class SpeakRequest(BaseModel):
+    text: str
+
+
+class MicRequest(BaseModel):
+    enabled: bool
 
 
 class FactRequest(BaseModel):
@@ -78,10 +87,59 @@ def create_app(assistant) -> FastAPI:
     def logo() -> FileResponse:
         return FileResponse(_LOGO_PATH, media_type="image/png")
 
+    @app.get("/config")
+    def get_config() -> JSONResponse:
+        wakeword = getattr(assistant, "wakeword", "") or ""
+        return JSONResponse({"wakeword": wakeword.title()})
+
     @app.get("/history")
     def get_history() -> JSONResponse:
         with history_lock:
             return JSONResponse(list(history_log))
+
+    @app.post("/reset")
+    def reset_chat() -> dict:
+        with history_lock:
+            history_log.clear()
+        assistant._history.clear()
+        on_turn({"role": "reset", "ts": time.time()})
+        return {"ok": True}
+
+    @app.get("/status")
+    def get_status() -> JSONResponse:
+        state = assistant.get_state()
+        last_utterance = ""
+        last_response = ""
+        with history_lock:
+            for event in reversed(history_log):
+                role = event.get("role")
+                if role == "user" and not last_utterance:
+                    last_utterance = event.get("content", "")
+                elif role == "assistant" and not last_response:
+                    last_response = event.get("content", "")
+                if last_utterance and last_response:
+                    break
+        return JSONResponse({
+            "state": state,
+            "mic_enabled": assistant.audio_capture.transcribing,
+            "last_utterance": last_utterance,
+            "last_response": last_response,
+        })
+
+    @app.post("/speak")
+    def speak(req: SpeakRequest) -> dict:
+        text = (req.text or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="empty text")
+        threading.Thread(
+            target=assistant.speak_proactive, args=(text,), daemon=True
+        ).start()
+        return {"ok": True}
+
+    @app.post("/mic")
+    def set_mic(req: MicRequest) -> dict:
+        assistant.audio_capture.transcribing = req.enabled
+        return {"ok": True, "mic_enabled": req.enabled}
 
     @app.post("/chat")
     def chat(req: ChatRequest) -> dict:

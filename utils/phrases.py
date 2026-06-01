@@ -17,6 +17,15 @@ STALL_PHRASES = [
     "Let me see.",
 ]
 
+# Single lead-in phrase played just before a note write/append/remember so
+# the user hears activity during the SLM → tool → reply gap. Pre-rendered.
+NOTE_WRITE_STALL_PHRASES = [
+    "Writing that down.",
+    "Saving that now.",
+    "Got it, noting that.",
+    "On it, jotting that down.",
+]
+
 # Single lead-in phrase played just before kicking off a web search +
 # summary, so the user knows what's happening during the ~1s gap before
 # the spoken answer. Context-specific so they hear "searching the web"

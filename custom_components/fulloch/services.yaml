@@ -1,0 +1,34 @@
+speak:
+  name: Speak
+  description: Speak text through Fulloch's cloned voice without a user turn.
+  fields:
+    text:
+      name: Text
+      description: The text to speak.
+      required: true
+      example: "Dinner is ready."
+      selector:
+        text:
+
+chat:
+  name: Chat
+  description: Send a query through Fulloch's full agent loop (tools + SLM). The response goes to the dashboard.
+  fields:
+    text:
+      name: Query
+      description: The query to process.
+      required: true
+      example: "Tell me today's weather and calendar."
+      selector:
+        text:
+
+mic:
+  name: Set Mic
+  description: Enable or disable the Fulloch microphone.
+  fields:
+    enabled:
+      name: Enabled
+      description: Turn the mic on or off.
+      required: true
+      selector:
+        boolean:

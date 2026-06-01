@@ -1,2 +1,3 @@
 # Files excluded from `git archive` exports (used by publish.sh).
 CLAUDE.md export-ignore
+docs/ export-ignore

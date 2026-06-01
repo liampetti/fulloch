@@ -19,8 +19,9 @@ DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float32
 class QwenASRPipelineWrapper:
     """Mimics the HF pipeline streaming API on top of Qwen3ASRModel."""
 
-    def __init__(self, model):
+    def __init__(self, model, language: Optional[str] = None):
         self.model = model
+        self.language = language
         # Wall time of the most recent transcribe() call — read by the
         # transcriber thread to seed a turn's STT stat. Measured here (not at
         # the consumer loop) so it excludes idle waiting on the audio queue.
@@ -35,6 +36,7 @@ class QwenASRPipelineWrapper:
     ):
         # batch_size / generate_kwargs are accepted for HF-pipeline parity but
         # ignored — Qwen3ASRModel.transcribe handles batching internally.
+        lang_kwargs = {"language": self.language} if self.language else {}
         if isinstance(audio_input, Generator):
             for chunk in audio_input:
                 if chunk is None:
@@ -44,7 +46,7 @@ class QwenASRPipelineWrapper:
                 elif not isinstance(chunk, np.ndarray):
                     chunk = np.array(chunk)
                 _t0 = time.monotonic()
-                results = self.model.transcribe(audio=[(chunk, SAMPLE_RATE)], return_time_stamps=False)
+                results = self.model.transcribe(audio=[(chunk, SAMPLE_RATE)], return_time_stamps=False, **lang_kwargs)
                 self.last_transcribe_seconds = time.monotonic() - _t0
                 for res in (results if isinstance(results, list) else [results]):
                     yield {"text": getattr(res, "text", str(res))}
@@ -53,12 +55,12 @@ class QwenASRPipelineWrapper:
         # Non-streaming path: single array in, list of dicts out.
         if not isinstance(audio_input, np.ndarray):
             audio_input = np.array(audio_input)
-        results = self.model.transcribe(audio=[(audio_input, SAMPLE_RATE)])
+        results = self.model.transcribe(audio=[(audio_input, SAMPLE_RATE)], **lang_kwargs)
         results = results if isinstance(results, list) else [results]
         return [{"text": getattr(r, "text", str(r))} for r in results]
 
 
-def load_asr_model():
+def load_asr_model(language: Optional[str] = None):
     logger.info(f"Loading {ASR_MODEL_NAME} on {DEVICE}...")
     model = Qwen3ASRModel.from_pretrained(
         ASR_MODEL_NAME,
@@ -66,7 +68,9 @@ def load_asr_model():
         dtype=DTYPE,
         attn_implementation="flash_attention_2",
     )
-    return QwenASRPipelineWrapper(model)
+    if language:
+        logger.info(f"ASR language locked to: {language!r}")
+    return QwenASRPipelineWrapper(model, language=language)
 
 
 def stream_generator(queue, onset_sink: Optional[dict] = None) -> Generator:

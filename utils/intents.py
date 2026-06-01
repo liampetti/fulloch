@@ -27,6 +27,7 @@ MAX_AGENT_CALLS_PER_TURN = 6
 # `is_web_search` to play its "searching the web" stall *before* dispatching
 # this tool, since the SearXNG round-trip is the slow part of the turn.
 WEB_SEARCH_TOOL = "external_information"
+NOTE_WRITE_TOOLS = frozenset({"write_note", "append_to_note", "remember_fact"})
 
 
 def describe_tools() -> str:
@@ -62,6 +63,13 @@ def handle_action(action: Dict[str, Any]) -> Optional[str]:
     except Exception as e:
         logger.exception(f"Error executing action {name}: {e}")
         return None
+
+
+def is_note_write(intent_name: Optional[str]) -> bool:
+    """True if `intent_name` resolves to a note-write tool."""
+    if not intent_name:
+        return False
+    return tool_registry.canonical_name(intent_name) in NOTE_WRITE_TOOLS
 
 
 def is_web_search(intent_name: Optional[str]) -> bool:

@@ -1,0 +1,20 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Connect to Fulloch",
+                "description": "Enter the host and port where Fulloch's dashboard is running.",
+                "data": {
+                    "host": "Host",
+                    "port": "Port"
+                }
+            }
+        },
+        "error": {
+            "cannot_connect": "Cannot connect to Fulloch. Make sure the dashboard is running and the host/port are correct."
+        },
+        "abort": {
+            "already_configured": "This Fulloch instance is already configured."
+        }
+    }
+}

@@ -52,10 +52,25 @@ _NON_WORD_RE = re.compile(r"\W+")
 
 # Leading/trailing punctuation peeled off the user prompt after the wakeword
 # is stripped. Includes "!"/"?" so ASR's "Hey Frasier! Stop." yields the bare
-# "stop" — otherwise the leading "!" defeats `_BARGE_QUIET_RE` and a barge-in
-# "stop" gets dispatched to the agent (which then talks again) instead of
-# silencing the assistant.
+# "stop" without trailing punctuation confusing intent matching.
 _PROMPT_STRIP_CHARS = " ,.!?;:"
+
+# Short tokens that Qwen3-ASR (and Whisper) commonly hallucinate from
+# background noise when English is enforced. None of these can match a real
+# wakeword, so dropping them globally is safe. Checked against the
+# punctuation-stripped lowercase transcription.
+_ASR_NOISE_TOKENS: frozenset[str] = frozenset({
+    "yeah", "yep", "yup",
+    "okay", "ok",
+    "sure",
+    "hmm", "hm", "uh", "um", "uh huh",
+    "thanks", "thank you", "thank you very much",
+    "you're welcome", "welcome",
+    "bye", "goodbye", "see you", "see ya",
+    "alright", "all right",
+    "right",
+    "oh",
+})
 
 
 def _build_wakeword_pattern(wakeword: str) -> str:
@@ -101,32 +116,12 @@ def _build_barge_pattern(wakeword: str, base_pattern: str) -> str:
     bare_name = _build_wakeword_pattern(" ".join(tokens))
     return f"(?:{base_pattern})|(?:{bare_name})"
 
-# Phrases that mean "stop talking" said immediately after a barge-in. Used
-# ONLY when a turn was just cancelled — in regular (non-barge) turns "stop"
-# should still route through `intent_catch._STOP_RE` to pause music. The
-# pattern is anchored end-to-end so music-control phrases ("stop the music",
-# "stop playing the song") fall through to the regular regex.
-_BARGE_QUIET_RE = re.compile(
-    r"^\s*(?:please\s+|ok\s+|okay\s+|just\s+)?"
-    r"(?:"
-    r"stop(?:\s+(?:talking|speaking|it))?|"
-    r"be\s+quiet|"
-    r"quiet|"
-    r"shut\s+up|"
-    r"hush|"
-    r"silence|"
-    r"enough|"
-    r"that(?:'?s|\s+is)\s+enough"
-    r")"
-    r"(?:\s+(?:please|now))?"
-    r"\s*[.!?]*\s*$",
-    re.IGNORECASE,
-)
 
 # Spoken phrase pools live in `utils.phrases` — edit them there.
 from utils.phrases import (
     ACK_PHRASES,
     GREETING_TOPICS,
+    NOTE_WRITE_STALL_PHRASES,
     PRE_THINKING_STALL_PHRASES,
     STALL_PHRASES,
     THINKING_STALL_PHRASES,
@@ -167,6 +162,7 @@ class Assistant:
         follow_up_time: str = "0s",
         input_device: Optional[str] = None,
         output_device: Optional[str] = None,
+        asr_language: Optional[str] = None,
     ):
         """
         Initialize the assistant.
@@ -216,6 +212,7 @@ class Assistant:
             re.IGNORECASE,
         )
         self.voice_clone = voice_clone
+        self.asr_language = asr_language
         # Built in `_load_models()` once the TTS model is in memory.
         self.voice_clone_prompt = None
         self.output_device = output_device
@@ -310,7 +307,7 @@ class Assistant:
         from .asr import load_asr_model, stream_generator
         logger.info("Using Qwen ASR")
 
-        self.asr_pipe = load_asr_model()
+        self.asr_pipe = load_asr_model(language=self.asr_language)
         self.asr_stream_generator = stream_generator
 
         from .tts import (
@@ -334,6 +331,7 @@ class Assistant:
         self.synthesize = synthesize
         self.play_chunks = play_chunks
         self.web_search_stall_cache: list = []
+        self.note_write_stall_cache: list = []
         self.pre_thinking_stall_cache: list = []
         self.thinking_stall_cache: list = []
         self.ack_cache: list = []
@@ -376,6 +374,11 @@ class Assistant:
             self.web_search_stall_cache = [
                 self.synthesize(phrase, self.voice_clone_prompt)
                 for phrase in WEB_SEARCH_STALL_PHRASES
+            ]
+            logger.info("Caching note-write stall phrases...")
+            self.note_write_stall_cache = [
+                self.synthesize(phrase, self.voice_clone_prompt)
+                for phrase in NOTE_WRITE_STALL_PHRASES
             ]
             logger.info("Caching pre-thinking stall phrases...")
             self.pre_thinking_stall_cache = [
@@ -792,6 +795,13 @@ class Assistant:
                         )
                         if session is not None and session.cancelled:
                             return ""
+                    elif intents.is_note_write(intent_name) and self.note_write_stall_cache:
+                        chunks, sr = random.choice(self.note_write_stall_cache)
+                        self.play_chunks(
+                            chunks, sr, session=session or self.tts_session
+                        )
+                        if session is not None and session.cancelled:
+                            return ""
                     self._emit_agent_event("step", {
                         "intent": intent_name,
                         "args": action.get("args", []),
@@ -1108,6 +1118,12 @@ class Assistant:
                 words[0] in spoken_norm
                 or self._wakeword_re.search(spoken) is not None
             )
+        # AEC residue always starts from a fragment the assistant actually spoke.
+        # If the first word isn't in the spoken text at all, this is user speech
+        # anchored by their own word (e.g. "yes, save a recipe..." after the
+        # assistant offered to save one) — not an echo.
+        if words[0] not in spoken_norm:
+            return False
         overlap = sum(1 for w in words if w in spoken_norm) / len(words)
         return overlap >= 0.6
 
@@ -1138,6 +1154,16 @@ class Assistant:
 
                 if time.monotonic() < self._drop_results_until:
                     logger.debug(f"Dropping post-cancel ASR result: {text}")
+                    continue
+
+                # Drop known ASR noise hallucinations before any routing.
+                # Enforcing English causes taps and ambient sounds to surface as
+                # short filler tokens ("Yeah.", "Okay.") that would otherwise
+                # trigger the follow-up window. Strip punctuation before matching
+                # so "Yeah." and "yeah" both hit.
+                _text_bare = re.sub(r"[^\w\s]", "", text.lower()).strip()
+                if _text_bare in _ASR_NOISE_TOKENS:
+                    logger.debug(f"Dropped noise token: {text!r}")
                     continue
 
                 logger.debug(f"Transcribed: {text}")
@@ -1197,19 +1223,28 @@ class Assistant:
                         continue
                     logger.info(f"FOLLOW-UP: {text}")
 
+                if just_barged_in:
+                    # Barge-in: TTS has stopped. Open the follow-up window so
+                    # the user can speak their full query without re-saying the
+                    # wakeword. Discard the partial chunk that triggered the
+                    # barge-in — silence detection may have cut the sentence
+                    # short, so the content here is unreliable.
+                    self._last_turn_end = time.monotonic()
+                    self._skip_followup_self_echo = True
+                    logger.info("Barge-in — follow-up window open")
+                    continue
+
                 if wakeword_present:
                     logger.debug(f"WAKEWORD: {text}")
                     user_prompt = text_lower[wakeword_match.end():].strip(_PROMPT_STRIP_CHARS).replace('"', '')
-                elif just_barged_in:
-                    # Barge-in matched via _barge_re (bare name, no greeting
-                    # prefix) — strip the matched portion so "Atticus, what
-                    # about going?" becomes "what about going", not the full text.
-                    barge_match = self._barge_re.search(text_lower)
-                    after = text_lower[barge_match.end():] if barge_match else text_lower
-                    user_prompt = after.strip(_PROMPT_STRIP_CHARS).replace('"', '')
                 else:
                     # Follow-up: no wakeword required (within follow_up window).
-                    user_prompt = text_lower.strip(_PROMPT_STRIP_CHARS).replace('"', '')
+                    # Strip a leading wakeword if the user habitually said it anyway.
+                    stripped = text_lower.strip(_PROMPT_STRIP_CHARS)
+                    leading_ww = self._wakeword_re.match(stripped)
+                    if leading_ww:
+                        stripped = stripped[leading_ww.end():].lstrip(" ,.:;-")
+                    user_prompt = stripped.replace('"', '')
 
                 if not user_prompt:
                     if wakeword_present:
@@ -1227,18 +1262,6 @@ class Assistant:
                         logger.debug("Nothing in utterance")
                     continue
 
-                # Barge-in "be quiet" — the user cancelled our speech and
-                # said "stop" / "stop talking" / "be quiet". They mean
-                # silence the assistant, NOT pause music; treat it like a
-                # wakeword-alone barge-in (open follow-up window, no
-                # dispatch). Music-control phrases like "stop the music"
-                # don't match `_BARGE_QUIET_RE` and fall through normally.
-                if just_barged_in and _BARGE_QUIET_RE.match(user_prompt):
-                    logger.info(f"BARGE-QUIET (no dispatch): {user_prompt!r}")
-                    self._last_turn_end = time.monotonic()
-                    self._skip_followup_self_echo = True
-                    continue
-
                 # Snapshot the STT latency of the utterance that triggered this
                 # turn before later (echo/cross-talk) transcriptions overwrite it.
                 stt_seconds = getattr(self.asr_pipe, "last_transcribe_seconds", None)
@@ -1249,6 +1272,45 @@ class Assistant:
 
             except Exception as e:
                 logger.error(f"Transcription error: {e}")
+
+    def get_state(self) -> str:
+        """Return the current assistant state: idle | thinking | speaking."""
+        if self.audio_capture.tts_active.is_set():
+            return "speaking"
+        if self._turn_active:
+            return "thinking"
+        return "idle"
+
+    def speak_proactive(self, text: str) -> None:
+        """Speak `text` through the cloned voice without a user turn.
+
+        Waits for any in-progress voice turn (SLM + TTS) to fully complete
+        before speaking. `_turn_lock` covers only the SLM phase; TTS runs
+        without it, so we also spin on `_turn_active` (barge-in worker) and
+        `tts_active` (half-duplex TTS) to avoid two audio streams overlapping.
+        Mutes the mic for the duration. Blocks until playback finishes.
+        """
+        if not self.models_ready.wait(timeout=30):
+            logger.warning("speak_proactive: models not ready")
+            return
+        deadline = time.monotonic() + 60.0
+        while self._turn_active or self.audio_capture.tts_active.is_set():
+            if time.monotonic() > deadline:
+                logger.warning("speak_proactive: timed out waiting for active turn")
+                break
+            time.sleep(0.05)
+        with self._turn_lock:
+            self.audio_capture.transcribing = False
+            try:
+                session = TtsSession()
+                cleaned = clean_for_tts(text)
+                if not cleaned:
+                    return
+                self._emit_turn_event("assistant", cleaned, "proactive")
+                self.speak_stream(cleaned, self.voice_clone_prompt, session=session)
+            finally:
+                self.audio_capture.transcribing = True
+            self._last_turn_end = time.monotonic()
 
     def run(self):
         """Start the recorder + transcriber threads and block until Ctrl+C."""

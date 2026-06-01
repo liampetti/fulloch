@@ -10,6 +10,9 @@ general:
   barge_in: "wakeword"             # "off" (half-duplex) | "wakeword" (needs AEC)
   follow_up_time: "5s"        # "0s" | "<N>s" wakeword-free window after TTS, allows for conversational discussions in quieter environments
 
+  # Force speech detection and transcription to a single language, only English supported currently. 
+  asr_language: "English"
+
   log_level: "info"           # "debug" | "info" | "warning" | "error" (debug = verbose project-side logs)
 
   # ALSA device substrings; null = system default. AEC routing for

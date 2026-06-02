@@ -49,7 +49,9 @@ def test_search_stall_plays_before_dispatch():
     # The stall must be gated on is_web_search and sit before handle_action.
     assert "is_web_search" in src, "search stall not gated on is_web_search"
     stall_pos = src.index("is_web_search")
-    dispatch_pos = src.index("intents.handle_action")
+    # Key on handle_action(action) — the main-loop dispatch — not
+    # handle_action(deferred) in the reply branch which appears earlier.
+    dispatch_pos = src.index("handle_action(action)")
     assert stall_pos < dispatch_pos, "stall must play before the search dispatch"
 
 

@@ -1,21 +1,58 @@
-# Each emission is exactly one of {"actions": [...]} or {"reply": "..."}.
-# Examples below cover: single-tool dispatch, multi-tool dispatch (≤3),
-# chat-only replies, propose-then-confirm flows, agentic chains where
-# the agent reacts to prior tool output in history.
-
-# ----- Single-tool dispatch -----
-
 - User: "Turn on the lights"
   Output:
   {"actions": [{"intent": "turn_on", "args": ["lights"]}]}
+
+- User: "Turn off the lights"
+  Output:
+  {"actions": [{"intent": "turn_off", "args": ["lights"]}]}
+
+- User: "Toggle the fan"
+  Output:
+  {"actions": [{"intent": "toggle", "args": ["fan"]}]}
 
 - User: "Set the office temperature to 19 degrees"
   Output:
   {"actions": [{"intent": "ha_set_climate", "args": ["Office", 19]}]}
 
+- User: "Turn the bedroom light red"
+  Output:
+  {"actions": [{"intent": "ha_set_color", "args": ["bedroom light", "red"]}]}
+
 - User: "Louder"
   Output:
   {"actions": [{"intent": "ha_volume_up", "args": []}]}
+
+- User: "Quieter"
+  Output:
+  {"actions": [{"intent": "ha_volume_down", "args": []}]}
+
+- User: "Set the volume to 40"
+  Output:
+  {"actions": [{"intent": "ha_volume_set", "args": ["TV", 40]}]}
+
+- User: "Switch to HDMI 2"
+  Output:
+  {"actions": [{"intent": "ha_select_source", "args": ["HDMI 2"]}]}
+
+- User: "Lock the front door"
+  Output:
+  {"actions": [{"intent": "ha_lock", "args": ["front door"]}]}
+
+- User: "Open the blinds"
+  Output:
+  {"actions": [{"intent": "ha_open_cover", "args": ["blinds"]}]}
+
+- User: "Run the bedtime script"
+  Output:
+  {"actions": [{"intent": "ha_run_script", "args": ["bedtime"]}]}
+
+- User: "How warm is the living room?"
+  Output:
+  {"actions": [{"intent": "get_temperature", "args": ["living room"]}]}
+
+- User: "Is the dishwasher on?"
+  Output:
+  {"actions": [{"intent": "get_entity_state", "args": ["dishwasher"]}]}
 
 - User: "What's the weather forecast"
   Output:
@@ -25,11 +62,17 @@
   Output:
   {"actions": [{"intent": "whats_on_today", "args": []}]}
 
+- User: "What's on tomorrow"
+  Output:
+  {"actions": [{"intent": "whats_on_tomorrow", "args": []}]}
+
+- User: "What's happening this week"
+  Output:
+  {"actions": [{"intent": "whats_on_this_week", "args": []}]}
+
 - User: "Who is the current US president"
   Output:
   {"actions": [{"intent": "external_information", "args": ["who is the current US president"]}]}
-
-# ----- Chat-only replies (no tool needed) -----
 
 - User: "What's the capital of France"
   Output:
@@ -47,8 +90,6 @@
   Output:
   {"reply": "I can't place orders, but I can add 'order pizza' to your shopping list if you'd like."}
 
-# ----- Propose-then-confirm (open-ended request → suggestion) -----
-
 - User: "I need to relax"
   Output:
   {"reply": "I can dim the lights and play some calming music for you?"}
@@ -56,8 +97,6 @@
 - User: "Movie night"
   Output:
   {"reply": "I can dim the lounge lights and put on the TV — want me to go ahead?"}
-
-# ----- Follow-up after a proposal (agent looks at conversation history) -----
 
 - Conversation context:
     Assistant: "I can dim the lights and play some calming music for you?"
@@ -84,62 +123,130 @@
     {"intent": "turn_off", "args": ["bedroom AC"]}
   ]}
 
-# ----- Notes -----
+- User: "Keep in mind that I take my coffee black"
+  Output:
+  {"actions": [{"intent": "remember_fact", "args": ["Prefers black coffee"]}]}
 
 - User: "Remember that bin night is Thursday"
   Output:
-  {"actions": [{"intent": "remember_fact", "args": ["Bin night is Thursday"]}]}
+  {"reply": "Want me to save that as a note, or set up a weekly calendar reminder for Thursday evenings?"}
 
 - User: "Add eggs to the shopping list"
   Output:
-  {"actions": [{"intent": "append_to_note", "args": ["shopping list", "eggs"]}]}
+  {"actions": [{"intent": "add_todo_item", "args": ["eggs"]}]}
+
+- User: "What's on my shopping list?"
+  Output:
+  {"actions": [{"intent": "get_todo_items", "args": []}]}
+
+- User: "Add a note to my shopping list about which brand of coffee we use"
+  Output:
+  {"actions": [{"intent": "append_to_note", "args": ["shopping list", "We use Lavazza Crema e Gusto ground coffee"]}]}
+
+- Conversation context:
+    User: "What's the boiling point of water at altitude?"
+    Assistant: "At 2000 metres water boils at around 93 degrees Celsius rather than 100."
+  User: "Can you save that?"
+  Output:
+  {"actions": [{"intent": "write_note", "args": ["Boiling point at altitude", "Water boils at approximately 93°C at 2000 metres elevation, compared to 100°C at sea level."]}]}
 
 - User: "Add a section about Darwin to my Australia climate note"
   Output:
   {"actions": [{"intent": "append_to_note", "args": ["Australia climate", "Darwin has a tropical savanna climate with a hot, humid wet season from November to April and a dry season from May to October. Climate change is bringing more extreme heat and stronger cyclones to the region."]}]}
 
-- User: "Find anything I wrote about the dishwasher"
+- User: "Log this: the plumber came and fixed the leak"
   Output:
-  {"actions": [{"intent": "search_notes_semantic", "args": ["dishwasher"]}]}
+  {"actions": [{"intent": "append_to_today", "args": ["the plumber came and fixed the leak"]}]}
 
-- User: "What did I write about Darwin in my notes"
+- Conversation context:
+    User: "Summarise today's news and save it to my notes"
+    Tool — external_information: "Reactive question: Today's top stories include..."
+  Output:
+  {"actions": [{"intent": "append_to_today", "args": ["News summary: Today's top stories include..."]}]}
+
+- User: "What notes do I have?"
+  Output:
+  {"actions": [{"intent": "list_notes", "args": []}]}
+
+- User: "Find anything I wrote about the Darwin trip"
   Output:
   {"actions": [{"intent": "search_notes", "args": ["Darwin"]}]}
 
-- User: "Get my notes regarding climate change in Australia"
+- User: "Find anything about my kitchen appliances"
   Output:
-  {"actions": [{"intent": "read_note", "args": ["climate change in Australia"]}]}
+  {"actions": [{"intent": "search_notes_semantic", "args": ["kitchen appliances"]}]}
 
-# ----- Thinking mode -----
+- User: "Get my Australia climate note"
+  Output:
+  {"actions": [{"intent": "read_note", "args": ["Australia climate"]}]}
+
+- User: "Remind me to turn off the stove in 10 minutes"
+  Output:
+  {"actions": [{"intent": "start_countdown", "args": ["10 minutes", "Turn off the stove"]}]}
+
+- User: "Remind me in 2 hours to take my medication"
+  Output:
+  {"actions": [{"intent": "start_countdown", "args": ["2 hours", "Take your medication"]}]}
+
+- User: "Remind me to have lunch at noon today"
+  Output:
+  {"actions": [{"intent": "create_calendar_event", "args": ["Lunch", "2026-06-02", "12:00", "13:00", "none"]}]}
+
+- User: "Remind me to call the doctor at 3pm tomorrow"
+  Output:
+  {"actions": [{"intent": "create_calendar_event", "args": ["Call the doctor", "2026-06-03", "15:00", "15:30", "none"]}]}
+
+- Conversation context:
+    User: "Remind me to call the doctor at 3pm tomorrow"
+    Tool — create_calendar_event: "Added 'Call the doctor' at 15:00 on Wednesday 3 June"
+  Output:
+  {"reply": "Done, I've added that to your calendar for 3pm tomorrow."}
+
+- User: "Cancel my timer"
+  Output:
+  {"actions": [{"intent": "get_timer_status", "args": []}]}
+
+- Conversation context:
+    User: "Cancel my timer"
+    Tool — get_timer_status: "timer_1: 5 minutes 23 seconds remaining"
+  Output:
+  {"actions": [{"intent": "cancel_timer", "args": ["timer_1"]}]}
+
+- User: "Add dentist appointment to my calendar for next Monday at 10am"
+  Output:
+  {"actions": [{"intent": "create_calendar_event", "args": ["Dentist appointment", "2026-06-08", "10:00", "11:00", "none"]}]}
+
+- User: "Remind me to put the bins out every Thursday at 8pm"
+  Output:
+  {"actions": [{"intent": "create_calendar_event", "args": ["Bin night", "2026-06-04", "20:00", null, "weekly"]}]}
+
+- Conversation context:
+    Assistant: "Want me to save that as a note, or set up a weekly calendar reminder for Thursday evenings?"
+  User: "calendar reminder"
+  Output:
+  {"actions": [{"intent": "create_calendar_event", "args": ["Bin night", "2026-06-04", null, null, "weekly"]}]}
+
+- Conversation context:
+    Assistant: "Want me to save that as a note, or set up a weekly calendar reminder for Thursday evenings?"
+  User: "just save it as a note"
+  Output:
+  {"actions": [{"intent": "remember_fact", "args": ["Bin night is on Thursday"]}]}
 
 - User: "Think about whether I should switch to solar"
   Output:
   {"actions": [{"intent": "deep_think", "args": ["whether I should switch to solar"]}]}
 
-# ----- Reactive-tool follow-up: agent sees a sentinel result and summarises -----
-
 - Conversation context:
-    User: "find anything I wrote about the dishwasher"
-    Tool — search_notes_semantic: "Reactive question: These are the 2 notes closest in topic to 'dishwasher' by meaning; they may not actually contain 'dishwasher'. in 'dishwasher manual': descaling cycle every three months...; in 'kitchen reno': replaced the old appliances..."
+    User: "find anything about my kitchen appliances"
+    Tool — search_notes_semantic: "Reactive question: These are the 2 notes closest in topic to 'kitchen appliances' by meaning; they may not actually contain 'kitchen appliances'. in 'dishwasher manual': descaling cycle every three months...; in 'kitchen reno': replaced the old appliances..."
   Output:
   {"reply": "Your dishwasher manual note covers the descaling cycle, and a kitchen reno note touches on the appliances. Want me to read the manual note?"}
 
-# ----- Agentic chain: search returns dated info, agent searches again -----
-
 - Conversation context:
-    User: "Research whether the Apple Watch Ultra 2 supports blood oxygen in the US and save the verdict to a note"
-    Tool — external_information: "Reactive question: As of late 2023, Apple disabled blood oxygen tracking on US Apple Watch models due to a Masimo patent ruling. Legal appeals are ongoing..."
+    User: "Look up how long it takes light to travel from the Sun to Earth and save it to my science notes"
+    Tool — external_information: "Reactive question: Light from the Sun takes approximately 8 minutes and 20 seconds to reach Earth, travelling 149.6 million kilometres at 299,792 kilometres per second."
   Output:
-  {"actions": [{"intent": "external_information", "args": ["Apple Watch Ultra 2 blood oxygen US update 2026"]}]}
-
-- Conversation context:
-    User: "Research whether the Apple Watch Ultra 2 supports blood oxygen in the US and save the verdict to a note"
-    Tool — external_information: "...2023 patent ban..."
-    Tool — external_information: "Reactive question: In late 2025 the US Federal Circuit ruled in Apple's favour and the blood oxygen feature was re-enabled via software update."
-  Output:
-  {"actions": [{"intent": "write_note", "args": ["apple-watch-blood-oxygen", "As of 2026, blood oxygen tracking is enabled on US Apple Watch Ultra 2 units following a 2025 Federal Circuit ruling that reversed the 2023 Masimo patent ban."]}]}
-
-# ----- Scene requests prefer the user's pre-configured HA scenes -----
+  {"actions": [{"intent": "write_note", "args": ["science notes", "Light from the Sun takes approximately 8 minutes and 20 seconds to reach Earth, travelling 149.6 million kilometres at 299,792 kilometres per second."]}]}
 
 - User: "Set up a movie scene"
   Output:

@@ -236,9 +236,8 @@ def read_note(title: str) -> str:
 @tool(
     name="write_note",
     description=(
-        "Create a markdown note with a title and content, or add to it if a "
-        "note with that title already exists. Use when the user asks to start, "
-        "create, or save a note."
+        "Create or overwrite a markdown note. Only use when the user explicitly "
+        "asks to save, write, or create a note — never proactively."
     ),
     aliases=["create_note", "save_note", "new_note"],
 )
@@ -272,8 +271,8 @@ def write_note(title: str, content: str) -> str:
 @tool(
     name="append_to_note",
     description=(
-        "Append content to an existing markdown note found by title or topic. "
-        "Use when the user asks to add, append, or extend an existing note."
+        "Append content to an existing markdown note. Only use when the user "
+        "explicitly asks to add, append, or extend a note — never proactively."
     ),
     aliases=["add_to_note", "extend_note"],
 )
@@ -406,9 +405,8 @@ def search_notes_semantic(query: str) -> str:
 @tool(
     name="remember_fact",
     description=(
-        "Save a long-term fact the user wants remembered across sessions "
-        "(e.g. 'remember that bin night is on Thursday'). Stored "
-        "with a date stamp in the facts note."
+        "Save a long-term fact across sessions. Only use when the user explicitly "
+        "asks you to remember or save a fact — never proactively."
     ),
     aliases=["save_fact", "remember_this", "remember"],
 )

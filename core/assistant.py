@@ -69,7 +69,8 @@ _ASR_NOISE_TOKENS: frozenset[str] = frozenset({
     "bye", "goodbye", "see you", "see ya",
     "alright", "all right",
     "right",
-    "oh",
+    "oh", "so",
+    "cough"
 })
 
 
@@ -123,6 +124,7 @@ from utils.phrases import (
     GREETING_TOPICS,
     NOTE_WRITE_STALL_PHRASES,
     PRE_THINKING_STALL_PHRASES,
+    REMINDER_PREFIX_PHRASES,
     STALL_PHRASES,
     THINKING_STALL_PHRASES,
     WEB_SEARCH_STALL_PHRASES,
@@ -277,6 +279,11 @@ class Assistant:
         self._last_thinking_question: Optional[str] = None
         self._last_thinking_cancelled_at: float = 0.0
 
+        # Reminder poll deduplication — keyed on (summary, YYYY-MM-DD).
+        # Value is the monotonic time after which the entry expires (2 hours),
+        # so the same reminder can re-fire on a different day or after a restart.
+        self._spoken_reminders: dict[tuple[str, str], float] = {}
+
         # Models loaded lazily in transcriber thread
         self.asr_pipe = None
         self.asr_stream_generator = None
@@ -342,6 +349,12 @@ class Assistant:
 
         self.models_ready.set()
         self._warm_and_announce()
+        self._start_reminder_poll()
+        try:
+            from tools.time_tools import set_speak_callback
+            set_speak_callback(self.speak_proactive)
+        except ImportError:
+            pass
 
     def _warm_and_announce(self):
         """Prime every cache, then speak the opening greeting.
@@ -433,6 +446,61 @@ class Assistant:
             logger.info("Warmup complete")
         finally:
             self.audio_capture.transcribing = True
+
+    def _reminder_poll_loop(self) -> None:
+        """Daemon thread: speak upcoming Fulloch calendar events via speak_proactive.
+
+        Polls every 60 seconds. Fires speak_proactive for any event on the
+        configured reminder calendar that starts within the next 90 seconds and
+        hasn't already been spoken this session.
+        """
+        import datetime as _dt
+        try:
+            from tools.home_assistant import get_upcoming_events
+        except ImportError:
+            return
+
+        _REMINDER_EXPIRY_S = 7200.0  # 2 hours — prevents re-fire within same day
+
+        logger.info("Reminder poll thread started (60s interval)")
+        while True:
+            time.sleep(60)
+            try:
+                mono_now = time.monotonic()
+                # Evict expired entries.
+                expired = [k for k, exp in self._spoken_reminders.items() if mono_now >= exp]
+                for k in expired:
+                    del self._spoken_reminders[k]
+
+                for event in get_upcoming_events(window_seconds=90):
+                    # Key on summary + date only — avoids any timezone/format
+                    # variation in the start string returned by HA.
+                    date_part = event["start"][:10]
+                    key = (event["summary"], date_part)
+                    if key not in self._spoken_reminders:
+                        self._spoken_reminders[key] = mono_now + _REMINDER_EXPIRY_S
+                        prefix = random.choice(REMINDER_PREFIX_PHRASES)
+                        text = f"{prefix} {event['summary']}"
+                        logger.info(f"Speaking reminder: {text!r}")
+                        self.speak_proactive(text)
+                    else:
+                        logger.debug(f"Reminder suppressed (already spoken): {event['summary']!r}")
+            except Exception:
+                logger.exception("Reminder poll iteration failed")
+
+    def _start_reminder_poll(self) -> None:
+        """Start the reminder poll thread if calendar and polling are configured."""
+        try:
+            from tools.home_assistant import _reminder_calendar_entity, HA_CONFIG
+        except ImportError:
+            return
+        if not _reminder_calendar_entity():
+            return
+        if not HA_CONFIG.get("reminder_poll", True):
+            logger.info("Reminder polling disabled via config (reminder_poll: false)")
+            return
+        t = threading.Thread(target=self._reminder_poll_loop, daemon=True)
+        t.start()
 
     def _maybe_reset_session(self) -> None:
         """Clear unified history if the silence gap exceeds the session timeout."""
@@ -1084,7 +1152,7 @@ class Assistant:
         if self._turn_thread is not None:
             self._turn_thread.join(timeout=2.0)
 
-    def _is_self_echo(self, text_lower: str) -> bool:
+    def _is_self_echo(self, text_lower: str, short_only: bool = False) -> bool:
         """True if `text_lower` looks like AEC residue of the assistant's voice.
 
         AEC suppresses the speaker-into-mic energy but isn't a phoneme filter,
@@ -1105,6 +1173,11 @@ class Assistant:
         words = [_NON_WORD_RE.sub("", w) for w in text_lower.split()]
         words = [w for w in words if w]
         if not words:
+            return False
+        # In the follow-up window, only short utterances (≤ 3 words) are
+        # plausibly AEC reverb; longer ones are deliberate user speech even
+        # if their words happen to overlap the assistant's prior reply.
+        if short_only and len(words) > 3:
             return False
         if len(words) == 1:
             # Single-word transcript — too short to score by overlap.
@@ -1178,6 +1251,7 @@ class Assistant:
                     # barge-ins; otherwise they're echo of our own voice (or
                     # cross-talk during SLM thinking) and must be ignored.
                     if not self._check_barge_in(text_lower):
+                        logger.debug(f"Suppressed (mid-turn, no barge-in match): {text!r}")
                         continue
 
                     logger.info(f"BARGE-IN: {text}")
@@ -1208,6 +1282,10 @@ class Assistant:
                         and 0 <= onset_gap < self.follow_up_seconds
                     )
                     if not in_follow_up:
+                        logger.debug(
+                            f"Suppressed (no wakeword, outside follow-up window "
+                            f"[gap={onset_gap:.1f}s, window={self.follow_up_seconds:.0f}s]): {text!r}"
+                        )
                         continue
                     if self._skip_followup_self_echo:
                         # One-shot bypass after a wakeword-alone barge-in:
@@ -1215,11 +1293,12 @@ class Assistant:
                         # even if every word also appears in the cancelled
                         # response. Consume the flag here.
                         self._skip_followup_self_echo = False
-                    elif self._is_self_echo(text_lower):
-                        # Trailing AEC residue after our own TTS regularly
-                        # looks like a brief utterance ("A.", "the.")
-                        # landing inside the follow-up window. Suppress it
-                        # the same way the barge-in path does.
+                    elif self._is_self_echo(text_lower, short_only=True):
+                        # Suppress brief AEC reverb after TTS ends (typically
+                        # 1–3 word fragments). Longer utterances are user
+                        # speech — even if the words overlap the assistant's
+                        # reply (e.g. user picks an option Atticus just offered).
+                        logger.debug(f"Suppressed (echo in follow-up window): {text!r}")
                         continue
                     logger.info(f"FOLLOW-UP: {text}")
 

@@ -577,18 +577,19 @@ def skip(entity: Optional[str] = None) -> str:
 # ---------------------------------------------------------------------------
 
 def _spotify_search(kind: str, query: str) -> list[dict]:
-    """Run a SpotifyPlus search and return the result list (possibly empty).
+    """Run a SpotifyPlus search and return the result items list (possibly empty).
 
-    `kind` is "playlists" or "tracks" — feeds the service name + the
-    result key. Logs and returns an empty list if anything goes wrong.
+    `kind` is "playlists" or "tracks". SpotifyPlus returns:
+      {"user_profile": {...}, "result": {"items": [...], "total": N, ...}}
+    The service parameter is `criteria` (not `query`).
     """
     service = "search_playlists" if kind == "playlists" else "search_tracks"
     response = _call_service_with_response(
-        "spotifyplus", service, {"entity_id": SPOTIFY_ENTITY, "query": query},
+        "spotifyplus", service, {"entity_id": SPOTIFY_ENTITY, "criteria": query},
     )
     if not response:
         return []
-    return (response.get("result") or {}).get(kind) or []
+    return (response.get("result") or {}).get("items") or []
 
 
 @tool(
@@ -604,17 +605,21 @@ def play_song(query: str, artist: Optional[str] = None) -> str:
         artist: Optional artist refinement. Combined into the query when given.
     """
     if not SPOTIFY_ENTITY:
-        return "Spotify isn't set up in Home Assistant."
+        return (
+            "Reactive question: No Spotify media player was found in Home Assistant. "
+            "Check that a Spotify or SpotifyPlus integration is set up, or add "
+            "`spotify_entity:` to the home_assistant block in config.yml."
+        )
 
     search_query = f"{query} {artist}".strip() if artist else query
     entity_id = _resolve_entity(SPOTIFY_ENTITY, domain="media_player")
 
-    # Playlists first, then fall back to tracks.
+    # SpotifyPlus path: search_playlists → search_tracks → play URI.
+    # Falls back to the generic path if SpotifyPlus isn't installed (empty results).
     playlists = _spotify_search("playlists", search_query)
     if playlists:
-        playlist = playlists[0]
-        uri = playlist.get("uri")
-        name = playlist.get("name", "playlist")
+        uri = playlists[0].get("uri")
+        name = playlists[0].get("name", "playlist")
         if uri:
             return _call_service(
                 "media_player", "play_media", entity_id,
@@ -622,12 +627,10 @@ def play_song(query: str, artist: Optional[str] = None) -> str:
                 success_message=f"Playing {name}",
             )
 
-    # 2) Tracks.
     tracks = _spotify_search("tracks", search_query)
     if tracks:
-        track = tracks[0]
-        uri = track.get("uri")
-        name = track.get("name", "your song")
+        uri = tracks[0].get("uri")
+        name = tracks[0].get("name", "your song")
         if uri:
             return _call_service(
                 "media_player", "play_media", entity_id,
@@ -635,8 +638,17 @@ def play_song(query: str, artist: Optional[str] = None) -> str:
                 success_message=f"Playing {name}",
             )
 
-    # 3) Nothing matched.
-    return f"I couldn't find anything for {query} on Spotify."
+    # Generic fallback for the built-in HA Spotify integration (no search service).
+    # Passes the search query directly as the media_content_id — some Spotify
+    # integrations resolve "spotify:search:<query>" but results are not guaranteed.
+    logger.info(
+        "SpotifyPlus search returned no results; trying generic media_player.play_media"
+    )
+    return _call_service(
+        "media_player", "play_media", entity_id,
+        {"media_content_id": f"spotify:search:{search_query}", "media_content_type": "music"},
+        success_message=f"Playing {search_query}",
+    )
 
 
 def _resolve_with_variants(entity: str, suffixes: tuple, domains: tuple) -> Optional[str]:
@@ -997,6 +1009,157 @@ def whats_on_this_week() -> str:
     return _ha_get_events("this_week")
 
 
+# ---------------------------------------------------------------------------
+# Calendar write — wraps the HA `calendar.create_event` service.
+# Requires `home_assistant.calendar` in config.yml to name the target calendar.
+# ---------------------------------------------------------------------------
+
+def get_upcoming_events(window_seconds: int = 90) -> list[dict]:
+    """Return events starting on the reminder calendar within the next `window_seconds`.
+
+    Used by the Assistant reminder poll thread. Not exposed as a tool.
+    Returns a list of {"summary": str, "start": str} dicts.
+    Uses UTC-aware datetimes so HA receives unambiguous timestamps regardless
+    of the container's local timezone.
+    """
+    calendar = _reminder_calendar_entity()
+    if not calendar:
+        return []
+    import datetime as _dt2
+    now = _dt2.datetime.now(_dt2.timezone.utc)
+    window_end = now + _dt2.timedelta(seconds=window_seconds)
+    response = _call_service_with_response(
+        "calendar", "get_events",
+        {
+            "entity_id": calendar,
+            "start_date_time": now.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+            "end_date_time": window_end.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+        },
+    )
+    if not response:
+        return []
+    raw = (response.get(calendar) or {}).get("events") or []
+    results = []
+    for e in raw:
+        summary = e.get("summary", "")
+        start = e.get("start", "")
+        if not summary:
+            continue
+        # Filter out events that have already started — HA returns currently-active
+        # events (started but not ended) which we don't want to re-fire as reminders.
+        # Allow a small grace window (30s) so a poll that fires just after the
+        # event's start time doesn't miss it.
+        try:
+            start_dt = _dt2.datetime.fromisoformat(start.replace("Z", "+00:00"))
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=_dt2.timezone.utc)
+            grace = now - _dt2.timedelta(seconds=30)
+            if start_dt < grace:
+                continue
+        except (ValueError, AttributeError):
+            pass
+        results.append({"summary": summary, "start": start})
+    return results
+
+
+_RECURRENCE_TO_RRULE = {
+    "daily": "FREQ=DAILY",
+    "weekly": "FREQ=WEEKLY",
+    "monthly": "FREQ=MONTHLY",
+    "weekdays": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+}
+
+
+def _reminder_calendar_entity() -> Optional[str]:
+    """Resolve the configured reminder calendar to an entity ID.
+
+    Reads `home_assistant.calendar` from config (friendly name or direct
+    entity_id). Returns None if not configured or not found in the alias map.
+    """
+    name = HA_CONFIG.get('calendar')
+    if not name:
+        return None
+    if '.' in str(name):
+        return name
+    entity_id = _ENTITY_ALIASES.get(name.lower())
+    if entity_id and entity_id.startswith('calendar.'):
+        return entity_id
+    logger.warning(f"Reminder calendar '{name}' not found in HA entity aliases")
+    return None
+
+
+@tool(
+    name="create_calendar_event",
+    description=(
+        "Create a one-off or recurring calendar event in Home Assistant. "
+        "Use for reminders and recurring events (bin night, appointments, etc.). "
+        "Requires home_assistant.calendar to be configured."
+    ),
+    aliases=["add_reminder", "set_reminder", "create_reminder", "add_calendar_event"],
+)
+def create_calendar_event(
+    summary: str,
+    date: str,
+    time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    recurrence: str = "none",
+) -> str:
+    """Create a calendar event in the configured HA reminder calendar.
+
+    Args:
+        summary: Event title (e.g. "Bin night", "Dentist").
+        date: ISO date string, e.g. "2026-06-05".
+        time: Start time in HH:MM 24-hour format. Omit for all-day events.
+        end_time: End time in HH:MM 24-hour format. Defaults to 1 hour after start.
+        recurrence: "none" (default), "daily", "weekly", or "monthly".
+    """
+    calendar = _reminder_calendar_entity()
+    if not calendar:
+        return (
+            "User question: No reminder calendar is configured in Fulloch. "
+            "Would you like me to save this as a note instead?"
+        )
+
+    try:
+        start_dt = _dt.date.fromisoformat(date)
+    except ValueError:
+        return "I couldn't parse that date — please provide it as YYYY-MM-DD."
+
+    extra: dict = {"summary": summary}
+
+    if time:
+        try:
+            hour, minute = (int(p) for p in time.split(":")[:2])
+        except (ValueError, AttributeError):
+            return "I couldn't parse that time — please use HH:MM format."
+        start_datetime = _dt.datetime.combine(start_dt, _dt.time(hour, minute))
+        if end_time:
+            try:
+                eh, em = (int(p) for p in end_time.split(":")[:2])
+            except (ValueError, AttributeError):
+                return "I couldn't parse the end time — please use HH:MM format."
+            end_datetime = _dt.datetime.combine(start_dt, _dt.time(eh, em))
+        else:
+            end_datetime = start_datetime + _dt.timedelta(hours=1)
+        extra["start_date_time"] = start_datetime.isoformat()
+        extra["end_date_time"] = end_datetime.isoformat()
+    else:
+        extra["start_date"] = start_dt.isoformat()
+        extra["end_date"] = (start_dt + _dt.timedelta(days=1)).isoformat()
+
+    rrule = _RECURRENCE_TO_RRULE.get(recurrence.lower())
+    if rrule:
+        extra["rrule"] = rrule
+
+    recurrence_label = f" ({recurrence})" if recurrence != "none" else ""
+    time_label = f" at {time}" if time else ""
+    success = (
+        f"Added '{summary}'{time_label} on "
+        f"{start_dt.strftime('%A %-d %B')}{recurrence_label}"
+    )
+    return _call_service("calendar", "create_event", calendar, extra, success_message=success)
+
+
 def _autodetect_weather_entity() -> str:
     """Pick a default weather entity: first weather.* in aliases > weather.home."""
     for eid in _ENTITY_ALIASES.values():
@@ -1011,11 +1174,27 @@ def _autodetect_weather_entity() -> str:
 
 
 def _autodetect_spotify_entity() -> Optional[str]:
-    """Pick a Spotify media_player entity: first media_player.spotify* > None."""
+    """Pick a Spotify media_player entity.
+
+    Priority:
+      1. `home_assistant.spotify_entity` in config (friendly name or direct entity_id)
+      2. First `media_player.spotify*` in the alias map (covers both the
+         built-in Spotify integration and SpotifyPlus whose entity IDs are
+         `media_player.spotifyplus_<username>`)
+    """
+    configured = HA_CONFIG.get("spotify_entity")
+    if configured:
+        eid = _ENTITY_ALIASES.get(str(configured).lower()) or str(configured)
+        logger.info(f"Using configured Spotify entity: {eid}")
+        return eid
     for eid in _ENTITY_ALIASES.values():
         if eid.startswith("media_player.spotify"):
             logger.info(f"Auto-selected Spotify entity: {eid}")
             return eid
+    logger.warning(
+        "No Spotify media_player found in HA alias map. "
+        "Add `spotify_entity: <friendly name or entity_id>` under home_assistant: in config.yml."
+    )
     return None
 
 
@@ -1069,11 +1248,95 @@ def _autodetect_calendar_entity() -> Optional[str]:
     return None
 
 
+def _autodetect_todo_entity() -> Optional[str]:
+    """Pick a todo entity.
+
+    Priority:
+      1. `home_assistant.todo_entity` in config (friendly name or direct entity_id)
+      2. `todo.shopping_list` (HA's default shopping list)
+      3. First `todo.*` entity in the alias map
+    """
+    configured = HA_CONFIG.get("todo_entity")
+    if configured:
+        eid = _ENTITY_ALIASES.get(str(configured).lower()) or str(configured)
+        logger.info(f"Using configured todo entity: {eid}")
+        return eid
+    if "todo.shopping_list" in _ENTITY_ALIASES.values():
+        logger.info("Auto-selected todo entity: todo.shopping_list")
+        return "todo.shopping_list"
+    for eid in _ENTITY_ALIASES.values():
+        if eid.startswith("todo."):
+            logger.info(f"Auto-selected todo entity: {eid}")
+            return eid
+    return None
+
+
 _DEFAULT_WEATHER_ENTITY = _autodetect_weather_entity()
 SPOTIFY_ENTITY = _autodetect_spotify_entity()
 TV_ENTITY = _autodetect_tv_entity()
 AVR_ENTITY = _autodetect_avr_entity()
 CALENDAR_ENTITY = _autodetect_calendar_entity()
+TODO_ENTITY = _autodetect_todo_entity()
+
+
+# ---------------------------------------------------------------------------
+# Todo / task lists — wraps HA `todo.add_item` and `todo.get_items`.
+# ---------------------------------------------------------------------------
+
+@tool(
+    name="add_todo_item",
+    description=(
+        "Add an item to a Home Assistant todo or shopping list. "
+        "Use for simple list items ('add eggs to the shopping list', 'add dentist to my tasks'). "
+        "Use append_to_note instead when the item needs context or belongs in a note."
+    ),
+    aliases=["add_shopping_item", "add_task", "todo_add"],
+)
+def add_todo_item(item: str) -> str:
+    """Add an item to the configured HA todo list.
+
+    Args:
+        item: The item text to add (e.g. "eggs", "call the plumber").
+    """
+    if not TODO_ENTITY:
+        return (
+            "User question: No todo list is configured in Home Assistant. "
+            "Would you like me to add this to a note instead?"
+        )
+    return _call_service(
+        "todo", "add_item", TODO_ENTITY,
+        {"item": item},
+        success_message=f"Added '{item}' to your list",
+    )
+
+
+@tool(
+    name="get_todo_items",
+    description="Read pending items from the Home Assistant todo or shopping list.",
+    aliases=["read_todo", "show_todo", "shopping_list", "get_shopping_list", "read_shopping_list"],
+)
+def get_todo_items() -> str:
+    """Return pending (incomplete) items from the configured HA todo list."""
+    if not TODO_ENTITY:
+        return (
+            "User question: No todo list is configured in Home Assistant. "
+            "Would you like me to check your notes instead?"
+        )
+    response = _call_service_with_response(
+        "todo", "get_items",
+        {"entity_id": TODO_ENTITY, "status": "needs_action"},
+    )
+    if not response:
+        return "I couldn't reach your todo list."
+    items = (response.get(TODO_ENTITY) or {}).get("items") or []
+    if not items:
+        return "Your list is empty."
+    names = [i.get("summary", "") for i in items if i.get("summary")]
+    if not names:
+        return "Your list is empty."
+    if len(names) == 1:
+        return f"You have one item: {names[0]}."
+    return f"You have {len(names)} items: {', '.join(names[:-1])}, and {names[-1]}."
 
 
 def _temperature_unit(attrs: dict) -> str:

@@ -1,3 +1,5 @@
-# Files excluded from `git archive` exports (used by publish.sh).
+# Files excluded from `git archive` exports (used by transfer_to_pub_dir.sh).
 CLAUDE.md export-ignore
 docs/ export-ignore
+transfer_to_pub_dir.sh export-ignore
+push_to_pub_repo.sh export-ignore

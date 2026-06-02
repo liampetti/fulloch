@@ -5,13 +5,11 @@
 # =============================================================================
 general:
   wakeword: "hey atticus"       # Activation phrase (case-insensitive; multi-word ok; s↔z tolerant), also acts as fallback if regex option is enabled and fails
-  wakeword_pattern: '\b(?:hey|hay|hi)\W+attic\W*u[sz]\b' # Optional regex override (compiled case-insensitive); tolerates the "attic us" split the ASR sometimes emits for "atticus"
+  wakeword_pattern: '\b(?:hey|hay|hi)\W+[ao][dt]{1,2}i?c\W*u[sz]\b' # Optional regex override (compiled case-insensitive); tolerates ASR variants: "attic us" split, "Oticus" (o+t), "Adicus" (a+d)
   voice_clone: "atticus"         # data/voices/<name>.{wav,txt} reference pair
   barge_in: "wakeword"             # "off" (half-duplex) | "wakeword" (needs AEC)
   follow_up_time: "5s"        # "0s" | "<N>s" wakeword-free window after TTS, allows for conversational discussions in quieter environments
-
-  # Force speech detection and transcription to a single language, only English supported currently. 
-  asr_language: "English"
+  asr_language: "English" # Force speech detection and transcription to a single language, only English supported currently. 
 
   log_level: "info"           # "debug" | "info" | "warning" | "error" (debug = verbose project-side logs)
 
@@ -34,6 +32,20 @@ general:
 #   url: "http://192.168.1.50:8123"
 #   token: "your_long_lived_access_token"
 #   timeout: 10
+#   spotify_entity: "SpotifyPlus Atticus"  # Friendly name (or entity_id) of the Spotify
+#                                               # media_player. Auto-detected from HA on startup
+#                                               # (first media_player.spotify* entity). Set this
+#                                               # if autodetect picks the wrong player or fails.
+#   todo_entity: "Shopping list"  # Friendly name (or entity_id) of the HA todo list for
+#                                   # voice shopping/task items. Auto-detected: prefers
+#                                   # todo.shopping_list, then the first todo.* entity.
+#   calendar: "Fulloch"   # Friendly name of the HA calendar Fulloch writes reminders to.
+#                          # Create a Local Calendar (or Google Calendar via HA) named "Fulloch"
+#                          # in HA. Fulloch will poll this calendar every 60 seconds and speak
+#                          # any event starting within the next 90 seconds via speak_proactive.
+#   reminder_poll: false  # Uncomment to disable the polling thread — e.g. if you have set up
+#                          # a HA automation to call fulloch.speak on calendar events instead,
+#                          # or if you don't want voice feedback for reminders.
 
 # =============================================================================
 # Always-Available Tools

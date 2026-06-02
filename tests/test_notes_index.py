@@ -212,8 +212,9 @@ class TestWriteHook:
     """Verify the notes.py write tools trigger _after_write → indexing."""
 
     def test_write_note_indexes_immediately(self, stub_index, monkeypatch, notes_dir):
-        # Patch the singleton getter so notes.py uses our stub
-        monkeypatch.setattr(notes, "_get_index", lambda: stub_index)
+        # _after_write runs in a background thread; patch it to run synchronously
+        # so the assertion doesn't race the thread.
+        monkeypatch.setattr(notes, "_after_write", lambda path: stub_index.index_file(path))
         notes.write_note("Heating", "boiler is a Vaillant ecoTEC")
         files = {c.file for c in stub_index._chunks}
         assert "heating.md" in files

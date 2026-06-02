@@ -15,6 +15,15 @@ from .tool_registry import tool
 active_timers: Dict[str, threading.Timer] = {}
 beep_manager = BeepManager()
 
+# Injected by Assistant._load_models so timers with a message can speak
+# via speak_proactive instead of beeping.
+_speak_proactive = None
+
+
+def set_speak_callback(fn) -> None:
+    global _speak_proactive
+    _speak_proactive = fn
+
 
 # Word forms used by `get_current_time` below. The output emits dates and
 # times entirely in words so ASR round-trips it back to (near-)identical
@@ -96,27 +105,25 @@ def get_current_time(location: Optional[str] = None) -> str:
 @tool(
     name="start_countdown",
     description=(
-        "Start a kitchen-style timer. ONLY use when the user explicitly says "
-        "'timer' or 'alarm' AND gives a duration with units (seconds, minutes, "
-        "or hours), e.g. 'set a timer for 10 minutes'. Do NOT use for "
-        "'count to N', 'count down from N', or any conversational counting."
+        "Start a countdown timer for a DURATION from now (e.g. '10 minutes', "
+        "'30 seconds', '2 hours'). When it fires it beeps and speaks the reminder "
+        "message if provided. ONLY use when the user gives a relative duration "
+        "('in X minutes/seconds/hours'). Do NOT use for specific clock times "
+        "('at noon', 'at 12pm', 'at 3 o'clock') — use create_calendar_event instead."
     ),
     aliases=["timer", "countdown", "set_timer", "start_timer"]
 )
-def start_countdown(duration: str) -> str:
-    """
-    Start a countdown timer for the specified duration.
-    
+def start_countdown(duration: str, message: Optional[str] = None) -> str:
+    """Start a countdown timer for the specified duration.
+
     Args:
-        duration: Duration string like "ten minutes" or "two hours"
-        
-    Returns:
-        Confirmation message
+        duration: Duration string e.g. "ten minutes", "90 seconds", "2 hours".
+                  Bare numbers (e.g. "60") are treated as seconds.
+        message:  Optional reminder text spoken after the beeps fire.
     """
     def parse_duration(duration_str: str) -> int:
         duration_str = duration_str.lower()
-        
-        # Extract number words and convert to digits
+
         number_str = ""
         unit = ""
         for word in duration_str.split():
@@ -125,49 +132,48 @@ def start_countdown(duration: str) -> str:
                 number_str = str(val)
             except ValueError:
                 unit += word + " "
-        
+
         if not number_str:
-            # Try direct digit extraction
             numbers = re.findall(r'\d+', duration_str)
             if not numbers:
                 raise ValueError("No valid duration value found")
             number_str = numbers[0]
-            
-        value = int(number_str)
-        
-        if "hour" in unit:
-            seconds = value * 3600
-        elif "minute" in unit:
-            seconds = value * 60
-        elif "second" in unit:
-            seconds = value
-        else:
-            raise ValueError("Unknown duration unit")
-            
-        return seconds
 
-    def on_timer_complete(timer_id: str):
+        value = int(number_str)
+
+        if "hour" in unit:
+            return value * 3600
+        elif "minute" in unit:
+            return value * 60
+        elif "second" in unit or not unit.strip():
+            # Bare number (no unit) → seconds.
+            return value
+        else:
+            raise ValueError(f"Unknown duration unit: {unit.strip()!r}")
+
+    def on_timer_complete(timer_id: str, reminder: Optional[str]):
         active_timers.pop(timer_id, None)
-        # Three alarm beeps with a 1s gap so the user has time to react.
         for _ in range(3):
             beep_manager.play_beep(filename="alarm.wav")
             time.sleep(1)
+        if reminder and _speak_proactive:
+            try:
+                _speak_proactive(reminder)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Timer speak failed: {e}")
 
     try:
         seconds = parse_duration(duration)
         timer_id = f"timer_{len(active_timers) + 1}"
-        
-        # `start_time` is monkey-patched on so `get_timer_status` can compute
-        # remaining = timer.interval - (now - start_time).
-        timer = threading.Timer(seconds, on_timer_complete, args=[timer_id])
+
+        timer = threading.Timer(seconds, on_timer_complete, args=[timer_id, message])
         timer.daemon = True
         timer.start_time = time.time()
         timer.start()
-        
-        # Store timer reference
+
         active_timers[timer_id] = timer
-        
-        # Format response message
+
         if seconds >= 3600:
             hours = seconds // 3600
             return f"Timer started for {hours} {'hour' if hours == 1 else 'hours'}"
@@ -176,7 +182,7 @@ def start_countdown(duration: str) -> str:
             return f"Timer started for {minutes} {'minute' if minutes == 1 else 'minutes'}"
         else:
             return f"Timer started for {seconds} {'second' if seconds == 1 else 'seconds'}"
-            
+
     except ValueError as e:
         return f"Error: {str(e)}"
 

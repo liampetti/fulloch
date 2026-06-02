@@ -28,7 +28,7 @@ def test_play_song_picks_playlist_when_playlists_match():
          patch("tools.home_assistant._call_service_with_response") as search, \
          patch("tools.home_assistant._call_service") as play:
         search.side_effect = [
-            {"result": {"playlists": [{"uri": "spotify:playlist:abc", "name": "Calm Evening"}]}},
+            {"result": {"items": [{"uri": "spotify:playlist:abc", "name": "Calm Evening"}]}},
         ]
         from tools.home_assistant import play_song
         play_song("calm evening")
@@ -50,8 +50,8 @@ def test_play_song_falls_through_to_track_when_no_playlists():
          patch("tools.home_assistant._call_service_with_response") as search, \
          patch("tools.home_assistant._call_service") as play:
         search.side_effect = [
-            {"result": {"playlists": []}},
-            {"result": {"tracks": [{"uri": "spotify:track:xyz", "name": "Wagon Wheel"}]}},
+            {"result": {"items": []}},
+            {"result": {"items": [{"uri": "spotify:track:xyz", "name": "Wagon Wheel"}]}},
         ]
         from tools.home_assistant import play_song
         play_song("wagon wheel")
@@ -62,20 +62,20 @@ def test_play_song_falls_through_to_track_when_no_playlists():
         assert play.call_args.args[3]["media_content_type"] == "music"
 
 
-def test_play_song_polite_failure_when_no_results():
-    """No playlists and no tracks → polite failure, no play_media call."""
+def test_play_song_generic_fallback_when_no_results():
+    """No SpotifyPlus results → generic media_player.play_media fallback."""
     with patch("tools.home_assistant.SPOTIFY_ENTITY", "media_player.spotify"), \
          patch("tools.home_assistant._resolve_entity", return_value="media_player.spotify"), \
          patch("tools.home_assistant._call_service_with_response") as search, \
          patch("tools.home_assistant._call_service") as play:
         search.side_effect = [
-            {"result": {"playlists": []}},
-            {"result": {"tracks": []}},
+            {"result": {"items": []}},
+            {"result": {"items": []}},
         ]
         from tools.home_assistant import play_song
-        result = play_song("nothing matches this")
-        play.assert_not_called()
-        assert "couldn't" in result.lower() or "no" in result.lower()
+        play_song("nothing matches this")
+        play.assert_called_once()
+        assert play.call_args.args[3]["media_content_id"] == "spotify:search:nothing matches this"
 
 
 def test_play_song_returns_friendly_error_when_spotify_entity_unset():

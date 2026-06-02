@@ -272,69 +272,10 @@ class TestPrefixOptionalBargeIn:
         assert a._check_barge_in("morgan stop") is True            # barge: prefix optional
 
 
-class TestBargeQuietRegex:
-    """`_BARGE_QUIET_RE` only matches "silence the assistant" phrases —
-    not music-control phrases like 'stop the music'.
-    """
-
-    @pytest.fixture
-    def regex(self):
-        from core.assistant import _BARGE_QUIET_RE
-        return _BARGE_QUIET_RE
-
-    @pytest.mark.parametrize("phrase", [
-        "stop",
-        "stop talking",
-        "stop speaking",
-        "stop it",
-        "stop please",
-        "stop now",
-        "please stop",
-        "ok stop",
-        "okay stop talking",
-        "just stop",
-        "be quiet",
-        "be quiet please",
-        "quiet",
-        "quiet please",
-        "shut up",
-        "hush",
-        "silence",
-        "enough",
-        "that's enough",
-        "that is enough",
-        "stop.",
-        "stop talking.",
-    ])
-    def test_quiet_phrases_match(self, regex, phrase):
-        assert regex.match(phrase) is not None, f"{phrase!r} should match"
-
-    @pytest.mark.parametrize("phrase", [
-        "stop the music",
-        "stop the song",
-        "stop playing",
-        "stop the timer",
-        "stop the alarm",
-        "pause",
-        "pause the music",
-        "halt",
-        "skip",
-        "resume",
-        "what time is it",
-        "play some jazz",
-        "turn off the lights",
-        "stop reading the news",
-    ])
-    def test_non_quiet_phrases_fall_through(self, regex, phrase):
-        assert regex.match(phrase) is None, f"{phrase!r} should NOT match"
-
-
 class TestPromptStripCharset:
     """The post-wakeword strip must peel off leading/trailing punctuation
-    (notably "!"/"?") so a barge-in "Hey Frasier! Stop." reduces to "stop"
-    and matches `_BARGE_QUIET_RE` — otherwise the leading "!" defeats the
-    barge-quiet check and the utterance gets dispatched to the agent, which
-    then talks again instead of going silent.
+    (notably "!"/"?") so a barge-in like "Hey Atticus! Stop." reduces to
+    "stop" before being dispatched to the agent.
     """
 
     @pytest.fixture
@@ -352,7 +293,3 @@ class TestPromptStripCharset:
     def test_strip_yields_bare_command(self, strip_chars, residue, expected):
         assert residue.strip(strip_chars) == expected
 
-    def test_stripped_barge_quiet_matches(self, strip_chars):
-        from core.assistant import _BARGE_QUIET_RE
-        # The exact failure from the debug log: wakeword stripped to "! stop".
-        assert _BARGE_QUIET_RE.match("! stop".strip(strip_chars)) is not None

@@ -127,21 +127,10 @@ class ToolRegistry:
 
     def describe_tools(self) -> str:
         """Render the registered tools as a human-readable block for the intent prompt."""
-        lines = []
-        for schema in self._schemas.values():
-            line = f"- {schema.name}: {schema.description}"
-            if schema.params:
-                parts = []
-                for p in schema.params:
-                    s = p.name
-                    if not p.required:
-                        s += " (optional)"
-                        if p.default is not None:
-                            s += f" (default: {p.default})"
-                    parts.append(s)
-                line += f" - Parameters: {', '.join(parts)}"
-            lines.append(line)
-        return "\n".join(lines)
+        return "\n".join(
+            f"- {schema.name}: {schema.description}"
+            for schema in self._schemas.values()
+        )
 
 
 tool_registry = ToolRegistry()

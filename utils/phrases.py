@@ -70,6 +70,15 @@ THINKING_STALL_PHRASES = [
     "Just a little more thought needed.",
 ]
 
+# Prefix phrases for calendar reminders spoken by the poll thread.
+# The event summary is appended after a pause dash.
+REMINDER_PREFIX_PHRASES = [
+    "Just a reminder —",
+    "Heads up —",
+    "Quick reminder —",
+    "Don't forget —",
+]
+
 # Topics for the startup greeting's "surprising fact" — rotated so the SLM
 # isn't asked the same open-ended question every launch. 
 # Specificity is increased to prevent modal collapse to common trivia.

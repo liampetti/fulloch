@@ -54,9 +54,28 @@
   Output:
   {"actions": [{"intent": "get_entity_state", "args": ["dishwasher"]}]}
 
+- User: "What time did the downstairs lights turn off last night"
+  Output:
+  {"actions": [{"intent": "get_entity_history", "args": ["downstairs lights", "2026-06-02"]}]}
+
+- Conversation context:
+    User: "Turn on the kitchen lights"
+    Assistant: "{\"actions\": [{\"intent\": \"turn_on\", \"args\": [\"kitchen lights\"]}]}"
+  User: "What did I just ask you to do?"
+  Output:
+  {"reply": "You asked me to turn on the kitchen lights."}
+
+- User: "What did I ask you yesterday afternoon?"
+  Output:
+  {"actions": [{"intent": "get_entity_history", "args": ["sensor.fulloch_last_utterance", "2026-06-02T12:00:00", "2026-06-02T18:00:00"]}]}
+
 - User: "What's the weather forecast"
   Output:
   {"actions": [{"intent": "get_weather_forecast", "args": []}]}
+
+- User: "What's the weather on Thursday"
+  Output:
+  {"actions": [{"intent": "get_weather_forecast", "args": ["2026-06-05", 1]}]}
 
 - User: "What's on today"
   Output:
@@ -183,10 +202,6 @@
 - User: "Remind me to turn off the stove in 10 minutes"
   Output:
   {"actions": [{"intent": "start_countdown", "args": ["10 minutes", "Turn off the stove"]}]}
-
-- User: "Remind me in 2 hours to take my medication"
-  Output:
-  {"actions": [{"intent": "start_countdown", "args": ["2 hours", "Take your medication"]}]}
 
 - User: "Remind me to have lunch at noon today"
   Output:

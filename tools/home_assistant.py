@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import time
+from collections import Counter
 from typing import Optional
 
 import requests
@@ -1361,18 +1362,99 @@ def _format_day(label: str, day: dict, unit: str) -> str:
     return " ".join(bits)
 
 
+def _weather_history_summary(entity_id: str, start: _dt.date, days: int, unit: str) -> str:
+    """Query HA state history for a weather entity and summarise past conditions."""
+    start_dt = _dt.datetime(start.year, start.month, start.day, 0, 0, 0).astimezone()
+    end_date = start + _dt.timedelta(days=days)
+    end_dt = _dt.datetime(end_date.year, end_date.month, end_date.day, 0, 0, 0).astimezone()
+    now_dt = _dt.datetime.now().astimezone()
+    if end_dt > now_dt:
+        end_dt = now_dt
+    try:
+        resp = requests.get(
+            f"{HA_URL}/api/history/period/{start_dt.isoformat()}",
+            headers=_get_headers(),
+            params={"end_time": end_dt.isoformat(), "filter_entity_id": entity_id},
+            timeout=TIMEOUT,
+        )
+        resp.raise_for_status()
+        hist = (resp.json() or [[]])[0]
+    except Exception as e:
+        logger.warning(f"HA weather history for {entity_id} failed: {e}")
+        return f"Reactive question: Could not fetch weather history for {entity_id!r}. Tell the user there was an error."
+
+    if not hist:
+        return f"No weather history recorded for {_friendly_for(entity_id)} on {start}."
+
+    today = _dt.date.today()
+    yesterday = today - _dt.timedelta(days=1)
+    daily: dict = {}
+    for s in hist:
+        ts_str = s.get("last_changed") or s.get("last_updated") or ""
+        try:
+            ts = _dt.datetime.fromisoformat(ts_str).astimezone()
+            day = ts.date()
+        except Exception:
+            continue
+        entry = daily.setdefault(day, {"conditions": [], "temps": []})
+        cond = (s.get("state") or "").replace("-", " ").strip()
+        if cond and cond not in ("unavailable", "unknown"):
+            entry["conditions"].append(cond)
+        temp = (s.get("attributes") or {}).get("temperature")
+        if temp is not None:
+            entry["temps"].append(float(temp))
+
+    if not daily:
+        return f"No usable weather data found for {start}."
+
+    parts = [f"Weather history for {_friendly_for(entity_id).replace('forecast', '').strip()}"]
+    for day in sorted(daily):
+        data = daily[day]
+        label = "Today" if day == today else "Yesterday" if day == yesterday else day.strftime("%A")
+        cond = Counter(data["conditions"]).most_common(1)[0][0] if data["conditions"] else "unknown"
+        bits = [f"{label} {cond}"]
+        if data["temps"]:
+            lo, hi = round(min(data["temps"])), round(max(data["temps"]))
+            bits.append(f"{lo} to {hi} {unit}" if lo != hi else f"{lo} {unit}")
+        parts.append(" ".join(bits))
+    return ". ".join(parts) + "."
+
+
 @tool(
     name="get_weather_forecast",
-    description="Get the weather forecast for today and tomorrow",
+    description=(
+        "Get the weather forecast from Home Assistant. Always use this for weather — never search the web. "
+        "start_date: ISO date (YYYY-MM-DD) of the first day to show; omit for today. "
+        "days: how many consecutive days to return (1–7, default 2). "
+        "Use the current date from the system prompt to compute exact dates. "
+        "Examples: no-arg = today+tomorrow; start_date=next Saturday + days=2 = weekend only; "
+        "start_date=specific day + days=1 = that day only."
+    ),
     aliases=["weather", "forecast", "get_weather"],
 )
-def get_weather_forecast(location: Optional[str] = None) -> str:
-    """Speak current conditions plus the next day or two from a HA weather entity.
+def get_weather_forecast(
+    start_date: Optional[str] = None,
+    days: int = 2,
+    location: Optional[str] = None,
+) -> str:
+    """Return N days of forecast beginning from start_date (default today).
 
     Args:
+        start_date: First date to include, ISO format (YYYY-MM-DD). Defaults to today.
+        days: Number of consecutive days to return (1–7, default 2).
         location: Optional weather entity name. Defaults to the first
             `weather.*` entity in HA (or `weather.home` if none found).
     """
+    days = max(1, min(days, 7))
+    today = _dt.date.today()
+    if start_date:
+        try:
+            start = _dt.date.fromisoformat(start_date)
+        except ValueError:
+            start = today
+    else:
+        start = today
+
     if not HA_TOKEN:
         return "Home Assistant isn't set up."
 
@@ -1384,8 +1466,6 @@ def get_weather_forecast(location: Optional[str] = None) -> str:
 
     state = _get_state(entity_id)
     if state is None:
-        # Route through the agent replan loop so the next call can compose a
-        # user-facing reply instead of speaking a dead-end "Sorry" line.
         return (
             f"Reactive question: Weather entity {entity_id!r} not found in "
             f"Home Assistant. Tell the user which entity to configure, or "
@@ -1394,14 +1474,19 @@ def get_weather_forecast(location: Optional[str] = None) -> str:
 
     attrs = state.get("attributes", {})
     unit = _temperature_unit(attrs)
+
+    if start < today:
+        return _weather_history_summary(entity_id, start, days, unit)
+
     current_cond = (state.get("state") or "unknown").replace("-", " ")
     current_temp = attrs.get("temperature")
 
     parts = [f"Forecast for {_friendly_for(entity_id).replace('forecast', '')}"]
-    if current_temp is not None:
-        parts.append(f"currently {current_cond} at {round(current_temp)} {unit}")
-    else:
-        parts.append(f"currently {current_cond}")
+    if start == today:
+        if current_temp is not None:
+            parts.append(f"currently {current_cond} at {round(current_temp)} {unit}")
+        else:
+            parts.append(f"currently {current_cond}")
 
     try:
         response = requests.post(
@@ -1417,7 +1502,151 @@ def get_weather_forecast(location: Optional[str] = None) -> str:
         logger.warning(f"HA weather forecast for {entity_id} failed: {e}")
         forecast = []
 
-    for label, day in zip(("Today", "Tomorrow"), forecast[:2]):
+    count = 0
+    for day in forecast:
+        raw_dt = day.get("datetime") or ""
+        try:
+            day_date = _dt.date.fromisoformat(raw_dt[:10])
+        except ValueError:
+            continue
+        if day_date < start:
+            continue
+        if count >= days:
+            break
+        if day_date == today:
+            label = "Today"
+        elif day_date == today + _dt.timedelta(days=1):
+            label = "Tomorrow"
+        else:
+            label = day_date.strftime("%A")
         parts.append(_format_day(label, day, unit))
+        count += 1
 
     return ". ".join(parts) + "."
+
+
+@tool(
+    name="get_entity_history",
+    description=(
+        "Query Home Assistant history to see when an entity changed state. "
+        "Works for any entity: lights (on/off times), temperature sensors, switches, locks, etc. "
+        "Also works for Fulloch's own conversation sensors — use entity 'sensor.fulloch_last_utterance' "
+        "to see what was said and 'sensor.fulloch_last_response' to see what Fulloch replied. "
+        "entity: friendly name or entity_id. "
+        "start: ISO date ('2026-06-02') for a full-day window, or ISO datetime ('2026-06-02T12:00:00') for a specific time. "
+        "end: optional end of window (ISO date or datetime); defaults to end of day for date-only start, "
+        "or start+2h for datetime start."
+    ),
+    aliases=["entity_history", "check_history", "light_history"],
+)
+def get_entity_history(entity: str, start: str, end: Optional[str] = None) -> str:
+    """Return state-change history for a HA entity over a time window.
+
+    Args:
+        entity: Friendly name or entity_id.
+        start: Start of the time window (ISO date or datetime).
+        end: End of the time window (ISO date or datetime). Defaults to end of day
+            for a date-only start, or start+2h for a datetime start.
+    """
+    if not HA_TOKEN:
+        return "Home Assistant isn't set up."
+
+    entity_id = _resolve_entity(entity)
+    # If resolution failed to produce a valid entity_id, try domain-specific fallbacks
+    if "." not in entity_id:
+        weather_terms = {"weather", "forecast", "temperature", "climate", "outdoor", "outside"}
+        if any(t in entity.lower() for t in weather_terms):
+            entity_id = _DEFAULT_WEATHER_ENTITY
+        else:
+            return (
+                f"Reactive question: Could not resolve '{entity}' to a Home Assistant entity. "
+                f"Ask the user for the exact entity ID (e.g. 'light.kitchen', 'sensor.outdoor_temperature')."
+            )
+
+    try:
+        if "T" in start or " " in start:
+            start_dt = _dt.datetime.fromisoformat(start)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.astimezone()
+            default_end_dt = start_dt + _dt.timedelta(hours=2)
+            date_only_start = False
+        else:
+            d = _dt.date.fromisoformat(start)
+            start_dt = _dt.datetime(d.year, d.month, d.day, 0, 0, 0).astimezone()
+            default_end_dt = start_dt + _dt.timedelta(days=1) - _dt.timedelta(seconds=1)
+            date_only_start = True
+    except ValueError:
+        return f"Reactive question: Could not parse start '{start}'. Ask the user to clarify the date."
+
+    if end:
+        try:
+            if "T" in end or " " in end:
+                end_dt = _dt.datetime.fromisoformat(end)
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.astimezone()
+            else:
+                d = _dt.date.fromisoformat(end)
+                end_dt = _dt.datetime(d.year, d.month, d.day, 23, 59, 59).astimezone()
+        except ValueError:
+            end_dt = default_end_dt
+    else:
+        end_dt = default_end_dt
+
+    now = _dt.datetime.now().astimezone()
+    if end_dt > now:
+        end_dt = now
+
+    try:
+        response = requests.get(
+            f"{HA_URL}/api/history/period/{start_dt.isoformat()}",
+            headers=_get_headers(),
+            params={
+                "end_time": end_dt.isoformat(),
+                "filter_entity_id": entity_id,
+                "minimal_response": "true",
+                "no_attributes": "true",
+            },
+            timeout=TIMEOUT,
+        )
+        response.raise_for_status()
+        history = response.json()
+    except Exception as e:
+        logger.warning(f"HA history query for {entity_id} failed: {e}")
+        return f"Reactive question: Could not fetch history for '{entity}'. Tell the user there was an error."
+
+    if not history or not history[0]:
+        window = f"{start}" + (f" to {end}" if end else "")
+        return f"No recorded state changes for {_friendly_for(entity_id)} on {window}."
+
+    states = history[0]
+    MAX_RESULTS = 15
+    truncated = len(states) > MAX_RESULTS
+    if truncated:
+        states = states[-MAX_RESULTS:]
+
+    friendly = _friendly_for(entity_id)
+    lines = [f"History for {friendly}"]
+    today = _dt.date.today()
+    yesterday = today - _dt.timedelta(days=1)
+
+    for s in states:
+        ts_str = s.get("last_changed") or s.get("last_updated") or ""
+        state_val = s.get("state", "unknown")
+        try:
+            ts = _dt.datetime.fromisoformat(ts_str).astimezone()
+            ts_date = ts.date()
+            if ts_date == today:
+                day_label = "today"
+            elif ts_date == yesterday:
+                day_label = "yesterday"
+            else:
+                day_label = ts.strftime("%A")
+            time_label = ts.strftime("%I:%M %p").lstrip("0")
+            lines.append(f"{day_label} at {time_label}: {state_val}")
+        except Exception:
+            lines.append(f"{ts_str}: {state_val}")
+
+    if truncated:
+        lines.append(f"showing the last {MAX_RESULTS} changes only")
+
+    return ". ".join(lines) + "."

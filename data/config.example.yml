@@ -5,7 +5,7 @@
 # =============================================================================
 general:
   wakeword: "hey atticus"       # Activation phrase (case-insensitive; multi-word ok; s↔z tolerant), also acts as fallback if regex option is enabled and fails
-  wakeword_pattern: '\b(?:hey|hay|hi)\W+[ao][dt]{1,2}i?c\W*u[sz]\b' # Optional regex override (compiled case-insensitive); tolerates ASR variants: "attic us" split, "Oticus" (o+t), "Adicus" (a+d)
+  wakeword_pattern: '\b(?:hey|hay|hi)\W+[ao][dtl]{1,2}i?c\W*u[sz]\b' # Optional regex override (compiled case-insensitive); tolerates ASR variants: "attic us" split, "Oticus" (o+t), "Adicus" (a+d), "Allicus" (a+ll)
   voice_clone: "atticus"         # data/voices/<name>.{wav,txt} reference pair
   barge_in: "wakeword"             # "off" (half-duplex) | "wakeword" (needs AEC)
   follow_up_time: "5s"        # "0s" | "<N>s" wakeword-free window after TTS, allows for conversational discussions in quieter environments

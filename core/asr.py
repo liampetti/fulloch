@@ -26,6 +26,10 @@ class QwenASRPipelineWrapper:
         # transcriber thread to seed a turn's STT stat. Measured here (not at
         # the consumer loop) so it excludes idle waiting on the audio queue.
         self.last_transcribe_seconds = None
+        # Optional system-prompt context injected into every transcribe() call.
+        # Biases the decoder toward named terms (wakeword, domain vocab).
+        # Empty string = no effect. Set once at model load; never mutated after.
+        self.context: str = ""
 
     def __call__(
         self,
@@ -46,7 +50,7 @@ class QwenASRPipelineWrapper:
                 elif not isinstance(chunk, np.ndarray):
                     chunk = np.array(chunk)
                 _t0 = time.monotonic()
-                results = self.model.transcribe(audio=[(chunk, SAMPLE_RATE)], return_time_stamps=False, **lang_kwargs)
+                results = self.model.transcribe(audio=[(chunk, SAMPLE_RATE)], context=self.context, return_time_stamps=False, **lang_kwargs)
                 self.last_transcribe_seconds = time.monotonic() - _t0
                 for res in (results if isinstance(results, list) else [results]):
                     yield {"text": getattr(res, "text", str(res))}
@@ -55,7 +59,7 @@ class QwenASRPipelineWrapper:
         # Non-streaming path: single array in, list of dicts out.
         if not isinstance(audio_input, np.ndarray):
             audio_input = np.array(audio_input)
-        results = self.model.transcribe(audio=[(audio_input, SAMPLE_RATE)], **lang_kwargs)
+        results = self.model.transcribe(audio=[(audio_input, SAMPLE_RATE)], context=self.context, **lang_kwargs)
         results = results if isinstance(results, list) else [results]
         return [{"text": getattr(r, "text", str(r))} for r in results]
 

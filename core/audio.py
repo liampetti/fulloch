@@ -14,6 +14,7 @@ from typing import Optional
 
 import numpy as np
 import sounddevice as sd
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,13 @@ def is_silent(chunk: np.ndarray, threshold: float = SILENCE_THRESHOLD) -> bool:
     return rms < threshold
 
 
+def _contains_speech(buf: np.ndarray, vad_model, get_timestamps, sample_rate: int) -> bool:
+    """Return True if Silero VAD detects at least one speech frame in `buf`."""
+    tensor = torch.from_numpy(buf).float()
+    timestamps = get_timestamps(tensor, vad_model, sampling_rate=sample_rate)
+    return len(timestamps) > 0
+
+
 class AudioCapture:
     """Mic capture with RMS silence detection.
 
@@ -77,12 +85,24 @@ class AudioCapture:
         tts_overlap_ms: int = TTS_OVERLAP_MS,
         tts_min_utterance_ms: int = TTS_MIN_UTTERANCE_MS,
         input_device: Optional[str] = None,
+        use_vad: bool = True,
     ):
         self.sample_rate = sample_rate
         self.chunk_duration_ms = chunk_duration_ms
         self.silence_threshold = silence_threshold
         self.tts_silence_threshold = tts_silence_threshold
         self.input_device = input_device
+
+        self._vad_model = None
+        self._vad_get_timestamps = None
+        if use_vad:
+            try:
+                from silero_vad import load_silero_vad, get_speech_timestamps
+                self._vad_model = load_silero_vad()
+                self._vad_get_timestamps = get_speech_timestamps
+                logger.info("Silero VAD loaded — non-speech buffers will be dropped")
+            except Exception as e:
+                logger.warning(f"Silero VAD requested but failed to load ({e}); running without VAD")
 
         # Derived values
         self.frames_per_chunk = int(sample_rate * chunk_duration_ms / 1000)
@@ -210,13 +230,18 @@ class AudioCapture:
                     buf = np.concatenate(list(self.audio_buffer), axis=0)
 
                     if buf.size >= min_samples:
-                        onset = (
-                            speech_onset_t if speech_onset_t is not None
-                            else time.monotonic()
-                        )
-                        self.audio_queue.put((buf, onset))
-                        secs = buf.size / self.sample_rate
-                        logger.debug(f"Enqueued {secs:.2f}s for transcription")
+                        if self._vad_model is not None and not _contains_speech(
+                            buf, self._vad_model, self._vad_get_timestamps, self.sample_rate
+                        ):
+                            logger.debug("VAD: no speech detected — buffer dropped")
+                        else:
+                            onset = (
+                                speech_onset_t if speech_onset_t is not None
+                                else time.monotonic()
+                            )
+                            self.audio_queue.put((buf, onset))
+                            secs = buf.size / self.sample_rate
+                            logger.debug(f"Enqueued {secs:.2f}s for transcription")
 
                     if tts_active and hit_max and not hit_silence:
                         # Force-flush mid-stream — retain the last ~1s as the

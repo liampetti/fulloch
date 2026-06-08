@@ -12,6 +12,7 @@ python-dotenv==1.2.1
 # Audio processing
 sounddevice>=0.5.0
 soundfile>=0.13.0
+silero-vad>=5.1
 
 # AI and ML
 transformers==4.57.6

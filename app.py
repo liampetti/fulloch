@@ -119,6 +119,9 @@ FOLLOW_UP_TIME = _GENERAL.get('follow_up_time', '0s')
 INPUT_DEVICE = _GENERAL.get('input_device', None)
 OUTPUT_DEVICE = _GENERAL.get('output_device', None)
 ASR_LANGUAGE = _GENERAL.get('asr_language', None)
+ASR_CONTEXT_HINT = bool(_GENERAL.get('asr_context_hint', True))
+ASR_CONTEXT_TERMS = _GENERAL.get('asr_context_terms', []) or []
+USE_VAD = bool(_GENERAL.get('use_vad', True))
 DASHBOARD_PORT = _GENERAL.get('dashboard_port', None)
 DASHBOARD_HOST = _GENERAL.get('dashboard_host', '127.0.0.1')
 
@@ -134,6 +137,9 @@ def main():
         input_device=INPUT_DEVICE,
         output_device=OUTPUT_DEVICE,
         asr_language=ASR_LANGUAGE,
+        asr_context_hint=ASR_CONTEXT_HINT,
+        asr_context_terms=ASR_CONTEXT_TERMS,
+        use_vad=USE_VAD,
     )
     if DASHBOARD_PORT:
         try:

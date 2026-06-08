@@ -148,6 +148,10 @@ general:
   follow_up_time: "5s"            # wakeword-free reply window after TTS ends
   voice_clone: "atticus"          # data/voices/<name>.{wav,txt}
   dashboard_port: 8765            # web chat UI; remove to disable
+  use_vad: true                   # drop non-speech buffers (coughs, taps) before ASR
+  asr_context_hint: true          # bias ASR decoder toward wakeword spelling
+  asr_context_terms:              # optional extra terms to bias (max 10)
+    - "phoebe bridgers"
 
 home_assistant:
   url: "http://192.168.1.50:8123"

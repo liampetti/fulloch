@@ -49,15 +49,26 @@ PRE_THINKING_STALL_PHRASES = [
 
 # Short acknowledgement spoken in parallel with the first SLM call of an
 # agent-path turn so the user knows their wakeword + utterance were heard.
-# Skipped on regex fast-path turns (the tool reply itself is fast enough)
-# and on replan iterations (the existing thinking/web-summary stalls cover
-# those). Pre-rendered at warmup.
+# Skipped on regex fast-path turns (the tool reply itself is fast enough).
+# Pre-rendered at warmup.
 ACK_PHRASES = [
     "Got it.",
     "Okay.",
     "On it.",
     "Sure thing.",
     "Right.",
+]
+
+# Played before each replan SLM iteration (2nd, 3rd agent call in a multi-step
+# turn) so the gap isn't silent and the user knows the agent is mid-process —
+# not just re-acknowledging. Pre-rendered at warmup.
+REPLAN_STALL_PHRASES = [
+    "Working through it.",
+    "Almost there.",
+    "Let me piece that together.",
+    "One more moment.",
+    "Bear with me.",
+    "Putting that together.",
 ]
 
 # Played by `ThinkingWatchdog` at given intervals while a thinking-mode

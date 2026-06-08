@@ -61,7 +61,6 @@ data/token.json
 data/notes
 data/notes_index.json
 data/notes_index.npy
-push_to_pub_repo.sh
 
 # =============================================================================
 # Local Data and Models

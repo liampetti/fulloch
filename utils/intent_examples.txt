@@ -93,9 +93,21 @@
   Output:
   {"actions": [{"intent": "external_information", "args": ["who is the current US president"]}]}
 
+- User: "What's the latest news?"
+  Output:
+  {"actions": [{"intent": "external_information", "args": ["latest news today"]}]}
+
 - User: "What's the capital of France"
   Output:
   {"reply": "Paris is the capital of France."}
+
+- User: "What's the distance to the moon?"
+  Output:
+  {"reply": "The Moon averages about 384,400 kilometres from Earth, ranging from around 357,000 km at its closest to 406,000 km at its furthest."}
+
+- User: "What's the speed of light?"
+  Output:
+  {"reply": "The speed of light in a vacuum is approximately 299,792 kilometres per second."}
 
 - User: "What's two plus two"
   Output:
@@ -178,10 +190,25 @@
   {"actions": [{"intent": "append_to_today", "args": ["the plumber came and fixed the leak"]}]}
 
 - Conversation context:
-    User: "Summarise today's news and save it to my notes"
-    Tool — external_information: "Reactive question: Today's top stories include..."
+    User: "Summarise today's news and save it"
+    Tool — external_information: "Reactive question: Top stories: inflation hits 3.2%; PM announces climate fund; Socceroos qualify for World Cup."
   Output:
-  {"actions": [{"intent": "append_to_today", "args": ["News summary: Today's top stories include..."]}]}
+  {"actions": [{"intent": "append_to_today", "args": ["News summary: Inflation hits 3.2%, PM announces a new climate fund, and the Socceroos have qualified for the World Cup."]}]}
+
+- Conversation context:
+    User: "What's today's news?"
+    Tool — external_information: "Reactive question: Top stories: inflation hits 3.2%; PM announces climate fund."
+    Tool — append_to_today: "Added to today's note."
+  User: "read me back that news summary"
+  Output:
+  {"actions": [{"intent": "search_notes_semantic", "args": ["today news summary"]}]}
+
+- Conversation context:
+    User: "What's today's news?"
+    Tool — external_information: "Reactive question: Top stories: ..."
+  User: "read me back what you just said"
+  Output:
+  {"actions": [{"intent": "search_notes_semantic", "args": ["today news summary"]}]}
 
 - User: "What notes do I have?"
   Output:

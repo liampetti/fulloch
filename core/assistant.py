@@ -73,6 +73,16 @@ _ASR_NOISE_TOKENS: frozenset[str] = frozenset({
     "cough"
 })
 
+# Bare stop commands that interrupt an active turn without any wakeword.
+# Kept separate from _barge_re so the idle wakeword detector stays strict.
+# These fire in _check_barge_in only (already gated by _turn_active), so
+# the false-positive risk is low; _is_self_echo still runs first to suppress
+# "stop" spoken by the assistant's own TTS.
+_BARGE_STOP_RE = re.compile(
+    r"\b(?:stop|halt|cancel|pause|quiet|enough)\b",
+    re.IGNORECASE,
+)
+
 
 def _build_wakeword_pattern(wakeword: str) -> str:
     """Compile a tolerant wakeword matcher pattern.
@@ -125,6 +135,7 @@ from utils.phrases import (
     NOTE_WRITE_STALL_PHRASES,
     PRE_THINKING_STALL_PHRASES,
     REMINDER_PREFIX_PHRASES,
+    REPLAN_STALL_PHRASES,
     STALL_PHRASES,
     THINKING_STALL_PHRASES,
     WEB_SEARCH_STALL_PHRASES,
@@ -142,7 +153,7 @@ THINKING_PARTIAL_TTL_S = 60.0
 HISTORY_MAX_MESSAGES = 50
 # Silence timeout — past this gap with no new turn, history is cleared so a
 # stale "you said earlier..." context can't bleed into a fresh conversation.
-CHAT_SESSION_TIMEOUT_S = 90.0
+CHAT_SESSION_TIMEOUT_S = 600.0
 
 # Time window after a barge-in cancel during which incoming ASR results
 # are discarded. ASR inference is ~200ms on this GPU, so 500ms reliably
@@ -165,6 +176,9 @@ class Assistant:
         input_device: Optional[str] = None,
         output_device: Optional[str] = None,
         asr_language: Optional[str] = None,
+        asr_context_hint: bool = True,
+        asr_context_terms: list = None,
+        use_vad: bool = True,
     ):
         """
         Initialize the assistant.
@@ -215,10 +229,13 @@ class Assistant:
         )
         self.voice_clone = voice_clone
         self.asr_language = asr_language
+        self.asr_context_hint = asr_context_hint
+        self.asr_context_terms = asr_context_terms or []
+        self.use_vad = use_vad
         # Built in `_load_models()` once the TTS model is in memory.
         self.voice_clone_prompt = None
         self.output_device = output_device
-        self.audio_capture = AudioCapture(input_device=input_device)
+        self.audio_capture = AudioCapture(input_device=input_device, use_vad=use_vad)
         # Mic stays muted through model load and the opening greeting;
         # `_warm_and_announce`'s `finally` flips it on once warmup ends.
         self.audio_capture.transcribing = False
@@ -315,6 +332,18 @@ class Assistant:
         logger.info("Using Qwen ASR")
 
         self.asr_pipe = load_asr_model(language=self.asr_language)
+        if self.asr_context_hint:
+            _MAX_CONTEXT_TERMS = 10
+            extras = [t for t in self.asr_context_terms if t]
+            if len(extras) > _MAX_CONTEXT_TERMS:
+                logger.warning(
+                    f"asr_context_terms has {len(extras)} entries; only the first "
+                    f"{_MAX_CONTEXT_TERMS} will be used (more dilutes the bias)"
+                )
+                extras = extras[:_MAX_CONTEXT_TERMS]
+            terms = [self.wakeword] + extras
+            self.asr_pipe.context = "Technical terms: " + ", ".join(terms)
+            logger.info(f"ASR context hint enabled: {self.asr_pipe.context!r}")
         self.asr_stream_generator = stream_generator
 
         from .tts import (
@@ -342,6 +371,7 @@ class Assistant:
         self.pre_thinking_stall_cache: list = []
         self.thinking_stall_cache: list = []
         self.ack_cache: list = []
+        self.replan_stall_cache: list = []
 
         self.grammar, self.slm_model = load_slm()
         self.greeting_prompt = get_greeting_system_prompt()
@@ -407,6 +437,11 @@ class Assistant:
             self.ack_cache = [
                 self.synthesize(phrase, self.voice_clone_prompt)
                 for phrase in ACK_PHRASES
+            ]
+            logger.info("Caching replan stall phrases...")
+            self.replan_stall_cache = [
+                self.synthesize(phrase, self.voice_clone_prompt)
+                for phrase in REPLAN_STALL_PHRASES
             ]
 
             # Pre-load the BGE embedding model + restore the persisted notes
@@ -649,13 +684,15 @@ class Assistant:
         })
         self._trim_history()
 
-    def _play_random_ack(self, session: Optional[TtsSession] = None) -> None:
+    def _play_random_ack(self, session: Optional[TtsSession] = None, cache: Optional[list] = None) -> None:
         """Play one pre-rendered ack chunk. Safe no-op if the cache is empty
         (e.g. an early failure before `_warm_and_announce` populated it).
+        Pass `cache` to use an alternate phrase pool (e.g. replan_stall_cache).
         """
-        if not self.ack_cache:
+        c = cache if cache is not None else self.ack_cache
+        if not c:
             return
-        chunks, sr = random.choice(self.ack_cache)
+        chunks, sr = random.choice(c)
         try:
             self.play_chunks(chunks, sr, session=session or self.tts_session)
         except Exception:
@@ -776,6 +813,19 @@ class Assistant:
                                 on_slm_start()
                             except Exception:
                                 logger.exception("on_slm_start hook raised")
+                    else:
+                        # Replan iterations — play a "mid-process" phrase so
+                        # the SLM thinking time isn't silent. Uses the replan
+                        # cache ("Working through it.", "Almost there.", etc.)
+                        # rather than ACK_PHRASES so the user hears progress
+                        # rather than repeated acknowledgements.
+                        if session is None or not session.cancelled:
+                            threading.Thread(
+                                target=self._play_random_ack,
+                                args=(session or self.tts_session,),
+                                kwargs={"cache": self.replan_stall_cache},
+                                daemon=True,
+                            ).start()
                     logger.debug(f"Agent call (iter {iteration})")
                     emission_text = generate_slm(
                         self.slm_model,
@@ -899,6 +949,15 @@ class Assistant:
                         logger.debug("Summarising web search payload")
                         if session is not None and session.cancelled:
                             return ""
+                        # Summarise is a full SLM call (~2-3s). The web-search
+                        # stall covered the SearXNG round-trip; play a parallel
+                        # ack now so this gap isn't silent too.
+                        if session is None or not session.cancelled:
+                            threading.Thread(
+                                target=self._play_random_ack,
+                                args=(session or self.tts_session,),
+                                daemon=True,
+                            ).start()
                         result = self._summarise_search_result(result, cancel_check, stats=stats)
                         if session is not None and session.cancelled:
                             return ""
@@ -1139,6 +1198,15 @@ class Assistant:
                 ),
             )
             if not session.cancelled:
+                # Mic stays live during barge-in TTS, so the queue contains
+                # audio of our own voice captured while we were speaking.
+                # Flush it before opening the follow-up window — same treatment
+                # as a barge-in cancel — otherwise the tail chunk arrives with
+                # onset ≈ _last_turn_end (speech_onset_t was never set because
+                # AEC kept the residue below TTS_SILENCE_THRESHOLD) and falls
+                # inside the follow-up window as a spurious new turn.
+                self.audio_capture.flush()
+                self._drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
                 self._last_turn_end = time.monotonic()
         except Exception as e:
             logger.error(f"Turn error: {e}")
@@ -1206,7 +1274,10 @@ class Assistant:
             return False
         if self._is_self_echo(text_lower):
             return False
-        return self._barge_re.search(text_lower) is not None
+        return (
+            self._barge_re.search(text_lower) is not None
+            or _BARGE_STOP_RE.search(text_lower) is not None
+        )
 
     def _transcriber_thread(self):
         """ASR results → wakeword/intent/TTS. Owns model loading on first call."""

@@ -272,6 +272,78 @@ class TestPrefixOptionalBargeIn:
         assert a._check_barge_in("morgan stop") is True            # barge: prefix optional
 
 
+class TestBareStopBargeIn:
+    """Bare stop commands (no wakeword) must trigger barge-in.
+
+    _BARGE_STOP_RE fires independently of the name-based _barge_re so that
+    even when ASR mangles the wakeword into something unrecognisable (e.g.
+    "Aricus" / "Arica" instead of "Atticus"), a clearly-spoken "stop" in
+    the same utterance still interrupts the active turn.
+    """
+
+    @pytest.fixture
+    def atticus(self):
+        return _make_assistant(
+            wakeword="hey atticus",
+            wakeword_pattern=r"\b(?:hey|hay|hi)\W+[ao][dtl]{1,2}i?c\W*u[sz]\b",
+        )
+
+    # --- Should fire ---
+
+    def test_bare_stop_triggers_barge_in(self, atticus):
+        atticus._last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("stop") is True
+
+    def test_mangled_name_plus_stop_triggers_barge_in(self, atticus):
+        # Real-world failure: ASR transcribes "Atticus" as "Aricus" or
+        # "Arica" at normal mic distance.  Name fails the barge_re, but
+        # "stop" must still fire via _BARGE_STOP_RE.
+        atticus._last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("aricus, stop") is True
+        assert atticus._check_barge_in("arica, stop") is True
+
+    def test_other_stop_words_trigger_barge_in(self, atticus):
+        atticus._last_spoken_text = "the model supports a range of modalities"
+        for word in ("halt", "cancel", "pause", "quiet", "enough"):
+            assert atticus._check_barge_in(word) is True, f"{word!r} should fire"
+
+    def test_stop_in_longer_utterance_triggers_barge_in(self, atticus):
+        atticus._last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("okay stop that") is True
+        assert atticus._check_barge_in("please cancel that") is True
+
+    # --- Should NOT fire ---
+
+    def test_stop_suppressed_when_tts_said_stop(self, atticus):
+        # If the assistant's TTS just said "stop", a bare "stop" transcript
+        # is likely AEC residue — _is_self_echo must catch it before
+        # _BARGE_STOP_RE has a chance to fire.
+        atticus._last_spoken_text = "i will stop the music right away"
+        assert atticus._check_barge_in("stop") is False
+
+    def test_stop_does_not_fire_when_turn_inactive(self, atticus):
+        atticus._turn_active = False
+        atticus._last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("stop") is False
+
+    def test_stop_does_not_fire_when_barge_in_off(self, atticus):
+        atticus.barge_in = "off"
+        atticus._last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("stop") is False
+
+    def test_word_boundary_not_triggered_by_stopped(self, atticus):
+        # "stopped" contains "stop" but _BARGE_STOP_RE requires \b on both
+        # sides, so inflected forms must not fire.
+        atticus._last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("i stopped the timer") is False
+        assert atticus._check_barge_in("that is unstoppable") is False
+
+    def test_word_boundary_not_triggered_by_paused(self, atticus):
+        atticus._last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("music is paused") is False
+        assert atticus._check_barge_in("it was cancelled yesterday") is False
+
+
 class TestPromptStripCharset:
     """The post-wakeword strip must peel off leading/trailing punctuation
     (notably "!"/"?") so a barge-in like "Hey Atticus! Stop." reduces to

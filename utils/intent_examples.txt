@@ -69,6 +69,44 @@
   Output:
   {"actions": [{"intent": "get_entity_history", "args": ["sensor.fulloch_last_utterance", "2026-06-02T12:00:00", "2026-06-02T18:00:00"]}]}
 
+- User: "What did we talk about yesterday afternoon?"
+  Output:
+  {"actions": [{"intent": "get_conversation_history", "args": ["2026-06-02T12:00:00", "2026-06-02T18:00:00"]}]}
+
+- Conversation context:
+    User: "What did we talk about around 3pm yesterday?"
+    Tool — get_conversation_history: "Reactive question: Below is the earlier conversation transcript... yesterday at 3:01 PM — You: who were the top three in the formula one at monaco. yesterday at 3:02 PM — You: and did hadjar get any penalties. yesterday at 3:02 PM — Fulloch: Antonelli won, Hamilton was second and Hadjar third; Hadjar avoided a penalty."
+  Output:
+  {"reply": "Around 3pm you were asking about the Formula 1 at Monaco — the top three finishers, and whether Hadjar picked up any penalties."}
+
+- User: "What's 15% of 340?"
+  Output:
+  {"actions": [{"intent": "calculate", "args": ["15% of 340"]}]}
+
+- User: "What's the square root of 144 times three?"
+  Output:
+  {"actions": [{"intent": "calculate", "args": ["sqrt(144) * 3"]}]}
+
+- User: "How many days until Christmas?"
+  Output:
+  {"actions": [{"intent": "days_between", "args": ["2026-06-10", "2026-12-25"]}]}
+
+- User: "What date is next Sunday?"
+  Output:
+  {"actions": [{"intent": "date_of", "args": ["Sunday", "next"]}]}
+
+- User: "When is this Thursday?"
+  Output:
+  {"actions": [{"intent": "date_of", "args": ["Thursday", "this"]}]}
+
+- User: "Convert 5 miles to kilometres"
+  Output:
+  {"actions": [{"intent": "convert_units", "args": [5, "miles", "kilometres"]}]}
+
+- User: "How many litres in 3 gallons?"
+  Output:
+  {"actions": [{"intent": "convert_units", "args": [3, "gallons", "litres"]}]}
+
 - User: "What's the weather forecast"
   Output:
   {"actions": [{"intent": "get_weather_forecast", "args": []}]}
@@ -96,6 +134,12 @@
 - User: "What's the latest news?"
   Output:
   {"actions": [{"intent": "external_information", "args": ["latest news today"]}]}
+
+- Conversation context:
+    User: "Search the news and summarise it for me"
+    Tool — external_information: "Reactive question: Top stories: inflation hits 3.2%; PM announces climate fund."
+  Output:
+  {"reply": "Inflation has hit 3.2%, and the PM has announced a new climate fund."}
 
 - User: "What's the capital of France"
   Output:
@@ -210,6 +254,14 @@
   Output:
   {"actions": [{"intent": "search_notes_semantic", "args": ["today news summary"]}]}
 
+- Conversation context:
+    User: "What's today's news?"
+    Tool — external_information: "Reactive question: A Red Flag Warning is in effect for gusty winds..."
+    Assistant: "There's a Red Flag Warning for gusty winds, and tension in the Strait of Hormuz."
+  User: "Where are the gusty winds happening?"
+  Output:
+  {"actions": [{"intent": "external_information", "args": ["where is the red flag warning for gusty winds in effect"]}]}
+
 - User: "What notes do I have?"
   Output:
   {"actions": [{"intent": "list_notes", "args": []}]}
@@ -225,6 +277,18 @@
 - User: "Get my Australia climate note"
   Output:
   {"actions": [{"intent": "read_note", "args": ["Australia climate"]}]}
+
+- User: "Read me back my notes from today"
+  Output:
+  {"actions": [{"intent": "read_today", "args": []}]}
+
+- User: "What did I log today?"
+  Output:
+  {"actions": [{"intent": "read_today", "args": []}]}
+
+- User: "Read me yesterday's note"
+  Output:
+  {"actions": [{"intent": "read_today", "args": ["2026-06-08"]}]}
 
 - User: "Remind me to turn off the stove in 10 minutes"
   Output:

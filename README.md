@@ -19,6 +19,7 @@ Fulloch sits on top of your existing setup as the conversational brain — it dr
 - **Agentic memory** — facts persist across restarts and build up over time
 - **Markdown notes** — read, write, append, and search `.md` files by voice; point it at your Obsidian vault
 - **Semantic search** — *"what did I write about the car service?"* via a local embedding model
+- **Conversation recall** — *"what did we talk about yesterday afternoon?"* — summarises past turns from Home Assistant history
 - **Web research** — live answers from a self-hosted search engine, summarised into a short spoken reply
 - **Smart-home control** — lights, climate, media, calendar, weather, scenes, and entity history via Home Assistant
 - **Music search & play** — *"play the Beatles"* via [SpotifyPlus](https://github.com/thlucas1/homeassistantcomponent_spotifyplus) (required for search-by-name; basic playback control works with the built-in Spotify integration)

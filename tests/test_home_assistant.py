@@ -125,8 +125,52 @@ def test_calendar_normalises_all_day_event():
 # ---------------------------------------------------------------------------
 
 def _patch_aliases(aliases: dict):
-    """Helper: patch the module-level _ENTITY_ALIASES with a fresh dict."""
-    return patch("tools.home_assistant._ENTITY_ALIASES", aliases)
+    """Helper: patch the module-level alias maps with a fresh dict.
+
+    Patches both the first-wins single map and the collision multimap (derived
+    one-entity-per-name) so resolution paths that consult either stay in sync.
+    """
+    multi = {k: [v] for k, v in aliases.items()}
+    return patch.multiple(
+        "tools.home_assistant",
+        _ENTITY_ALIASES=aliases,
+        _ENTITY_ALIASES_MULTI=multi,
+    )
+
+
+def test_get_temperature_resolves_collided_climate_over_light():
+    """A climate entity named 'Upstairs' that lost the first-wins alias key to
+    a light of the same name is still found for a temperature lookup."""
+    # light.upstairs won the single map; both share the "upstairs" name.
+    aliases = {"upstairs": "light.upstairs"}
+    multi = {"upstairs": ["light.upstairs", "climate.living"]}
+    climate_state = {
+        "entity_id": "climate.living",
+        "state": "fan_only",
+        "attributes": {"friendly_name": "Upstairs", "current_temperature": 18.3},
+    }
+
+    def fake_get_state(entity_id):
+        return climate_state if entity_id == "climate.living" else None
+
+    with patch("tools.home_assistant._ENTITY_ALIASES", aliases), \
+         patch("tools.home_assistant._ENTITY_ALIASES_MULTI", multi), \
+         patch("tools.home_assistant._get_state", side_effect=fake_get_state):
+        from tools.home_assistant import get_temperature, _resolve_entity
+        # Variant resolver recovers the climate entity despite the light winning.
+        assert _resolve_entity("upstairs", domain="climate") == "climate.living"
+        result = get_temperature("upstairs")
+        # Reads the climate temp, and speaks as "upstairs" (not the slug "living").
+        assert "18" in result and "upstairs" in result.lower()
+        assert "living" not in result.lower()
+
+
+def test_resolve_entity_without_domain_keeps_first_wins():
+    """No domain hint → first registration order entity (unchanged behaviour)."""
+    with patch("tools.home_assistant._ENTITY_ALIASES_MULTI",
+               {"upstairs": ["light.upstairs", "climate.living"]}):
+        from tools.home_assistant import _resolve_entity
+        assert _resolve_entity("upstairs") == "light.upstairs"
 
 
 def test_autodetect_spotify_picks_media_player_spotify_prefix():

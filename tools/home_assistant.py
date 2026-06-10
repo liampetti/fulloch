@@ -76,18 +76,25 @@ _ALIAS_FETCH_RETRIES = int(os.environ.get("FULLOCH_HA_ALIAS_RETRIES", "15"))
 _ALIAS_FETCH_BACKOFF_S = 2.0
 
 
-def _fetch_entity_aliases() -> dict:
+def _fetch_entity_aliases() -> tuple:
     """Fetch every entity's friendly_name from HA at module load.
 
-    Returns a lowercased `friendly_name -> entity_id` map. On the first
-    duplicate friendly_name the earlier entity_id wins (later ones are
-    logged and skipped). Returns an empty dict if HA is unreachable or
-    no token is configured — direct entity_ids still resolve via the
-    `'.' in name` fallback in `_resolve_entity`.
+    Returns `(aliases, aliases_multi)`:
+      - `aliases`: lowercased `friendly_name -> entity_id`, first-duplicate-wins
+        (later ones are logged and skipped). Used by the exact-match and
+        autodetect paths.
+      - `aliases_multi`: lowercased `friendly_name -> [entity_id, ...]` keeping
+        EVERY entity that shares a name, in registration order. Lets a
+        domain-scoped lookup recover a collided entity that the first-wins map
+        dropped — e.g. a `climate.*` named "Upstairs" that lost the key to a
+        `light.*` also named "Upstairs".
+
+    Both are empty if HA is unreachable or no token is configured — direct
+    entity_ids still resolve via the `'.' in name` fallback in `_resolve_entity`.
     """
     if not HA_TOKEN:
         logger.warning("Home Assistant token not configured; entity aliases unavailable")
-        return {}
+        return {}, {}
 
     states = None
     for attempt in range(1, _ALIAS_FETCH_RETRIES + 1):
@@ -110,11 +117,12 @@ def _fetch_entity_aliases() -> dict:
                     f"Could not fetch entity aliases from {HA_URL} after "
                     f"{_ALIAS_FETCH_RETRIES} attempts: {e}"
                 )
-                return {}
+                return {}, {}
     if states is None:
-        return {}
+        return {}, {}
 
     aliases: dict = {}
+    aliases_multi: dict = {}
     for state in states:
         entity_id = state.get('entity_id')
         if not entity_id:
@@ -126,6 +134,9 @@ def _fetch_entity_aliases() -> dict:
         # safe because entity_ids contain a "." which real friendly_names
         # never do, so there's no risk of colliding with a spoken alias.
         key = (friendly or entity_id).lower()
+        bucket = aliases_multi.setdefault(key, [])
+        if entity_id not in bucket:
+            bucket.append(entity_id)
         if key in aliases and aliases[key] != entity_id:
             logger.debug(
                 f"Duplicate key '{key}': keeping "
@@ -135,10 +146,10 @@ def _fetch_entity_aliases() -> dict:
         aliases[key] = entity_id
 
     logger.info(f"Fetched {len(aliases)} entity aliases from Home Assistant")
-    return aliases
+    return aliases, aliases_multi
 
 
-_ENTITY_ALIASES = _fetch_entity_aliases()
+_ENTITY_ALIASES, _ENTITY_ALIASES_MULTI = _fetch_entity_aliases()
 
 # Trailing words a speaker is likely to add or drop when referring to a device
 # (e.g. "downstairs office" vs "downstairs office lights").
@@ -155,6 +166,12 @@ def _friendly_for(entity_id: str) -> str:
     """Return a human-readable name for an entity_id, suitable for TTS."""
     for friendly, eid in _ENTITY_ALIASES.items():
         if eid == entity_id:
+            return friendly
+    # Fall back to the collision multimap so an entity that lost its name to a
+    # same-named sibling still speaks as that name ("upstairs") rather than its
+    # entity_id slug ("living").
+    for friendly, eids in _ENTITY_ALIASES_MULTI.items():
+        if entity_id in eids:
             return friendly
     slug = entity_id.split(".", 1)[-1] if "." in entity_id else entity_id
     return slug.replace("_", " ")
@@ -256,13 +273,30 @@ def _get_state(entity_id: str) -> Optional[dict]:
         return None
 
 
+def _pick_by_domain(entity_ids: list, domain: str = None) -> str:
+    """Choose one entity_id from a name's collision bucket.
+
+    When `domain` is given, prefer the first entity in that domain so a
+    `climate.*` named "Upstairs" wins over a `light.*` of the same name for a
+    temperature/climate lookup. Falls back to the first (registration order)
+    when no domain is given or none matches.
+    """
+    if domain:
+        prefix = f"{domain}."
+        for eid in entity_ids:
+            if eid.startswith(prefix):
+                return eid
+    return entity_ids[0]
+
+
 def _resolve_entity(name: str, domain: str = None) -> str:
     """Resolve a friendly name to an entity_id.
 
-    Tries (in order): exact friendly_name match, the name with a trailing
-    "lights"/"group"/etc. stripped, the name with each common suffix
-    appended, and finally falls back to assuming `name` is already a
-    valid entity_id or constructing one from `domain`.
+    Tries (in order): exact friendly_name match (domain-preferred when the
+    name collides across domains), the name with a trailing "lights"/"group"/
+    etc. stripped, the name with each common suffix appended, and finally
+    falls back to assuming `name` is already a valid entity_id or constructing
+    one from `domain`.
     """
     key = name.lower().strip()
     for filler in _LEADING_FILLERS:
@@ -270,6 +304,8 @@ def _resolve_entity(name: str, domain: str = None) -> str:
             key = key[len(filler):].strip()
             break
 
+    if key in _ENTITY_ALIASES_MULTI:
+        return _pick_by_domain(_ENTITY_ALIASES_MULTI[key], domain)
     if key in _ENTITY_ALIASES:
         return _ENTITY_ALIASES[key]
 
@@ -662,8 +698,10 @@ def _resolve_with_variants(entity: str, suffixes: tuple, domains: tuple) -> Opti
     key = entity.lower().strip()
     candidates = [key] + [f"{key} {s}" for s in suffixes]
     for candidate in candidates:
-        if candidate in _ENTITY_ALIASES:
-            eid = _ENTITY_ALIASES[candidate]
+        # Consult the collision multimap so a domain-matching entity is found
+        # even when the first-wins single map handed the name to another
+        # domain (e.g. "upstairs" -> light.upstairs hiding climate.living).
+        for eid in _ENTITY_ALIASES_MULTI.get(candidate, ()):
             if any(eid.startswith(f"{d}.") for d in domains):
                 return eid
     return None
@@ -1525,6 +1563,68 @@ def get_weather_forecast(
     return ". ".join(parts) + "."
 
 
+def _parse_history_start(start: str):
+    """Parse a history `start` arg into (start_dt, default_end_dt, date_only).
+
+    Accepts an ISO date ('2026-06-02' → whole-day window) or ISO datetime
+    ('2026-06-02T12:00:00' → start+2h default window). Naive values are
+    localised to the host timezone. Raises ValueError on an unparseable arg.
+    """
+    if "T" in start or " " in start:
+        start_dt = _dt.datetime.fromisoformat(start)
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.astimezone()
+        return start_dt, start_dt + _dt.timedelta(hours=2), False
+    d = _dt.date.fromisoformat(start)
+    start_dt = _dt.datetime(d.year, d.month, d.day, 0, 0, 0).astimezone()
+    return start_dt, start_dt + _dt.timedelta(days=1) - _dt.timedelta(seconds=1), True
+
+
+def _parse_history_end(end: Optional[str], default_end_dt):
+    """Parse an optional history `end` arg; fall back to `default_end_dt`.
+
+    A date-only end resolves to the end of that day. An unparseable end
+    silently degrades to the default rather than failing the whole query.
+    """
+    if not end:
+        return default_end_dt
+    try:
+        if "T" in end or " " in end:
+            end_dt = _dt.datetime.fromisoformat(end)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.astimezone()
+        else:
+            d = _dt.date.fromisoformat(end)
+            end_dt = _dt.datetime(d.year, d.month, d.day, 23, 59, 59).astimezone()
+    except ValueError:
+        return default_end_dt
+    return end_dt
+
+
+def _fetch_history_states(entity_id: str, start_dt, end_dt) -> list:
+    """GET /api/history/period for one entity; return its list of state dicts.
+
+    Returns an empty list when HA has no recorded changes in the window.
+    Raises on a transport/HTTP error so the caller can surface a sentinel.
+    """
+    response = requests.get(
+        f"{HA_URL}/api/history/period/{start_dt.isoformat()}",
+        headers=_get_headers(),
+        params={
+            "end_time": end_dt.isoformat(),
+            "filter_entity_id": entity_id,
+            "minimal_response": "true",
+            "no_attributes": "true",
+        },
+        timeout=TIMEOUT,
+    )
+    response.raise_for_status()
+    history = response.json()
+    if not history or not history[0]:
+        return []
+    return history[0]
+
+
 @tool(
     name="get_entity_history",
     description=(
@@ -1650,3 +1750,92 @@ def get_entity_history(entity: str, start: str, end: Optional[str] = None) -> st
         lines.append(f"showing the last {MAX_RESULTS} changes only")
 
     return ". ".join(lines) + "."
+
+
+@tool(
+    name="get_conversation_history",
+    description=(
+        "Recall an earlier conversation — BOTH the user's questions and your own "
+        "replies, interleaved in order. Use this for 'what did we talk about', "
+        "'what did we discuss', 'what did I ask you earlier/yesterday' when the "
+        "relevant turns are NOT already in the current chat history. "
+        "start: ISO date ('2026-06-02') for a whole day, or ISO datetime "
+        "('2026-06-02T15:00:00') for a specific time. "
+        "end: optional ISO date/datetime; defaults to end of day for a date-only "
+        "start, or start+2h for a datetime start."
+    ),
+    aliases=["conversation_history", "recall_conversation", "what_did_we_discuss"],
+)
+def get_conversation_history(start: str, end: Optional[str] = None) -> str:
+    """Interleave Fulloch's utterance + response sensors into a Q/A transcript.
+
+    Returns a `Reactive question:` sentinel wrapping the transcript so the
+    agent loop re-plans and SUMMARISES the topics rather than reading the
+    raw timestamped list back line by line.
+    """
+    if not HA_TOKEN:
+        return "Home Assistant isn't set up."
+
+    try:
+        start_dt, default_end_dt, _ = _parse_history_start(start)
+    except ValueError:
+        return f"Reactive question: Could not parse start '{start}'. Ask the user to clarify the date."
+
+    end_dt = _parse_history_end(end, default_end_dt)
+    now = _dt.datetime.now().astimezone()
+    if end_dt > now:
+        end_dt = now
+
+    try:
+        user_states = _fetch_history_states("sensor.fulloch_last_utterance", start_dt, end_dt)
+        bot_states = _fetch_history_states("sensor.fulloch_last_response", start_dt, end_dt)
+    except Exception as e:
+        logger.warning(f"HA conversation history query failed: {e}")
+        return "Reactive question: Could not fetch the conversation history. Tell the user there was an error."
+
+    # Merge both sensors into a single timeline tagged by speaker, then sort
+    # by timestamp so each user question sits next to the reply it drew.
+    events = [(s, "You") for s in user_states] + [(s, "Fulloch") for s in bot_states]
+    events.sort(key=lambda it: it[0].get("last_changed") or it[0].get("last_updated") or "")
+
+    _SKIP = {"unknown", "unavailable", ""}
+    today = _dt.date.today()
+    yesterday = today - _dt.timedelta(days=1)
+    lines: list = []
+    for s, speaker in events:
+        state_val = (s.get("state") or "").strip()
+        if state_val.lower() in _SKIP:
+            continue
+        ts_str = s.get("last_changed") or s.get("last_updated") or ""
+        try:
+            ts = _dt.datetime.fromisoformat(ts_str).astimezone()
+            ts_date = ts.date()
+            if ts_date == today:
+                day_label = "today"
+            elif ts_date == yesterday:
+                day_label = "yesterday"
+            else:
+                day_label = ts.strftime("%A")
+            time_label = ts.strftime("%I:%M %p").lstrip("0")
+            lines.append(f"{day_label} at {time_label} — {speaker}: {state_val}")
+        except Exception:
+            lines.append(f"{speaker}: {state_val}")
+
+    if not lines:
+        window = f"{start}" + (f" to {end}" if end else "")
+        return f"No recorded conversation for {window}."
+
+    # Keep the most recent exchanges if the window is busy — the tail is what
+    # "what did we talk about" usually means, and caps the replan payload.
+    MAX_RESULTS = 30
+    if len(lines) > MAX_RESULTS:
+        lines = lines[-MAX_RESULTS:]
+
+    transcript = "\n".join(lines)
+    return (
+        "Reactive question: Below is the earlier conversation transcript "
+        "(the user's questions and your replies). Summarise for the user what "
+        "was discussed, grouped by topic, in a sentence or two — do NOT read it "
+        "back line by line, and do NOT re-research those topics with another "
+        "tool.\n" + transcript
+    )

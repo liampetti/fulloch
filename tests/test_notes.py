@@ -172,6 +172,38 @@ class TestAppend:
         assert "entry one" in body
         assert "entry two" in body
 
+    def test_read_today_reads_back_logged_entries(self, notes_dir):
+        notes.append_to_today("Took the bins out")
+        notes.append_to_today("Called the plumber")
+        result = notes.read_today()
+        assert "Took the bins out" in result
+        assert "Called the plumber" in result
+        # Markdown markers stripped for TTS — no bullet/hash characters.
+        assert "#" not in result and "- " not in result
+
+    def test_read_today_when_nothing_logged(self, notes_dir):
+        result = notes.read_today()
+        assert "don't have any notes logged today" in result.lower()
+
+    def test_read_today_ignores_non_date_arg_and_uses_today(self, notes_dir):
+        """The SLM may pass the literal word 'today' — fall back to today's file."""
+        notes.append_to_today("real entry")
+        result = notes.read_today("today")
+        assert "real entry" in result
+
+    def test_read_today_reads_specific_past_date(self, notes_dir):
+        (notes_dir / "daily" / "2026-06-08.md").write_text(
+            "# Monday 08 June 2026\n\n- 09:00 yesterday entry\n"
+        )
+        result = notes.read_today("2026-06-08")
+        assert "yesterday entry" in result
+        assert "on 2026-06-08" in result
+
+    def test_read_today_rejects_path_traversal_date(self, notes_dir):
+        """A non-date arg can't escape the daily folder; it resolves to today."""
+        result = notes.read_today("../../facts")
+        assert "don't have any notes logged today" in result.lower()
+
 
 class TestSearch:
     def test_search_finds_matches_across_notes(self, notes_dir):

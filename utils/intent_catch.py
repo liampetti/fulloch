@@ -101,11 +101,16 @@ def extract_deep_think(command: str) -> Optional[str]:
 
 
 # Anchored asks to surface the partial thinking from a cancelled thinking turn,
-# so passing mentions ("we discussed this so far") don't trigger.
+# so passing mentions ("we discussed this so far") don't trigger. The bare
+# "summarise" branch is end-anchored (\s*$) so it only catches the standalone
+# command ("summarise", "summarise so far") — not "summarise today's news" /
+# "summarise this email", which must fall through to the agent's web/reply path.
 _SUMMARIZE_THINKING_PATTERNS = [
     re.compile(
         r"^\s*(?:please\s+)?summari[sz]e"
-        r"(?:\s+(?:your\s+thoughts|what\s+you('?ve|\s+have)\s+got|so\s+far))?",
+        r"(?:\s+(?:your\s+thoughts"
+        r"|what\s+you(?:'?ve|\s+have)\s+(?:got|been\s+thinking)"
+        r"|what\s+you(?:'?ve|\s+have)\s+(?:got\s+)?so\s+far))?\s*$",
         re.IGNORECASE,
     ),
     re.compile(

@@ -121,11 +121,17 @@ def _find_note_semantic(query: str) -> Optional[Path]:
     return path if path.exists() else None
 
 
-def _today_path() -> Path:
-    date = datetime.now().strftime('%Y-%m-%d')
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _daily_base() -> Path:
     base = NOTES_DIR / DAILY_SUBDIR if DAILY_SUBDIR else NOTES_DIR
     base.mkdir(parents=True, exist_ok=True)
-    return base / f'{date}.md'
+    return base
+
+
+def _today_path() -> Path:
+    return _daily_base() / f"{datetime.now().strftime('%Y-%m-%d')}.md"
 
 
 def _to_spoken(md: str) -> str:
@@ -319,6 +325,43 @@ def append_to_today(content: str) -> str:
         return "I couldn't update today's note."
     _after_write(path)
     return f"Logged at {timestamp} in today's note."
+
+
+@tool(
+    name="read_today",
+    description=(
+        "Read back the daily note — the dated journal of entries saved with "
+        "append_to_today. Use for 'read my notes from today', 'what did I log "
+        "today', 'read today's note'. Pass an optional YYYY-MM-DD date to read "
+        "a past day's note; omit it for today. This is the correct tool for "
+        "the daily log — do not use semantic search to find today's note."
+    ),
+    aliases=["read_daily_note", "todays_note", "read_today_note"],
+)
+def read_today(date: Optional[str] = None) -> str:
+    # Guard the date arg: it builds a filename, and the SLM may pass a literal
+    # word ("today") or a relative phrase. Anything that isn't a YYYY-MM-DD
+    # stamp falls back to today (also blocks path-traversal via the date).
+    date_str = (date or '').strip()
+    if not _DATE_RE.match(date_str):
+        date_str = datetime.now().strftime('%Y-%m-%d')
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    when = "today" if date_str == today_str else f"on {date_str}"
+
+    path = _daily_base() / f'{date_str}.md'
+    if not path.exists():
+        return f"You don't have any notes logged {when}."
+    try:
+        raw = path.read_text(encoding='utf-8')
+    except OSError as e:
+        logger.error(f"Failed to read daily note {path}: {e}")
+        return f"I couldn't read your note {when}."
+    text = _to_spoken(raw)
+    truncated = ''
+    if len(text) > MAX_READ_CHARS:
+        text = text[:MAX_READ_CHARS]
+        truncated = ' (note continues)'
+    return f"Your note {when}: {text}{truncated}"
 
 
 @tool(

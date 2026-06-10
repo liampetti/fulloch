@@ -126,11 +126,24 @@ class ToolRegistry:
             return ""
 
     def describe_tools(self) -> str:
-        """Render the registered tools as a human-readable block for the intent prompt."""
-        return "\n".join(
-            f"- {schema.name}: {schema.description}"
-            for schema in self._schemas.values()
-        )
+        """Render the registered tools as a human-readable block for the intent prompt.
+
+        Each line is `- name: description` followed by the argument signature
+        derived from the function (`Args: a, b (optional, default: ...)`), so
+        the agent sees exact arg names/order without each tool author having to
+        restate them in the description.
+        """
+        lines = []
+        for schema in self._schemas.values():
+            parts = []
+            for p in schema.params:
+                if p.required:
+                    parts.append(p.name)
+                else:
+                    parts.append(f"{p.name} (optional, default: {p.default})")
+            args = f" Args: {', '.join(parts)}." if parts else ""
+            lines.append(f"- {schema.name}: {schema.description}{args}")
+        return "\n".join(lines)
 
 
 tool_registry = ToolRegistry()

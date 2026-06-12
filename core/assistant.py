@@ -12,48 +12,33 @@ import threading
 import time
 from typing import Callable, Optional
 
-from .audio import AudioCapture
-from .slm import load_slm, generate_slm
-from .text_utils import clean_for_tts, split_sentences
-from .thinking_watchdog import ThinkingWatchdog
-from .tts_session import TtsSession, parse_barge_time
-from .turn_stats import TurnStats
-
+# Sentinels returned by the thinking tools — kept as module-level
+# constants so renames only happen in one place.
 from utils.prompts import (
     CACHE_PRIMING_USER_PROMPT,
     get_agent_system_prompt,
     get_greeting_system_prompt,
     get_greeting_user_prompt,
     get_partial_thinking_summary_prompt,
-    get_thinking_system_prompt,
     get_web_summary_system_prompt,
 )
-from utils.intent_catch import catchAll
-import utils.intents as intents
-from utils.intents import MAX_AGENT_CALLS_PER_TURN
 
-# Sentinels returned by the thinking tools — kept as module-level
-# constants so renames only happen in one place.
-from tools.thinking import THINKING_PREFIX, SUMMARY_PREFIX
-import tools.notes as notes
+from .agent_loop import (
+    _PROMPT_STRIP_CHARS,
+    AgentLoop,
+)
+from .audio import AudioCapture
+from .slm import generate_slm, load_slm
+from .text_utils import clean_for_tts, split_sentences
+from .tts_session import TtsSession, parse_barge_time
+from .turn_stats import TurnStats
 
 logger = logging.getLogger(__name__)
-
-# Tool intents that count as "context retrieval" for the stats panel. The
-# chunk count is surfaced by the semantic paths via notes.last_retrieval.
-NOTE_SEARCH_INTENTS = frozenset(
-    {"search_notes", "search_notes_semantic", "read_note"}
-)
 
 # Strips every non-word character. The self-echo check uses this so ASR's
 # "1254" / "am" still match the assistant's spoken "12 54" / "a m" — the
 # get_time tool spells digits out with spaces and ASR re-concatenates them.
 _NON_WORD_RE = re.compile(r"\W+")
-
-# Leading/trailing punctuation peeled off the user prompt after the wakeword
-# is stripped. Includes "!"/"?" so ASR's "Hey Frasier! Stop." yields the bare
-# "stop" without trailing punctuation confusing intent matching.
-_PROMPT_STRIP_CHARS = " ,.!?;:"
 
 # Short tokens that Qwen3-ASR (and Whisper) commonly hallucinate from
 # background noise when English is enforced. None of these can match a real
@@ -129,14 +114,13 @@ def _build_barge_pattern(wakeword: str, base_pattern: str) -> str:
 
 
 # Spoken phrase pools live in `utils.phrases` — edit them there.
-from utils.phrases import (
+from utils.phrases import (  # noqa: E402
     ACK_PHRASES,
     GREETING_TOPICS,
     NOTE_WRITE_STALL_PHRASES,
     PRE_THINKING_STALL_PHRASES,
     REMINDER_PREFIX_PHRASES,
     REPLAN_STALL_PHRASES,
-    STALL_PHRASES,
     THINKING_STALL_PHRASES,
     WEB_SEARCH_STALL_PHRASES,
 )
@@ -154,6 +138,13 @@ HISTORY_MAX_MESSAGES = 50
 # Silence timeout — past this gap with no new turn, history is cleared so a
 # stale "you said earlier..." context can't bleed into a fresh conversation.
 CHAT_SESSION_TIMEOUT_S = 600.0
+
+# Spoken when a turn overflows the SLM context window. The handler also clears
+# `_history`, so the conversation genuinely restarts — the wording says so.
+CONTEXT_EXHAUSTED_REPLY = (
+    "Sorry, that was too much for me to hold in mind. "
+    "I've cleared our conversation — what would you like to do?"
+)
 
 # Time window after a barge-in cancel during which incoming ASR results
 # are discarded. ASR inference is ~200ms on this GPU, so 500ms reliably
@@ -347,13 +338,13 @@ class Assistant:
         self.asr_stream_generator = stream_generator
 
         from .tts import (
-            speak_stream,
-            warmup_model,
-            synthesize,
             play_chunks,
             set_output_device,
             set_tts_active_event,
             set_voice,
+            speak_stream,
+            synthesize,
+            warmup_model,
         )
         set_output_device(self.output_device)
         # The recorder uses this to switch to a stricter silence threshold
@@ -489,7 +480,6 @@ class Assistant:
         configured reminder calendar that starts within the next 90 seconds and
         hasn't already been spoken this session.
         """
-        import datetime as _dt
         try:
             from tools.home_assistant import get_upcoming_events
         except ImportError:
@@ -526,7 +516,7 @@ class Assistant:
     def _start_reminder_poll(self) -> None:
         """Start the reminder poll thread if calendar and polling are configured."""
         try:
-            from tools.home_assistant import _reminder_calendar_entity, HA_CONFIG
+            from tools.home_assistant import HA_CONFIG, _reminder_calendar_entity
         except ImportError:
             return
         if not _reminder_calendar_entity():
@@ -744,6 +734,21 @@ class Assistant:
             stats=stats,
         )
 
+    def _context_exhausted_reply(self) -> str:
+        """Reset the conversation after a context overflow and apologise.
+
+        Wipes `_history` so the next turn starts within budget, then returns
+        the spoken/returned apology. Called from the agent loop when an SLM
+        call raises `ContextExhaustedError` — otherwise the turn would fail
+        silently (the caller's generic `except` only logs).
+        """
+        logger.warning(
+            "SLM context exhausted; clearing %d history entries and apologising",
+            len(self._history),
+        )
+        self._history.clear()
+        return CONTEXT_EXHAUSTED_REPLY
+
     def _handle_wakeword(
         self,
         user_prompt: str,
@@ -772,321 +777,13 @@ class Assistant:
         and dashboard text turns share this method with voice turns.
         """
         with self._turn_lock:
-            cancel_check = (lambda: session.cancelled) if session is not None else None
-            logger.info(f"Handling turn: {user_prompt}")
-
-            self._history.append({"role": "user", "content": user_prompt})
-            self._trim_history()
-
-            # Regex fast-path: if it matches, use it as the first agent emission.
-            caught = catchAll(user_prompt)
-            first_emission = caught if isinstance(caught, dict) else None
-            if first_emission is not None:
-                logger.debug(f"Regex caught: {first_emission}")
-
-            slm_started = False
-            # Holds the most recent web-search summary produced this turn.
-            # Persists across replan iterations so a follow-up side-effect
-            # action (e.g. write_note) doesn't bury the findings — see the
-            # terminal "speak joined outputs" step.
-            web_summary_text: Optional[str] = None
-            # Side-effect actions (e.g. write_note) that were skipped when a
-            # web-search step forced a replan before they could execute.
-            # Flushed in the reply branch so they still run even when the
-            # replanned agent emits a reply instead of re-emitting them.
-            pending_side_effects: list = []
-            # The query deep_think tagged this turn (if any). Captured at
-            # dispatch, consumed once by the out-of-loop thinking call.
-            thinking_query: Optional[str] = None
-            for iteration in range(MAX_AGENT_CALLS_PER_TURN):
-                if session is not None and session.cancelled:
-                    return ""
-
-                if iteration == 0 and first_emission is not None:
-                    emission = first_emission
-                    emission_text = json.dumps(emission)
-                else:
-                    if not slm_started:
-                        slm_started = True
-                        if on_slm_start is not None:
-                            try:
-                                on_slm_start()
-                            except Exception:
-                                logger.exception("on_slm_start hook raised")
-                    else:
-                        # Replan iterations — play a "mid-process" phrase so
-                        # the SLM thinking time isn't silent. Uses the replan
-                        # cache ("Working through it.", "Almost there.", etc.)
-                        # rather than ACK_PHRASES so the user hears progress
-                        # rather than repeated acknowledgements.
-                        if session is None or not session.cancelled:
-                            threading.Thread(
-                                target=self._play_random_ack,
-                                args=(session or self.tts_session,),
-                                kwargs={"cache": self.replan_stall_cache},
-                                daemon=True,
-                            ).start()
-                    logger.debug(f"Agent call (iter {iteration})")
-                    emission_text = generate_slm(
-                        self.slm_model,
-                        user_prompt=None,
-                        grammar=self.grammar,
-                        system_prompt=get_agent_system_prompt(),
-                        cancel_check=cancel_check,
-                        history=self._history,
-                        stats=stats,
-                    )
-                    logger.debug(f"Agent emission: {emission_text}")
-
-                    if session is not None and session.cancelled:
-                        return ""
-
-                    try:
-                        emission = json.loads(emission_text)
-                    except Exception as e:
-                        logger.error(f"Failed to parse agent emission: {emission_text!r} ({e})")
-                        return random.choice([
-                            "Sorry, can you repeat that",
-                            "I don't understand",
-                        ])
-
-                self._history.append({"role": "assistant", "content": emission_text})
-                self._trim_history()
-
-                # Emit a `plan` event so dashboards can show what the agent decided.
-                self._emit_agent_event("plan", emission, source=source)
-
-                # Reply branch — agent's final spoken answer.
-                if "reply" in emission:
-                    # Flush any side-effect actions that were skipped when a
-                    # web-search replan fired before they could execute.  For
-                    # write_note, substitute the actual search summary so the
-                    # saved note contains real findings, not the pre-search stub.
-                    for deferred in pending_side_effects:
-                        d_intent = deferred.get("intent", "?")
-                        if d_intent == "write_note" and web_summary_text:
-                            d_args = list(deferred.get("args", []))
-                            if len(d_args) >= 2:
-                                d_args[1] = web_summary_text
-                                deferred = dict(deferred, args=d_args)
-                        logger.debug(f"Executing deferred action: {deferred}")
-                        d_result = intents.handle_action(deferred)
-                        self._history.append({
-                            "role": "tool",
-                            "name": d_intent,
-                            "content": d_result if isinstance(d_result, str) else str(d_result or "<error>"),
-                        })
-                        self._emit_agent_event("observation", {
-                            "intent": d_intent,
-                            "result": d_result if isinstance(d_result, str) else str(d_result or "<error>"),
-                        }, source=source)
-                    pending_side_effects = []
-                    reply = (emission.get("reply") or "").strip()
-                    if not reply:
-                        return random.choice(STALL_PHRASES)
-                    return reply
-
-                actions = emission.get("actions") or []
-                if not actions:
-                    logger.warning("Agent emitted empty actions; stalling")
-                    return random.choice(STALL_PHRASES)
-
-                # Dispatch each action in order. Stop on the first replan trigger.
-                result_strs: list = []
-                replan = False
-                saw_summary = False
-                saw_thinking = False
-                for _action_idx, action in enumerate(actions[:3]):
-                    if session is not None and session.cancelled:
-                        return ""
-                    intent_name = action.get("intent", "?")
-                    logger.debug(f"Dispatching action: {action}")
-                    # A web search blocks on a SearXNG round-trip that can run
-                    # many seconds (engine timeouts / rate-limits). Play the
-                    # context stall BEFORE dispatch so the user hears
-                    # "searching the web" during the lookup itself, not after
-                    # it lands (the summarise step that follows is only ~1s).
-                    if intents.is_web_search(intent_name) and self.web_search_stall_cache:
-                        chunks, sr = random.choice(self.web_search_stall_cache)
-                        self.play_chunks(
-                            chunks, sr, session=session or self.tts_session
-                        )
-                        if session is not None and session.cancelled:
-                            return ""
-                    elif intents.is_note_write(intent_name) and self.note_write_stall_cache:
-                        chunks, sr = random.choice(self.note_write_stall_cache)
-                        self.play_chunks(
-                            chunks, sr, session=session or self.tts_session
-                        )
-                        if session is not None and session.cancelled:
-                            return ""
-                    self._emit_agent_event("step", {
-                        "intent": intent_name,
-                        "args": action.get("args", []),
-                    }, source=source)
-                    _t_dispatch = time.monotonic()
-                    result = intents.handle_action(action)
-                    if stats is not None:
-                        stats.tool_dispatches += 1
-                        if action.get("intent") in NOTE_SEARCH_INTENTS:
-                            stats.retrieval_seconds = (
-                                stats.retrieval_seconds or 0.0
-                            ) + (time.monotonic() - _t_dispatch)
-                            chunks = notes.last_retrieval.pop("chunks", None)
-                            if chunks is not None:
-                                stats.retrieval_chunks = chunks
-
-                    # Inline summariser: web search returns kilobytes of raw
-                    # HTML snippets. Compress them into a short spoken answer
-                    # with a focused SLM call BEFORE the agent's next view of
-                    # history. (The "searching the web" stall already played
-                    # before dispatch above, covering the slower lookup.)
-                    web_summarised = False
-                    if (
-                        isinstance(result, str)
-                        and result.startswith("User question:")
-                    ):
-                        logger.debug("Summarising web search payload")
-                        if session is not None and session.cancelled:
-                            return ""
-                        # Summarise is a full SLM call (~2-3s). The web-search
-                        # stall covered the SearXNG round-trip; play a parallel
-                        # ack now so this gap isn't silent too.
-                        if session is None or not session.cancelled:
-                            threading.Thread(
-                                target=self._play_random_ack,
-                                args=(session or self.tts_session,),
-                                daemon=True,
-                            ).start()
-                        result = self._summarise_search_result(result, cancel_check, stats=stats)
-                        if session is not None and session.cancelled:
-                            return ""
-                        web_summarised = True
-                        web_summary_text = result
-
-                    result_str = result if isinstance(result, str) else (
-                        "<error>" if result is None else str(result)
-                    )
-                    self._history.append({
-                        "role": "tool",
-                        "name": action.get("intent", "?"),
-                        "content": result_str,
-                    })
-                    self._emit_agent_event("observation", {
-                        "intent": action.get("intent", "?"),
-                        "result": result_str,
-                    }, source=source)
-                    if isinstance(result, str):
-                        if result.startswith(SUMMARY_PREFIX):
-                            saw_summary = True
-                        elif result.startswith(THINKING_PREFIX):
-                            saw_thinking = True
-                            # deep_think returns "Thinking question:\n<query>";
-                            # keep the query for the out-of-loop thinking call.
-                            _parts = result.split("\n", 1)
-                            thinking_query = (
-                                _parts[1].strip() if len(_parts) > 1 else user_prompt
-                            )
-                        result_strs.append(result)
-                    # A summarised web search normally gets spoken directly
-                    # (fast path). But when the agent planned more than the
-                    # lookup alone (e.g. search + write_note), route the summary
-                    # back through the agent so it writes the note from the
-                    # *actual* findings now in history instead of a stub
-                    # composed before the search ran.
-                    if (web_summarised and len(actions) > 1) or intents.should_replan(result):
-                        replan = True
-                        # Save actions that haven't run yet; they'll be flushed
-                        # in the reply branch if the agent doesn't re-emit them.
-                        pending_side_effects = list(actions[_action_idx + 1 : 3])
-                        break
-                self._trim_history()
-
-                # Special sentinel handling.
-                if saw_summary:
-                    # summarize_thinking — surface the captured partial directly.
-                    summary = self._summarise_partial_thinking(cancel_check, stats=stats)
-                    self._record_spoken(summary)
-                    return summary
-
-                if saw_thinking:
-                    # deep_think flagged this query. Run ONE free-text reasoning
-                    # call (NO agent grammar — the grammar permits only a JSON
-                    # object, so it would forbid Qwen3's <think> block) and speak
-                    # the result. Handling it here, out of the grammar loop, also
-                    # stops the agent from simply re-emitting deep_think forever:
-                    # with the sentinel in history and no other obvious move, it
-                    # looped until MAX_AGENT_CALLS and never answered.
-                    query = thinking_query or user_prompt
-                    # Stall before the (slow) reasoning call so the user hears
-                    # acknowledgement up front.
-                    if self.pre_thinking_stall_cache:
-                        chunks, sr = random.choice(self.pre_thinking_stall_cache)
-                        self.play_chunks(chunks, sr, session=session or self.tts_session)
-                    if session is not None and session.cancelled:
-                        return ""
-                    # Watchdog plays periodic "still thinking" stalls during the
-                    # long /think run.
-                    watchdog_session = session or self.tts_session
-                    with ThinkingWatchdog(
-                        self.thinking_stall_cache, self.play_chunks, watchdog_session,
-                    ):
-                        answer = generate_slm(
-                            self.slm_model,
-                            user_prompt=query,
-                            system_prompt=get_thinking_system_prompt(),
-                            cancel_check=cancel_check,
-                            history=self._history,
-                            thinking_mode=True,
-                            stats=stats,
-                        )
-                    if session is not None and session.cancelled:
-                        # Stash the partial reasoning for a follow-up
-                        # summarize_thinking ("what have you got so far?").
-                        if answer:
-                            self._last_thinking_partial = answer
-                            self._last_thinking_question = query
-                            self._last_thinking_cancelled_at = time.monotonic()
-                            logger.debug(
-                                f"Captured {len(answer)} chars of partial thinking"
-                            )
-                        return ""
-                    cleaned = clean_for_tts(answer)
-                    if not cleaned:
-                        cleaned = random.choice(STALL_PHRASES)
-                    self._record_spoken(cleaned)
-                    return cleaned
-
-                if replan:
-                    # Reactive question: (HA 400/404, multi-event calendar) or
-                    # error — re-call the agent with observations in history.
-                    # No stall here; the agent's next call is usually <1s
-                    # because the input is small. `User question:` payloads
-                    # are intercepted earlier by the inline summariser.
-                    continue
-
-                # All actions succeeded without replan — speak joined outputs.
-                parts = [s.strip() for s in result_strs if s and s.strip()]
-                # If the turn researched something and then took a side-effect
-                # action (e.g. write_note), the web summary lives in history
-                # but isn't in this iteration's result_strs. Surface it first
-                # so the user hears the findings, not just "saved a note".
-                if web_summary_text:
-                    summary = web_summary_text.strip().rstrip(".")
-                    already = any(p.rstrip(".") == summary for p in parts)
-                    if summary and not already:
-                        parts.insert(0, summary)
-                spoken = ". ".join(parts)
-                if not spoken:
-                    spoken = "Done."
-                self._record_spoken(spoken)
-                return spoken
-
-            # Cap exhausted
-            logger.warning(
-                f"Hit MAX_AGENT_CALLS_PER_TURN={MAX_AGENT_CALLS_PER_TURN}"
-            )
-            return "Sorry, I couldn't finish that."
+            return AgentLoop(
+                self,
+                session=session,
+                source=source,
+                stats=stats,
+                on_slm_start=on_slm_start,
+            ).run(user_prompt)
 
     def _run_half_duplex(self, user_prompt: str, stt_seconds=None) -> None:
         """Synchronous handle + speak, with mic muted during TTS playback."""

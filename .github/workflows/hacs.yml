@@ -9,6 +9,11 @@ on:
 jobs:
   hacs:
     runs-on: ubuntu-latest
+    # The HACS integration is published from the public `fulloch` repo (this
+    # private dev repo is transferred there via transfer_to_pub_dir.sh). Only
+    # validate on the public repo — the private one legitimately lacks the
+    # published repo's topics/description, so HACS validation fails there.
+    if: github.repository == 'liampetti/fulloch'
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:

@@ -25,9 +25,13 @@ logger = logging.getLogger(__name__)
 
 HA_CONFIG = config.get('home_assistant', {})
 
-# Home Assistant connection settings
+# Home Assistant connection settings.
+# The long-lived token (effectively root on your smart home) is read from the
+# FULLOCH_HA_TOKEN environment variable first — set it in `.env` to keep it out
+# of plaintext config.yml — and falls back to home_assistant.token in config.yml
+# for backward compatibility.
 HA_URL = HA_CONFIG.get('url', 'http://localhost:8123')
-HA_TOKEN = HA_CONFIG.get('token', '')
+HA_TOKEN = os.environ.get('FULLOCH_HA_TOKEN', '').strip() or HA_CONFIG.get('token', '')
 TIMEOUT = HA_CONFIG.get('timeout', 10)
 
 # Role entities (SPOTIFY_ENTITY / TV_ENTITY / AVR_ENTITY / CALENDAR_ENTITY)
@@ -1669,12 +1673,10 @@ def get_entity_history(entity: str, start: str, end: Optional[str] = None) -> st
             if start_dt.tzinfo is None:
                 start_dt = start_dt.astimezone()
             default_end_dt = start_dt + _dt.timedelta(hours=2)
-            date_only_start = False
         else:
             d = _dt.date.fromisoformat(start)
             start_dt = _dt.datetime(d.year, d.month, d.day, 0, 0, 0).astimezone()
             default_end_dt = start_dt + _dt.timedelta(days=1) - _dt.timedelta(seconds=1)
-            date_only_start = True
     except ValueError:
         return f"Reactive question: Could not parse start '{start}'. Ask the user to clarify the date."
 

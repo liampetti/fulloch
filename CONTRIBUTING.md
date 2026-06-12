@@ -12,7 +12,7 @@ Thank you for your interest in contributing to Fulloch! This document provides g
    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
    pip install -r requirements.txt
    # Install special packages (see requirements.txt for details)
-   pip install --no-deps git+https://github.com/rekuenkdr/Qwen3-TTS-streaming.git@97da215
+   pip install --no-deps git+https://github.com/liampetti/Qwen3-TTS-streaming.git@97da215
    pip install --no-build-isolation --no-deps git+https://github.com/Dao-AILab/flash-attention.git@ef9e6a6
    pip install -e ".[dev]"  # Install dev dependencies
    ```

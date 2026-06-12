@@ -1,4 +1,6 @@
-"""Qwen3 TTS with voice cloning, streaming via rekuenkdr/Qwen3-TTS-streaming.
+"""Qwen3 TTS with voice cloning, streaming via the Qwen3-TTS-streaming fork
+(installed from liampetti/Qwen3-TTS-streaming@97da215, a pinned org mirror of
+rekuenkdr/Qwen3-TTS-streaming so a deleted upstream fork can't brick installs).
 
 All generation runs on a single long-lived worker thread (`_worker_thread`).
 Two things this buys us:
@@ -58,19 +60,19 @@ _TTS_ACTIVE_EVENT: Optional[threading.Event] = None
 # Shared kwargs for every `stream_generate_voice_clone` call — warmup,
 # pre-render, and live streaming all use the same generation cadence so the
 # voice clone sounds consistent across them.
-_STREAM_KWARGS = dict(
-    language="english",
-    overlap_samples=512,
+_STREAM_KWARGS = {
+    "language": "english",
+    "overlap_samples": 512,
     # The codec runs at 12 Hz, so each frame encodes ~83ms of audio. At
     # emit_every_frames=6 (~500ms chunks) the worker checks
     # `session.cancelled` twice per second, so a mid-TTS barge-in waits
     # at most ~500ms for the current chunk to finish.
-    emit_every_frames=6,
-    decode_window_frames=80,
-    first_chunk_emit_every=5,
-    first_chunk_decode_window=48,
-    first_chunk_frames=48,
-)
+    "emit_every_frames": 6,
+    "decode_window_frames": 80,
+    "first_chunk_emit_every": 5,
+    "first_chunk_decode_window": 48,
+    "first_chunk_frames": 48,
+}
 
 
 def set_output_device(device: Optional[str]) -> None:

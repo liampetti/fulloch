@@ -1,22 +1,88 @@
-"""Action dispatch + replan predicate for the unified agent loop."""
+"""Action dispatch + typed step results for the unified agent loop."""
 
+import enum
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from tools.tool_registry import tool_registry, UnknownToolError
+from tools.thinking import SUMMARY_PREFIX, THINKING_PREFIX
+from tools.tool_registry import UnknownToolError, tool_registry
 
 logger = logging.getLogger(__name__)
 
-# Sentinel prefixes that signal "the agent should be re-called with this
-# observation in history". Tools that need SLM follow-up emit one of these
-# at the start of their return string. Centralised here so additions don't
-# require touching multiple call sites.
-REPLAN_SENTINEL_PREFIXES = (
-    "User question:",
-    "Thinking question:",
-    "Summary question:",
-    "Reactive question:",
+# Leading sentinels a tool can emit to request an SLM follow-up. Tools that
+# need a re-call embed one at the start of their return string. `classify_step`
+# is the SINGLE place these prefixes are matched — the agent loop then routes on
+# the typed `StepKind`, never on the raw string. Centralising the match removes
+# the hijack risk where any downstream code re-checking prefixes could mis-route
+# a tool output that merely happened to begin with a sentinel.
+WEB_QUESTION_PREFIX = "User question:"
+REACTIVE_PREFIX = "Reactive question:"
+
+
+class StepKind(enum.Enum):
+    """Routing class of a dispatched action's result."""
+
+    NORMAL = "normal"          # plain output — joined into the spoken reply
+    WEB_SEARCH = "web_search"  # raw SearXNG payload — summarise inline, replan
+    THINKING = "thinking"      # deep_think flagged — run the /think branch
+    SUMMARY = "summary"        # summarize_thinking — surface captured partial
+    REACTIVE = "reactive"      # tool error / HA 4xx — replan with failure shown
+    ERROR = "error"            # dispatch returned None / raised — replan
+
+
+# Prefix → kind, in match priority order.
+_SENTINEL_KINDS = (
+    (WEB_QUESTION_PREFIX, StepKind.WEB_SEARCH),
+    (THINKING_PREFIX, StepKind.THINKING),
+    (SUMMARY_PREFIX, StepKind.SUMMARY),
+    (REACTIVE_PREFIX, StepKind.REACTIVE),
 )
+
+# Kinds that hand control back to the agent for another call.
+_REPLAN_KINDS = frozenset({
+    StepKind.WEB_SEARCH, StepKind.THINKING, StepKind.SUMMARY,
+    StepKind.REACTIVE, StepKind.ERROR,
+})
+
+
+@dataclass(frozen=True)
+class StepResult:
+    """Typed outcome of one dispatched action.
+
+    `text` is the history / observation representation (the raw tool string,
+    or "<error>" for a failed dispatch). `in_output` is whether the text should
+    be joined into the final spoken reply — true only for plain string results;
+    sentinel/error kinds force a replan so they never reach the join anyway.
+    """
+
+    kind: StepKind
+    text: str
+    in_output: bool
+
+    @property
+    def should_replan(self) -> bool:
+        return self.kind in _REPLAN_KINDS
+
+
+def classify_step(raw: Optional[object]) -> StepResult:
+    """Convert a raw tool result into a typed `StepResult`.
+
+    The single boundary where sentinel prefixes are matched. `None` (a failed
+    dispatch) becomes `ERROR`; a non-string result is treated as plain output
+    that isn't spoken; a string is matched against the sentinel prefixes (after
+    `lstrip`, so leading whitespace doesn't hide one) and otherwise `NORMAL`.
+    """
+    if raw is None:
+        return StepResult(StepKind.ERROR, "<error>", in_output=False)
+    if not isinstance(raw, str):
+        return StepResult(StepKind.NORMAL, str(raw), in_output=False)
+    stripped = raw.lstrip()
+    for prefix, kind in _SENTINEL_KINDS:
+        if stripped.startswith(prefix):
+            return StepResult(kind, raw, in_output=True)
+    return StepResult(StepKind.NORMAL, raw, in_output=True)
+
 
 # Hard cap on agent re-calls per turn. 1 initial + up to 5 replans = 6.
 # With grammar-cap-3 actions per emission, worst-case is 18 tool calls;
@@ -80,16 +146,11 @@ def is_web_search(intent_name: Optional[str]) -> bool:
     return tool_registry.canonical_name(intent_name) == WEB_SEARCH_TOOL
 
 
-def should_replan(step_result: Optional[str]) -> bool:
+def should_replan(step_result: Optional[object]) -> bool:
     """True if a step's result should trigger another agent call.
 
-    Triggers:
-      - `None` (unknown tool, exception)
-      - Output starts with one of the routing sentinels
+    Thin wrapper over `classify_step` for callers/tests that work with the raw
+    string form (`None` or a sentinel-prefixed string). New code in the agent
+    loop routes on `StepResult.kind` / `StepResult.should_replan` instead.
     """
-    if step_result is None:
-        return True
-    if not isinstance(step_result, str):
-        return False
-    stripped = step_result.lstrip()
-    return any(stripped.startswith(p) for p in REPLAN_SENTINEL_PREFIXES)
+    return classify_step(step_result).should_replan

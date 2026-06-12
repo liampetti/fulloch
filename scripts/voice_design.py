@@ -23,7 +23,6 @@ import sounddevice as sd
 import soundfile as sf
 import torch
 
-
 DEFAULT_PHRASE = (
     "A rainbow is a meteorological phenomenon that is caused by reflection, "
     "refraction and dispersion of light in water droplets resulting in a "
@@ -98,7 +97,7 @@ def load_model():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
         print("⚠️  CUDA not detected — generation will be very slow.")
-    kwargs = dict(torch_dtype=torch.bfloat16, device_map=device)
+    kwargs = {"torch_dtype": torch.bfloat16, "device_map": device}
     if device == "cuda":
         kwargs["attn_implementation"] = "flash_attention_2"
     model = Qwen3TTSModel.from_pretrained(MODEL_NAME, **kwargs)

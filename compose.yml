@@ -31,8 +31,16 @@ services:
       # defaults to).
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
+    # Liveness probe. Prefers the dashboard /status endpoint (catches a hung /
+    # OOM process that's still "running" but no longer serving) and falls back
+    # to a process check when the dashboard is disabled, served over HTTPS, or
+    # on a non-default port. DASHBOARD_PORT (.env) must match
+    # general.dashboard_port in data/config.yml for the curl probe to be the
+    # deciding check; otherwise it degrades to the pgrep fallback. Only acted on
+    # by an orchestrator / autoheal sidecar — plain `restart: unless-stopped`
+    # ignores health status.
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'python app.py' || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${DASHBOARD_PORT:-8765}/status || pgrep -f 'python app.py' || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

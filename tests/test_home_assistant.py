@@ -156,7 +156,7 @@ def test_get_temperature_resolves_collided_climate_over_light():
     with patch("tools.home_assistant._ENTITY_ALIASES", aliases), \
          patch("tools.home_assistant._ENTITY_ALIASES_MULTI", multi), \
          patch("tools.home_assistant._get_state", side_effect=fake_get_state):
-        from tools.home_assistant import get_temperature, _resolve_entity
+        from tools.home_assistant import _resolve_entity, get_temperature
         # Variant resolver recovers the climate entity despite the light winning.
         assert _resolve_entity("upstairs", domain="climate") == "climate.living"
         result = get_temperature("upstairs")

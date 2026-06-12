@@ -111,8 +111,8 @@ class NotesIndex:
             return
         # Imports are deferred so users without the `notes:` block never
         # pay the sentence-transformers startup cost.
-        from sentence_transformers import SentenceTransformer
         import torch
+        from sentence_transformers import SentenceTransformer
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Loading embedding model {EMBED_MODEL_NAME} on {device}...")

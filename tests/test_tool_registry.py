@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tools.tool_registry import ToolRegistry, ToolSchema, UnknownToolError  # noqa: E402
+from tools.tool_registry import ToolSchema, UnknownToolError  # noqa: E402
 
 
 class TestRegistration:

@@ -804,6 +804,51 @@
 
 <script>
 (() => {
+  // --- Optional bearer-token auth -----------------------------------------
+  // The server gates every route (except this page + logo) when
+  // FULLOCH_DASHBOARD_TOKEN is set. We keep the token in localStorage, accept it
+  // once from a ?token= URL param (then strip it from the address bar), attach
+  // it as an Authorization header on every fetch, and pass it to /stream as a
+  // query param since EventSource can't set headers. No token configured = no
+  // auth, and everything below works unchanged.
+  const TOKEN_KEY = 'fulloch_token';
+  (() => {
+    const p = new URLSearchParams(location.search);
+    if (p.has('token')) {
+      localStorage.setItem(TOKEN_KEY, p.get('token').trim());
+      p.delete('token');
+      const qs = p.toString();
+      history.replaceState(null, '', location.pathname + (qs ? '?' + qs : ''));
+    }
+  })();
+  const authToken = () => localStorage.getItem(TOKEN_KEY) || '';
+  const streamUrl = (path) => {
+    const t = authToken();
+    return t ? `${path}?token=${encodeURIComponent(t)}` : path;
+  };
+  let promptingForToken = false;
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = (url, opts = {}) => {
+    const t = authToken();
+    if (t) {
+      const headers = new Headers(opts.headers || {});
+      headers.set('Authorization', `Bearer ${t}`);
+      opts = { ...opts, headers };
+    }
+    return _origFetch(url, opts).then((r) => {
+      if (r.status === 401 && !promptingForToken) {
+        promptingForToken = true;
+        const entered = prompt('Dashboard access token required:');
+        if (entered) {
+          localStorage.setItem(TOKEN_KEY, entered.trim());
+          location.reload();
+        }
+        promptingForToken = false;
+      }
+      return r;
+    });
+  };
+
   const chat = document.getElementById('chat');
   const empty = document.getElementById('empty');
   const form = document.getElementById('form');
@@ -1197,7 +1242,7 @@
   };
 
   const startStream = () => {
-    const es = new EventSource('/stream');
+    const es = new EventSource(streamUrl('/stream'));
     es.onopen = () => setLive(true);
     es.onmessage = (e) => {
       if (!e.data) return;

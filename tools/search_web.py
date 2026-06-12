@@ -12,7 +12,12 @@ from .tool_registry import tool
 
 logger = logging.getLogger(__name__)
 
-SEARXNG_URL = config['search']['searxng_url']
+# Defensive read so importing this module never crashes when no `search` config
+# is present (e.g. the test suite / CI with no data/config.yml). In production
+# the module is only loaded when the `search` key exists (see tools/__init__.py).
+SEARXNG_URL = (config.get('search') or {}).get(
+    'searxng_url', 'http://localhost:8080/search'
+)
 
 # Per-snippet cap. Wide enough to give the agent rich source material to
 # triangulate from; the inline summariser (see core/assistant.py) does the

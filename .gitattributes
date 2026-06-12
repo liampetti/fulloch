@@ -2,4 +2,3 @@
 CLAUDE.md export-ignore
 docs/ export-ignore
 transfer_to_pub_dir.sh export-ignore
-push_to_pub_repo.sh export-ignore

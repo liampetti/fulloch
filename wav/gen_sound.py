@@ -1,4 +1,6 @@
-import wave, struct, math
+import math
+import struct
+import wave
 
 sample_rate = 44100
 beep_freq = 880.0

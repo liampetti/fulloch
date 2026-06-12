@@ -138,6 +138,14 @@ launch.bat
 
 SearXNG runs in Docker; the assistant runs natively in Python — no audio-passthrough complexity. Requires Python 3.10+, Docker Desktop, and an NVIDIA GPU with CUDA.
 
+### Dependencies
+
+`requirements.txt` pins every direct dependency to an exact version for reproducible installs. The GPU stack (CUDA `torch`, plus the git-installed `qwen-tts` / `flash-attn`) can't be PyPI-locked cleanly, so there's no transitive lockfile — snapshot a known-good environment by freezing the built image:
+
+```bash
+docker compose run --rm app pip freeze > requirements.lock
+```
+
 ## Configuration
 
 Everything lives in `data/config.yml`. Key settings:
@@ -149,6 +157,9 @@ general:
   follow_up_time: "5s"            # wakeword-free reply window after TTS ends
   voice_clone: "atticus"          # data/voices/<name>.{wav,txt}
   dashboard_port: 8765            # web chat UI; remove to disable
+  dashboard_host: "127.0.0.1"     # local-only; "0.0.0.0" to reach it from other devices
+  # dashboard_ssl_certfile: "./data/certs/fulloch.pem"   # optional HTTPS (both keys required)
+  # dashboard_ssl_keyfile:  "./data/certs/fulloch-key.pem"
   use_vad: true                   # drop non-speech buffers (coughs, taps) before ASR
   asr_context_hint: true          # bias ASR decoder toward wakeword spelling
   asr_context_terms:              # optional extra terms to bias (max 10)
@@ -156,7 +167,7 @@ general:
 
 home_assistant:
   url: "http://192.168.1.50:8123"
-  token: "your_long_lived_access_token"
+  token: "your_long_lived_access_token"  # or set FULLOCH_HA_TOKEN in .env (preferred)
   calendar: "Fulloch"             # HA calendar for voice reminders (optional)
 
 notes:
@@ -168,6 +179,45 @@ search:
 ```
 
 Full reference: [`data/config.example.yml`](data/config.example.yml)
+
+Secrets and tokens live in `.env` (not `config.yml`): `SEARXNG_SECRET`,
+`FULLOCH_DASHBOARD_TOKEN` (dashboard auth), and `FULLOCH_HA_TOKEN` (Home Assistant,
+overrides `home_assistant.token`). See [`.env.example`](.env.example).
+
+### Exposing the dashboard
+
+The dashboard can read and write your notes, toggle the microphone, speak through
+your speakers, and drive Home Assistant — so it is **unauthenticated and bound to
+`127.0.0.1` (local-only) by default**.
+
+To reach it from your phone or another device on your network:
+
+1. **Bind to your network** — set `general.dashboard_host: "0.0.0.0"` in `data/config.yml`.
+2. **Require a token** — set `FULLOCH_DASHBOARD_TOKEN` in `.env` (generate one with
+   `openssl rand -hex 32`). This is mandatory: without it, anyone on your LAN gets
+   full notes/mic/speech/Home-Assistant control, and Fulloch logs a warning at startup.
+3. **Open it once** at `http://<this-host-ip>:<port>/?token=<your-token>` (find the IP
+   with `hostname -I`). The browser stores the token and strips it from the address
+   bar, so you can bookmark the bare `http://<host>:<port>/` afterwards. If the token
+   is missing or wrong, the page prompts you for it.
+
+#### Optional: HTTPS
+
+Over plain HTTP the token travels in clear text — fine on a trusted home LAN, but if
+you want the traffic encrypted, point Fulloch at a TLS cert/key pair in `data/config.yml`:
+
+```yaml
+general:
+  dashboard_ssl_certfile: "./data/certs/fulloch.pem"
+  dashboard_ssl_keyfile:  "./data/certs/fulloch-key.pem"
+```
+
+Both keys are required (set only one and TLS is skipped with a warning), and the URL
+becomes `https://...`. For a certificate that doesn't trip browser warnings on your
+devices, generate one with [mkcert](https://github.com/FiloSottile/mkcert) and install
+its root CA on each device. In Docker the cert/key must live under `./data` (the only
+host folder mounted into the container), so keep them at `./data/certs/...` as above.
+Do not expose this to the public internet without a proper reverse proxy doing TLS.
 
 ## Reporting a Problem
 

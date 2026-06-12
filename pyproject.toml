@@ -4,13 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fulloch"
-version = "0.1.0"
+# Must match custom_components/fulloch/manifest.json "version" — enforced by
+# tests/test_version_consistency.py. Bump both together (and tag the release).
+version = "2.1.6"
 description = "A fully local, privacy-focused AI voice home assistant"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
-    {name = "Fulloch Contributors"}
+    {name = "Liam Pettigrew"}
 ]
 keywords = [
     "voice-assistant",
@@ -56,10 +58,10 @@ dependencies = {file = ["requirements.txt"]}
 fulloch = "app:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/fulloch"
-Documentation = "https://github.com/yourusername/fulloch#readme"
-Repository = "https://github.com/yourusername/fulloch"
-Issues = "https://github.com/yourusername/fulloch/issues"
+Homepage = "https://github.com/liampetti/fulloch"
+Documentation = "https://github.com/liampetti/fulloch#readme"
+Repository = "https://github.com/liampetti/fulloch"
+Issues = "https://github.com/liampetti/fulloch/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -97,6 +99,14 @@ select = [
 ignore = [
     "E501",  # line too long (handled by formatter)
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# Entry-point scripts deliberately import after env/logging/CUDA setup, so the
+# imports-not-at-top rule (E402) doesn't apply to them. app.py also has a hard
+# import-ordering constraint isort can't model (torch must load before
+# llama_cpp), so import sorting (I001) is exempt there too.
+"app.py" = ["E402", "I001"]
+"scripts/voice_design.py" = ["E402"]
 
 # MyPy configuration
 [tool.mypy]

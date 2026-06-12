@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
-    pip install --no-deps git+https://github.com/rekuenkdr/Qwen3-TTS-streaming.git@97da215 && \
+    pip install --no-deps git+https://github.com/liampetti/Qwen3-TTS-streaming.git@97da215 && \
     pip install flash-attn --no-build-isolation
 
 # Stage 2: Runtime (no CUDA compilers/headers)
@@ -37,6 +37,7 @@ RUN apt-get update && apt-get install -y \
     libasound2-plugins \
     libpulse0 \
     procps \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Route ALSA's default device through PulseAudio so the host's selected

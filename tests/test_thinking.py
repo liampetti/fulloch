@@ -123,6 +123,12 @@ def _import_assistant_module():
         mod = types.ModuleType(name)
         for attr in attrs:
             setattr(mod, attr, lambda *a, **k: None)
+        if name == "core.slm":
+            # Real exception class — assistant.py does `except
+            # ContextExhaustedError`, which a lambda stub can't satisfy.
+            mod.ContextExhaustedError = type(
+                "ContextExhaustedError", (RuntimeError,), {}
+            )
         sys.modules[name] = mod
     import core.assistant as assistant  # noqa: E402
     return assistant
@@ -137,7 +143,7 @@ class TestThinkingLoopFix:
     def test_thinking_uses_free_text_prompt(self):
         import inspect
         a = _import_assistant_module()
-        src = inspect.getsource(a.Assistant._handle_wakeword)
+        src = inspect.getsource(a.AgentLoop.run)
         # The thinking branch runs the dedicated free-text prompt...
         assert "get_thinking_system_prompt" in src
         # ...and does NOT pass the agent grammar on that call (free text so
@@ -148,14 +154,14 @@ class TestThinkingLoopFix:
     def test_no_thinking_replan_loop(self):
         import inspect
         a = _import_assistant_module()
-        src = inspect.getsource(a.Assistant._handle_wakeword)
+        src = inspect.getsource(a.AgentLoop.run)
         # The old looping flag is gone — thinking terminates the turn.
         assert "thinking_for_next" not in src
 
     def test_thinking_branch_returns(self):
         import inspect
         a = _import_assistant_module()
-        src = inspect.getsource(a.Assistant._handle_wakeword)
+        src = inspect.getsource(a.AgentLoop.run)
         # The saw_thinking block ends by returning the cleaned answer rather
         # than `continue`-ing back into the loop.
         block = src[src.index("if saw_thinking"):]

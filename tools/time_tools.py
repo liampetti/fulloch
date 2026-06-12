@@ -195,10 +195,10 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
 def cancel_timer(timer_id: str) -> str:
     """
     Cancel an active timer.
-    
+
     Args:
         timer_id: ID of timer to cancel
-        
+
     Returns:
         Confirmation message
     """
@@ -217,10 +217,10 @@ def cancel_timer(timer_id: str) -> str:
 def get_timer_status(timer_id: Optional[str] = None) -> str:
     """
     Get status of a specific timer or all timers.
-    
+
     Args:
         timer_id: Optional ID of timer to check. If None, shows all timers.
-        
+
     Returns:
         Timer status information
     """
@@ -241,21 +241,21 @@ def get_timer_status(timer_id: Optional[str] = None) -> str:
 
     if not active_timers:
         return "No active timers"
-        
+
     if timer_id:
         if timer_id not in active_timers:
             return f"Timer {timer_id} not found"
-            
+
         timer = active_timers[timer_id]
         remaining = max(0, timer.interval - (time.time() - timer.start_time))
         time_str = format_time_remaining(remaining)
         return f"Timer {timer_id} has {time_str} remaining"
-    
+
     # Show status of all timers
     statuses = []
     for tid, timer in active_timers.items():
         remaining = max(0, timer.interval - (time.time() - timer.start_time))
         time_str = format_time_remaining(remaining)
         statuses.append(f"{tid}: {time_str}")
-            
+
     return "Timer status:\n" + "\n".join(statuses)

@@ -2,9 +2,10 @@
 Tests for the regex intent catching module.
 """
 
-import pytest
 import sys
 from pathlib import Path
+
+import pytest
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -12,12 +13,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.intent_catch import (
     catchAll,
     extract_after_play,
-    extract_stop,
-    extract_skip,
-    extract_resume,
-    extract_timer,
     extract_deep_think,
+    extract_resume,
+    extract_skip,
+    extract_stop,
     extract_summarize_thinking,
+    extract_timer,
     has_time_query,
     list_timers,
 )

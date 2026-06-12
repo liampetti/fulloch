@@ -8,9 +8,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from tools.tool_registry import UnknownToolError, tool_registry  # noqa: E402
 from utils import intents  # noqa: E402
-from tools.tool_registry import tool_registry, UnknownToolError  # noqa: E402
-
 
 # --- handle_action ------------------------------------------------------
 
@@ -118,6 +117,59 @@ class TestShouldReplan:
         assert intents.should_replan([]) is False
 
 
+# --- classify_step (typed boundary) -------------------------------------
+
+class TestClassifyStep:
+    def test_none_is_error_and_replans(self):
+        step = intents.classify_step(None)
+        assert step.kind is intents.StepKind.ERROR
+        assert step.should_replan is True
+        assert step.in_output is False
+        assert step.text == "<error>"
+
+    def test_plain_string_is_normal_and_spoken(self):
+        step = intents.classify_step("Set Lounge to 20 percent")
+        assert step.kind is intents.StepKind.NORMAL
+        assert step.should_replan is False
+        assert step.in_output is True
+        assert step.text == "Set Lounge to 20 percent"
+
+    def test_non_string_is_normal_but_not_spoken(self):
+        # Non-str, non-None tool output: kept in history as str(), not spoken,
+        # and does not replan.
+        step = intents.classify_step(42)
+        assert step.kind is intents.StepKind.NORMAL
+        assert step.in_output is False
+        assert step.should_replan is False
+        assert step.text == "42"
+
+    @pytest.mark.parametrize("prefix,kind", [
+        ("User question:", "WEB_SEARCH"),
+        ("Thinking question:", "THINKING"),
+        ("Summary question:", "SUMMARY"),
+        ("Reactive question:", "REACTIVE"),
+    ])
+    def test_sentinel_prefix_maps_to_kind(self, prefix, kind):
+        step = intents.classify_step(f"{prefix} payload")
+        assert step.kind is intents.StepKind[kind]
+        assert step.should_replan is True
+
+    def test_leading_whitespace_still_matches(self):
+        step = intents.classify_step("   Thinking question:\nwhy is the sky blue")
+        assert step.kind is intents.StepKind.THINKING
+
+    def test_sentinel_must_be_at_start(self):
+        # A note whose body merely contains a sentinel mid-string must NOT route.
+        step = intents.classify_step("note says 'User question: x'")
+        assert step.kind is intents.StepKind.NORMAL
+        assert step.should_replan is False
+
+    def test_should_replan_delegates_to_classify(self):
+        # The legacy raw-string predicate is now a thin wrapper.
+        assert intents.should_replan("Reactive question: oops") is True
+        assert intents.should_replan("all good") is False
+
+
 # --- module surface -----------------------------------------------------
 
 class TestModuleSurface:
@@ -138,7 +190,15 @@ class TestAgentGrammarParses:
     catches that on every test run."""
 
     def test_grammar_file_loads(self):
+        # Needs the real llama.cpp grammar parser — skip when it's been stubbed
+        # (CI without the GPU stack). The grammar still gets validated for real
+        # on any machine with llama_cpp installed.
+        from tests.conftest import STUBBED_MODULES
+        if "llama_cpp" in STUBBED_MODULES:
+            pytest.skip("requires real llama_cpp (grammar parser)")
+
         from llama_cpp import LlamaGrammar
+
         from core import slm
         # Will raise on a parse error.
         LlamaGrammar.from_file(slm.GRAMMAR_FILE)

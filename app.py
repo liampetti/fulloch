@@ -11,14 +11,23 @@ Usage:
 """
 
 import ctypes
-import os
 import logging
+import os
 import sys
-import yaml
 from pathlib import Path
 
-# torch must be imported before llama_cpp
-import torch
+import yaml
+
+# Load .env before anything reads os.environ (e.g. tools/home_assistant.py reads
+# FULLOCH_HA_TOKEN, server/dashboard.py reads FULLOCH_DASHBOARD_TOKEN). In Docker
+# these are already injected via compose `env_file`, so load_dotenv is a no-op
+# there (it never overrides existing vars); this covers native `python app.py`.
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# torch must be imported before llama_cpp (load-order side effect, not used here)
+import torch  # noqa: F401
 import llama_cpp
 
 # Load configuration early so the log level (general.log_level) is available
@@ -124,8 +133,11 @@ ASR_CONTEXT_TERMS = _GENERAL.get('asr_context_terms', []) or []
 USE_VAD = bool(_GENERAL.get('use_vad', True))
 DASHBOARD_PORT = _GENERAL.get('dashboard_port', None)
 DASHBOARD_HOST = _GENERAL.get('dashboard_host', '127.0.0.1')
+DASHBOARD_SSL_CERTFILE = _GENERAL.get('dashboard_ssl_certfile', None)
+DASHBOARD_SSL_KEYFILE = _GENERAL.get('dashboard_ssl_keyfile', None)
 
 from core.assistant import Assistant
+
 
 def main():
     assistant = Assistant(
@@ -144,7 +156,13 @@ def main():
     if DASHBOARD_PORT:
         try:
             from server.dashboard import start_dashboard
-            start_dashboard(assistant, host=DASHBOARD_HOST, port=int(DASHBOARD_PORT))
+            start_dashboard(
+                assistant,
+                host=DASHBOARD_HOST,
+                port=int(DASHBOARD_PORT),
+                ssl_certfile=DASHBOARD_SSL_CERTFILE,
+                ssl_keyfile=DASHBOARD_SSL_KEYFILE,
+            )
         except Exception as e:
             logger.error(f"Could not start dashboard: {e}")
     assistant.run()

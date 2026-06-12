@@ -97,7 +97,7 @@ class AudioCapture:
         self._vad_get_timestamps = None
         if use_vad:
             try:
-                from silero_vad import load_silero_vad, get_speech_timestamps
+                from silero_vad import get_speech_timestamps, load_silero_vad
                 self._vad_model = load_silero_vad()
                 self._vad_get_timestamps = get_speech_timestamps
                 logger.info("Silero VAD loaded — non-speech buffers will be dropped")

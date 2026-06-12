@@ -36,6 +36,12 @@ def _import_assistant_module():
         mod = types.ModuleType(name)
         for attr in attrs:
             setattr(mod, attr, lambda *a, **k: None)
+        if name == "core.slm":
+            # Real exception class — assistant.py does `except
+            # ContextExhaustedError`, which a lambda stub can't satisfy.
+            mod.ContextExhaustedError = type(
+                "ContextExhaustedError", (RuntimeError,), {}
+            )
         sys.modules[name] = mod
 
     import core.assistant as assistant  # noqa: E402

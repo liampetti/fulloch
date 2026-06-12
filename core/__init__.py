@@ -1,5 +1,9 @@
-"""Core package — re-export the small surface used by app.py / tests."""
+"""Core package.
 
-from .assistant import Assistant
+Intentionally empty: importing `core` must NOT eagerly pull in
+`core.assistant` (and its `sounddevice` / `torch` / `llama_cpp` dependencies),
+so pure-logic test files can collect and run on a machine with no GPU stack.
+Import the heavy surface explicitly where it's needed:
 
-__all__ = ["Assistant"]
+    from core.assistant import Assistant
+"""

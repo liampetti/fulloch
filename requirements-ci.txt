@@ -1,0 +1,28 @@
+# Lightweight dependency set for CI (ruff + pytest), no GPU stack.
+#
+# The full pipeline (torch / llama_cpp / qwen_asr / qwen_tts / sounddevice /
+# silero_vad / sentence_transformers ...) is GPU-resident and only meaningfully
+# testable on real hardware — those are stubbed in tests/conftest.py when absent.
+# This file lists only the pure-Python / light packages the test suite actually
+# imports unstubbed, so CI installs in seconds. Keep in sync with the real
+# imports exercised by tests/ (validated by running the suite against this set).
+
+# Test + lint tooling (mirrors pyproject [project.optional-dependencies] dev)
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+ruff>=0.4.0
+
+# Light runtime deps the tests import directly
+numpy>=1.24.0
+pyyaml>=6.0
+fastapi>=0.115.0
+uvicorn>=0.30.0
+httpx>=0.27.0
+pydantic>=2.0
+python-dotenv>=1.0
+requests>=2.31
+beautifulsoup4>=4.12
+word2number>=1.1
+simpleeval>=1.0
+pint>=0.24
+python-dateutil>=2.9

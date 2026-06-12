@@ -191,7 +191,10 @@ def test_repeated_barge_ins_keep_worker_alive():
         assert not t.is_alive(), f"speak_stream hung on barge-in #{attempt}"
 
         result: list = []
-        s = threading.Thread(target=lambda: result.append(tts.synthesize("ok", object())), daemon=True)
+        s = threading.Thread(
+            target=lambda r=result: r.append(tts.synthesize("ok", object())),
+            daemon=True,
+        )
         s.start()
         s.join(timeout=5.0)
         assert not s.is_alive(), f"worker wedged after barge-in #{attempt}"

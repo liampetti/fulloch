@@ -91,7 +91,7 @@ REMINDER_PREFIX_PHRASES = [
 ]
 
 # Topics for the startup greeting's "surprising fact" — rotated so the SLM
-# isn't asked the same open-ended question every launch. 
+# isn't asked the same open-ended question every launch.
 # Specificity is increased to prevent modal collapse to common trivia.
 GREETING_TOPICS = [
     # Science & Nature
@@ -101,21 +101,21 @@ GREETING_TOPICS = [
     "deep-sea extremophiles and how they survive",
     "the aerodynamics of insect flight",
     "unusual or extinct edible plants",
-    
+
     # History & Culture
     "forgotten ancient technologies",
     "the origins of common everyday idioms",
     "unusual historical currencies",
     "misunderstood events in medieval history",
     "the logistics of ancient trade routes",
-    
+
     # Math, Tech & Engineering
     "counterintuitive mathematical paradoxes",
     "accidental scientific discoveries",
     "early internet and computing history",
     "the engineering of ancient aqueducts and plumbing",
     "bizarre and obsolete units of measurement",
-    
+
     # Arts & Human Experience
     "obscure musical instruments from around the world",
     "the chemistry behind historical art supplies",

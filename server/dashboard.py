@@ -9,10 +9,13 @@ and `_turn_lock` so the two inputs never race on the SLM.
 import asyncio
 import json
 import logging
+import os
 import queue
+import secrets
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -32,6 +35,14 @@ _LOGO_PATH = _SERVER_DIR.parent / "fulloch.png"
 
 HISTORY_LIMIT = 200
 SUBSCRIBER_IDLE_KEEPALIVE_S = 15
+
+# Optional bearer-token gate. When FULLOCH_DASHBOARD_TOKEN is set, every route
+# except the unauthenticated shell (the HTML page + its logo) requires the token
+# — supplied either as `Authorization: Bearer <token>` or, for EventSource which
+# can't set headers, a `?token=<token>` query param. Unset = no auth (preserves
+# the zero-config local-only experience); we warn loudly if that's paired with a
+# non-loopback bind. See README "Exposing the dashboard".
+_AUTH_EXEMPT_PATHS = frozenset({"/", "/logo.png", "/favicon.ico"})
 
 
 class ChatRequest(BaseModel):
@@ -56,6 +67,24 @@ class NoteRequest(BaseModel):
 
 def create_app(assistant) -> FastAPI:
     app = FastAPI(title="Fulloch Dashboard")
+
+    token = os.environ.get("FULLOCH_DASHBOARD_TOKEN", "").strip()
+    if token:
+        @app.middleware("http")
+        async def _require_token(request: Request, call_next):
+            if request.url.path not in _AUTH_EXEMPT_PATHS:
+                header = request.headers.get("authorization", "")
+                supplied = (
+                    header[7:].strip()
+                    if header.lower().startswith("bearer ")
+                    else request.query_params.get("token", "").strip()
+                )
+                if not secrets.compare_digest(supplied, token):
+                    return JSONResponse(
+                        {"detail": "unauthorized"}, status_code=401
+                    )
+            return await call_next(request)
+        logger.info("Dashboard bearer-token auth enabled")
 
     history_log: list = []
     history_lock = threading.Lock()
@@ -227,15 +256,50 @@ def create_app(assistant) -> FastAPI:
 
 
 def start_dashboard(
-    assistant, host: str = "127.0.0.1", port: int = 8765
+    assistant,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    ssl_certfile: Optional[str] = None,
+    ssl_keyfile: Optional[str] = None,
 ) -> threading.Thread:
-    """Launch the dashboard on a daemon thread. Non-blocking."""
+    """Launch the dashboard on a daemon thread. Non-blocking.
+
+    Pass both ``ssl_certfile`` and ``ssl_keyfile`` to serve over HTTPS (uvicorn
+    terminates TLS). If only one is given, or a file is missing, TLS is skipped
+    and the dashboard falls back to HTTP with a loud warning.
+    """
+    if host not in ("127.0.0.1", "localhost", "::1") and not os.environ.get(
+        "FULLOCH_DASHBOARD_TOKEN", "").strip():
+        logger.warning(
+            "Dashboard bound to %s with NO auth token — notes, mic, speech, and "
+            "Home Assistant control are exposed to your whole network. Set "
+            "FULLOCH_DASHBOARD_TOKEN in .env or bind dashboard_host to 127.0.0.1.",
+            host,
+        )
+
+    ssl_kwargs = {}
+    if ssl_certfile or ssl_keyfile:
+        if not (ssl_certfile and ssl_keyfile):
+            logger.warning(
+                "Dashboard TLS needs BOTH dashboard_ssl_certfile and "
+                "dashboard_ssl_keyfile — only one was set; serving over HTTP."
+            )
+        elif not Path(ssl_certfile).is_file() or not Path(ssl_keyfile).is_file():
+            logger.warning(
+                "Dashboard TLS cert/key not found (cert=%s, key=%s); serving "
+                "over HTTP.", ssl_certfile, ssl_keyfile,
+            )
+        else:
+            ssl_kwargs = {"ssl_certfile": ssl_certfile, "ssl_keyfile": ssl_keyfile}
+
     app = create_app(assistant)
     config = uvicorn.Config(
-        app, host=host, port=port, log_level="warning", access_log=False
+        app, host=host, port=port, log_level="warning", access_log=False,
+        **ssl_kwargs,
     )
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True, name="dashboard-uvicorn")
     thread.start()
-    logger.info(f"Dashboard listening on http://{host}:{port}")
+    scheme = "https" if ssl_kwargs else "http"
+    logger.info(f"Dashboard listening on {scheme}://{host}:{port}")
     return thread

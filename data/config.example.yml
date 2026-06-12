@@ -25,7 +25,22 @@ general:
 
   # Web chat UI. Set port to enable; unset disables.
   dashboard_port: 8765
-  dashboard_host: "0.0.0.0"   # 127.0.0.1 (default) = local-only
+  dashboard_host: "127.0.0.1"  # local-only (default).
+  #
+  # To reach the dashboard from a phone / another computer on your network:
+  #   1. dashboard_host: "0.0.0.0"            (bind to all interfaces)
+  #   2. set FULLOCH_DASHBOARD_TOKEN in .env  (REQUIRED — the dashboard can
+  #      read/write notes, toggle the mic, speak, and drive Home Assistant)
+  #   3. (optional) serve over HTTPS by setting both keys below.
+  # Then open  http(s)://<this-host-ip>:8765/?token=<your-token>  once; the
+  # browser stores the token and you can bookmark the bare URL afterwards.
+  #
+  # Optional HTTPS. Point these at a cert/key PAIR (both required, or TLS is
+  # skipped). For a no-browser-warning local cert use mkcert. In Docker the
+  # files must live under ./data (mounted into the container), so reference
+  # them as ./data/certs/... :
+  # dashboard_ssl_certfile: "./data/certs/fulloch.pem"
+  # dashboard_ssl_keyfile:  "./data/certs/fulloch-key.pem"
 
 # =============================================================================
 # Home Assistant — smart-home backend
@@ -35,7 +50,9 @@ general:
 
 # home_assistant:
 #   url: "http://192.168.1.50:8123"
-#   token: "your_long_lived_access_token"
+#   token: "your_long_lived_access_token"  # prefer setting FULLOCH_HA_TOKEN in .env
+#                                            # instead; the env var takes priority and
+#                                            # keeps the token out of plaintext config.
 #   timeout: 10
 #   spotify_entity: "SpotifyPlus Atticus"  # Friendly name (or entity_id) of the Spotify
 #                                               # media_player. Auto-detected from HA on startup

@@ -15,13 +15,19 @@ import logging
 import math
 import re
 from datetime import date, datetime, timedelta
-from typing import Optional
 
 import pint
 import simpleeval
 from dateutil import parser as _dateparser
 from dateutil.relativedelta import (
-    relativedelta, MO, TU, WE, TH, FR, SA, SU,
+    FR,
+    MO,
+    SA,
+    SU,
+    TH,
+    TU,
+    WE,
+    relativedelta,
 )
 
 from .tool_registry import tool

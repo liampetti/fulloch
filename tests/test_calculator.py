@@ -6,11 +6,11 @@ number formatting across magnitudes, date maths, and unit conversion.
 """
 
 from tools.calculator import (
+    _fmt_number,
     calculate,
     convert_units,
     date_of,
     days_between,
-    _fmt_number,
 )
 
 

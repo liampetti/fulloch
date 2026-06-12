@@ -137,7 +137,7 @@
 
 - Conversation context:
     User: "Search the news and summarise it for me"
-    Tool — external_information: "Reactive question: Top stories: inflation hits 3.2%; PM announces climate fund."
+    Tool — external_information: "Inflation has risen to 3.2%, and the Prime Minister has announced a new climate fund."
   Output:
   {"reply": "Inflation has hit 3.2%, and the PM has announced a new climate fund."}
 
@@ -235,13 +235,13 @@
 
 - Conversation context:
     User: "Summarise today's news and save it"
-    Tool — external_information: "Reactive question: Top stories: inflation hits 3.2%; PM announces climate fund; Socceroos qualify for World Cup."
+    Tool — external_information: "Inflation has risen to 3.2%, the Prime Minister has announced a new climate fund, and the Socceroos have qualified for the World Cup."
   Output:
   {"actions": [{"intent": "append_to_today", "args": ["News summary: Inflation hits 3.2%, PM announces a new climate fund, and the Socceroos have qualified for the World Cup."]}]}
 
 - Conversation context:
     User: "What's today's news?"
-    Tool — external_information: "Reactive question: Top stories: inflation hits 3.2%; PM announces climate fund."
+    Tool — external_information: "Inflation has risen to 3.2%, and the Prime Minister has announced a new climate fund."
     Tool — append_to_today: "Added to today's note."
   User: "read me back that news summary"
   Output:
@@ -249,14 +249,14 @@
 
 - Conversation context:
     User: "What's today's news?"
-    Tool — external_information: "Reactive question: Top stories: ..."
+    Tool — external_information: "Inflation has risen to 3.2%, and the Prime Minister has announced a new climate fund."
   User: "read me back what you just said"
   Output:
   {"actions": [{"intent": "search_notes_semantic", "args": ["today news summary"]}]}
 
 - Conversation context:
     User: "What's today's news?"
-    Tool — external_information: "Reactive question: A Red Flag Warning is in effect for gusty winds..."
+    Tool — external_information: "A Red Flag Warning is in effect for gusty winds, and there is rising tension in the Strait of Hormuz."
     Assistant: "There's a Red Flag Warning for gusty winds, and tension in the Strait of Hormuz."
   User: "Where are the gusty winds happening?"
   Output:
@@ -350,7 +350,7 @@
 
 - Conversation context:
     User: "Look up how long it takes light to travel from the Sun to Earth and save it to my science notes"
-    Tool — external_information: "Reactive question: Light from the Sun takes approximately 8 minutes and 20 seconds to reach Earth, travelling 149.6 million kilometres at 299,792 kilometres per second."
+    Tool — external_information: "Light from the Sun takes approximately 8 minutes and 20 seconds to reach Earth, travelling 149.6 million kilometres at 299,792 kilometres per second."
   Output:
   {"actions": [{"intent": "write_note", "args": ["science notes", "Light from the Sun takes approximately 8 minutes and 20 seconds to reach Earth, travelling 149.6 million kilometres at 299,792 kilometres per second."]}]}
 

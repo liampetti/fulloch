@@ -42,9 +42,32 @@ TTS_MAX_UTTERANCE_MS = 2000
 # start of the next buffer so the wakeword can't fall on a chunk
 # boundary and get split between two ASR results.
 TTS_OVERLAP_MS = 1000
-# Shorter min during TTS so a brief wakeword utterance ("Connery.") is
+# Shorter min during TTS so a brief wakeword utterance ("Atticus.") is
 # still long enough to enqueue when it's force-flushed.
 TTS_MIN_UTTERANCE_MS = 500
+# Shorter min while the wakeword-free follow-up window is open: replies to the
+# assistant are often one or two words ("yes", "stop", "the kitchen one") that
+# fall under MIN_UTTERANCE_MS and would otherwise be dropped before ASR. The
+# follow-up window only accepts short utterances anyway, and VAD already guards
+# against noise blips (speech must have been detected), so the long floor isn't
+# needed here.
+FOLLOW_UP_MIN_UTTERANCE_MS = 500
+# VAD endpointing: speech probability threshold (Silero outputs 0..1 per
+# window; higher = stricter about what counts as voice) and how long the
+# probability must stay low before the speaker is judged to have finished.
+VAD_THRESHOLD = 0.5
+VAD_ENDPOINT_SILENCE_MS = SILENCE_DURATION_MS
+# While VAD has not yet detected any speech, discard the buffer once it grows
+# past this so a noisy room doesn't accumulate seconds of pre-speech audio
+# (which would both inflate onset latency and hand ASR a long noise clip).
+VAD_IDLE_RESET_MS = 3000
+# Minimum *voiced* span (VAD end - start) for a silence-endpointed segment to
+# be enqueued, outside the follow-up window. Silero scores a brief burst (a
+# cough, a tap) above the speech threshold, so without this floor a single
+# cough is enqueued and ASR hallucinates the wakeword from it. The wakeword
+# phrase is ~800ms+ so 300ms is safe; the follow-up window stays exempt (a
+# cough and a one-word reply like "no" are acoustically identical there).
+VAD_MIN_SPEECH_MS = 300
 
 
 def is_silent(chunk: np.ndarray, threshold: float = SILENCE_THRESHOLD) -> bool:
@@ -84,8 +107,12 @@ class AudioCapture:
         tts_max_utterance_ms: int = TTS_MAX_UTTERANCE_MS,
         tts_overlap_ms: int = TTS_OVERLAP_MS,
         tts_min_utterance_ms: int = TTS_MIN_UTTERANCE_MS,
+        follow_up_min_utterance_ms: int = FOLLOW_UP_MIN_UTTERANCE_MS,
         input_device: Optional[str] = None,
         use_vad: bool = True,
+        vad_threshold: Optional[float] = None,
+        vad_endpoint_silence_ms: Optional[int] = None,
+        vad_min_speech_ms: Optional[int] = None,
     ):
         self.sample_rate = sample_rate
         self.chunk_duration_ms = chunk_duration_ms
@@ -95,12 +122,28 @@ class AudioCapture:
 
         self._vad_model = None
         self._vad_get_timestamps = None
+        # Streaming endpointer (None when VAD is off/unavailable). When present
+        # it — not RMS — decides end-of-speech outside TTS; RMS remains the
+        # endpoint mechanism on the fallback path and while TTS is playing.
+        self._endpointer = None
         if use_vad:
             try:
                 from silero_vad import get_speech_timestamps, load_silero_vad
+
+                from .vad import VadEndpointer
                 self._vad_model = load_silero_vad()
                 self._vad_get_timestamps = get_speech_timestamps
-                logger.info("Silero VAD loaded — non-speech buffers will be dropped")
+                self._endpointer = VadEndpointer(
+                    self._vad_model,
+                    sample_rate=sample_rate,
+                    threshold=VAD_THRESHOLD if vad_threshold is None else vad_threshold,
+                    endpoint_silence_ms=(
+                        vad_endpoint_silence_ms
+                        if vad_endpoint_silence_ms is not None
+                        else silence_duration_ms
+                    ),
+                )
+                logger.info("Silero VAD loaded — speech-based endpointing enabled")
             except Exception as e:
                 logger.warning(f"Silero VAD requested but failed to load ({e}); running without VAD")
 
@@ -112,6 +155,18 @@ class AudioCapture:
         self.tts_max_utterance_samples = int(sample_rate * tts_max_utterance_ms / 1000)
         self.tts_overlap_samples = int(sample_rate * tts_overlap_ms / 1000)
         self.tts_min_utterance_samples = int(sample_rate * tts_min_utterance_ms / 1000)
+        self.follow_up_min_utterance_samples = int(sample_rate * follow_up_min_utterance_ms / 1000)
+        self.vad_idle_reset_samples = int(sample_rate * VAD_IDLE_RESET_MS / 1000)
+        self.vad_min_speech_samples = int(
+            sample_rate
+            * (VAD_MIN_SPEECH_MS if vad_min_speech_ms is None else vad_min_speech_ms)
+            / 1000
+        )
+        # Slack added to the follow-up deadline so a reply that *starts* just
+        # inside the window still clears the recorder's shorter-min gate when
+        # it's endpointed ~silence_duration later (the assistant gauges the
+        # window from speech onset, the recorder acts at endpoint time).
+        self._follow_up_slack_s = silence_duration_ms / 1000.0 + 1.5
 
         # State
         self.audio_buffer: deque = deque()
@@ -125,11 +180,41 @@ class AudioCapture:
         # switches to `tts_silence_threshold` so AEC residue is treated as
         # silence and utterances end on time.
         self.tts_active = threading.Event()
+        # Set by Assistant while the wakeword-free follow-up window is open.
+        # The recorder then accepts shorter utterances (a brief reply to the
+        # assistant) instead of holding them to the full min length. Paired
+        # with `_follow_up_until` so the window auto-expires even if the
+        # Assistant never gets a chance to clear it.
+        self.follow_up_active = threading.Event()
+        self._follow_up_until = 0.0
         # Cross-thread signal: when set, the recorder drops its in-progress
         # buffer at the top of the next iteration. Set by `flush()`; only
         # the recorder thread mutates `audio_buffer` to avoid races with
         # the InputStream callback.
         self._flush_pending = False
+
+    def arm_follow_up(self, window_seconds: float) -> None:
+        """Open the follow-up window for `window_seconds` (plus capture slack).
+
+        While open the recorder uses `follow_up_min_utterance_samples`, so a
+        short reply isn't dropped before it reaches ASR.
+        """
+        self._follow_up_until = time.monotonic() + window_seconds + self._follow_up_slack_s
+        self.follow_up_active.set()
+
+    def clear_follow_up(self) -> None:
+        """Close the follow-up window (e.g. when a fresh turn begins)."""
+        self.follow_up_active.clear()
+        self._follow_up_until = 0.0
+
+    def _follow_up_open(self) -> bool:
+        """True while the follow-up window is armed and not yet expired."""
+        if not self.follow_up_active.is_set():
+            return False
+        if time.monotonic() >= self._follow_up_until:
+            self.follow_up_active.clear()
+            return False
+        return True
 
     def _audio_callback(self, indata, frames, time_info, status):
         """Callback for sounddevice InputStream. Must be fast — no resampling here."""
@@ -185,6 +270,8 @@ class AudioCapture:
                     self.audio_buffer.clear()
                     silence_counter = 0
                     speech_onset_t = None
+                    if self._endpointer is not None:
+                        self._endpointer.reset()
                     self._flush_pending = False
                     continue
 
@@ -193,6 +280,65 @@ class AudioCapture:
                         continue
 
                     tts_active = self.tts_active.is_set()
+
+                    # VAD-driven endpointing (outside TTS): speech probability,
+                    # not RMS energy, decides when the speaker has finished —
+                    # robust in a noisy room where energy never drops to a
+                    # silence floor. RMS still governs the TTS/barge-in path
+                    # below (a latency mechanism, not a noise problem).
+                    if self._endpointer is not None and not tts_active:
+                        self._endpointer.process(self.audio_buffer[-1])
+                        buffer_samples = sum(c.size for c in self.audio_buffer)
+
+                        # Discard accumulating noise before any speech is
+                        # detected so a noisy room neither inflates onset
+                        # latency nor hands ASR a long noise clip.
+                        if (not self._endpointer.speech_started
+                                and buffer_samples >= self.vad_idle_reset_samples):
+                            self.audio_buffer.clear()
+                            self._endpointer.reset()
+                            continue
+
+                        hit_silence = self._endpointer.endpointed
+                        hit_max = buffer_samples >= self.max_utterance_samples
+                        if not (hit_silence or hit_max):
+                            continue
+
+                        # Speech-duration floor (silence-endpointed segments
+                        # only — a hit_max segment is long genuine speech).
+                        # Drop a too-brief voiced burst — a cough Silero scored
+                        # as speech — before it reaches ASR and gets
+                        # hallucinated into the wakeword. Exempt while the
+                        # follow-up window is open: a cough there is
+                        # indistinguishable from a one-word reply.
+                        if (hit_silence and not self._follow_up_open()
+                                and self._endpointer.last_speech_samples
+                                    < self.vad_min_speech_samples):
+                            secs = self._endpointer.last_speech_samples / self.sample_rate
+                            logger.debug(f"VAD: speech span {secs:.2f}s < min — dropped as noise")
+                            self.audio_buffer.clear()
+                            self._endpointer.reset()
+                            continue
+
+                        # A short reply during the follow-up window ("yes",
+                        # "stop") would fall under the normal min; accept the
+                        # shorter floor while it's open.
+                        min_required = (
+                            self.follow_up_min_utterance_samples
+                            if self._follow_up_open()
+                            else self.min_utterance_samples
+                        )
+                        buf = np.concatenate(list(self.audio_buffer), axis=0)
+                        if (buf.size >= min_required
+                                and self._endpointer.speech_started):
+                            onset = self._endpointer.speech_onset or time.monotonic()
+                            self.audio_queue.put((buf, onset))
+                            secs = buf.size / self.sample_rate
+                            logger.debug(f"VAD endpoint: enqueued {secs:.2f}s for transcription")
+                        self.audio_buffer.clear()
+                        self._endpointer.reset()
+                        continue
+
                     # AEC residue during TTS sits above the normal threshold,
                     # so utterances captured during playback would never reach
                     # silence. Use the stricter floor while TTS is active.
@@ -218,6 +364,8 @@ class AudioCapture:
                     )
                     min_samples = (
                         self.tts_min_utterance_samples if tts_active
+                        else self.follow_up_min_utterance_samples
+                        if self._follow_up_open()
                         else self.min_utterance_samples
                     )
 

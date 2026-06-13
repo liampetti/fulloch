@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "fulloch"
 # Must match custom_components/fulloch/manifest.json "version" — enforced by
 # tests/test_version_consistency.py. Bump both together (and tag the release).
-version = "2.1.6"
+version = "2.1.7"
 description = "A fully local, privacy-focused AI voice home assistant"
 readme = "README.md"
 license = {text = "MIT"}

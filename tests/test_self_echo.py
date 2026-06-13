@@ -28,7 +28,7 @@ def assistant():
         mock_ac.return_value = MagicMock()
         from core.assistant import Assistant
         a = Assistant(
-            wakeword="morgan",
+            wakeword="atticus",
             barge_in="wakeword",
         )
         a._turn_active = True  # pretend a turn is running so checks engage
@@ -38,12 +38,12 @@ def assistant():
 class TestIsSelfEcho:
     def test_no_recent_spoken_text_means_not_echo(self, assistant):
         assistant._last_spoken_text = ""
-        assert assistant._is_self_echo("morgan what time is it") is False
+        assert assistant._is_self_echo("atticus what time is it") is False
 
     def test_multi_word_overlap_above_threshold(self, assistant):
         # Assistant said this; mic picks up most of it as a barge-in.
-        assistant._last_spoken_text = "morgan freeman was born in memphis"
-        assert assistant._is_self_echo("morgan freeman was born") is True
+        assistant._last_spoken_text = "atticus is a local voice assistant"
+        assert assistant._is_self_echo("atticus is a local") is True
 
     def test_multi_word_overlap_below_threshold(self, assistant):
         # User's real request shares only stop-words with the prior answer.
@@ -51,36 +51,36 @@ class TestIsSelfEcho:
         assert assistant._is_self_echo("play some jazz music for me") is False
 
     def test_single_word_wakeword_in_recent_speech_is_echo(self, assistant):
-        # The assistant's answer mentioned "morgan" — a stray single-word
-        # "morgan" transcript is almost certainly AEC residue.
-        assistant._last_spoken_text = "morgan freeman was a great narrator"
-        assert assistant._is_self_echo("morgan") is True
+        # The assistant's answer mentioned "atticus" — a stray single-word
+        # "atticus" transcript is almost certainly AEC residue.
+        assistant._last_spoken_text = "atticus is a great narrator"
+        assert assistant._is_self_echo("atticus") is True
 
     def test_single_word_wakeword_not_in_recent_speech_is_not_echo(self, assistant):
-        # The prior answer didn't mention the wakeword, so a "morgan" transcript
+        # The prior answer didn't mention the wakeword, so an "atticus" transcript
         # is a legitimate barge-in attempt.
         assistant._last_spoken_text = "it is sunny and twenty two degrees"
-        assert assistant._is_self_echo("morgan") is False
+        assert assistant._is_self_echo("atticus") is False
 
 
 class TestCheckBargeIn:
     def test_does_not_barge_when_self_echo(self, assistant):
-        assistant._last_spoken_text = "morgan freeman was born in memphis"
-        assert assistant._check_barge_in("morgan freeman was born") is False
+        assistant._last_spoken_text = "atticus is a local voice assistant"
+        assert assistant._check_barge_in("atticus is a local") is False
 
     def test_barges_on_real_user_utterance(self, assistant):
         assistant._last_spoken_text = "it is sunny and twenty two degrees"
-        assert assistant._check_barge_in("morgan stop") is True
+        assert assistant._check_barge_in("atticus stop") is True
 
     def test_does_not_barge_when_turn_inactive(self, assistant):
         assistant._turn_active = False
         assistant._last_spoken_text = "it is sunny"
-        assert assistant._check_barge_in("morgan stop") is False
+        assert assistant._check_barge_in("atticus stop") is False
 
     def test_does_not_barge_when_barge_in_off(self, assistant):
         assistant.barge_in = "off"
         assistant._last_spoken_text = "it is sunny"
-        assert assistant._check_barge_in("morgan stop") is False
+        assert assistant._check_barge_in("atticus stop") is False
 
 
 @pytest.fixture
@@ -90,7 +90,7 @@ def multiword_assistant():
         mock_ac.return_value = MagicMock()
         from core.assistant import Assistant
         a = Assistant(
-            wakeword="hey fraser",
+            wakeword="hey atticus",
             barge_in="wakeword",
         )
         a._turn_active = True
@@ -103,48 +103,48 @@ class TestTolerantWakewordMatcher:
     """
 
     def test_word_boundary_rejects_substring_match(self, assistant):
-        # "morgan" should not fire inside "morganic" / "morgans".
-        assert assistant._wakeword_re.search("morganic chemistry") is None
-        assert assistant._wakeword_re.search("the morgans arrived") is None
+        # "atticus" should not fire inside a longer word like "atticuses".
+        assert assistant._wakeword_re.search("atticuses chemistry") is None
+        assert assistant._wakeword_re.search("the atticuser arrived") is None
 
     def test_word_boundary_accepts_clean_match(self, assistant):
-        assert assistant._wakeword_re.search("morgan stop") is not None
-        assert assistant._wakeword_re.search("ok morgan, what time") is not None
+        assert assistant._wakeword_re.search("atticus stop") is not None
+        assert assistant._wakeword_re.search("ok atticus, what time") is not None
 
     def test_two_word_wakeword_plain(self, multiword_assistant):
-        assert multiword_assistant._wakeword_re.search("hey fraser stop") is not None
+        assert multiword_assistant._wakeword_re.search("hey atticus stop") is not None
 
     def test_two_word_wakeword_with_comma_between(self, multiword_assistant):
         # ASR routinely inserts a comma after the leading word.
         assert multiword_assistant._wakeword_re.search(
-            "hey, fraser what time is it"
+            "hey, atticus what time is it"
         ) is not None
 
     def test_two_word_wakeword_with_extra_whitespace(self, multiword_assistant):
         assert multiword_assistant._wakeword_re.search(
-            "hey   fraser play some music"
+            "hey   atticus play some music"
         ) is not None
 
     def test_two_word_wakeword_partial_does_not_match(self, multiword_assistant):
-        # "fraser" alone is not the wakeword.
-        assert multiword_assistant._wakeword_re.search("fraser what time") is None
+        # "atticus" alone is not the wakeword.
+        assert multiword_assistant._wakeword_re.search("atticus what time") is None
         # "hey" alone is not either.
         assert multiword_assistant._wakeword_re.search("hey what time") is None
 
     def test_two_word_wakeword_self_echo(self, multiword_assistant):
         # The assistant's reply mentioned the wakeword, so a stray
-        # "hey fraser" transcript is AEC residue, not a real barge-in.
+        # "hey atticus" transcript is AEC residue, not a real barge-in.
         multiword_assistant._last_spoken_text = (
-            "hey fraser is a friendly australian voice"
+            "hey atticus is a friendly australian voice"
         )
-        assert multiword_assistant._is_self_echo("hey fraser") is True
+        assert multiword_assistant._is_self_echo("hey atticus") is True
 
     def test_s_in_wakeword_matches_z_transcript(self, multiword_assistant):
         # ASR routinely transcribes the trailing /s/ of names like
-        # "Fraser" as "z" (and vice versa). Either spelling should hit.
-        assert multiword_assistant._wakeword_re.search("hey frazer stop") is not None
+        # "Atticus" as "z" (and vice versa). Either spelling should hit.
+        assert multiword_assistant._wakeword_re.search("hey atticuz stop") is not None
         assert multiword_assistant._wakeword_re.search(
-            "hey, frazer what time is it"
+            "hey, atticuz what time is it"
         ) is not None
 
     def test_z_in_wakeword_matches_s_transcript(self):
@@ -154,16 +154,16 @@ class TestTolerantWakewordMatcher:
         with patch("core.assistant.AudioCapture") as mock_ac:
             mock_ac.return_value = MagicMock()
             from core.assistant import Assistant
-            a = Assistant(wakeword="frazer", barge_in="wakeword")
+            a = Assistant(wakeword="atticuz", barge_in="wakeword")
             a._turn_active = True
-        assert a._wakeword_re.search("frazer stop") is not None
-        assert a._wakeword_re.search("fraser stop") is not None
+        assert a._wakeword_re.search("atticuz stop") is not None
+        assert a._wakeword_re.search("atticus stop") is not None
 
     def test_two_word_wakeword_barge_in_with_comma(self, multiword_assistant):
         multiword_assistant._last_spoken_text = "it is sunny and warm today"
         # Even with a comma inserted by ASR, the barge-in should fire.
         assert multiword_assistant._check_barge_in(
-            "hey, fraser stop"
+            "hey, atticus stop"
         ) is True
 
 
@@ -266,10 +266,10 @@ class TestPrefixOptionalBargeIn:
     def test_bare_name_barge_for_auto_built_wakeword(self):
         # No explicit pattern — the greeting prefix is stripped off the
         # auto-built wakeword too.
-        a = _make_assistant(wakeword="hey morgan")
+        a = _make_assistant(wakeword="hey atticus")
         a._last_spoken_text = "it is sunny and warm today"
-        assert a._wakeword_re.search("morgan stop") is None       # idle: needs prefix
-        assert a._check_barge_in("morgan stop") is True            # barge: prefix optional
+        assert a._wakeword_re.search("atticus stop") is None      # idle: needs prefix
+        assert a._check_barge_in("atticus stop") is True           # barge: prefix optional
 
 
 class TestBareStopBargeIn:

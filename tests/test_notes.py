@@ -90,6 +90,21 @@ class TestWriteRead:
         # Markdown header is stripped for spoken output
         assert "#" not in result
 
+    def test_read_does_not_repeat_title(self, notes_dir):
+        # The leading `# <title>` header duplicates the spoken `Note '<title>':`
+        # prefix, so it should be stripped — the title is spoken exactly once.
+        notes.write_note("Sydney to Perth route", "The drive takes four days.")
+        result = notes.read_note("Sydney to Perth route")
+        assert "The drive takes four days." in result
+        assert result.lower().count("sydney to perth route") == 1
+
+    def test_read_keeps_a_non_title_first_heading(self, notes_dir):
+        # A first heading that isn't the title carries content — don't drop it.
+        notes.write_note("Recipes", "# Carbonara\n\nEggs and pancetta.")
+        result = notes.read_note("Recipes")
+        assert "Carbonara" in result
+        assert "Eggs and pancetta." in result
+
     def test_read_fuzzy_match_on_substring(self, notes_dir):
         notes.write_note("Vaillant Boiler Notes", "service due July")
         result = notes.read_note("boiler")
@@ -226,6 +241,47 @@ class TestSearch:
     def test_search_empty_query(self, notes_dir):
         result = notes.search_notes("")
         assert "something to search" in result.lower()
+
+    def test_search_matches_reworded_multiword_query(self, notes_dir):
+        # The old exact-phrase match missed any rewording; AND-of-terms (with
+        # stopwords dropped and plural tolerance) finds it regardless of order.
+        notes.write_note("Sydney to Perth route", "Best stops along the way.")
+        result = notes.search_notes("what's your note about the Sydney Perth routes")
+        assert "sydney to perth route" in result.lower()
+
+    def test_search_requires_all_terms(self, notes_dir):
+        notes.write_note("Sydney trip", "ferries and beaches")
+        notes.write_note("Perth trip", "swan river")
+        # No single note contains both "sydney" and "perth", so neither matches.
+        result = notes.search_notes("Sydney Perth")
+        assert "didn't find" in result.lower()
+
+    def test_search_hits_route_through_agent_loop(self, notes_dir):
+        # Hybrid hits carry the Reactive-question prefix so the SLM filters them.
+        notes.write_note("Boiler", "Vaillant ecoTEC")
+        result = notes.search_notes("vaillant")
+        assert result.startswith("Reactive question:")
+
+
+class TestQueryTerms:
+    def test_drops_stopwords(self):
+        terms = notes._query_terms("what's your note about the Sydney Perth route")
+        assert "sydney" in terms
+        assert "perth" in terms
+        assert "route" in terms
+        assert "the" not in terms
+        assert "note" not in terms
+        assert "about" not in terms
+
+    def test_falls_back_when_all_stopwords(self):
+        # A query that's nothing but stopwords keeps the raw tokens rather than
+        # returning empty (which would match every note).
+        assert notes._query_terms("what is the") == ["what", "is", "the"]
+
+    def test_term_in_is_plural_tolerant(self):
+        assert notes._term_in("routes", "the sydney to perth route")
+        assert notes._term_in("route", "the sydney to perth routes")
+        assert not notes._term_in("perth", "sydney harbour notes")
 
 
 class TestRememberFact:

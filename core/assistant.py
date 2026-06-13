@@ -55,7 +55,12 @@ _ASR_NOISE_TOKENS: frozenset[str] = frozenset({
     "alright", "all right",
     "right",
     "oh", "so",
-    "cough"
+    "cough",
+    # ASR prompt-echo: on non-speech (a cough), the context-biased decoder
+    # regurgitates its context label instead of transcribing. Drop it before
+    # routing so it can't open a spurious follow-up window. See
+    # `asr_context_hint` / asr.py:context.
+    "technical terms"
 })
 
 # Bare stop commands that interrupt an active turn without any wakeword.
@@ -73,13 +78,13 @@ def _build_wakeword_pattern(wakeword: str) -> str:
     """Compile a tolerant wakeword matcher pattern.
 
     Tolerates two ASR foibles:
-      - Punctuation / whitespace runs between tokens ("Hey, Fraser") via
+      - Punctuation / whitespace runs between tokens ("Hey, Atticus") via
         a `\\W+` join between words.
-      - The s↔z swap that names like "Fraser" / "Frazer" trigger — any
+      - The s↔z swap that names like "Atticus" / "Atticuz" trigger — any
         `s` or `z` in the wakeword is matched by `[sz]`, so the same
         configured wakeword catches either pronunciation.
-    Wraps the whole thing in word boundaries so "fraser" doesn't fire
-    inside "frasers" or "morganic".
+    Wraps the whole thing in word boundaries so "atticus" doesn't fire
+    inside a longer word like "atticuses".
     """
     def _tolerant_word(word: str) -> str:
         return "".join("[sz]" if c in "sz" else re.escape(c) for c in word)
@@ -170,6 +175,9 @@ class Assistant:
         asr_context_hint: bool = True,
         asr_context_terms: list = None,
         use_vad: bool = True,
+        vad_threshold: Optional[float] = None,
+        vad_endpoint_silence_ms: Optional[int] = None,
+        vad_min_speech_ms: Optional[int] = None,
     ):
         """
         Initialize the assistant.
@@ -226,7 +234,13 @@ class Assistant:
         # Built in `_load_models()` once the TTS model is in memory.
         self.voice_clone_prompt = None
         self.output_device = output_device
-        self.audio_capture = AudioCapture(input_device=input_device, use_vad=use_vad)
+        self.audio_capture = AudioCapture(
+            input_device=input_device,
+            use_vad=use_vad,
+            vad_threshold=vad_threshold,
+            vad_endpoint_silence_ms=vad_endpoint_silence_ms,
+            vad_min_speech_ms=vad_min_speech_ms,
+        )
         # Mic stays muted through model load and the opening greeting;
         # `_warm_and_announce`'s `finally` flips it on once warmup ends.
         self.audio_capture.transcribing = False
@@ -636,8 +650,8 @@ class Assistant:
 
         # Strip a leading wakeword if the user typed "Computer, ..." — keeps
         # parity with the voice path's pre-handle wakeword stripping. Uses
-        # the tolerant regex so "Hey, Fraser ..." strips the same as
-        # "Hey Fraser ...".
+        # the tolerant regex so "Hey, Atticus ..." strips the same as
+        # "Hey Atticus ...".
         lowered = prompt.lower()
         leading = self._wakeword_re.match(lowered)
         if leading is not None:
@@ -787,6 +801,9 @@ class Assistant:
 
     def _run_half_duplex(self, user_prompt: str, stt_seconds=None) -> None:
         """Synchronous handle + speak, with mic muted during TTS playback."""
+        # A real turn is starting — close the prior follow-up window; it's
+        # re-armed at the end of this method via `_mark_turn_end`.
+        self.audio_capture.clear_follow_up()
         self._maybe_reset_session()
         self._emit_turn_event("user", user_prompt, "voice")
         stats = TurnStats(stt_seconds=stt_seconds)
@@ -827,10 +844,13 @@ class Assistant:
             )
         finally:
             self.audio_capture.transcribing = True
-        self._last_turn_end = time.monotonic()
+        self._mark_turn_end()
 
     def _start_turn(self, user_prompt: str, stt_seconds=None) -> None:
         """Kick off a barge-in turn (handle + speak) on a worker thread."""
+        # A real turn is starting — close the prior follow-up window; the new
+        # turn re-arms it at its end via `_mark_turn_end`.
+        self.audio_capture.clear_follow_up()
         # Wait briefly for any prior turn to wind down so its session can't
         # leak forward and abort the new turn.
         if self._turn_thread is not None and self._turn_thread.is_alive():
@@ -904,7 +924,7 @@ class Assistant:
                 # inside the follow-up window as a spurious new turn.
                 self.audio_capture.flush()
                 self._drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
-                self._last_turn_end = time.monotonic()
+                self._mark_turn_end()
         except Exception as e:
             logger.error(f"Turn error: {e}")
         finally:
@@ -916,6 +936,17 @@ class Assistant:
             self._turn_session.stop()
         if self._turn_thread is not None:
             self._turn_thread.join(timeout=2.0)
+
+    def _mark_turn_end(self) -> None:
+        """Record the turn-end time and open the wakeword-free follow-up window.
+
+        The recorder reads the armed window to accept short replies (which the
+        full min-utterance length would otherwise drop); the transcriber gauges
+        the window itself from `_last_turn_end` against each utterance's onset.
+        """
+        self._last_turn_end = time.monotonic()
+        if self.follow_up_seconds > 0:
+            self.audio_capture.arm_follow_up(self.follow_up_seconds)
 
     def _is_self_echo(self, text_lower: str, short_only: bool = False) -> bool:
         """True if `text_lower` looks like AEC residue of the assistant's voice.
@@ -950,7 +981,7 @@ class Assistant:
             # we just said. Catches single-letter residue like the "A"
             # tail of a spoken time ("...12:28 A M."). The wakeword check
             # runs against the un-stripped `spoken` so it still resolves
-            # multi-word wakewords like "hey fraser" (spoken_norm has no
+            # multi-word wakewords like "hey atticus" (spoken_norm has no
             # whitespace, so a substring check there would always miss).
             return (
                 words[0] in spoken_norm
@@ -1076,7 +1107,7 @@ class Assistant:
                     # wakeword. Discard the partial chunk that triggered the
                     # barge-in — silence detection may have cut the sentence
                     # short, so the content here is unreliable.
-                    self._last_turn_end = time.monotonic()
+                    self._mark_turn_end()
                     self._skip_followup_self_echo = True
                     logger.info("Barge-in — follow-up window open")
                     continue
@@ -1102,7 +1133,7 @@ class Assistant:
                         # one-shot bypass so the user's question isn't
                         # suppressed as self-echo when it shares words
                         # with the response we just cancelled.
-                        self._last_turn_end = time.monotonic()
+                        self._mark_turn_end()
                         self._skip_followup_self_echo = True
                         logger.info("Wakeword alone — awaiting follow-up")
                     else:
@@ -1157,7 +1188,7 @@ class Assistant:
                 self.speak_stream(cleaned, self.voice_clone_prompt, session=session)
             finally:
                 self.audio_capture.transcribing = True
-            self._last_turn_end = time.monotonic()
+            self._mark_turn_end()
 
     def run(self):
         """Start the recorder + transcriber threads and block until Ctrl+C."""

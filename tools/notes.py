@@ -34,11 +34,15 @@ DAILY_SUBDIR: Optional[str] = _notes_config.get('daily_subdir')
 # the spoken content and tell the user we truncated.
 MAX_READ_CHARS = 2000
 MAX_SEARCH_MATCHES = 5
-SEMANTIC_TOP_K = 3
+SEMANTIC_TOP_K = 5
 # Semantic-search score threshold: BGE-small cosine similarities tend to
-# sit around 0.4–0.7 for genuine matches and below 0.3 for irrelevant ones.
-# Tightening this if "no match" leaks too many false positives.
-SEMANTIC_MIN_SCORE = 0.3
+# sit around 0.4–0.7 for genuine matches and below ~0.25 for irrelevant ones.
+# Kept deliberately loose: `search_notes` hands its hits back through the agent
+# loop with a "may not actually contain X" caveat, so the SLM filters false
+# positives — a missed real match (silent "found nothing") is the worse error.
+SEMANTIC_MIN_SCORE = 0.25
+# Total hits the hybrid search surfaces after fusing keyword + semantic lists.
+MAX_HYBRID_MATCHES = 5
 FACTS_NOTE = 'facts'
 INDEX_BASENAME = 'notes_index'
 
@@ -56,9 +60,66 @@ _HEADER_RE = re.compile(r'^#+\s*', flags=re.MULTILINE)
 _BULLET_RE = re.compile(r'^[-*+]\s+', flags=re.MULTILINE)
 _EMPHASIS_RE = re.compile(r'[*_`]')
 
+_TOKEN_RE = re.compile(r'\w+')
+# Dropped from keyword queries so an AND-of-terms match isn't defeated by the
+# filler words a spoken query carries ("what's your note about the X route").
+_QUERY_STOPWORDS = frozenset({
+    'a', 'an', 'the', 'this', 'that', 'these', 'those', 'to', 'of', 'in', 'on',
+    'for', 'and', 'or', 'is', 'are', 'was', 'were', 'my', 'your', 'our',
+    'what', 'whats', 'which', 'who', 'about', 'regarding', 'note', 'notes',
+    'say', 'says', 'said', 'tell', 'me', 'find', 'anything', 'something',
+    'did', 'do', 'does', 'i', 'you', 'it', 'with', 'from', 'have', 'has',
+})
+
 
 def _match_plural(n: int) -> str:
     return 'es' if n > 1 else ''
+
+
+def _query_terms(query: str) -> list[str]:
+    """Tokenise a search query into meaningful lowercase terms.
+
+    Drops filler/stopwords so a keyword match is `AND` over the words that
+    carry signal, not the whole spoken phrase. Falls back to the raw tokens
+    if stripping stopwords would leave nothing (e.g. a one-word query that
+    happens to be a stopword).
+    """
+    tokens = [t.lower() for t in _TOKEN_RE.findall(query)]
+    meaningful = [t for t in tokens if len(t) > 1 and t not in _QUERY_STOPWORDS]
+    return meaningful or tokens
+
+
+def _term_in(term: str, text_lower: str) -> bool:
+    """True if `term` occurs in already-lowercased `text_lower`.
+
+    Substring match (so a singular query term hits a plural in the note), plus
+    a singularised retry (trailing-'s' stripped) so a plural query term still
+    matches the singular in the note ("routes" → "route").
+    """
+    if term in text_lower:
+        return True
+    if term.endswith('s') and len(term) > 3 and term[:-1] in text_lower:
+        return True
+    return False
+
+
+def _strip_leading_title(md: str, title: str) -> str:
+    """Drop a leading markdown header line when it just repeats the note title.
+
+    Notes created by `write_note` start with `# <title>`, which `read_note`
+    already announces via its `Note '<title>':` prefix — leaving it in the body
+    makes TTS read the title twice. Only stripped when the header actually
+    matches the title, so a meaningful first heading is preserved.
+    """
+    lines = md.splitlines()
+    i = 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i < len(lines) and lines[i].lstrip().startswith('#'):
+        header_text = lines[i].lstrip('#').strip()
+        if _slugify(header_text) == _slugify(title):
+            return '\n'.join(lines[i + 1:]).strip()
+    return md
 
 
 def _slugify(title: str) -> str:
@@ -102,7 +163,7 @@ def _find_note_semantic(query: str) -> Optional[Path]:
     only covers the title. A topical query like "notes regarding climate
     change in Australia" won't match the slug `climate-living-advice-australia`,
     so fall through to the semantic index and take the top hit if it clears
-    the same relevance bar `search_notes_semantic` uses.
+    the same relevance bar `search_notes` uses for its semantic pass.
     """
     if not query:
         return None
@@ -230,12 +291,14 @@ def read_note(title: str) -> str:
     except OSError as e:
         logger.error(f"Failed to read {note}: {e}")
         return f"I couldn't read the {title} note."
-    text = _to_spoken(raw)
+    title_spoken = note.stem.replace('-', ' ')
+    # Don't speak the title twice — the prefix below already announces it, so
+    # strip a leading `# <title>` header from the body if present.
+    text = _to_spoken(_strip_leading_title(raw, title_spoken))
     truncated = ''
     if len(text) > MAX_READ_CHARS:
         text = text[:MAX_READ_CHARS]
         truncated = ' (note continues)'
-    title_spoken = note.stem.replace('-', ' ')
     return f"Note '{title_spoken}': {text}{truncated}"
 
 
@@ -364,84 +427,118 @@ def read_today(date: Optional[str] = None) -> str:
     return f"Your note {when}: {text}{truncated}"
 
 
-@tool(
-    name="search_notes",
-    description=(
-        "Full-text search across saved markdown notes for a keyword or phrase. "
-        "Use when the user asks 'what did I write about X' or 'find anything on Y'."
-    ),
-    aliases=["find_notes", "lookup_notes"],
-)
-def search_notes(query: str) -> str:
-    query = (query or '').strip()
-    if not query:
-        return "Please give me something to search for."
-    try:
-        pattern = re.compile(re.escape(query), re.IGNORECASE)
-    except re.error as e:
-        logger.error(f"Bad search pattern '{query}': {e}")
-        return "I couldn't understand that search."
+def _truncate_snippet(snippet: str, limit: int = 240) -> str:
+    snippet = snippet.strip()
+    if len(snippet) > limit:
+        return snippet[:limit].rstrip() + '...'
+    return snippet
 
+
+def _keyword_search(query: str) -> list[tuple[str, str]]:
+    """`AND`-of-terms full-text search → `(title, snippet)` hits.
+
+    A note matches when *every* meaningful query term appears somewhere in it
+    (order-independent, plural-tolerant — see `_term_in`). The surfaced snippet
+    is the single line carrying the most query terms, so the agent sees the
+    most relevant part rather than the first incidental mention. Replaces the
+    old exact-phrase `re.escape` match, which missed any rewording.
+    """
+    terms = _query_terms(query)
+    if not terms:
+        return []
     hits: list[tuple[str, str]] = []
     for path in _iter_notes():
         try:
             content = path.read_text(encoding='utf-8', errors='ignore')
         except OSError:
             continue
+        if not all(_term_in(t, content.lower()) for t in terms):
+            continue
+        best_line, best_score = '', 0
         for line in content.splitlines():
-            if pattern.search(line):
-                hits.append((path.stem.replace('-', ' '), _to_spoken(line).strip()))
-                if len(hits) >= MAX_SEARCH_MATCHES:
-                    break
+            line_lower = line.lower()
+            score = sum(1 for t in terms if _term_in(t, line_lower))
+            if score > best_score:
+                best_line, best_score = line, score
+        snippet = _to_spoken(best_line).strip()
+        if snippet:
+            hits.append((path.stem.replace('-', ' '), snippet))
         if len(hits) >= MAX_SEARCH_MATCHES:
             break
-
-    if not hits:
-        return f"I didn't find anything about {query} in your notes."
-    summary = '; '.join(f"in '{title}': {line}" for title, line in hits if line)
-    return f"Found {len(hits)} match{_match_plural(len(hits))}: {summary}."
+    return hits
 
 
-@tool(
-    name="search_notes_semantic",
-    description=(
-        "Semantic search across saved markdown notes. Use when the user asks "
-        "by meaning or topic rather than exact wording — e.g. 'what did I "
-        "say about my heating system' or 'find notes related to allergies'. "
-        "Prefer search_notes for exact keywords or names."
-    ),
-    aliases=["semantic_notes", "find_notes_about"],
-)
-def search_notes_semantic(query: str) -> str:
-    query = (query or '').strip()
-    if not query:
-        return "Please give me something to search for."
+def _semantic_search(query: str) -> list[tuple[str, str]]:
+    """Embedding search → `(title, snippet)` hits clearing `SEMANTIC_MIN_SCORE`."""
     try:
         results = _get_index().search(query, k=SEMANTIC_TOP_K)
     except Exception as e:
         logger.error(f"Semantic search failed: {e}")
-        return "I couldn't run the semantic search."
+        return []
+    out: list[tuple[str, str]] = []
+    for score, chunk in results:
+        if score < SEMANTIC_MIN_SCORE:
+            continue
+        out.append((Path(chunk.file).stem.replace('-', ' '), chunk.text.strip()))
+    return out
 
-    hits = [(score, chunk) for score, chunk in results if score >= SEMANTIC_MIN_SCORE]
-    last_retrieval['chunks'] = len(hits)
-    if not hits:
-        return f"I didn't find anything related to {query} in your notes."
-    parts = []
-    for _, chunk in hits:
-        title_spoken = Path(chunk.file).stem.replace('-', ' ')
-        snippet = chunk.text
-        if len(snippet) > 240:
-            snippet = snippet[:240].rstrip() + '...'
-        parts.append(f"in '{title_spoken}': {snippet}")
-    # `Reactive question:` prefix routes through the agent loop so the SLM
-    # filters / summarises the matches rather than speaking them raw. The
-    # wording stresses that these are nearest-by-meaning hits, not literal
-    # keyword matches, so the agent doesn't claim a note mentions the term.
-    plural = 's' if len(hits) != 1 else ''
+
+@tool(
+    name="search_notes",
+    description=(
+        "Search the user's saved markdown notes by keyword, name, meaning, or "
+        "topic. Combines exact keyword matching with semantic similarity, so it "
+        "works whether the user recalls the exact words or just the gist — use "
+        "it for 'what did I write about X', 'find my note on Y', or 'what does "
+        "my note about Z say'. Returns the closest matches; confirm a note "
+        "actually covers the topic from the returned text before answering."
+    ),
+    aliases=[
+        "find_notes", "lookup_notes",
+        "search_notes_semantic", "semantic_notes", "find_notes_about",
+    ],
+)
+def search_notes(query: str) -> str:
+    query = (query or '').strip()
+    if not query:
+        return "Please give me something to search for."
+
+    # Fuse both backends. Keyword hits lead (an exact term match is the
+    # strongest signal); semantic hits fill in reworded / topical matches the
+    # keyword pass can't reach. Dedupe so a paragraph that also satisfied the
+    # keyword match isn't surfaced twice.
+    fused: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for title, snippet in _keyword_search(query) + _semantic_search(query):
+        if not snippet:
+            continue
+        key = (title.lower(), snippet.lower())
+        # Skip a hit whose snippet is already contained in (or contains) one we
+        # kept for the same note — keyword lines are often a subset of the
+        # semantic paragraph from the same file.
+        if any(
+            t == title.lower() and (snippet.lower() in s or s in snippet.lower())
+            for t, s in seen
+        ):
+            continue
+        seen.add(key)
+        fused.append((title, _truncate_snippet(snippet)))
+        if len(fused) >= MAX_HYBRID_MATCHES:
+            break
+
+    last_retrieval['chunks'] = len(fused)
+    if not fused:
+        return f"I didn't find anything about {query} in your notes."
+    parts = '; '.join(f"in '{title}': {snippet}" for title, snippet in fused)
+    # `Reactive question:` routes the hits back through the agent loop so the
+    # SLM filters / summarises them rather than speaking raw matches. The
+    # caveat matters: semantic hits are nearest-by-meaning and may not contain
+    # the query term, so the agent must not claim a note mentions it blindly.
+    n = len(fused)
     return (
-        f"Reactive question: These are the {len(hits)} note{plural} closest "
-        f"in topic to '{query}' by meaning; they may not actually contain "
-        f"'{query}'. " + '; '.join(parts) + "."
+        f"Reactive question: Found {n} possible match{_match_plural(n)} for "
+        f"'{query}' in the user's notes (matched by keyword or by topic, so "
+        f"some may not contain '{query}' literally). {parts}."
     )
 
 

@@ -30,6 +30,18 @@ logger = logging.getLogger(__name__)
 # Outperforms MiniLM on most retrieval benchmarks for ~40MB extra download.
 EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
+# BGE-v1.5 is trained to prepend this instruction to the *query* only (never
+# the documents). It measurably lifts recall for short topical queries — the
+# common case here ("Sydney to Perth route") — so `search()` adds it at encode
+# time. Index-time chunk embeddings are left bare.
+QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
+
+# Bumped whenever the *embedding input* recipe changes (e.g. prepending the
+# note title to each chunk). A persisted index built under an older recipe is
+# discarded on restore so the whole store is re-embedded under the new one —
+# otherwise mtime-diffing would keep stale embeddings forever.
+INDEX_VERSION = 2
+
 # Embeddings reach the SLM through a TTS-bound assistant — top-3 is enough
 # breadth for spoken summaries without bloating replies.
 DEFAULT_TOP_K = 3
@@ -135,6 +147,13 @@ class NotesIndex:
     def _restore(self) -> None:
         embeddings = np.load(self._npy_path)
         meta = json.loads(self._meta_path.read_text(encoding='utf-8'))
+        version = meta.get('version', 1)
+        if version != INDEX_VERSION:
+            # Embedding recipe changed under us — force a full re-embed by
+            # refusing the stale index (the caller resets chunks/mtimes).
+            raise ValueError(
+                f"Index version {version} != {INDEX_VERSION}; rebuilding"
+            )
         chunk_meta = meta.get('chunks', [])
         if len(chunk_meta) != embeddings.shape[0]:
             raise ValueError(
@@ -167,7 +186,11 @@ class NotesIndex:
         self._npy_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(self._npy_path, embeddings)
         self._meta_path.write_text(
-            json.dumps({'mtimes': self._mtimes, 'chunks': chunk_meta}),
+            json.dumps({
+                'version': INDEX_VERSION,
+                'mtimes': self._mtimes,
+                'chunks': chunk_meta,
+            }),
             encoding='utf-8',
         )
 
@@ -204,7 +227,13 @@ class NotesIndex:
                 cleaned.append((line, spoken))
         if not cleaned:
             return []
-        embeddings = self._embed([t for _, t in cleaned])
+        # Prepend the note title to the *embedded* text (not the stored/spoken
+        # text). A body paragraph that never repeats the note's subject still
+        # embeds near a topical query ("Sydney to Perth route") because the
+        # title rides along — a big lift for "what does my note about X say".
+        title = path.stem.replace('-', ' ').strip()
+        embed_inputs = [f"{title}: {text}" if title else text for _, text in cleaned]
+        embeddings = self._embed(embed_inputs)
         rel = self._rel(path)
         return [
             Chunk(file=rel, line=line, text=text, embedding=embeddings[i])
@@ -271,7 +300,7 @@ class NotesIndex:
         with self._lock:
             if not self._chunks:
                 return []
-            query_emb = self._embed([query])[0]
+            query_emb = self._embed([QUERY_INSTRUCTION + query])[0]
             matrix = np.stack([c.embedding for c in self._chunks])
             scores = matrix @ query_emb
             top_idx = np.argsort(-scores)[:k]

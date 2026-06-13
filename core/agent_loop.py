@@ -48,7 +48,7 @@ NOTE_SEARCH_INTENTS = frozenset(
 )
 
 # Leading/trailing punctuation peeled off a user prompt / search query. Includes
-# "!"/"?" so ASR's "Hey Frasier! Stop." yields the bare "stop" without trailing
+# "!"/"?" so ASR's "Hey Atticus! Stop." yields the bare "stop" without trailing
 # punctuation confusing intent matching.
 _PROMPT_STRIP_CHARS = " ,.!?;:"
 

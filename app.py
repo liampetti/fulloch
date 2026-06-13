@@ -121,16 +121,21 @@ os.environ.setdefault("TORCHINDUCTOR_VERBOSE", "0")
 
 # Configuration
 WAKEWORD = _GENERAL['wakeword']
-WAKEWORD_PATTERN = _GENERAL.get('wakeword_pattern', None)  # optional regex override
-VOICE_CLONE = _GENERAL.get('voice_clone', None)
-BARGE_IN = _GENERAL.get('barge_in', 'off')
-FOLLOW_UP_TIME = _GENERAL.get('follow_up_time', '0s')
-INPUT_DEVICE = _GENERAL.get('input_device', None)
-OUTPUT_DEVICE = _GENERAL.get('output_device', None)
-ASR_LANGUAGE = _GENERAL.get('asr_language', None)
-ASR_CONTEXT_HINT = bool(_GENERAL.get('asr_context_hint', True))
-ASR_CONTEXT_TERMS = _GENERAL.get('asr_context_terms', []) or []
-USE_VAD = bool(_GENERAL.get('use_vad', True))
+
+# Optional general settings forwarded to Assistant. Only keys actually present
+# (and non-null) in config are passed, so every default lives in exactly one
+# place — the Assistant / AudioCapture signature — and can't drift between here
+# and there. Tests construct those classes directly and get the same defaults.
+_ASSISTANT_OPTION_KEYS = (
+    'wakeword_pattern', 'voice_clone', 'barge_in', 'follow_up_time',
+    'input_device', 'output_device', 'asr_language', 'asr_context_hint',
+    'asr_context_terms', 'use_vad', 'vad_threshold',
+    'vad_endpoint_silence_ms', 'vad_min_speech_ms',
+)
+_ASSISTANT_OPTIONS = {
+    k: _GENERAL[k] for k in _ASSISTANT_OPTION_KEYS if _GENERAL.get(k) is not None
+}
+
 DASHBOARD_PORT = _GENERAL.get('dashboard_port', None)
 DASHBOARD_HOST = _GENERAL.get('dashboard_host', '127.0.0.1')
 DASHBOARD_SSL_CERTFILE = _GENERAL.get('dashboard_ssl_certfile', None)
@@ -140,19 +145,7 @@ from core.assistant import Assistant
 
 
 def main():
-    assistant = Assistant(
-        wakeword=WAKEWORD,
-        wakeword_pattern=WAKEWORD_PATTERN,
-        voice_clone=VOICE_CLONE,
-        barge_in=BARGE_IN,
-        follow_up_time=FOLLOW_UP_TIME,
-        input_device=INPUT_DEVICE,
-        output_device=OUTPUT_DEVICE,
-        asr_language=ASR_LANGUAGE,
-        asr_context_hint=ASR_CONTEXT_HINT,
-        asr_context_terms=ASR_CONTEXT_TERMS,
-        use_vad=USE_VAD,
-    )
+    assistant = Assistant(wakeword=WAKEWORD, **_ASSISTANT_OPTIONS)
     if DASHBOARD_PORT:
         try:
             from server.dashboard import start_dashboard

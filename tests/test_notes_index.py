@@ -227,5 +227,7 @@ class TestWriteHook:
         notes.write_note("Shopping", "milk bread eggs")
         # Loosen threshold for the stub encoder's smaller similarity range
         monkeypatch.setattr(notes, "SEMANTIC_MIN_SCORE", 0.0)
-        result = notes.search_notes_semantic("Vaillant ecoTEC heating")
+        # search_notes is now the hybrid entry point (search_notes_semantic is
+        # just an alias); the semantic pass runs through the stub index.
+        result = notes.search_notes("Vaillant ecoTEC heating")
         assert "heating" in result.lower()

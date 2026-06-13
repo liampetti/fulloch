@@ -10,8 +10,11 @@ general:
   barge_in: "wakeword"          # "off" (half-duplex) | "wakeword" (needs AEC)
   follow_up_time: "5s"          # "0s" | "<N>s" wakeword-free window after TTS, allows for conversational discussions in quieter environments
   asr_language: "English"       # Force speech detection and transcription to a single language, only English supported currently.
-  use_vad: true                 # Buffers with no detected speech frames are dropped before ASR, eliminating hallucinated words from coughs, keyboard taps, and background noise.
-  asr_context_hint: true        # Inject "Technical terms: <wakeword>" as a system prompt on every ASR call, biasing the decoder toward your wakeword spelling. 
+  use_vad: true                 # Use Silero VAD (speech probability) to decide when you've stopped talking, instead of raw mic energy — robust in noisy rooms. Also drops non-speech buffers (coughs, taps) before ASR. Falls back to RMS energy when off/unavailable.
+  # vad_threshold: 0.5          # Speech probability (0..1) above which a window counts as voice. Raise toward 0.7 in noisy rooms to ignore background chatter; lower for quiet/soft speech.
+  # vad_endpoint_silence_ms: 1500 # How long speech probability must stay low before you're judged to have finished talking. Defaults to the internal silence_duration_ms (1500ms).
+  # vad_min_speech_ms: 300        # Minimum detected speech (ms) for an utterance to be sent to ASR, outside the follow-up window. Filters coughs/taps that VAD scores as speech (which ASR otherwise hallucinates into the wakeword). Raise to reject more noise; the follow-up window is always exempt.
+  asr_context_hint: true        # Inject "Technical terms: <wakeword>" as a system prompt on every ASR call, biasing the decoder toward your wakeword spelling.
   # asr_context_terms:          # Optional extra terms appended after the wakeword. Add proper nouns or names that get consistently mistranscribed. (Max 10)
   #   - "phoebe bridgers"     
   #   - "downstairs office"   

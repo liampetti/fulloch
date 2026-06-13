@@ -245,14 +245,14 @@
     Tool — append_to_today: "Added to today's note."
   User: "read me back that news summary"
   Output:
-  {"actions": [{"intent": "search_notes_semantic", "args": ["today news summary"]}]}
+  {"actions": [{"intent": "search_notes", "args": ["today news summary"]}]}
 
 - Conversation context:
     User: "What's today's news?"
     Tool — external_information: "Inflation has risen to 3.2%, and the Prime Minister has announced a new climate fund."
   User: "read me back what you just said"
   Output:
-  {"actions": [{"intent": "search_notes_semantic", "args": ["today news summary"]}]}
+  {"actions": [{"intent": "search_notes", "args": ["today news summary"]}]}
 
 - Conversation context:
     User: "What's today's news?"
@@ -272,7 +272,7 @@
 
 - User: "Find anything about my kitchen appliances"
   Output:
-  {"actions": [{"intent": "search_notes_semantic", "args": ["kitchen appliances"]}]}
+  {"actions": [{"intent": "search_notes", "args": ["kitchen appliances"]}]}
 
 - User: "Get my Australia climate note"
   Output:
@@ -344,7 +344,7 @@
 
 - Conversation context:
     User: "find anything about my kitchen appliances"
-    Tool — search_notes_semantic: "Reactive question: These are the 2 notes closest in topic to 'kitchen appliances' by meaning; they may not actually contain 'kitchen appliances'. in 'dishwasher manual': descaling cycle every three months...; in 'kitchen reno': replaced the old appliances..."
+    Tool — search_notes: "Reactive question: Found 2 possible matches for 'kitchen appliances' in the user's notes (matched by keyword or by topic, so some may not contain 'kitchen appliances' literally). in 'dishwasher manual': descaling cycle every three months...; in 'kitchen reno': replaced the old appliances..."
   Output:
   {"reply": "Your dishwasher manual note covers the descaling cycle, and a kitchen reno note touches on the appliances. Want me to read the manual note?"}
 

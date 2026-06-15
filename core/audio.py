@@ -55,7 +55,7 @@ FOLLOW_UP_MIN_UTTERANCE_MS = 500
 # VAD endpointing: speech probability threshold (Silero outputs 0..1 per
 # window; higher = stricter about what counts as voice) and how long the
 # probability must stay low before the speaker is judged to have finished.
-VAD_THRESHOLD = 0.5
+VAD_THRESHOLD = 0.6
 VAD_ENDPOINT_SILENCE_MS = SILENCE_DURATION_MS
 # While VAD has not yet detected any speech, discard the buffer once it grows
 # past this so a noisy room doesn't accumulate seconds of pre-speech audio

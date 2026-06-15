@@ -10,6 +10,7 @@ import datetime as _dt
 import json
 import logging
 import os
+import threading
 import time
 from collections import Counter
 from typing import Optional
@@ -155,6 +156,111 @@ def _fetch_entity_aliases() -> tuple:
 
 _ENTITY_ALIASES, _ENTITY_ALIASES_MULTI = _fetch_entity_aliases()
 
+
+# ---------------------------------------------------------------------------
+# Voice deny-list — entities the user has switched off for voice control via
+# the Fulloch dashboard's Entities tab. Fulloch-owned state (not an HA label):
+# stored as a JSON array of entity_ids and read live, so toggles take effect
+# immediately with no restart and no polling thread. `_call_service` refuses a
+# deny-listed entity outright, so locks/alarms can be controlled from the
+# secure dashboard but never by voice.
+#
+# The set is rebound atomically on edit (build-new-then-assign) so a concurrent
+# membership test on the turn thread always sees a complete set — no lock needed
+# on the read path; `_denylist_lock` only serialises writers (file + rebind).
+# ---------------------------------------------------------------------------
+_DENYLIST_PATH = os.environ.get(
+    "FULLOCH_DENYLIST_PATH", "data/voice_denylist.json"
+)
+_denylist_lock = threading.Lock()
+
+
+def _load_denylist() -> frozenset:
+    """Read the persisted deny-list. Empty (nothing blocked) if absent/invalid."""
+    try:
+        with open(_DENYLIST_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return frozenset()
+    except Exception as e:
+        logger.warning(f"Could not read voice deny-list {_DENYLIST_PATH}: {e}")
+        return frozenset()
+    if not isinstance(data, list):
+        logger.warning(f"Voice deny-list {_DENYLIST_PATH} is not a list; ignoring")
+        return frozenset()
+    return frozenset(str(e) for e in data)
+
+
+def _persist_denylist(entities) -> None:
+    """Write the deny-list atomically (temp file + os.replace)."""
+    directory = os.path.dirname(_DENYLIST_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp = f"{_DENYLIST_PATH}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(sorted(entities), f, indent=2)
+    os.replace(tmp, _DENYLIST_PATH)
+
+
+_DENIED_ENTITIES = _load_denylist()
+if _DENIED_ENTITIES:
+    logger.info(
+        f"Voice deny-list: {len(_DENIED_ENTITIES)} entity(ies) blocked from "
+        f"voice control"
+    )
+
+
+def get_denylist() -> set:
+    """Return a copy of the entity_ids currently blocked from voice control."""
+    return set(_DENIED_ENTITIES)
+
+
+def set_entity_denied(entity_id: str, denied: bool) -> None:
+    """Block (`denied=True`) or unblock an entity for voice control, and persist.
+
+    Takes effect immediately for the next `_call_service` — the set is rebound
+    atomically so the reading turn thread never sees a half-updated set.
+    """
+    global _DENIED_ENTITIES
+    with _denylist_lock:
+        current = set(_DENIED_ENTITIES)
+        if denied:
+            current.add(entity_id)
+        else:
+            current.discard(entity_id)
+        _persist_denylist(current)
+        _DENIED_ENTITIES = frozenset(current)
+    logger.info(
+        f"Voice {'blocked' if denied else 'allowed'}: {entity_id} "
+        f"({len(_DENIED_ENTITIES)} blocked total)"
+    )
+
+
+def list_entities() -> list:
+    """Every known HA entity with its voice allow/deny state, for the dashboard.
+
+    Built from the full alias map (deny-listed entities are kept in the map so
+    they remain visible — and re-enableable — in the dashboard). Sorted by
+    domain then name.
+    """
+    denied = _DENIED_ENTITIES
+    seen: dict = {}
+    for eids in _ENTITY_ALIASES_MULTI.values():
+        for eid in eids:
+            if eid not in seen:
+                seen[eid] = _friendly_for(eid)
+    out = [
+        {
+            "entity_id": eid,
+            "name": friendly,
+            "domain": _domain_of(eid),
+            "denied": eid in denied,
+        }
+        for eid, friendly in seen.items()
+    ]
+    out.sort(key=lambda e: (e["domain"], e["name"].lower()))
+    return out
+
 # Trailing words a speaker is likely to add or drop when referring to a device
 # (e.g. "downstairs office" vs "downstairs office lights").
 _NAME_SUFFIXES = (
@@ -200,6 +306,15 @@ def _call_service(
     """Call a Home Assistant service and return a TTS-friendly response."""
     if not HA_TOKEN:
         return "Home Assistant isn't set up."
+
+    # Enforcement backstop: even if a deny-listed entity_id reaches here (e.g.
+    # the SLM emitted it verbatim, bypassing the filtered alias map), refuse it
+    # outright rather than replanning — we don't want the agent retrying under a
+    # different name to slip the control through.
+    if entity_id in _DENIED_ENTITIES:
+        friendly = _friendly_for(entity_id)
+        logger.info(f"Refused voice control of deny-listed entity {entity_id}")
+        return f"Sorry, {friendly} isn't available for voice control."
 
     url = f"{HA_URL}/api/services/{domain}/{service}"
     payload = {"entity_id": entity_id}

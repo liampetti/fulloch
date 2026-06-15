@@ -3,44 +3,73 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#f8faf9">
 <title>Fulloch</title>
 <link rel="icon" href="/logo.png" type="image/png">
 <link rel="apple-touch-icon" href="/logo.png">
+<script>
+  // Apply the stored appearance (or the OS default) before first paint so the
+  // page never flashes the wrong theme. Mirrors Blowfish's class-based system:
+  // a `dark` class on <html>, localStorage["appearance"] = "light"|"dark", with
+  // the OS preference as the default when the user hasn't picked one.
+  (() => {
+    const stored = localStorage.getItem('appearance');
+    const prefersDark = window.matchMedia &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches;
+    if (stored === 'dark' || (stored === null && prefersDark)) {
+      document.documentElement.classList.add('dark');
+    }
+  })();
+</script>
 <style>
   :root {
-    --bg: #f5f6f8;
+    /* Local Sanctuary typography — JetBrains Mono / Space Grotesk / Inter
+       are used when installed, falling back to system fonts (no external
+       font fetch, so the dashboard stays fully offline). */
+    --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 system-ui, sans-serif;
+    --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+    /* Neutral — slate with a faint warm-green cast (blog neutral palette). */
+    --bg: #f8faf9;
     --surface: #ffffff;
-    --surface-2: #f1f3f6;
-    --text: #0f172a;
-    --text-muted: #64748b;
-    --border: rgba(15, 23, 42, 0.08);
+    --surface-2: #f0f4f2;
+    --text: #1b2722;
+    --text-muted: #64746e;
+    --border: rgba(14, 23, 19, 0.08);
+    /* Primary emerald + secondary teal (matches assets/css/schemes/fulloch.css). */
     --primary: #10b981;
     --primary-press: #059669;
+    --secondary: #14b8a6;
     --bubble-user: #10b981;
     --bubble-user-text: #ffffff;
-    --bubble-assist: #f1f5f9;
-    --bubble-assist-text: #0f172a;
+    --bubble-assist: rgba(255, 255, 255, 0.65);
+    --bubble-assist-text: #1b2722;
+    /* Frosted-glass surfaces. */
+    --glass: rgba(255, 255, 255, 0.6);
+    --glass-border: rgba(120, 140, 130, 0.18);
     --tag-voice: #f59e0b;
-    --tag-text:  #6366f1;
-    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
-    --shadow-md: 0 4px 16px rgba(15, 23, 42, 0.06);
+    --tag-text:  #14b8a6;
+    --shadow-sm: 0 1px 2px rgba(14, 23, 19, 0.04);
+    --shadow-md: 0 4px 16px rgba(14, 23, 19, 0.06);
   }
 
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0b1220;
-      --surface: #111827;
-      --surface-2: #1a2233;
-      --text: #e5e7eb;
-      --text-muted: #94a3b8;
-      --border: rgba(255, 255, 255, 0.07);
-      --bubble-assist: #1e293b;
-      --bubble-assist-text: #e5e7eb;
-      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-      --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
-    }
+  /* Dark theme is class-driven (html.dark), toggled by the appearance switcher
+     and defaulted to the OS preference by the early head script. */
+  html.dark {
+    --bg: #0e1713;
+    --surface: #1b2722;
+    --surface-2: #2f3d37;
+    --text: #f0f4f2;
+    --text-muted: #92a19a;
+    --border: rgba(110, 231, 183, 0.12);
+    --bubble-assist: rgba(20, 32, 28, 0.55);
+    --bubble-assist-text: #f0f4f2;
+    --glass: rgba(20, 32, 28, 0.5);
+    --glass-border: rgba(110, 231, 183, 0.12);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
   }
 
   *, *::before, *::after { box-sizing: border-box; }
@@ -49,15 +78,76 @@
     margin: 0;
     padding: 0;
     height: 100%;
-    background: var(--bg);
   }
+  html { background: var(--bg); }
 
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter,
-                 system-ui, sans-serif;
+    background: transparent;
+    font-family: var(--font-sans);
     color: var(--text);
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
     -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Living aurora — a slow emerald/teal breathing glow behind everything. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: -20vmax;
+    z-index: -20;
+    pointer-events: none;
+    background:
+      radial-gradient(38vmax 30vmax at 22% 12%, rgba(16, 185, 129, 0.16), transparent 60%),
+      radial-gradient(34vmax 28vmax at 82% 8%, rgba(20, 184, 166, 0.14), transparent 60%),
+      radial-gradient(40vmax 34vmax at 60% 92%, rgba(13, 148, 136, 0.10), transparent 62%);
+    filter: blur(8px);
+    animation: aurora-drift 26s ease-in-out infinite alternate;
+  }
+
+  html.dark body::before {
+    background:
+      radial-gradient(40vmax 32vmax at 20% 10%, rgba(16, 185, 129, 0.30), transparent 60%),
+      radial-gradient(36vmax 30vmax at 84% 6%, rgba(20, 184, 166, 0.22), transparent 60%),
+      radial-gradient(44vmax 36vmax at 62% 94%, rgba(5, 150, 105, 0.20), transparent 62%);
+  }
+
+  /* Fine grain overlay for tactile depth. */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -19;
+    pointer-events: none;
+    opacity: 0.5;
+    mix-blend-mode: soft-light;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+  }
+
+  @keyframes aurora-drift {
+    0%   { transform: translate3d(0, 0, 0) scale(1); }
+    50%  { transform: translate3d(2vmax, -1.5vmax, 0) scale(1.06); }
+    100% { transform: translate3d(-2vmax, 1.5vmax, 0) scale(1.03); }
+  }
+
+  /* Emerald chrome: selection + scrollbar + focus ring. */
+  ::selection { background: rgba(16, 185, 129, 0.28); color: inherit; }
+  ::-webkit-scrollbar { width: 11px; height: 11px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(16, 185, 129, 0.35);
+    border-radius: 9999px;
+    border: 3px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(16, 185, 129, 0.6);
+    background-clip: padding-box;
+  }
+  :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    body::before, header .name { animation: none !important; }
   }
 
   .app {
@@ -67,7 +157,7 @@
     height: 100dvh;
     max-width: 760px;
     margin: 0 auto;
-    background: var(--bg);
+    background: transparent;
   }
 
   /* Card layout on roomy screens — centred, capped height, soft chrome.
@@ -84,9 +174,12 @@
       max-width: 1100px;
       height: min(900px, calc(100dvh - 48px));
       border-radius: 18px;
-      border: 1px solid var(--border);
+      border: 1px solid var(--glass-border);
       overflow: hidden;
       box-shadow: var(--shadow-md);
+      background: var(--glass);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
     }
   }
 
@@ -96,7 +189,9 @@
     gap: 12px;
     padding: 14px 18px;
     padding-top: calc(14px + env(safe-area-inset-top));
-    background: var(--surface);
+    background: var(--glass);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
     border-bottom: 1px solid var(--border);
     box-shadow: var(--shadow-sm);
     flex-shrink: 0;
@@ -120,8 +215,32 @@
   }
 
   header .meta { flex: 1; min-width: 0; }
-  header .name { font-size: 1.1rem; font-weight: 600; line-height: 1.15; }
-  header .sub  { font-size: 0.78rem; color: var(--text-muted); margin-top: 1px; }
+  header .name {
+    font-size: 1.15rem;
+    font-weight: 700;
+    line-height: 1.15;
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+    width: fit-content;
+    background: linear-gradient(100deg,
+      var(--primary), var(--secondary), #6ee7b7);
+    background-size: 220% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: wordmark-shift 9s ease-in-out infinite alternate;
+  }
+  @keyframes wordmark-shift {
+    from { background-position: 0% 50%; }
+    to   { background-position: 100% 50%; }
+  }
+  header .sub  {
+    font-size: 0.74rem;
+    color: var(--text-muted);
+    margin-top: 2px;
+    font-family: var(--font-mono);
+    letter-spacing: 0.01em;
+  }
 
   #reset-btn {
     width: 34px;
@@ -139,6 +258,51 @@
   }
   #reset-btn:hover { color: #ef4444; border-color: #ef4444; background: var(--surface-2); }
   #reset-btn svg { width: 16px; height: 16px; fill: currentColor; }
+
+  /* Always-show-details toggle: when active, every turn's trace group and
+     inference-stats panel start expanded (persisted in localStorage). */
+  #detail-toggle {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+    margin-right: 2px;
+  }
+  #detail-toggle:hover { color: var(--text); background: var(--surface-2); }
+
+  /* Light/dark switcher: moon in light mode (click → dark), sun in dark mode. */
+  #appearance-switcher {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+    margin-right: 2px;
+  }
+  #appearance-switcher:hover { color: var(--primary); background: var(--surface-2); }
+  #appearance-switcher svg { width: 17px; height: 17px; display: block; }
+  #appearance-switcher .icon-sun { display: none; }
+  html.dark #appearance-switcher .icon-moon { display: none; }
+  html.dark #appearance-switcher .icon-sun { display: block; }
+  #detail-toggle.active {
+    color: var(--primary);
+    border-color: var(--primary);
+    background: var(--surface-2);
+  }
+  #detail-toggle svg { width: 16px; height: 16px; fill: currentColor; }
 
   #status {
     display: flex;
@@ -191,7 +355,9 @@
     display: flex;
     gap: 4px;
     padding: 8px 14px;
-    background: var(--surface);
+    background: var(--glass);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
@@ -258,8 +424,10 @@
     align-items: flex-start;
     gap: 10px;
     padding: 10px 12px;
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: var(--glass);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--glass-border);
     border-radius: 12px;
     box-shadow: var(--shadow-sm);
     animation: bubbleIn 0.22s ease-out;
@@ -328,7 +496,82 @@
     line-height: 1.5;
   }
 
+  /* Entities panel */
+  #entity-search {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 15px;
+  }
+  .entities-list { display: flex; flex-direction: column; gap: 6px; }
+  .entity-domain-head {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--text-muted);
+    margin: 12px 4px 2px;
+  }
+  .entity-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+  .entity-row.denied { opacity: .65; }
+  .entity-body { min-width: 0; }
+  .entity-name {
+    font-size: 15px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .entity-id {
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .switch { position: relative; flex: none; width: 42px; height: 24px; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .slider {
+    position: absolute;
+    inset: 0;
+    cursor: pointer;
+    border-radius: 999px;
+    background: var(--primary);
+    transition: background .15s;
+  }
+  .switch .slider::before {
+    content: "";
+    position: absolute;
+    height: 18px;
+    width: 18px;
+    left: 3px;
+    top: 3px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform .15s;
+  }
+  .switch input:not(:checked) + .slider { background: var(--surface-2); }
+  .switch input:checked + .slider::before { transform: translateX(18px); }
+  .entities-empty { color: var(--text-muted); padding: 16px 4px; }
+
   /* Notes panel */
+  /* These panels set an explicit `display`, which overrides the UA
+     `[hidden] { display: none }` — so the JS toggle (open note / back to
+     list) silently fails without this. */
+  .notes-list[hidden], .note-detail[hidden] { display: none; }
   .notes-list {
     display: flex;
     flex-direction: column;
@@ -339,8 +582,10 @@
     align-items: center;
     gap: 10px;
     padding: 12px 14px;
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: var(--glass);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--glass-border);
     border-radius: 12px;
     box-shadow: var(--shadow-sm);
     cursor: pointer;
@@ -424,11 +669,13 @@
     min-height: 200px;
     margin: 0;
     padding: 12px 14px;
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: var(--glass);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--glass-border);
     border-radius: 12px;
     box-shadow: var(--shadow-sm);
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 0.88rem;
     line-height: 1.5;
     color: var(--text);
@@ -464,6 +711,7 @@
     place-items: center;
     box-shadow: var(--shadow-md);
     overflow: hidden;
+    filter: drop-shadow(0 16px 26px rgba(5, 150, 105, 0.30));
   }
   .empty .logo-lg img { width: 100%; height: 100%; object-fit: cover; }
   .empty h2 { font-size: 1.05rem; margin: 0 0 6px; color: var(--text); font-weight: 600; }
@@ -497,6 +745,12 @@
     word-wrap: break-word;
     overflow-wrap: anywhere;
     box-shadow: var(--shadow-sm);
+  }
+
+  .msg.assistant .bubble {
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--glass-border);
   }
 
   .msg.user .bubble {
@@ -554,7 +808,7 @@
   .stats-panel {
     align-self: stretch;
     margin: 4px 6px 0;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 0.72rem;
     color: var(--text-muted);
     background: var(--bubble-assist);
@@ -570,7 +824,7 @@
   .trace {
     align-self: flex-start;
     max-width: 92%;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 0.78rem;
     color: var(--text-muted);
     padding: 2px 10px;
@@ -606,7 +860,7 @@
   .trace-group > summary {
     cursor: pointer;
     list-style: none;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 0.72rem;
     color: var(--text-muted);
     padding: 3px 8px;
@@ -644,6 +898,9 @@
     gap: 5px;
     padding: 12px 16px;
     background: var(--bubble-assist);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--glass-border);
     border-radius: 18px;
     border-bottom-left-radius: 5px;
     align-self: flex-start;
@@ -668,7 +925,9 @@
 
   footer {
     padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
-    background: var(--surface);
+    background: var(--glass);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
     border-top: 1px solid var(--border);
     flex-shrink: 0;
   }
@@ -736,6 +995,13 @@
       <div class="name">Fulloch</div>
       <div class="sub">fully-local home assistant</div>
     </div>
+    <button id="appearance-switcher" type="button" aria-label="Toggle light or dark theme" title="Toggle light/dark — right-click to follow your system">
+      <span class="icon-moon" aria-hidden="true"><svg viewBox="0 0 512 512"><path fill="currentColor" d="M32 256c0-123.8 100.3-224 223.8-224c11.36 0 29.7 1.668 40.9 3.746c9.616 1.777 11.75 14.63 3.279 19.44C245 86.5 211.2 144.6 211.2 207.8c0 109.7 99.71 193 208.3 172.3c9.561-1.805 16.28 9.324 10.11 16.95C387.9 448.6 324.8 480 255.8 480C132.1 480 32 379.6 32 256z"/></svg></span>
+      <span class="icon-sun" aria-hidden="true"><svg viewBox="0 0 512 512"><path fill="currentColor" d="M256 159.1c-53.02 0-95.1 42.98-95.1 95.1S202.1 351.1 256 351.1s95.1-42.98 95.1-95.1S309 159.1 256 159.1zM509.3 347L446.1 255.1l63.15-91.01c6.332-9.125 1.104-21.74-9.826-23.72l-109-19.7l-19.7-109c-1.975-10.93-14.59-16.16-23.72-9.824L256 65.89L164.1 2.736c-9.125-6.332-21.74-1.107-23.72 9.824L121.6 121.6L12.56 141.3C1.633 143.2-3.596 155.9 2.736 164.1L65.89 256l-63.15 91.01c-6.332 9.125-1.105 21.74 9.824 23.72l109 19.7l19.7 109c1.975 10.93 14.59 16.16 23.72 9.824L256 446.1l91.01 63.15c9.127 6.334 21.75 1.107 23.72-9.822l19.7-109l109-19.7C510.4 368.8 515.6 356.1 509.3 347zM256 383.1c-70.69 0-127.1-57.31-127.1-127.1c0-70.69 57.31-127.1 127.1-127.1s127.1 57.3 127.1 127.1C383.1 326.7 326.7 383.1 256 383.1z"/></svg></span>
+    </button>
+    <button id="detail-toggle" type="button" aria-pressed="false" aria-label="Always show turn details" title="Always show turn details (agent loop + stats)">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h3v7H4v-7zm6.5-5h3v12h-3V8zM17 3h3v17h-3V3z"/></svg>
+    </button>
     <button id="reset-btn" type="button" aria-label="Clear conversation" title="Clear conversation">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
     </button>
@@ -749,6 +1015,7 @@
     <button class="tab active" data-tab="chat" role="tab" aria-selected="true">Chat</button>
     <button class="tab" data-tab="facts" role="tab" aria-selected="false">Facts</button>
     <button class="tab" data-tab="notes" role="tab" aria-selected="false">Notes</button>
+    <button class="tab" data-tab="entities" role="tab" aria-selected="false">Entities</button>
   </nav>
 
   <main>
@@ -787,6 +1054,12 @@
       </div>
 
       <p class="facts-hint" id="notes-hint">Markdown notes Fulloch keeps locally — tap one to read or edit.</p>
+    </section>
+
+    <section id="entities" class="view" hidden>
+      <input id="entity-search" type="text" placeholder="Search entities…" autocomplete="off">
+      <div id="entities-list" class="entities-list"></div>
+      <p class="facts-hint" id="entities-hint">Switch off any entity you don't want Fulloch to control by voice — it stays usable here in the dashboard. Door locks and alarms are good candidates. Changes take effect immediately.</p>
     </section>
   </main>
 
@@ -857,6 +1130,10 @@
   const statusDot = document.getElementById('status-dot');
   const statusText = document.getElementById('status-text');
   const resetBtn = document.getElementById('reset-btn');
+  const detailToggle = document.getElementById('detail-toggle');
+  const themeSwitcher = document.getElementById('appearance-switcher');
+  // When on, every turn's trace group + stats panel start expanded.
+  let alwaysDetail = localStorage.getItem('fulloch_detail') === '1';
 
   let typingEl = null;
   let waiting = false;
@@ -1060,6 +1337,7 @@
     activeTraceSummary = document.createElement('summary');
     activeTraceSummary.textContent = 'trace';
     activeTraceGroup.appendChild(activeTraceSummary);
+    if (alwaysDetail) activeTraceGroup.open = true;
     chat.appendChild(activeTraceGroup);
     return activeTraceGroup;
   };
@@ -1138,7 +1416,7 @@
     btn.className = 'stats-btn';
     btn.type = 'button';
     const panel = document.createElement('div');
-    panel.className = 'stats-panel hidden';
+    panel.className = alwaysDetail ? 'stats-panel' : 'stats-panel hidden';
     const entry = { stats: ev.stats, panel, btn };
     entry.refresh = () => {
       btn.textContent = fmtSecs(entry.stats.total);
@@ -1293,6 +1571,7 @@
     chat: document.getElementById('chat'),
     facts: document.getElementById('facts'),
     notes: document.getElementById('notes'),
+    entities: document.getElementById('entities'),
   };
   const chatFooter = document.getElementById('chat-footer');
   const factsList = document.getElementById('facts-list');
@@ -1548,6 +1827,113 @@
     else if (e.key === 'Escape') setEditMode(false);
   });
 
+  // ---- Entities viewer ----
+  const entitiesList = document.getElementById('entities-list');
+  const entitiesHint = document.getElementById('entities-hint');
+  const entitySearch = document.getElementById('entity-search');
+  let allEntities = [];
+
+  const renderEntities = () => {
+    const q = entitySearch.value.trim().toLowerCase();
+    const items = q
+      ? allEntities.filter((e) =>
+          e.name.toLowerCase().includes(q) ||
+          e.entity_id.toLowerCase().includes(q))
+      : allEntities;
+    entitiesList.innerHTML = '';
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.className = 'entities-empty';
+      empty.textContent = allEntities.length
+        ? 'No entities match your search.'
+        : 'No Home Assistant entities found.';
+      entitiesList.appendChild(empty);
+      return;
+    }
+    let domain = null;
+    for (const e of items) {
+      if (e.domain !== domain) {
+        domain = e.domain;
+        const head = document.createElement('div');
+        head.className = 'entity-domain-head';
+        head.textContent = domain;
+        entitiesList.appendChild(head);
+      }
+      entitiesList.appendChild(renderEntityRow(e));
+    }
+  };
+
+  const renderEntityRow = (e) => {
+    const row = document.createElement('div');
+    row.className = 'entity-row' + (e.denied ? ' denied' : '');
+    const body = document.createElement('div');
+    body.className = 'entity-body';
+    const name = document.createElement('div');
+    name.className = 'entity-name';
+    name.textContent = e.name;
+    const id = document.createElement('div');
+    id.className = 'entity-id';
+    id.textContent = e.entity_id;
+    body.append(name, id);
+
+    const label = document.createElement('label');
+    label.className = 'switch';
+    label.title = 'Voice control';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = !e.denied;  // checked = allowed for voice
+    const slider = document.createElement('span');
+    slider.className = 'slider';
+    label.append(input, slider);
+    input.addEventListener('change', () => setEntityDenied(e, !input.checked, input));
+
+    row.append(body, label);
+    return row;
+  };
+
+  const setEntityDenied = async (e, denied, input) => {
+    input.disabled = true;
+    try {
+      const r = await fetch('/entities', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entity_id: e.entity_id, denied }),
+      });
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      const data = await r.json();
+      allEntities = data.entities || [];
+      renderEntities();
+    } catch (err) {
+      console.error('entity toggle failed', err);
+      input.checked = !denied;  // revert on failure
+    } finally {
+      input.disabled = false;
+    }
+  };
+
+  const loadEntities = async () => {
+    try {
+      const r = await fetch('/entities');
+      const data = await r.json();
+      if (!data.available) {
+        allEntities = [];
+        entitiesList.innerHTML =
+          '<div class="entities-empty">Home Assistant isn\'t configured.</div>';
+        entitiesHint.hidden = true;
+        return;
+      }
+      entitiesHint.hidden = false;
+      allEntities = data.entities || [];
+      renderEntities();
+    } catch (e) {
+      console.warn('entities load failed', e);
+      entitiesList.innerHTML =
+        '<div class="entities-empty">Couldn\'t load entities.</div>';
+    }
+  };
+
+  entitySearch.addEventListener('input', renderEntities);
+
   const setTab = (name) => {
     tabs.forEach((t) => {
       const on = t.dataset.tab === name;
@@ -1558,6 +1944,7 @@
     chatFooter.hidden = name !== 'chat';
     if (name === 'facts') loadFacts();
     if (name === 'notes') loadNotes();
+    if (name === 'entities') loadEntities();
   };
 
   tabs.forEach((t) => t.addEventListener('click', () => setTab(t.dataset.tab)));
@@ -1568,6 +1955,53 @@
       resetUI();
     } catch (e) {
       console.error('reset failed', e);
+    }
+  });
+
+  // Reflect the always-detail preference onto the button and every
+  // already-rendered turn (so flipping it updates the whole transcript).
+  const applyDetailPref = () => {
+    detailToggle.classList.toggle('active', alwaysDetail);
+    detailToggle.setAttribute('aria-pressed', alwaysDetail ? 'true' : 'false');
+    document.querySelectorAll('.trace-group').forEach(g => { g.open = alwaysDetail; });
+    document.querySelectorAll('.stats-panel').forEach(p =>
+      p.classList.toggle('hidden', !alwaysDetail));
+  };
+  detailToggle.addEventListener('click', () => {
+    alwaysDetail = !alwaysDetail;
+    localStorage.setItem('fulloch_detail', alwaysDetail ? '1' : '0');
+    applyDetailPref();
+  });
+  applyDetailPref();
+
+  // ---- Light/dark appearance switcher (Blowfish-style) ----
+  // The early head script already applied the class; here we wire the toggle.
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+  const darkMql = window.matchMedia('(prefers-color-scheme: dark)');
+  const syncThemeMeta = () => {
+    if (themeMeta) {
+      themeMeta.setAttribute('content',
+        getComputedStyle(document.documentElement).backgroundColor);
+    }
+  };
+  syncThemeMeta();
+  themeSwitcher.addEventListener('click', () => {
+    const dark = document.documentElement.classList.toggle('dark');
+    localStorage.setItem('appearance', dark ? 'dark' : 'light');
+    syncThemeMeta();
+  });
+  // Right-click clears the manual choice and follows the OS again.
+  themeSwitcher.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    localStorage.removeItem('appearance');
+    document.documentElement.classList.toggle('dark', darkMql.matches);
+    syncThemeMeta();
+  });
+  // Track OS changes while the user hasn't pinned a preference.
+  darkMql.addEventListener('change', (e) => {
+    if (localStorage.getItem('appearance') === null) {
+      document.documentElement.classList.toggle('dark', e.matches);
+      syncThemeMeta();
     }
   });
 

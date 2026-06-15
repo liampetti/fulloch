@@ -21,7 +21,7 @@ Fulloch sits on top of your existing setup as the conversational brain — it dr
 - **Semantic search** — *"what did I write about the car service?"* via a local embedding model
 - **Conversation recall** — *"what did we talk about yesterday afternoon?"* — summarises past turns from Home Assistant history
 - **Web research** — live answers from a self-hosted search engine, summarised into a short spoken reply
-- **Smart-home control** — lights, climate, media, calendar, weather, scenes, and entity history via Home Assistant
+- **Smart-home control** — lights, climate, media, calendar, weather, scenes, and entity history via Home Assistant; common commands (lights on/off, dim, colour, locks, blinds, volume) skip the model for an instant response, and any entity can be switched off for voice control from the dashboard
 - **Music search & play** — *"play the Beatles"* via [SpotifyPlus](https://github.com/thlucas1/homeassistantcomponent_spotifyplus) (required for search-by-name; basic playback control works with the built-in Spotify integration)
 - **Calendar reminders** — creates events on a dedicated HA calendar and speaks them at the right time
 - **Thinking mode** — *"think about X"* for a slower, deeper answer; interrupt to get a partial summary
@@ -114,6 +114,22 @@ action: fulloch.chat
 data:
   text: "Tell me today's calendar and weather."
 ```
+
+### Restricting voice control
+
+Some entities you may be happy to control from the secure dashboard but **not**
+by voice — door locks and alarms being the obvious cases. The dashboard's
+**Entities** tab lists every Home Assistant entity Fulloch knows about with a
+toggle each; switch one off and Fulloch will **refuse to control it by voice**
+(it speaks a short "that isn't available for voice control" instead of acting),
+while it stays fully usable from the dashboard and in your own HA automations.
+
+Changes take effect **immediately** — no restart. The choices are stored in
+`data/voice_denylist.json` so they persist across restarts.
+
+> This is **separate from Home Assistant's "Expose to Assist"** setting, which
+> only governs HA's built-in Assist and isn't readable by Fulloch. Use the
+> Entities tab instead.
 
 ## Fulloch Installation
 

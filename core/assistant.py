@@ -28,7 +28,7 @@ from .agent_loop import (
     AgentLoop,
 )
 from .audio import AudioCapture
-from .slm import generate_slm, load_slm
+from .slm import ContextExhaustedError, generate_slm, load_slm
 from .text_utils import clean_for_tts, split_sentences
 from .tts_session import TtsSession, parse_barge_time
 from .turn_stats import TurnStats
@@ -140,12 +140,18 @@ THINKING_PARTIAL_TTL_S = 60.0
 # generously — agent prompt cache stays warm; user / agent / tool messages
 # average ~80 tokens each, so 50 entries ≈ 4k tokens of history.
 HISTORY_MAX_MESSAGES = 50
+# Floor for context-overflow recovery: keep at least this many of the most
+# recent history entries (≈ the in-flight turn plus a little) when shedding old
+# history to fit the context window. Only if even this won't fit do we fall back
+# to clearing entirely.
+CONTEXT_TRIM_KEEP_MIN = 4
 # Silence timeout — past this gap with no new turn, history is cleared so a
 # stale "you said earlier..." context can't bleed into a fresh conversation.
 CHAT_SESSION_TIMEOUT_S = 600.0
 
-# Spoken when a turn overflows the SLM context window. The handler also clears
-# `_history`, so the conversation genuinely restarts — the wording says so.
+# Spoken only when a turn overflows the context window AND even the recent
+# history floor won't fit (a single oversized message) — the rare case where we
+# do clear. Normal overflow now sheds the oldest history and retries silently.
 CONTEXT_EXHAUSTED_REPLY = (
     "Sorry, that was too much for me to hold in mind. "
     "I've cleared our conversation — what would you like to do?"
@@ -561,6 +567,84 @@ class Assistant:
         """Cap `_history` at HISTORY_MAX_MESSAGES with FIFO eviction."""
         if len(self._history) > HISTORY_MAX_MESSAGES:
             self._history = self._history[-HISTORY_MAX_MESSAGES:]
+
+    def _compact_completed_turns(self) -> None:
+        """Strip tool results and bare planning emissions from `_history`.
+
+        Called at the start of each turn, when every tool / `{"actions": ...}`
+        entry belongs to an already-completed turn. Those are in-turn scaffolding
+        — the agent needs a tool result only while composing that turn's reply,
+        and the reply itself is recorded as a `{"reply": ...}` assistant entry.
+        Keeping the raw dumps afterwards just bloats the context (a single note
+        read or search payload can be many KB) and evicts the real conversation;
+        a follow-up re-fetches what it needs (e.g. web searches re-research)
+        rather than relying on a stale copy. The result is history that's just
+        the user's turns and Fulloch's replies.
+        """
+        kept = []
+        for msg in self._history:
+            role = msg.get("role")
+            if role == "tool":
+                continue
+            if role == "assistant":
+                try:
+                    emission = json.loads(msg.get("content") or "")
+                except Exception:
+                    emission = None
+                # Drop a bare action-emission (planning scaffolding); keep
+                # replies (what Fulloch actually said) and anything unparseable.
+                if (isinstance(emission, dict)
+                        and "reply" not in emission and "actions" in emission):
+                    continue
+            kept.append(msg)
+        if len(kept) != len(self._history):
+            logger.debug(
+                "Compacted history: dropped %d tool/scaffolding entries",
+                len(self._history) - len(kept),
+            )
+            self._history = kept
+
+    def _shed_oldest_history(self) -> bool:
+        """Drop the oldest history entries to recover from a context overflow.
+
+        Returns True if entries were shed (worth retrying the SLM call), False
+        if `_history` is already down to the recent floor — at which point a
+        single oversized message is to blame and the caller falls back to the
+        full clear + apology. Sheds roughly half the over-floor surplus per call
+        (so a few retries converge), then drops forward to the next `user`
+        message so the trimmed history still starts on a turn boundary rather
+        than an orphaned tool/assistant entry.
+        """
+        n = len(self._history)
+        if n <= CONTEXT_TRIM_KEEP_MIN:
+            return False
+        drop = max(2, (n - CONTEXT_TRIM_KEEP_MIN + 1) // 2)
+        del self._history[:drop]
+        while (
+            len(self._history) > CONTEXT_TRIM_KEEP_MIN
+            and self._history[0].get("role") != "user"
+        ):
+            del self._history[0]
+        logger.info(
+            "Context overflow: shed %d oldest history entries, %d remain",
+            drop, len(self._history),
+        )
+        return True
+
+    def _generate_with_context_recovery(self, **kwargs) -> str:
+        """`generate_slm` wrapper that degrades gracefully on context overflow.
+
+        On `ContextExhaustedError`, sheds the oldest history (preserving the
+        in-flight turn) and retries, so a long conversation loses its tail end
+        instead of being wiped. Re-raises only when even the recent floor won't
+        fit — the caller then apologises + clears as a last resort.
+        """
+        while True:
+            try:
+                return generate_slm(self.slm_model, **kwargs)
+            except ContextExhaustedError:
+                if not self._shed_oldest_history():
+                    raise
 
     def register_turn_listener(self, callback) -> None:
         """Subscribe a callable to per-turn user/assistant events.

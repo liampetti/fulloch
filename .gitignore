@@ -61,6 +61,7 @@ data/token.json
 data/notes
 data/notes_index.json
 data/notes_index.npy
+data/voice_denylist.json
 
 # =============================================================================
 # Local Data and Models

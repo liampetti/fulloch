@@ -35,7 +35,7 @@ from utils.intents import MAX_AGENT_CALLS_PER_TURN, StepKind, StepResult
 from utils.phrases import STALL_PHRASES
 from utils.prompts import get_agent_system_prompt, get_thinking_system_prompt
 
-from .slm import ContextExhaustedError, generate_slm
+from .slm import ContextExhaustedError
 from .text_utils import clean_for_tts
 from .thinking_watchdog import ThinkingWatchdog
 
@@ -110,6 +110,14 @@ class AgentLoop:
 
         logger.info(f"Handling turn: {user_prompt}")
 
+        # Every tool result / planning emission in history now belongs to an
+        # already-finished turn, so drop them: the conversation is carried by
+        # the user messages and Fulloch's recorded replies, and anything a
+        # follow-up needs (notes, web findings) is re-fetched rather than
+        # recalled from a stale tool dump. Keeps history lean so long
+        # conversations don't blow N_CONTEXT.
+        host._compact_completed_turns()
+
         host._history.append({"role": "user", "content": user_prompt})
         host._trim_history()
 
@@ -164,8 +172,9 @@ class AgentLoop:
                         ).start()
                 logger.debug(f"Agent call (iter {iteration})")
                 try:
-                    emission_text = generate_slm(
-                        host.slm_model,
+                    # Recovery wrapper sheds oldest history and retries on
+                    # overflow; only re-raises if the recent floor won't fit.
+                    emission_text = host._generate_with_context_recovery(
                         user_prompt=None,
                         grammar=host.grammar,
                         system_prompt=get_agent_system_prompt(),
@@ -370,8 +379,7 @@ class AgentLoop:
                     with ThinkingWatchdog(
                         host.thinking_stall_cache, host.play_chunks, watchdog_session,
                     ):
-                        answer = generate_slm(
-                            host.slm_model,
+                        answer = host._generate_with_context_recovery(
                             user_prompt=query,
                             system_prompt=get_thinking_system_prompt(),
                             cancel_check=cancel_check,

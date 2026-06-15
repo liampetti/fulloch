@@ -44,6 +44,7 @@ Home Assistant is the sole smart-home backend; all third-party device protocols 
 2. **Credential Rotation**: Regularly rotate API keys and tokens
 3. **Minimal Permissions**: Use read-only API access where possible
 4. **Update Dependencies**: Keep dependencies updated for security patches
+5. **Restrict sensitive entities from voice**: In the dashboard's **Entities** tab, switch off any entity that should not be voice-controllable (door locks, alarms). Fulloch then refuses to control it by voice while it stays usable in the dashboard. Changes apply immediately and persist in `data/voice_denylist.json`. This is separate from HA's "Expose to Assist" setting, which Fulloch cannot read. See [README → Restricting voice control](README.md#restricting-voice-control).
 
 ### Credentials
 

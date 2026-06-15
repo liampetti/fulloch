@@ -65,6 +65,11 @@ class NoteRequest(BaseModel):
     content: str
 
 
+class EntityDenyRequest(BaseModel):
+    entity_id: str
+    denied: bool
+
+
 def create_app(assistant) -> FastAPI:
     app = FastAPI(title="Fulloch Dashboard")
 
@@ -225,6 +230,26 @@ def create_app(assistant) -> FastAPI:
         if not save_note_file(name, req.content):
             raise HTTPException(status_code=404, detail="note not found")
         return JSONResponse({"name": name, "content": read_note_file(name)})
+
+    @app.get("/entities")
+    def entities_list() -> JSONResponse:
+        from tools._config import config
+        if "home_assistant" not in config:
+            return JSONResponse({"available": False, "entities": []})
+        from tools import home_assistant as ha
+        return JSONResponse({"available": True, "entities": ha.list_entities()})
+
+    @app.post("/entities")
+    def entities_set(req: EntityDenyRequest) -> JSONResponse:
+        from tools._config import config
+        if "home_assistant" not in config:
+            raise HTTPException(status_code=404, detail="Home Assistant not configured")
+        from tools import home_assistant as ha
+        entity_id = (req.entity_id or "").strip()
+        if not entity_id:
+            raise HTTPException(status_code=400, detail="empty entity_id")
+        ha.set_entity_denied(entity_id, req.denied)
+        return JSONResponse({"available": True, "entities": ha.list_entities()})
 
     @app.get("/stream")
     async def stream(request: Request) -> StreamingResponse:

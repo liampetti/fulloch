@@ -8,7 +8,7 @@ max_temp attributes enforce safe bounds.
 """
 
 import datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 def test_set_climate_passes_temperature_through():
@@ -237,3 +237,81 @@ def test_autodetect_calendar_falls_back_to_first_when_no_primary():
          patch("tools.home_assistant.HA_CONFIG", {}):
         from tools.home_assistant import _autodetect_calendar_entity
         assert _autodetect_calendar_entity() == "calendar.work"
+
+
+# ---------------------------------------------------------------------------
+# Voice deny-list — dashboard-managed, file-backed. Entities switched off in
+# the dashboard's Entities tab can't be voice-controlled, but stay usable
+# in the dashboard. Edits are live (no restart) and persisted to JSON.
+# ---------------------------------------------------------------------------
+
+def test_call_service_refuses_denied_entity():
+    """A deny-listed entity_id is refused before any HTTP call."""
+    import tools.home_assistant as ha
+    with patch.object(ha, "HA_TOKEN", "tok"), \
+         patch.object(ha, "_DENIED_ENTITIES", frozenset({"lock.front_door"})), \
+         patch("tools.home_assistant.requests.post") as post:
+        result = ha._call_service("lock", "unlock", "lock.front_door")
+        assert "voice control" in result.lower()
+        post.assert_not_called()
+
+
+def test_call_service_allows_non_denied_entity():
+    """A normal entity still calls the service (deny-list doesn't over-block)."""
+    import tools.home_assistant as ha
+    resp = MagicMock()
+    resp.raise_for_status = lambda: None
+    with patch.object(ha, "HA_TOKEN", "tok"), \
+         patch.object(ha, "_DENIED_ENTITIES", frozenset({"lock.front_door"})), \
+         patch("tools.home_assistant.requests.post", return_value=resp) as post:
+        ha._call_service("light", "turn_on", "light.kitchen", success_message="ok")
+        post.assert_called_once()
+
+
+def test_set_entity_denied_persists_and_takes_effect(tmp_path):
+    """Toggling deny mutates the live set, persists JSON, and round-trips on load."""
+    import tools.home_assistant as ha
+    path = str(tmp_path / "voice_denylist.json")
+    with patch.object(ha, "_DENYLIST_PATH", path), \
+         patch.object(ha, "_DENIED_ENTITIES", frozenset()):
+        ha.set_entity_denied("lock.front_door", True)
+        # Live: the in-memory set updated immediately, no restart.
+        assert "lock.front_door" in ha.get_denylist()
+        # Persisted: the JSON file reflects it and reloads identically.
+        assert ha._load_denylist() == frozenset({"lock.front_door"})
+        # Toggling back off removes it.
+        ha.set_entity_denied("lock.front_door", False)
+        assert "lock.front_door" not in ha.get_denylist()
+        assert ha._load_denylist() == frozenset()
+
+
+def test_load_denylist_missing_file_is_empty(tmp_path):
+    """No persisted file → nothing blocked (feature is a no-op until used)."""
+    import tools.home_assistant as ha
+    with patch.object(ha, "_DENYLIST_PATH", str(tmp_path / "absent.json")):
+        assert ha._load_denylist() == frozenset()
+
+
+def test_load_denylist_ignores_malformed(tmp_path):
+    """A corrupt deny-list file fails safe to empty rather than crashing."""
+    import tools.home_assistant as ha
+    path = tmp_path / "voice_denylist.json"
+    path.write_text("{ not valid json", encoding="utf-8")
+    with patch.object(ha, "_DENYLIST_PATH", str(path)):
+        assert ha._load_denylist() == frozenset()
+
+
+def test_list_entities_reports_deny_state():
+    """list_entities surfaces every entity with its allow/deny flag, sorted."""
+    import tools.home_assistant as ha
+    with _patch_aliases({
+        "kitchen": "light.kitchen",
+        "front door": "lock.front_door",
+    }), patch.object(ha, "_DENIED_ENTITIES", frozenset({"lock.front_door"})):
+        entities = ha.list_entities()
+    by_id = {e["entity_id"]: e for e in entities}
+    assert by_id["lock.front_door"]["denied"] is True
+    assert by_id["light.kitchen"]["denied"] is False
+    assert by_id["light.kitchen"]["domain"] == "light"
+    # Deny-listed entities stay listed so they can be re-enabled.
+    assert "lock.front_door" in by_id

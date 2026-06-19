@@ -168,6 +168,45 @@ class TestAppend:
         body = (notes_dir / "climate-living-advice-australia.md").read_text()
         assert "Darwin is tropical." in body
 
+    def test_append_does_not_semantic_write_into_daily_note(self, notes_dir, monkeypatch):
+        # Regression: a date-like title with no literal match must not fall
+        # through to the loose semantic index and silently append into the
+        # nearest daily journal (the F1-into-2026-06-05 corruption).
+        daily = notes_dir / "daily" / "2026-06-05.md"
+        daily.write_text("# Friday\n\n- 09:00 had coffee\n")
+        monkeypatch.setattr(
+            notes, "_get_index",
+            lambda: _StubIndex([(0.62, _StubHit("daily/2026-06-05.md"))]),
+        )
+        result = notes.append_to_note("2026 06 16", "F1 standings update.")
+        assert result.startswith("Reactive question:")
+        assert "F1 standings update." not in daily.read_text()
+
+    def test_append_refuses_literal_match_on_daily_note(self, notes_dir):
+        # A date title literally exact-matches a daily file's slug; appending
+        # there would edit another day's journal. Must refuse, not write.
+        daily = notes_dir / "daily" / "2026-06-05.md"
+        daily.write_text("# Friday\n\n- 09:00 had coffee\n")
+        result = notes.append_to_note("2026 06 05", "F1 standings update.")
+        assert result.startswith("Reactive question:")
+        # Steer the content to a general note, never back into a daily log.
+        assert "write_note" in result
+        assert "append_to_today" not in result
+        assert "F1 standings update." not in daily.read_text()
+
+    def test_append_ignores_low_confidence_semantic_match(self, notes_dir, monkeypatch):
+        # A weak topical match (below the stricter write threshold) must not
+        # trigger a silent write — reads tolerate it, writes don't.
+        notes.write_note("some-note", "body text here")
+        weak = notes.WRITE_SEMANTIC_MIN_SCORE - 0.05
+        monkeypatch.setattr(
+            notes, "_get_index",
+            lambda: _StubIndex([(weak, _StubHit("some-note.md"))]),
+        )
+        result = notes.append_to_note("totally unrelated", "should not land")
+        assert result.startswith("Reactive question:")
+        assert "should not land" not in (notes_dir / "some-note.md").read_text()
+
     def test_append_to_today_creates_dated_file(self, notes_dir):
         result = notes.append_to_today("Took the bins out")
         assert "Logged" in result

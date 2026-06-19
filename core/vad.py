@@ -47,6 +47,8 @@ class VadEndpointer:
         sample_rate: int = 16000,
         threshold: float = 0.5,
         endpoint_silence_ms: int = 1500,
+        soft_model=None,
+        soft_endpoint_silence_ms: Optional[int] = None,
     ):
         from silero_vad import VADIterator
 
@@ -57,6 +59,25 @@ class VadEndpointer:
             sampling_rate=sample_rate,
             min_silence_duration_ms=endpoint_silence_ms,
         )
+        # Optional *soft* endpoint: a second VADIterator with a shorter silence
+        # requirement, giving an early "speaker has briefly paused" signal for
+        # the speculative early-commit path (see docs/speculative-early-action).
+        # It needs its OWN Silero handle — VADIterator advances the model's LSTM
+        # state on every window, so sharing the hard iterator's model would
+        # corrupt the proven endpoint. Disabled (None) unless both a soft model
+        # and a positive silence are supplied; the hard path is then unchanged.
+        self._soft_iterator = None
+        if soft_model is not None and soft_endpoint_silence_ms:
+            self._soft_iterator = VADIterator(
+                soft_model,
+                threshold=threshold,
+                sampling_rate=sample_rate,
+                min_silence_duration_ms=soft_endpoint_silence_ms,
+            )
+        # Latched by the soft iterator's `{'end'}` and re-armed (cleared) on its
+        # next `{'start'}`, so each pause yields one soft endpoint. Always False
+        # when the soft iterator is disabled.
+        self.soft_endpointed = False
         self._residual = np.empty(0, dtype=np.float32)
         # True once VADIterator has emitted a `{'start'}` for the current
         # utterance; `endpointed` only after a subsequent `{'end'}`.
@@ -73,6 +94,15 @@ class VadEndpointer:
         # context prompt) from the noise.
         self._seg_start_sample: Optional[int] = None
         self.last_speech_samples = 0
+        # Loudness (linear RMS) of the segment that just endpointed, measured
+        # over the *voiced* 512-sample windows only (the 80th-percentile window
+        # RMS — robust to a soft onset/offset and to the leading/trailing
+        # near-silence a whole-buffer RMS would dilute). None until a segment
+        # has endpointed. Read by the recorder to tag the enqueued utterance
+        # with a dBFS volume; nothing acts on it yet.
+        self.voiced_rms: Optional[float] = None
+        self._in_speech = False
+        self._voiced_rms_vals: list[float] = []
 
     def process(self, samples: np.ndarray) -> None:
         """Feed newly captured samples, advancing the endpointer state.
@@ -92,14 +122,31 @@ class VadEndpointer:
         while offset + VAD_WINDOW_SAMPLES <= n:
             window = samples[offset:offset + VAD_WINDOW_SAMPLES]
             offset += VAD_WINDOW_SAMPLES
+            rms = float(np.sqrt(np.mean(window ** 2)))
+            # Soft endpoint: re-arm on a fresh speech start, latch on its (early)
+            # end. Fed the same window as the hard iterator but with its own
+            # model state, so it never disturbs the hard endpoint below.
+            if self._soft_iterator is not None:
+                soft_event = self._soft_iterator(window)
+                if soft_event:
+                    if "start" in soft_event:
+                        self.soft_endpointed = False
+                    if "end" in soft_event:
+                        self.soft_endpointed = True
             event = self._iterator(window)
             if not event:
+                # Accumulate the RMS of windows inside the current speech
+                # segment so `voiced_rms` reflects only voiced audio.
+                if self._in_speech:
+                    self._voiced_rms_vals.append(rms)
                 continue
             if "start" in event:
                 self.speech_started = True
                 self._seg_start_sample = event["start"]
                 if self.speech_onset is None:
                     self.speech_onset = time.monotonic()
+                self._in_speech = True
+                self._voiced_rms_vals = [rms]
             if "end" in event:
                 self.endpointed = True
                 start = (
@@ -108,15 +155,24 @@ class VadEndpointer:
                     else event["end"]
                 )
                 self.last_speech_samples = max(0, event["end"] - start)
+                if self._voiced_rms_vals:
+                    self.voiced_rms = float(np.percentile(self._voiced_rms_vals, 80))
+                self._in_speech = False
 
         self._residual = samples[offset:].copy()
 
     def reset(self) -> None:
         """Clear all per-utterance state, ready for the next utterance."""
         self._iterator.reset_states()
+        if self._soft_iterator is not None:
+            self._soft_iterator.reset_states()
+        self.soft_endpointed = False
         self._residual = np.empty(0, dtype=np.float32)
         self.speech_started = False
         self.endpointed = False
         self.speech_onset = None
         self._seg_start_sample = None
         self.last_speech_samples = 0
+        self.voiced_rms = None
+        self._in_speech = False
+        self._voiced_rms_vals = []

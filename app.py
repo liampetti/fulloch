@@ -78,6 +78,15 @@ for _noisy in (
     "torch._functorch",
     "torch.fx",
     "flash_attn",
+    # numba (pulled in by librosa/audio deps) floods DEBUG with bytecode/type
+    # inference traces — numba.core.ssa, numba.core.byteflow, etc. Capping the
+    # parent `numba` logger covers all the numba.core.* children.
+    "numba",
+    # torchaudio's I/O backend probes FFmpeg extensions newest-first on import;
+    # the older-FFmpeg-in-container case logs a full traceback per failed probe
+    # at DEBUG before falling back to the version that loads. Harmless noise.
+    "torio",
+    "torchaudio",
 ):
     logging.getLogger(_noisy).setLevel(_third_party_level)
 # "Setting pad_token_id to eos_token_id" fires at WARNING on every
@@ -127,10 +136,11 @@ WAKEWORD = _GENERAL['wakeword']
 # place — the Assistant / AudioCapture signature — and can't drift between here
 # and there. Tests construct those classes directly and get the same defaults.
 _ASSISTANT_OPTION_KEYS = (
-    'wakeword_pattern', 'voice_clone', 'barge_in', 'follow_up_time',
-    'input_device', 'output_device', 'asr_language', 'asr_context_hint',
-    'asr_context_terms', 'use_vad', 'vad_threshold',
+    'wakeword_pattern', 'voice_clone', 'barge_in', 'barge_in_threshold_dbfs',
+    'follow_up_time', 'input_device', 'output_device', 'asr_language',
+    'asr_context_hint', 'asr_context_terms', 'use_vad', 'vad_threshold',
     'vad_endpoint_silence_ms', 'vad_min_speech_ms',
+    'vad_soft_endpoint_silence_ms',
 )
 _ASSISTANT_OPTIONS = {
     k: _GENERAL[k] for k in _ASSISTANT_OPTION_KEYS if _GENERAL.get(k) is not None

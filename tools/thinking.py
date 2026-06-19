@@ -23,11 +23,10 @@ SUMMARY_PREFIX = "Summary question:"
 @tool(
     name="deep_think",
     description=(
-        "Enter thinking mode for a complex query that benefits from "
-        "deliberate reasoning, weighing tradeoffs, or careful analysis. "
-        "Use when the user explicitly asks to think, consider, reflect, "
-        "or weigh options. Do NOT use for quick lookups, simple chitchat, "
-        "or any query a one-line answer covers."
+        "Enter thinking mode for a complex query needing deliberate reasoning "
+        "or weighing tradeoffs. Only when the user explicitly asks to think, "
+        "consider, reflect, or weigh options — never for quick lookups, "
+        "chitchat, or anything a one-line answer covers."
     ),
     aliases=["think_about", "consider", "reflect", "ponder"],
 )
@@ -39,11 +38,9 @@ def deep_think(query: str) -> str:
 @tool(
     name="summarize_thinking",
     description=(
-        "Summarise where the assistant was leaning when the user last "
-        "interrupted a thinking-mode response. Use when the user asks "
-        "'what do you have so far', 'summarise your thoughts', or "
-        "'tell me what you were thinking'. Has no effect outside that "
-        "specific interrupt-mid-thinking flow."
+        "Summarise where you were leaning when the user interrupted a "
+        "thinking-mode response ('what do you have so far'). No effect "
+        "outside that interrupt-mid-thinking flow."
     ),
     aliases=["summarise_thinking", "thoughts_so_far"],
 )

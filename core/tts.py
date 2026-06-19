@@ -47,7 +47,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Output device for sd.OutputStream. None = system default. Set via
 # `set_output_device()` once at startup so play_chunks/speak_stream pick it
-# up consistently (e.g. to route through PulseAudio's echocancel_sink).
+# up consistently.
 _OUTPUT_DEVICE: Optional[str] = None
 
 # Event the recorder thread reads to switch to a stricter silence threshold

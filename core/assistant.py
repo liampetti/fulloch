@@ -14,6 +14,8 @@ from typing import Callable, Optional
 
 # Sentinels returned by the thinking tools — kept as module-level
 # constants so renames only happen in one place.
+from utils.completeness import should_commit_provisional
+from utils.intent_catch import catchAll
 from utils.prompts import (
     CACHE_PRIMING_USER_PROMPT,
     get_agent_system_prompt,
@@ -27,7 +29,8 @@ from .agent_loop import (
     _PROMPT_STRIP_CHARS,
     AgentLoop,
 )
-from .audio import AudioCapture
+from .audio import AudioCapture, resolve_device
+from .noise_baseline import BackgroundNoiseBaseline
 from .slm import ContextExhaustedError, generate_slm, load_slm
 from .text_utils import clean_for_tts, split_sentences
 from .tts_session import TtsSession, parse_barge_time
@@ -72,6 +75,15 @@ _BARGE_STOP_RE = re.compile(
     r"\b(?:stop|halt|cancel|pause|quiet|enough)\b",
     re.IGNORECASE,
 )
+
+# Innocuous tokens allowed alongside a stop word without turning a bare stop
+# into a redirect. "Atticus, stop talking now please" is still a pure stop —
+# an instruction to cease entirely — not a new command. Used by
+# `_is_pure_stop` to decide whether a barge-in should open a follow-up window.
+_STOP_FILLER_TOKENS = frozenset({
+    "talking", "speaking", "now", "please", "it", "that", "this",
+    "thanks", "thank", "you", "just", "right", "ok", "okay", "be",
+})
 
 
 def _build_wakeword_pattern(wakeword: str) -> str:
@@ -174,6 +186,7 @@ class Assistant:
         wakeword_pattern: Optional[str] = None,
         voice_clone: Optional[str] = None,
         barge_in: str = "off",
+        barge_in_threshold_dbfs: Optional[float] = None,
         follow_up_time: str = "0s",
         input_device: Optional[str] = None,
         output_device: Optional[str] = None,
@@ -184,6 +197,7 @@ class Assistant:
         vad_threshold: Optional[float] = None,
         vad_endpoint_silence_ms: Optional[int] = None,
         vad_min_speech_ms: Optional[int] = None,
+        vad_soft_endpoint_silence_ms: Optional[int] = None,
     ):
         """
         Initialize the assistant.
@@ -200,17 +214,28 @@ class Assistant:
                 model conditions every generation on this clone, so the
                 speaker stays consistent across turns.
             barge_in: "off" (half-duplex) or "wakeword" (interrupt with wakeword)
+            barge_in_threshold_dbfs: Silence floor while TTS plays, in dBFS
+                (the unit transcription volume is logged in). An interrupting
+                voice must exceed it to be captured — lower = easier to barge
+                in. None uses the built-in default (BARGE_IN_THRESHOLD_DBFS,
+                -48 dBFS). Useful on a speakerphone that ducks its mic during
+                playback (so interrupts arrive quiet); raise it if the assistant
+                self-interrupts.
             follow_up_time: "0s" or "<N>s" — window after TTS ends during
                 which a wakeword-free utterance counts as a follow-up turn.
             input_device: PortAudio/PulseAudio source name for the mic (None =
-                system default). Set to "echocancel_source" to route through
-                PulseAudio's module-echo-cancel.
+                system default).
             output_device: PortAudio/PulseAudio sink name for TTS playback
-                (None = system default). Set to "echocancel_sink" to pair with
-                module-echo-cancel so the assistant's voice becomes the AEC
-                reference signal.
+                (None = system default).
         """
         self.wakeword = wakeword.lower()
+        # Spoken name for self-introduction: the bare wakeword with any
+        # leading greeting token stripped ("hey atticus" -> "Atticus"), so
+        # the greeting introduces it by what the user actually calls it.
+        _name_tokens = self.wakeword.split()
+        while len(_name_tokens) > 1 and _name_tokens[0] in _WAKE_GREETINGS:
+            _name_tokens.pop(0)
+        self.wakeword_name = " ".join(_name_tokens).title() or "Fulloch"
         # An explicit regex in config wins over the auto-built matcher — lets
         # you express phonetic swaps the builder can't (f↔t, u↔a). A bad
         # pattern from a hand-edited config degrades to the auto-builder rather
@@ -236,16 +261,27 @@ class Assistant:
         self.asr_language = asr_language
         self.asr_context_hint = asr_context_hint
         self.asr_context_terms = asr_context_terms or []
+        # Flat pool of every token that appears in any `asr_context_terms`
+        # entry (multi-word terms split into their words). A wakeword command
+        # built *only* from these tokens is almost certainly the ASR decoder
+        # echoing its bias prompt from non-speech — see `_is_context_echo`.
+        self._asr_context_tokens = frozenset(
+            tok
+            for term in self.asr_context_terms
+            for tok in re.sub(r"[^\w\s]", "", term.lower()).split()
+        )
         self.use_vad = use_vad
         # Built in `_load_models()` once the TTS model is in memory.
         self.voice_clone_prompt = None
         self.output_device = output_device
         self.audio_capture = AudioCapture(
             input_device=input_device,
+            barge_in_threshold_dbfs=barge_in_threshold_dbfs,
             use_vad=use_vad,
             vad_threshold=vad_threshold,
             vad_endpoint_silence_ms=vad_endpoint_silence_ms,
             vad_min_speech_ms=vad_min_speech_ms,
+            vad_soft_endpoint_silence_ms=vad_soft_endpoint_silence_ms,
         )
         # Mic stays muted through model load and the opening greeting;
         # `_warm_and_announce`'s `finally` flips it on once warmup ends.
@@ -264,6 +300,18 @@ class Assistant:
         # measures against this (when the user started talking) rather than
         # when the transcription lands, so a long reply isn't penalised.
         self._asr_onset: dict = {'t': 0.0}
+        # Written by the ASR stream generator with the dBFS loudness of the
+        # buffer currently being transcribed (voiced-window RMS where VAD is
+        # active). Logged alongside each transcription and fed into the
+        # background-noise baseline; nothing acts on it yet.
+        self._asr_loudness: dict = {'db': None}
+        # Written by the ASR stream generator: True when the buffer currently
+        # being transcribed is a *provisional* soft-endpoint snapshot of an
+        # unfinished utterance (the speculative early-commit path). Such a
+        # result may only commit a turn at the dispatch gate — never trigger the
+        # follow-up/stand-down/baseline side effects — and is ignored mid-turn.
+        self._asr_provisional: dict = {'flag': False}
+        self._noise_baseline = BackgroundNoiseBaseline()
 
         # Turn state (only meaningful in barge-in mode). A "turn" runs the SLM
         # intent/chat path + stall + final TTS in a worker thread; the
@@ -271,6 +319,12 @@ class Assistant:
         self._turn_active = False
         self._turn_session: Optional[TtsSession] = None
         self._turn_thread: Optional[threading.Thread] = None
+        # Cancel handle for whichever turn is currently in flight — voice
+        # barge-in, voice half-duplex, or a dashboard text turn. `request_stop`
+        # signals it so the SLM stream and any TTS abort; set/cleared by each
+        # turn path, None when idle. Also drives `get_state` so the dashboard
+        # knows the agent is working even outside barge-in mode.
+        self._active_session: Optional[TtsSession] = None
         # Monotonic deadline: ASR results returned before this are dropped.
         # Set briefly after a barge-in so any inference already on the GPU
         # at the moment of cancel doesn't get treated as a fresh turn. The
@@ -366,7 +420,8 @@ class Assistant:
             synthesize,
             warmup_model,
         )
-        set_output_device(self.output_device)
+        output_device = resolve_device(self.output_device, want_input=False)
+        set_output_device(output_device)
         # The recorder uses this to switch to a stricter silence threshold
         # while we're talking, so AEC residue doesn't keep utterances alive.
         set_tts_active_event(self.audio_capture.tts_active)
@@ -385,15 +440,16 @@ class Assistant:
         self.replan_stall_cache: list = []
 
         self.grammar, self.slm_model = load_slm()
-        self.greeting_prompt = get_greeting_system_prompt()
+        self.greeting_prompt = get_greeting_system_prompt(self.wakeword_name)
         self.web_summary_prompt = get_web_summary_system_prompt()
 
         self.models_ready.set()
         self._warm_and_announce()
         self._start_reminder_poll()
         try:
-            from tools.time_tools import set_speak_callback
+            from tools.time_tools import set_beep_device, set_speak_callback
             set_speak_callback(self.speak_proactive)
+            set_beep_device(output_device)
         except ImportError:
             pass
 
@@ -744,10 +800,19 @@ class Assistant:
                 return ""
 
         self._emit_turn_event("user", prompt, "text")
+        # Per-turn cancel handle so the dashboard Stop button can abort the SLM
+        # stream mid-turn (request_stop signals `_active_session`).
+        session = TtsSession()
+        self._active_session = session
         try:
             self._maybe_reset_session()
             stats = TurnStats()  # text turns have no STT/TTS
-            answer = self._handle_wakeword(prompt, source="text", stats=stats)
+            answer = self._handle_wakeword(
+                prompt, session=session, source="text", stats=stats
+            )
+            if session.cancelled:
+                # Stopped from the dashboard — stand down silently, no bubble.
+                return ""
             cleaned = clean_for_tts(answer)
             self._emit_turn_event("assistant", cleaned, "text", stats=stats)
             return cleaned
@@ -756,6 +821,8 @@ class Assistant:
             err = "Sorry, something went wrong handling that."
             self._emit_turn_event("assistant", err, "text")
             return err
+        finally:
+            self._active_session = None
 
     def _record_spoken(self, spoken: str) -> None:
         """Replace the most recent assistant entry with one whose `reply` is
@@ -892,6 +959,11 @@ class Assistant:
         self._emit_turn_event("user", user_prompt, "voice")
         stats = TurnStats(stt_seconds=stt_seconds)
 
+        # Per-turn cancel handle so the dashboard Stop button can abort the SLM
+        # stream and TTS (request_stop signals `_active_session`).
+        session = TtsSession()
+        self._active_session = session
+
         ack_thread: list = []
 
         def _start_ack() -> None:
@@ -900,35 +972,45 @@ class Assistant:
             self.audio_capture.transcribing = False
             t = threading.Thread(
                 target=self._play_random_ack,
-                args=(self.tts_session,),
+                args=(session,),
                 daemon=True,
             )
             t.start()
             ack_thread.append(t)
 
-        answer = self._handle_wakeword(
-            user_prompt, source="voice", on_slm_start=_start_ack, stats=stats
-        )
-        cleaned = clean_for_tts(answer)
-        self.audio_capture.transcribing = False
         try:
-            if ack_thread:
-                ack_thread[0].join()
-            # Emit before speaking so the dashboard can reveal the text while
-            # TTS plays, not only after playback finishes.
-            ts = self._emit_turn_event("assistant", cleaned, "voice", stats=stats)
-            # Emit the TTS stat as soon as the first audio chunk is ready, so the
-            # panel doesn't wait for the whole reply to finish playing.
-            self.speak_stream(
-                cleaned, self.voice_clone_prompt, session=self.tts_session, stats=stats,
-                on_first_audio=lambda: self._emit_stats_patch(
-                    ts, "voice",
-                    {"tts": stats.tts_payload(), "total": stats.total_with_tts()},
-                ),
+            answer = self._handle_wakeword(
+                user_prompt, session=session, source="voice",
+                on_slm_start=_start_ack, stats=stats,
             )
+            cleaned = clean_for_tts(answer)
+            self.audio_capture.transcribing = False
+            try:
+                if ack_thread:
+                    ack_thread[0].join()
+                # Stopped mid-SLM or during the ack: stand down silently — no
+                # answer bubble, no speech.
+                if session.cancelled:
+                    return
+                # Emit before speaking so the dashboard can reveal the text while
+                # TTS plays, not only after playback finishes.
+                ts = self._emit_turn_event("assistant", cleaned, "voice", stats=stats)
+                # Emit the TTS stat as soon as the first audio chunk is ready, so the
+                # panel doesn't wait for the whole reply to finish playing.
+                self.speak_stream(
+                    cleaned, self.voice_clone_prompt, session=session, stats=stats,
+                    on_first_audio=lambda: self._emit_stats_patch(
+                        ts, "voice",
+                        {"tts": stats.tts_payload(), "total": stats.total_with_tts()},
+                    ),
+                )
+            finally:
+                self.audio_capture.transcribing = True
         finally:
-            self.audio_capture.transcribing = True
-        self._mark_turn_end()
+            self._active_session = None
+        # A stop stands down without a follow-up window.
+        if not session.cancelled:
+            self._mark_turn_end()
 
     def _start_turn(self, user_prompt: str, stt_seconds=None) -> None:
         """Kick off a barge-in turn (handle + speak) on a worker thread."""
@@ -941,6 +1023,7 @@ class Assistant:
             self._turn_thread.join(timeout=2.0)
         session = TtsSession()
         self._turn_session = session
+        self._active_session = session
         self._turn_active = True
         self._turn_thread = threading.Thread(
             target=self._run_turn,
@@ -1004,7 +1087,7 @@ class Assistant:
                 # Flush it before opening the follow-up window — same treatment
                 # as a barge-in cancel — otherwise the tail chunk arrives with
                 # onset ≈ _last_turn_end (speech_onset_t was never set because
-                # AEC kept the residue below TTS_SILENCE_THRESHOLD) and falls
+                # the residue stayed below the barge-in floor) and falls
                 # inside the follow-up window as a spurious new turn.
                 self.audio_capture.flush()
                 self._drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
@@ -1013,6 +1096,7 @@ class Assistant:
             logger.error(f"Turn error: {e}")
         finally:
             self._turn_active = False
+            self._active_session = None
 
     def _cancel_turn(self) -> None:
         """Signal the active turn to abort and wait briefly for it to wind down."""
@@ -1020,6 +1104,30 @@ class Assistant:
             self._turn_session.stop()
         if self._turn_thread is not None:
             self._turn_thread.join(timeout=2.0)
+
+    def request_stop(self) -> None:
+        """Stop whatever the agent is doing right now — SLM generation, TTS
+        playback, an in-flight turn — silently, and stand down with no
+        follow-up window. Safe no-op when idle. This is the dashboard Stop
+        button's effect; the voice equivalent is a pure-stop barge-in. An
+        in-flight tool dispatch runs to completion (see Known Gaps); the turn
+        cancels at the next checkpoint.
+        """
+        session = self._active_session
+        if session is not None:
+            session.stop()
+        # Belt-and-suspenders for any out-of-band playback on the shared session.
+        self.tts_session.stop()
+        if self._turn_active:
+            # Barge-in worker: flush the mic and drop in-flight ASR so our own
+            # speech captured mid-turn doesn't replay, mirroring a voice barge-in.
+            self.audio_capture.flush()
+            self._drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
+        # A stop means stand down — no wakeword-free follow-up window.
+        self._last_turn_end = 0.0
+        self.audio_capture.clear_follow_up()
+        self._dispatch_event({"role": "stopped", "ts": time.time()})
+        logger.info("Stop requested — standing down")
 
     def _mark_turn_end(self) -> None:
         """Record the turn-end time and open the wakeword-free follow-up window.
@@ -1031,6 +1139,23 @@ class Assistant:
         self._last_turn_end = time.monotonic()
         if self.follow_up_seconds > 0:
             self.audio_capture.arm_follow_up(self.follow_up_seconds)
+
+    def _is_context_echo(self, command: str) -> bool:
+        """True if `command` is built solely from ASR context-bias tokens.
+
+        The Qwen3-ASR context prompt biases the decoder toward the wakeword and
+        `asr_context_terms`. Fed a few seconds of contentless voiced noise (a
+        sigh or cough Silero scored as speech), the decoder regurgitates those
+        bias words verbatim — e.g. "Hey Atticus, <term>" from a cough. A genuine
+        command always carries non-bias words, so a wakeword command made
+        *entirely* of context tokens is treated as an echo hallucination and
+        dropped. Works for any number of terms (single/multi-word): all are
+        pooled into `_asr_context_tokens` at init.
+        """
+        if not self._asr_context_tokens:
+            return False
+        tokens = re.sub(r"[^\w\s]", "", command.lower()).split()
+        return bool(tokens) and all(t in self._asr_context_tokens for t in tokens)
 
     def _is_self_echo(self, text_lower: str, short_only: bool = False) -> bool:
         """True if `text_lower` looks like AEC residue of the assistant's voice.
@@ -1091,6 +1216,30 @@ class Assistant:
             or _BARGE_STOP_RE.search(text_lower) is not None
         )
 
+    def _is_pure_stop(self, text_lower: str) -> bool:
+        """True if a barge-in utterance is *only* a stop/cancel command.
+
+        A bare "stop" (or "Atticus, stop") means *terminate and stand down* —
+        the user wants the assistant to cease entirely, not to acknowledge or
+        wait for more. So we cancel the turn and return to idle without opening
+        a follow-up window (the wakeword is required again). A redirect like
+        "Atticus, stop — play jazz instead" carries a real command after the
+        stop word, so it keeps the follow-up behaviour.
+
+        We require a stop word to be present, then strip the wakeword/bare-name
+        occurrences and the stop words themselves; if every remaining token is a
+        greeting or innocuous filler (`_STOP_FILLER_TOKENS`), nothing meaningful
+        was asked and it's a pure stop.
+        """
+        if _BARGE_STOP_RE.search(text_lower) is None:
+            return False
+        stripped = self._barge_re.sub(" ", text_lower)
+        stripped = _BARGE_STOP_RE.sub(" ", stripped)
+        tokens = re.sub(r"[^\w\s]", "", stripped).split()
+        return all(
+            t in _WAKE_GREETINGS or t in _STOP_FILLER_TOKENS for t in tokens
+        )
+
     def _transcriber_thread(self):
         """ASR results → wakeword/intent/TTS. Owns model loading on first call."""
         self._load_models()
@@ -1098,7 +1247,10 @@ class Assistant:
 
         for result in self.asr_pipe(
             self.asr_stream_generator(
-                self.audio_capture.audio_queue, self._asr_onset
+                self.audio_capture.audio_queue,
+                self._asr_onset,
+                self._asr_loudness,
+                self._asr_provisional,
             ),
             batch_size=1,
             generate_kwargs={"max_new_tokens": 256}
@@ -1122,12 +1274,37 @@ class Assistant:
                     logger.debug(f"Dropped noise token: {text!r}")
                     continue
 
-                logger.debug(f"Transcribed: {text}")
+                # Provisional (soft-endpoint) snapshot of an unfinished
+                # utterance. It may only *commit* a turn at the dispatch gate
+                # below; the side-effecting special cases (stand-down, follow-up
+                # open, baseline feed) all guard on `provisional` and drop it so
+                # the real hard endpoint stays authoritative. Mid-turn a partial
+                # is ignored outright — barge-in waits for the hard endpoint.
+                provisional = self._asr_provisional.get('flag', False)
+                if provisional and self._turn_active:
+                    logger.debug(f"Ignoring provisional during active turn: {text!r}")
+                    continue
 
                 text_lower = text.lower()
                 wakeword_match = self._wakeword_re.search(text_lower)
                 wakeword_present = wakeword_match is not None
                 just_barged_in = False
+
+                # Tag every transcription with its dBFS volume and the current
+                # background-speech baseline (logged for tuning; not acted on
+                # yet). The baseline is fed only by *genuine background* — see
+                # the background-suppression branch below, which is the single
+                # feed site. Non-wakeword alone isn't enough: an accepted
+                # follow-up is the user (loud, close) and our own TTS bleed
+                # mid-turn is us, not the room — feeding either would poison the
+                # "background is quieter than the user" estimate.
+                loudness_db = self._asr_loudness.get('db')
+                baseline_db = self._noise_baseline.value()
+                _vol = f"{loudness_db:.1f}" if loudness_db is not None else "n/a"
+                logger.debug(
+                    f"Transcribed: {text} "
+                    f"[volume={_vol} dBFS, baseline={baseline_db:.1f} dBFS]"
+                )
 
                 if self._turn_active:
                     # Mid-turn transcriptions are only acted on as potential
@@ -1165,6 +1342,15 @@ class Assistant:
                         and 0 <= onset_gap < self.follow_up_seconds
                     )
                     if not in_follow_up:
+                        # Genuine background: non-wakeword, not an accepted
+                        # follow-up, and not mid-turn (that path is handled by
+                        # the `_turn_active` branch above). This is the only
+                        # site that feeds the noise baseline — the room/TV
+                        # talking to itself, which is exactly what we estimate.
+                        # A provisional is not a final utterance — never feed it
+                        # into the background-noise baseline estimate.
+                        if loudness_db is not None and not provisional:
+                            self._noise_baseline.add(loudness_db)
                         logger.debug(
                             f"Suppressed (no wakeword, outside follow-up window "
                             f"[gap={onset_gap:.1f}s, window={self.follow_up_seconds:.0f}s]): {text!r}"
@@ -1186,14 +1372,37 @@ class Assistant:
                     logger.info(f"FOLLOW-UP: {text}")
 
                 if just_barged_in:
-                    # Barge-in: TTS has stopped. Open the follow-up window so
-                    # the user can speak their full query without re-saying the
-                    # wakeword. Discard the partial chunk that triggered the
-                    # barge-in — silence detection may have cut the sentence
-                    # short, so the content here is unreliable.
+                    if self._is_pure_stop(text_lower):
+                        # Pure "stop"/"cancel": the turn is already cancelled.
+                        # Stand down to idle — no follow-up window, no spoken
+                        # acknowledgement. A bare stop is an instruction to
+                        # cease entirely, not a preface to a new request, so the
+                        # wakeword is required again before the next turn.
+                        logger.info("Barge-in (pure stop) — standing down")
+                        continue
+                    # Redirect barge-in ("stop — actually do X"): TTS has
+                    # stopped. Open the follow-up window so the user can speak
+                    # their full query without re-saying the wakeword. Discard
+                    # the partial chunk that triggered the barge-in — silence
+                    # detection may have cut the sentence short, so the content
+                    # here is unreliable.
                     self._mark_turn_end()
                     self._skip_followup_self_echo = True
                     logger.info("Barge-in — follow-up window open")
+                    continue
+
+                # Pure stop in the follow-up window: cease, don't issue a new
+                # command. Stand down silently and close the window (wakeword
+                # required again). Active turns use the barge-in path above; a
+                # fresh wakeword turn while idle still routes "stop" to the agent.
+                if not wakeword_present and self._is_pure_stop(text_lower):
+                    # Don't stand down on a partial — wait for the hard endpoint
+                    # to confirm the user really only said "stop".
+                    if provisional:
+                        continue
+                    self._last_turn_end = 0.0
+                    self.audio_capture.clear_follow_up()
+                    logger.info("Pure stop in follow-up — standing down")
                     continue
 
                 if wakeword_present:
@@ -1208,7 +1417,24 @@ class Assistant:
                         stripped = stripped[leading_ww.end():].lstrip(" ,.:;-")
                     user_prompt = stripped.replace('"', '')
 
+                # Context-bias echo guard: a wakeword utterance whose command is
+                # nothing but ASR context terms (e.g. "Hey Atticus, <term>" from
+                # a cough) is the decoder echoing its bias prompt off non-speech.
+                # Drop it. Wakeword-only (empty command) is handled below; the
+                # follow-up path is exempt — a one-word context-term reply there
+                # can be a legitimate answer.
+                if wakeword_present and self._is_context_echo(user_prompt):
+                    logger.debug(
+                        f"Suppressed (context-bias echo, likely non-speech): {text!r}"
+                    )
+                    continue
+
                 if not user_prompt:
+                    # A provisional with no command yet (e.g. "Hey Atticus…"
+                    # mid-pause) must not open the follow-up window early; let
+                    # the hard endpoint decide.
+                    if provisional:
+                        continue
                     if wakeword_present:
                         # Wakeword said alone (often to barge in and then
                         # pause before asking) — open the follow-up window
@@ -1223,6 +1449,26 @@ class Assistant:
                     else:
                         logger.debug("Nothing in utterance")
                     continue
+
+                # Early-commit gate: a provisional reaches here only as a genuine
+                # wakeword/follow-up command. Commit the turn before the hard
+                # endpoint only if the partial reads as a complete and
+                # speculation-safe command (lights/time/etc.); otherwise drop it
+                # and let the buffer grow to the hard endpoint, which re-runs
+                # this path on the full utterance.
+                if provisional:
+                    if not should_commit_provisional(user_prompt, catchAll(user_prompt)):
+                        logger.debug(
+                            f"Provisional held (awaiting hard endpoint): {user_prompt!r}"
+                        )
+                        continue
+                    # Commit: drop the in-progress buffer and drain the queue so
+                    # the hard endpoint's duplicate of this same utterance (still
+                    # accumulating) is discarded, and briefly guard any in-flight
+                    # result on the contaminated tail.
+                    self.audio_capture.flush()
+                    self._drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
+                    logger.info(f"Committing early on soft endpoint: {user_prompt!r}")
 
                 # Snapshot the STT latency of the utterance that triggered this
                 # turn before later (echo/cross-talk) transcriptions overwrite it.
@@ -1239,7 +1485,7 @@ class Assistant:
         """Return the current assistant state: idle | thinking | speaking."""
         if self.audio_capture.tts_active.is_set():
             return "speaking"
-        if self._turn_active:
+        if self._turn_active or self._active_session is not None:
             return "thinking"
         return "idle"
 

@@ -926,7 +926,15 @@ def call_ha_service(domain: str, service: str, entity: str, data: Optional[str] 
         try:
             extra_data = json.loads(data)
         except json.JSONDecodeError:
-            return "Sorry, the data for that service call wasn't valid."
+            # Replan rather than dead-end: a malformed JSON `data` arg is the
+            # most fragile thing the SLM has to assemble here, so hand control
+            # back so it can retry via a typed wrapper or apologise gracefully
+            # (mirrors the other HA error paths' `Reactive question:` sentinel).
+            return (
+                f"Reactive question: The data for the {domain}.{service} call "
+                f"wasn't valid JSON. Retry with a more specific tool if one "
+                f"fits, otherwise tell the user you couldn't complete that."
+            )
 
     friendly = _friendly_for(entity_id)
     return _call_service(
@@ -1062,10 +1070,11 @@ def activate_scene(scene_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _calendar_window(day: str, now: Optional[_dt.datetime] = None) -> tuple[str, str]:
-    """Return (start_iso, end_iso) for a spoken day phrase.
+    """Return (start_iso, end_iso) for a spoken day phrase or ISO date.
 
     Args:
-        day: "today", "tomorrow", or "this_week" (also accepts "week").
+        day: "today", "tomorrow", "this_week" (also "week"), or a specific
+            ISO date "YYYY-MM-DD" for a single-day window.
         now: Override for testing; defaults to datetime.now().
     """
     now = now or _dt.datetime.now()
@@ -1077,8 +1086,15 @@ def _calendar_window(day: str, now: Optional[_dt.datetime] = None) -> tuple[str,
     elif day in ("this_week", "week"):
         start = midnight
         end = start + _dt.timedelta(days=7)
-    else:  # today (default)
-        start = midnight
+    else:
+        # Specific ISO date ("2026-06-26") — single-day window. Falls back to
+        # today for any unrecognised string (so a stray phrase never silently
+        # queries the wrong arbitrary day; it just defaults to today).
+        try:
+            d = _dt.date.fromisoformat(str(day).strip())
+            start = _dt.datetime.combine(d, _dt.time())
+        except (ValueError, AttributeError):
+            start = midnight
         end = start + _dt.timedelta(days=1)
 
     return start.isoformat(), end.isoformat()
@@ -1098,16 +1114,34 @@ def _normalise_ha_event(event: dict) -> dict:
     }
 
 
+def _read_calendars() -> list[str]:
+    """Calendars whats_on reads from.
+
+    The autodetected primary calendar PLUS the configured reminder calendar
+    Fulloch writes to (`create_calendar_event`). Without the reminder
+    calendar here, events Fulloch creates are invisible to its own
+    `whats_on` whenever the write target differs from the autodetected read
+    target (e.g. config `calendar: "Fulloch"` vs an auto-picked
+    `calendar.primary`). Deduped, order-preserving.
+    """
+    cals: list[str] = []
+    for c in (CALENDAR_ENTITY, _reminder_calendar_entity()):
+        if c and c not in cals:
+            cals.append(c)
+    return cals
+
+
 def _ha_get_events(day: str) -> str:
     """Common body for whats_on and its day-specific aliases."""
-    if not CALENDAR_ENTITY:
+    calendars = _read_calendars()
+    if not calendars:
         return "No calendar is configured in Home Assistant."
 
     start_iso, end_iso = _calendar_window(day)
     response = _call_service_with_response(
         "calendar", "get_events",
         {
-            "entity_id": CALENDAR_ENTITY,
+            "entity_id": calendars,
             "start_date_time": start_iso,
             "end_date_time": end_iso,
         },
@@ -1115,8 +1149,14 @@ def _ha_get_events(day: str) -> str:
     if not response:
         return "I couldn't reach your calendar."
 
-    raw_events = (response.get(CALENDAR_ENTITY) or {}).get("events") or []
+    raw_events: list[dict] = []
+    for cal in calendars:
+        raw_events.extend((response.get(cal) or {}).get("events") or [])
     events = [_normalise_ha_event(e) for e in raw_events]
+    # Merged calendars arrive grouped by source; sort so the spoken summary
+    # reads chronologically. Date-only all-day starts sort before that day's
+    # timed events (string compare: "2026-06-26" < "2026-06-26T12:00").
+    events.sort(key=lambda e: e["start"])
     summary = tts_friendly_event_summary(events)
     # Multi-event days benefit from agent summarisation/filtering; route
     # through the replan loop. The "no events" case stays as a direct
@@ -1128,14 +1168,18 @@ def _ha_get_events(day: str) -> str:
 
 @tool(
     name="whats_on",
-    description="Get calendar events for a spoken time period",
+    description=(
+        "Get calendar events for a time period. Pass 'today', 'tomorrow', "
+        "'this_week', or a specific date as 'YYYY-MM-DD'."
+    ),
     aliases=["calendar", "events", "schedule"],
 )
 def whats_on(day: str = "today") -> str:
-    """Calendar events for today, tomorrow, or this week.
+    """Calendar events for today, tomorrow, this week, or a specific date.
 
     Args:
-        day: "today" (default), "tomorrow", or "this_week".
+        day: "today" (default), "tomorrow", "this_week", or an ISO date
+            "YYYY-MM-DD" for a single day.
     """
     return _ha_get_events(day)
 
@@ -1249,9 +1293,9 @@ def _reminder_calendar_entity() -> Optional[str]:
 @tool(
     name="create_calendar_event",
     description=(
-        "Create a one-off or recurring calendar event in Home Assistant. "
-        "Use for reminders and recurring events (bin night, appointments, etc.). "
-        "Requires home_assistant.calendar to be configured."
+        "Create a one-off or recurring calendar event in Home Assistant "
+        "(reminders, appointments, bin night). recurrence: weekly/daily/monthly "
+        "or 'none'. Requires home_assistant.calendar to be configured."
     ),
     aliases=["add_reminder", "set_reminder", "create_reminder", "add_calendar_event"],
 )
@@ -1444,9 +1488,9 @@ TODO_ENTITY = _autodetect_todo_entity()
 @tool(
     name="add_todo_item",
     description=(
-        "Add an item to a Home Assistant todo or shopping list. "
-        "Use for simple list items ('add eggs to the shopping list', 'add dentist to my tasks'). "
-        "Use append_to_note instead when the item needs context or belongs in a note."
+        "Add an item to a Home Assistant todo or shopping list ('add eggs'). "
+        "Use append_to_note instead when the item needs context or belongs in "
+        "a note."
     ),
     aliases=["add_shopping_item", "add_task", "todo_add"],
 )
@@ -1580,12 +1624,10 @@ def _weather_history_summary(entity_id: str, start: _dt.date, days: int, unit: s
 @tool(
     name="get_weather_forecast",
     description=(
-        "Get the weather forecast from Home Assistant. Always use this for weather — never search the web. "
-        "start_date: ISO date (YYYY-MM-DD) of the first day to show; omit for today. "
-        "days: how many consecutive days to return (1–7, default 2). "
-        "Use the current date from the system prompt to compute exact dates. "
-        "Examples: no-arg = today+tomorrow; start_date=next Saturday + days=2 = weekend only; "
-        "start_date=specific day + days=1 = that day only."
+        "Weather forecast from Home Assistant — always use this for weather, "
+        "never web search. start_date is an ISO date (omit for today); days is "
+        "1–7 consecutive days (default 2). Compute exact dates from the system "
+        "prompt's current date."
     ),
     aliases=["weather", "forecast", "get_weather"],
 )
@@ -1747,14 +1789,12 @@ def _fetch_history_states(entity_id: str, start_dt, end_dt) -> list:
 @tool(
     name="get_entity_history",
     description=(
-        "Query Home Assistant history to see when an entity changed state. "
-        "Works for any entity: lights (on/off times), temperature sensors, switches, locks, etc. "
-        "Also works for Fulloch's own conversation sensors — use entity 'sensor.fulloch_last_utterance' "
-        "to see what was said and 'sensor.fulloch_last_response' to see what Fulloch replied. "
-        "entity: friendly name or entity_id. "
-        "start: ISO date ('2026-06-02') for a full-day window, or ISO datetime ('2026-06-02T12:00:00') for a specific time. "
-        "end: optional end of window (ISO date or datetime); defaults to end of day for date-only start, "
-        "or start+2h for datetime start."
+        "When a Home Assistant entity changed state — any entity, plus "
+        "Fulloch's own conversation sensors 'sensor.fulloch_last_utterance' "
+        "(what was said) and 'sensor.fulloch_last_response' (what Fulloch "
+        "replied). start/end take an ISO date (whole-day window) or datetime; "
+        "end defaults to end-of-day for a date start, or start+2h for a "
+        "datetime start."
     ),
     aliases=["entity_history", "check_history", "light_history"],
 )
@@ -1872,14 +1912,11 @@ def get_entity_history(entity: str, start: str, end: Optional[str] = None) -> st
 @tool(
     name="get_conversation_history",
     description=(
-        "Recall an earlier conversation — BOTH the user's questions and your own "
-        "replies, interleaved in order. Use this for 'what did we talk about', "
-        "'what did we discuss', 'what did I ask you earlier/yesterday' when the "
-        "relevant turns are NOT already in the current chat history. "
-        "start: ISO date ('2026-06-02') for a whole day, or ISO datetime "
-        "('2026-06-02T15:00:00') for a specific time. "
-        "end: optional ISO date/datetime; defaults to end of day for a date-only "
-        "start, or start+2h for a datetime start."
+        "Recall an earlier conversation — both the user's questions and your "
+        "own replies, interleaved — when the turns are NOT already in the "
+        "current chat history. start/end take an ISO date (whole day) or "
+        "datetime; end defaults to end-of-day for a date start, or start+2h "
+        "for a datetime start."
     ),
     aliases=["conversation_history", "recall_conversation", "what_did_we_discuss"],
 )

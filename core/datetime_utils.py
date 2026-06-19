@@ -1,11 +1,7 @@
 """Date / time formatting helpers shared between calendar tools.
 
-`tts_friendly_event_summary` is the spoken-summary formatter previously
-embedded in `tools/google_calendar.py`. Extracted so the new HA-mode
-`whats_on` wrapper can reuse it without re-implementing the
-"ten o'clock" / "ten a m" rendering.
-
-Input shape (normalised): list of dicts with keys
+`tts_friendly_event_summary` renders events as spoken summaries
+("ten o'clock" / "ten a m") from a normalised list of dicts:
     - "start"   (str)  ISO 8601 datetime OR ISO date
     - "summary" (str | None) event title
     - "all_day" (bool)  True if the event has no time component

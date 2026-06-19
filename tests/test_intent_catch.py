@@ -19,6 +19,7 @@ from utils.intent_catch import (
     extract_dim_brighten,
     extract_light_brightness,
     extract_lock,
+    extract_note_delete,
     extract_resume,
     extract_skip,
     extract_stop,
@@ -45,9 +46,13 @@ class TestExtractAfterPlay:
         assert result == "Taylor Swift"
 
     def test_play_with_leading_words(self):
-        # extract_after_play uses re.search, so leading words are tolerated.
+        # A polite prefix before the leading verb is still tolerated.
         result = extract_after_play("please play the Beatles")
         assert result == "the Beatles"
+
+    def test_play_with_request_prefix(self):
+        assert extract_after_play("can you play some jazz") == "some jazz"
+        assert extract_after_play("i want you to play Taylor Swift") == "Taylor Swift"
 
     def test_no_play_command(self):
         result = extract_after_play("what's the weather")
@@ -56,6 +61,29 @@ class TestExtractAfterPlay:
     def test_play_case_insensitive(self):
         result = extract_after_play("PLAY jazz music")
         assert result == "jazz music"
+
+    def test_midsentence_play_not_caught(self):
+        # Regression: "play" buried mid-sentence must NOT route to play_song.
+        # Real failure (2026-06-18): a web-search request matched the play
+        # fast-path because "play" appeared deep in the utterance.
+        assert extract_after_play(
+            "search the web for the best new ps5 games that i can play "
+            "with my seven-year-old daughter. she liked playing astro bot before"
+        ) is None
+        # And the user's correction attempt, which also contained "play":
+        assert extract_after_play(
+            "i don't want you to play me a song. i want you to search "
+            "about ps5 games"
+        ) is None
+
+    def test_midsentence_play_routes_to_slm(self):
+        # End-to-end through catchAll: the over-matching turn falls through to
+        # the SLM (returned unchanged) instead of emitting a play_song action.
+        msg = (
+            "search the web for the best new ps5 games that i can play "
+            "with my daughter"
+        )
+        assert catchAll(msg) == msg
 
 
 class TestExtractStop:
@@ -141,6 +169,12 @@ class TestExtractTimer:
         result = extract_timer("what time is it")
         assert result is None
 
+    def test_midsentence_timer_not_caught(self):
+        # Anchored like play: a passing mention of setting a timer must not fire.
+        assert extract_timer(
+            "remind me later that i need to set a timer for the eggs"
+        ) is None
+
 
 class TestListTimers:
     """Tests for list timers command."""
@@ -153,6 +187,10 @@ class TestListTimers:
 
     def test_not_list_timers(self):
         assert list_timers("start timer") is None
+
+    def test_midsentence_get_timer_not_caught(self):
+        # Anchored: "get the timer" mid-sentence must not hijack the turn.
+        assert list_timers("can you help me get the timer working") is None
 
 
 class TestLightBrightness:
@@ -498,6 +536,50 @@ class TestCatchAll:
     def test_catch_deep_think(self):
         result = catchAll("think about whether I should switch banks")
         assert result == {"actions": [{"intent": "deep_think", "args": ["whether I should switch banks"]}]}
+
+
+class TestExtractNoteDelete:
+    """Deletion/editing of notes is unsupported — these requests must be caught
+    and refused deterministically, never routed to the SLM (which would
+    confabulate doing it)."""
+
+    @pytest.mark.parametrize("utterance", [
+        "delete the note",
+        "remove that note",
+        "remove the note you wrote in today's note regarding formula one",
+        "can you delete the F1 entry from today's note",
+        "erase my shopping note",
+        "clear the daily note",
+        "get rid of the boiler note",
+        "forget that fact",
+        "delete that fact you saved",
+        "edit my shopping note",
+        "change the F1 note",
+        "update the journal entry",
+        "i want you to remove the note about the trip",
+    ])
+    def test_matches(self, utterance):
+        assert extract_note_delete(utterance) is True
+
+    @pytest.mark.parametrize("utterance", [
+        "add a note to delete the old config tomorrow",  # 'delete' is content
+        "turn off the lights",
+        "remove the milk from the shopping list",        # HA todo, not a note
+        "delete the alarm",
+        "write a note about the F1 standings",
+        "read my notes from today",
+        "what's in my shopping note",
+        "forget it",                                      # dismissal, no note
+        "cancel the timer",
+    ])
+    def test_non_matches(self, utterance):
+        assert extract_note_delete(utterance) is None
+
+    def test_catch_all_refuses_with_reply(self):
+        result = catchAll("delete the note you wrote about formula one")
+        assert isinstance(result, dict)
+        assert "reply" in result and "actions" not in result
+        assert "dashboard" in result["reply"].lower()
 
 
 class TestExtractDeepThink:

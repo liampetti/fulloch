@@ -77,18 +77,33 @@ def load_asr_model(language: Optional[str] = None):
     return QwenASRPipelineWrapper(model, language=language)
 
 
-def stream_generator(queue, onset_sink: Optional[dict] = None) -> Generator:
+def stream_generator(
+    queue,
+    onset_sink: Optional[dict] = None,
+    loudness_sink: Optional[dict] = None,
+    provisional_sink: Optional[dict] = None,
+) -> Generator:
     """Yield audio buffers from a queue until a None sentinel.
 
-    Queue items are `(buf, speech_onset_monotonic)` tuples. When `onset_sink`
-    is given, each yielded buffer's onset time is written to `onset_sink['t']`
-    before it's yielded, so the consumer can correlate the resulting
-    transcription with when the speaker began. Generators are lazy, so no
-    further item is dequeued between yielding a buffer and the consumer
-    receiving its transcription — the sink stays correct for that result.
+    Queue items are `(buf, speech_onset_monotonic, loudness_dbfs[, provisional])`
+    tuples (loudness and the provisional flag are optional for backward
+    compatibility). When `onset_sink` / `loudness_sink` / `provisional_sink` are
+    given, each yielded buffer's onset time, dBFS volume, and provisional flag
+    (True for a soft-endpoint snapshot of an unfinished utterance) are written to
+    `onset_sink['t']` / `loudness_sink['db']` / `provisional_sink['flag']` before
+    it's yielded, so the consumer can correlate the resulting transcription with
+    them. Generators are lazy, so no further item is dequeued between yielding a
+    buffer and the consumer receiving its transcription — the sinks stay correct
+    for that result.
     """
     while (item := queue.get()) is not None:
-        buf, onset_t = item
+        buf, onset_t = item[0], item[1]
+        loudness_db = item[2] if len(item) > 2 else None
+        provisional = item[3] if len(item) > 3 else False
         if onset_sink is not None:
             onset_sink['t'] = onset_t
+        if loudness_sink is not None:
+            loudness_sink['db'] = loudness_db
+        if provisional_sink is not None:
+            provisional_sink['flag'] = provisional
         yield buf

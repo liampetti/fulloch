@@ -985,6 +985,12 @@
     fill: white;
     transform: translateX(1px);
   }
+
+  /* Stop mode: while the agent is working (voice or text), the send button
+     becomes a red stop button that aborts the in-flight turn. */
+  button.send.stop { background: #ef4444; box-shadow: 0 2px 8px rgba(239, 68, 68, 0.35); }
+  button.send.stop:hover { background: #dc2626; }
+  button.send.stop svg { transform: none; }
 </style>
 </head>
 <body>
@@ -1136,8 +1142,35 @@
   let alwaysDetail = localStorage.getItem('fulloch_detail') === '1';
 
   let typingEl = null;
-  let waiting = false;
+  let waiting = false;       // this page's text turn is in flight
+  let voiceBusy = false;     // a voice/other turn is working, from /status
   let lastTs = 0;
+
+  // The send button doubles as a stop button while the agent is working.
+  const SEND_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4 22 12 3.4 3.6 3 10l13 2-13 2z"/></svg>';
+  const STOP_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>';
+  const syncButton = () => {
+    const stop = waiting || voiceBusy;
+    sendBtn.classList.toggle('stop', stop);
+    sendBtn.disabled = false;
+    sendBtn.setAttribute('aria-label', stop ? 'Stop' : 'Send');
+    sendBtn.title = stop ? 'Stop' : 'Send';
+    sendBtn.innerHTML = stop ? STOP_SVG : SEND_SVG;
+  };
+
+  const doStop = async () => {
+    try { await fetch('/stop', { method: 'POST' }); }
+    catch (e) { console.warn('stop failed', e); }
+    // Optimistic: snap any in-flight typewriter to full, drop the typing
+    // indicator, and revert the button. The `stopped` SSE event and /status
+    // poll confirm the wind-down.
+    finishTyping();
+    removeTyping();
+    waiting = false;
+    voiceBusy = false;
+    syncButton();
+    input.focus();
+  };
   let typingTimer = null;   // live typewriter tick handle
   let finishActive = null;  // finalises the in-flight typewriter, if any
   const statsMsgs = new Map();  // assistant ts -> {stats, panel, btn}
@@ -1253,7 +1286,8 @@
     resetTraceGroup();
     removeTyping();
     waiting = false;
-    sendBtn.disabled = false;
+    voiceBusy = false;
+    syncButton();
   };
 
   // Show the wakeword prompt in the empty state, pulled from config so it
@@ -1437,6 +1471,17 @@
     // already-rendered assistant message keyed by ref_ts. Handled before the
     // dedup guard since it carries its own later ts.
     if (ev.role === 'reset') { resetUI(); return; }
+    if (ev.role === 'stopped') {
+      // A turn was stopped (dashboard button or voice). Snap any in-flight
+      // typewriter to full, drop the typing indicator, and revert the button —
+      // no answer bubble follows.
+      finishTyping();
+      removeTyping();
+      waiting = false;
+      voiceBusy = false;
+      syncButton();
+      return;
+    }
     if (ev.role === 'stats') {
       const entry = statsMsgs.get(ev.ref_ts);
       if (entry && ev.patch) {
@@ -1486,10 +1531,13 @@
     if (animate) typeInto(bubble, text);
     scrollEnd();
 
-    if (ev.role === 'assistant' && waiting) {
-      waiting = false;
-      sendBtn.disabled = false;
-      input.focus();
+    if (ev.role === 'assistant') {
+      // Text turns end here; voice turns stay "busy" through TTS (cleared by
+      // the /status poll once playback finishes) so the stop button can still
+      // cut off speech.
+      if (waiting) { waiting = false; input.focus(); }
+      if (ev.source === 'text') voiceBusy = false;
+      syncButton();
     }
   };
 
@@ -1543,10 +1591,12 @@
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    // While working, the button is a stop button (and Enter stops too).
+    if (waiting || voiceBusy) { doStop(); return; }
     const text = input.value.trim();
-    if (!text || waiting) return;
+    if (!text) return;
     waiting = true;
-    sendBtn.disabled = true;
+    syncButton();
     input.value = '';
     autosize();
     showTyping();
@@ -1560,7 +1610,7 @@
       console.error(err);
       removeTyping();
       waiting = false;
-      sendBtn.disabled = false;
+      syncButton();
       input.focus();
     }
   });
@@ -2005,8 +2055,30 @@
     }
   });
 
+  // Background tabs throttle/pause setTimeout, freezing the typewriter
+  // mid-reveal — so a minimised window reopened after TTS already finished
+  // would resume slow-crawling a stale answer. Snap any in-flight reveal to
+  // full on every visibility change (no-op when nothing is animating).
+  document.addEventListener('visibilitychange', () => { finishTyping(); });
+
+  // Poll the agent's state so the stop button appears for voice turns (and any
+  // work this page didn't start), and clears once playback finishes. Text turns
+  // this page started are tracked locally via `waiting` for snappier feedback.
+  const pollStatus = async () => {
+    try {
+      const r = await fetch('/status');
+      if (!r.ok) return;
+      const s = await r.json();
+      const busy = s.state !== 'idle';
+      if (busy !== voiceBusy) { voiceBusy = busy; syncButton(); }
+    } catch (e) { /* transient; next tick retries */ }
+  };
+  setInterval(pollStatus, 1000);
+
+  syncButton();
   loadWakeHint();
   loadHistory().then(startStream);
+  pollStatus();
 })();
 </script>
 </body>

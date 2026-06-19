@@ -158,33 +158,6 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 mkdir -p "${HOME}/.config/pulse"
 [ -f "${HOME}/.config/pulse/cookie" ] || touch "${HOME}/.config/pulse/cookie"
 
-# 7b. Load PulseAudio echo-cancellation module (required for usable barge-in
-# on speakerphone setups). Idempotent. Opt out with FULLOCH_SKIP_AEC=1.
-if [ "${FULLOCH_SKIP_AEC:-0}" = "1" ]; then
-    echo "ℹ️  FULLOCH_SKIP_AEC=1 — skipping module-echo-cancel load."
-elif command -v pactl &> /dev/null && pactl info &> /dev/null; then
-    if pactl list short modules | grep -q "module-echo-cancel"; then
-        echo "✅ module-echo-cancel already loaded."
-    else
-        echo "🎙️  Loading PulseAudio module-echo-cancel (webrtc backend)..."
-        if pactl load-module module-echo-cancel \
-            source_name=echocancel_source \
-            sink_name=echocancel_sink \
-            aec_method=webrtc \
-            source_properties=device.description=Echo-Cancelled\ Source \
-            sink_properties=device.description=Echo-Cancelled\ Sink \
-            > /dev/null 2>&1; then
-            echo "✅ module-echo-cancel loaded."
-            echo "   compose.yml routes the container through it via PULSE_SOURCE / PULSE_SINK."
-        else
-            echo "⚠️  Failed to load module-echo-cancel. Continuing without echo cancellation."
-            echo "   Barge-in may self-trigger from the assistant's own voice."
-        fi
-    fi
-else
-    echo "ℹ️  pactl not found or no PulseAudio server — skipping echo-cancel load."
-fi
-
 # 8. Optional rebuild
 read -p "Rebuild image before starting? (y/N): " response
 response=${response,,}

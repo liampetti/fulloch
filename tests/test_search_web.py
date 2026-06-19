@@ -106,6 +106,33 @@ def test_extract_keeps_real_paragraphs():
     assert "substantial paragraph" in out
 
 
+def test_extract_reads_table_rows():
+    # Tabular data (standings/scores/prices) lives in <td> cells, not <p>/<li>.
+    # Each cell is short, but the joined row must survive the length filter.
+    rows = "".join(
+        f"<tr><td>{i}</td><td>Driver Number {i}</td><td>Team {i}</td><td>{300 - i}</td></tr>"
+        for i in range(1, 11)
+    )
+    body = f"<html><body><table><tbody>{rows}</tbody></table></body></html>"
+    out = search_web.extract_main_text(body)
+    assert "Driver Number 1" in out
+    assert "Team 1" in out
+    # Cells from one row are kept together as a single block.
+    assert "1 | Driver Number 1 | Team 1 | 299" in out
+
+
+def test_fetch_sends_browser_user_agent(monkeypatch):
+    seen = {}
+
+    def fake_get(url, timeout=None, headers=None, **kw):
+        seen["headers"] = headers or {}
+        return FakeResp(text="<html><body><nav>junk</nav></body></html>")
+
+    monkeypatch.setattr(search_web.requests, "get", fake_get)
+    search_web.fetch_website_summary("http://x", fallback="snip")
+    assert "Mozilla/5.0" in seen["headers"].get("User-Agent", "")
+
+
 def test_fetch_falls_back_to_snippet(monkeypatch):
     def fake_get(url, timeout=None, **kw):
         return FakeResp(text="<html><body><nav>junk</nav></body></html>")

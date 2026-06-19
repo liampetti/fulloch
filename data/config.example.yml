@@ -4,46 +4,56 @@
 # General Settings
 # =============================================================================
 general:
-  wakeword: "hey atticus"       # Activation phrase (case-insensitive, multi-word ok), also acts as fallback if regex option is enabled and fails
-  wakeword_pattern: '\b(?:hey|hay|hi)\W+[ao][dtl]{1,2}i?c\W*u[sz]\b' # Optional regex override (compiled case-insensitive) to tolerate ASR variants
-  voice_clone: "atticus"        
-  barge_in: "wakeword"          # "off" (half-duplex) | "wakeword" (needs AEC)
-  follow_up_time: "5s"          # "0s" | "<N>s" wakeword-free window after TTS, allows for conversational discussions in quieter environments
-  asr_language: "English"       # Force speech detection and transcription to a single language, only English supported currently.
-  use_vad: true                 # Use Silero VAD (speech probability) to decide when you've stopped talking, instead of raw mic energy — robust in noisy rooms. Also drops non-speech buffers (coughs, taps) before ASR. Falls back to RMS energy when off/unavailable.
-  # vad_threshold: 0.6          # Speech probability (0..1) above which a window counts as voice. Raise toward 0.7 in noisy rooms to ignore background chatter (and cough-induced false wakewords); lower for quiet/soft speech.
-  # vad_endpoint_silence_ms: 1500 # How long speech probability must stay low before you're judged to have finished talking. Defaults to the internal silence_duration_ms (1500ms).
-  # vad_min_speech_ms: 300        # Minimum detected speech (ms) for an utterance to be sent to ASR, outside the follow-up window. Filters coughs/taps that VAD scores as speech (which ASR otherwise hallucinates into the wakeword). Raise to reject more noise; the follow-up window is always exempt.
-  asr_context_hint: true        # Inject "Technical terms: <wakeword>" as a system prompt on every ASR call, biasing the decoder toward your wakeword spelling.
-  # asr_context_terms:          # Optional extra terms appended after the wakeword. Add proper nouns or names that get consistently mistranscribed. (Max 10)
-  #   - "phoebe bridgers"     
-  #   - "downstairs office"   
+  wakeword: "hey atticus"       # Activation phrase (case-insensitive, multi-word ok); also the fallback if wakeword_pattern fails to compile
+  wakeword_pattern: '\b(?:hey|hay|hi)\W+[ao][dtl]{1,2}i?c\W*u[sz]\b' # Optional case-insensitive regex override to tolerate ASR variants
+  voice_clone: "atticus"
+  barge_in: "wakeword"          # "off" (half-duplex) | "wakeword" (interrupt mid-response)
+  follow_up_time: "5s"          # "0s" | "<N>s" — wakeword-free reply window after TTS, for back-and-forth in quiet rooms
+  asr_language: "English"       # Force transcription to one language (English only for now)
+  use_vad: true                 # Endpoint on Silero speech probability rather than mic energy — robust in noisy rooms, and drops non-speech (coughs, taps) before ASR. Falls back to RMS when off/unavailable.
+  log_level: "info"           # "debug" | "info" | "warning" | "error" (debug = verbose project logs)
 
-  log_level: "info"           # "debug" | "info" | "warning" | "error" (debug = verbose project-side logs)
-
-  # ALSA device substrings; null = system default. AEC routing for
-  # barge-in is configured via PULSE_SOURCE / PULSE_SINK in compose.yml.
+  # Mic/speaker device-name substrings (matched against PortAudio's device
+  # list); null = system default. An absent name falls back to the default
+  # rather than failing to start. NATIVE (non-Docker) path only — Windows in
+  # particular, where PortAudio resamples. On Linux/Docker leave these null and
+  # use PULSE_SOURCE / PULSE_SINK in .env: a substring here opens the raw ALSA
+  # hw: device, which can't resample and fails on a rate mismatch.
   # input_device: null
   # output_device: null
 
   # Web chat UI. Set port to enable; unset disables.
   dashboard_port: 8765
-  dashboard_host: "127.0.0.1"  # local-only (default).
+  dashboard_host: "127.0.0.1"  # local-only (default)
   #
-  # To reach the dashboard from a phone / another computer on your network:
+  # To reach it from another device on your network:
   #   1. dashboard_host: "0.0.0.0"            (bind to all interfaces)
-  #   2. set FULLOCH_DASHBOARD_TOKEN in .env  (REQUIRED — the dashboard can
-  #      read/write notes, toggle the mic, speak, and drive Home Assistant)
-  #   3. (optional) serve over HTTPS by setting both keys below.
-  # Then open  http(s)://<this-host-ip>:8765/?token=<your-token>  once; the
-  # browser stores the token and you can bookmark the bare URL afterwards.
+  #   2. set FULLOCH_DASHBOARD_TOKEN in .env  (REQUIRED — the dashboard reads/
+  #      writes notes, toggles the mic, speaks, and drives Home Assistant)
+  #   3. (optional) HTTPS via the cert/key pair below
+  # Then open http(s)://<host-ip>:8765/?token=<your-token> once; the browser
+  # stores the token, so you can bookmark the bare URL afterwards.
   #
-  # Optional HTTPS. Point these at a cert/key PAIR (both required, or TLS is
-  # skipped). For a no-browser-warning local cert use mkcert. In Docker the
-  # files must live under ./data (mounted into the container), so reference
-  # them as ./data/certs/... :
+  # Optional HTTPS — both keys required, or TLS is skipped. Use mkcert for a
+  # warning-free local cert. In Docker the files must live under ./data
+  # (mounted into the container):
   # dashboard_ssl_certfile: "./data/certs/fulloch.pem"
   # dashboard_ssl_keyfile:  "./data/certs/fulloch-key.pem"
+
+  # ---------------------------------------------------------------------------
+  # Advanced tuning — all still under `general:`. Defaults (shown) suit most
+  # setups; uncomment only to override. Mostly endpointing/barge-in thresholds
+  # you'd tune against your mic and room.
+  # ---------------------------------------------------------------------------
+  # barge_in_threshold_dbfs: -48     # Silence floor while speaking, in dBFS. Keep low to improve barge-in. Raise it if the assistant interrupts itself or barge-in response time is too slow.
+  # vad_threshold: 0.6               # Probability (0..1) above which a window counts as voice. Raise toward 0.7 in noisy rooms (cuts background chatter and cough false-triggers); lower for quiet/soft speech.
+  # vad_endpoint_silence_ms: 1500    # Low-probability duration before end-of-speech is declared. Defaults to silence_duration_ms (1500).
+  # vad_min_speech_ms: 300           # Min voiced duration to send to ASR (outside the follow-up window); filters coughs/taps VAD scores as speech. Raise to reject more noise.
+  # vad_soft_endpoint_silence_ms: 500 # Early-commit pause: after this much silence a complete + speculation-safe command (lights/time/etc.) acts before the full endpoint above, cutting perceived latency. Locks/media/timers always wait for the hard endpoint. 0 disables. See docs/speculative-early-action.md.
+  # asr_context_hint: true           # Bias the ASR decoder toward your wakeword spelling via a "Technical terms: <wakeword>" prompt (default true).
+  # asr_context_terms:               # Extra terms appended after the wakeword — proper nouns/names that get mistranscribed (max 10).
+  #   - "phoebe bridgers"
+  #   - "downstairs office"
 
 # =============================================================================
 # Home Assistant — smart-home backend
@@ -53,32 +63,27 @@ general:
 
 # home_assistant:
 #   url: "http://192.168.1.50:8123"
-#   token: "your_long_lived_access_token"  # prefer setting FULLOCH_HA_TOKEN in .env
-#                                            # instead; the env var takes priority and
-#                                            # keeps the token out of plaintext config.
+#   token: "your_long_lived_access_token"  # prefer FULLOCH_HA_TOKEN in .env — it takes
+#                                            # priority and keeps the token out of config
 #   timeout: 10
-#   spotify_entity: "SpotifyPlus Atticus"  # Friendly name (or entity_id) of the Spotify
-#                                               # media_player. Auto-detected from HA on startup
-#                                               # (first media_player.spotify* entity). Set this
-#                                               # if autodetect picks the wrong player or fails.
-#   todo_entity: "Shopping list"  # Friendly name (or entity_id) of the HA todo list for
-#                                   # voice shopping/task items. Auto-detected: prefers
-#                                   # todo.shopping_list, then the first todo.* entity.
-#   calendar: "Fulloch"   # Friendly name of the HA calendar Fulloch writes reminders to.
-#                          # Create a Local Calendar (or Google Calendar via HA) named "Fulloch"
-#                          # in HA. Fulloch will poll this calendar every 60 seconds and speak
-#                          # any event starting within the next 90 seconds via speak_proactive.
-#   reminder_poll: false  # Uncomment to disable the polling thread — e.g. if you have set up
-#                          # a HA automation to call fulloch.speak on calendar events instead,
-#                          # or if you don't want voice feedback for reminders.
+#   spotify_entity: "SpotifyPlus Atticus"  # Spotify media_player (friendly name or entity_id).
+#                                            # Auto-detected (first media_player.spotify*); set
+#                                            # only if autodetect picks wrong or fails.
+#   todo_entity: "Shopping list"  # HA todo list for voice items (friendly name or entity_id).
+#                                   # Auto-detected: todo.shopping_list, else first todo.*.
+#   calendar: "Fulloch"   # HA calendar Fulloch writes reminders to. Create a Local (or Google)
+#                          # Calendar named "Fulloch" in HA; Fulloch polls it every 60s and
+#                          # speaks any event starting within 90s via speak_proactive.
+#   reminder_poll: false  # Disable the polling thread — e.g. if a HA automation calls
+#                          # fulloch.speak on calendar events, or you want no reminder audio.
 
 # =============================================================================
 # Always-Available Tools
 # =============================================================================
 
 # Notes — local markdown store (read / write / append / search).
-# Leave commented to use the default ./data/notes folder. Point `path` at an
-# existing Obsidian vault (or any markdown folder) to use that instead.
+# Leave commented for the default ./data/notes folder, or point `path` at an
+# existing Obsidian vault (or any markdown folder).
 # notes:
 #   path: "./data/notes"      # where notes are stored
 #   daily_subdir: "daily"     # optional: daily-journal notes go here as YYYY-MM-DD.md

@@ -25,6 +25,11 @@ def set_speak_callback(fn) -> None:
     _speak_proactive = fn
 
 
+def set_beep_device(device) -> None:
+    """Route timer/alarm beeps to the same output device as TTS."""
+    beep_manager.set_output_device(device)
+
+
 # Word forms used by `get_current_time` below. The output emits dates and
 # times entirely in words so ASR round-trips it back to (near-)identical
 # text — the self-echo check in core/assistant.py uses substring matching
@@ -105,11 +110,10 @@ def get_current_time(location: Optional[str] = None) -> str:
 @tool(
     name="start_countdown",
     description=(
-        "Start a countdown timer for a DURATION from now (e.g. '10 minutes', "
-        "'30 seconds', '2 hours'). When it fires it beeps and speaks the reminder "
-        "message if provided. ONLY use when the user gives a relative duration "
-        "('in X minutes/seconds/hours'). Do NOT use for specific clock times "
-        "('at noon', 'at 12pm', 'at 3 o'clock') — use create_calendar_event instead."
+        "Start a countdown for a relative DURATION from now ('in 10 minutes'); "
+        "beeps and speaks the reminder message when it fires. ONLY for relative "
+        "durations — for specific clock times ('at noon', 'at 3pm') use "
+        "create_calendar_event instead."
     ),
     aliases=["timer", "countdown", "set_timer", "start_timer"]
 )

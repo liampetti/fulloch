@@ -106,6 +106,54 @@ def test_calendar_window_week_is_seven_days_from_today():
     assert end == "2026-05-28T00:00:00"
 
 
+def test_calendar_window_specific_iso_date_is_single_day():
+    from tools.home_assistant import _calendar_window
+    start, end = _calendar_window("2026-06-26", now=datetime.datetime(2026, 6, 18, 14, 30))
+    assert start == "2026-06-26T00:00:00"
+    assert end == "2026-06-27T00:00:00"
+
+
+def test_calendar_window_unrecognised_string_defaults_to_today():
+    from tools.home_assistant import _calendar_window
+    start, end = _calendar_window("sometime", now=datetime.datetime(2026, 6, 18, 14, 30))
+    assert start == "2026-06-18T00:00:00"
+    assert end == "2026-06-19T00:00:00"
+
+
+def test_whats_on_reads_both_primary_and_reminder_calendars():
+    """Events Fulloch writes to its reminder calendar must surface in whats_on
+    even when the autodetected read calendar differs (#2 regression)."""
+    import tools.home_assistant as ha
+    response = {
+        "calendar.primary": {"events": [
+            {"start": "2026-06-26T09:00:00", "summary": "Standup"},
+        ]},
+        "calendar.fulloch": {"events": [
+            {"start": "2026-06-26T12:00:00", "summary": "Australia vs Paraguay"},
+        ]},
+    }
+    with patch.object(ha, "CALENDAR_ENTITY", "calendar.primary"), \
+         patch.object(ha, "_reminder_calendar_entity", return_value="calendar.fulloch"), \
+         patch.object(ha, "_call_service_with_response", return_value=response) as call:
+        out = ha._ha_get_events("2026-06-26")
+
+    # Both calendars were queried in one call.
+    assert call.call_args.args[2]["entity_id"] == ["calendar.primary", "calendar.fulloch"]
+    # The reminder-calendar event is present in the spoken summary.
+    assert "Australia vs Paraguay" in out
+    assert "Standup" in out
+
+
+def test_whats_on_dedupes_when_read_and_reminder_calendars_match():
+    import tools.home_assistant as ha
+    response = {"calendar.primary": {"events": []}}
+    with patch.object(ha, "CALENDAR_ENTITY", "calendar.primary"), \
+         patch.object(ha, "_reminder_calendar_entity", return_value="calendar.primary"), \
+         patch.object(ha, "_call_service_with_response", return_value=response) as call:
+        ha._ha_get_events("today")
+    assert call.call_args.args[2]["entity_id"] == ["calendar.primary"]
+
+
 def test_calendar_normalises_timed_event():
     from tools.home_assistant import _normalise_ha_event
     ha_event = {"start": "2026-05-25T10:00:00+10:00", "end": "...", "summary": "Dentist"}

@@ -155,7 +155,28 @@ def _find_note(query: str) -> Optional[Path]:
     return None
 
 
-def _find_note_semantic(query: str) -> Optional[Path]:
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _is_daily_note(path: Path) -> bool:
+    """True if `path` is a date-stamped daily/journal note.
+
+    Daily notes live under `DAILY_SUBDIR` (or, when that's unset, as
+    `YYYY-MM-DD.md` in the top-level folder). They're owned by
+    `append_to_today`/`read_today`, never a named-append target — so a
+    semantic *write* must never resolve onto one (see `append_to_note`).
+    """
+    if DAILY_SUBDIR:
+        rel = path.relative_to(NOTES_DIR)
+        return bool(rel.parts) and rel.parts[0] == DAILY_SUBDIR
+    return bool(_DATE_RE.match(path.stem))
+
+
+def _find_note_semantic(
+    query: str,
+    min_score: float = SEMANTIC_MIN_SCORE,
+    exclude_daily: bool = False,
+) -> Optional[Path]:
     """Resolve a note by topic via the embedding index when literal title
     matching misses.
 
@@ -163,26 +184,50 @@ def _find_note_semantic(query: str) -> Optional[Path]:
     only covers the title. A topical query like "notes regarding climate
     change in Australia" won't match the slug `climate-living-advice-australia`,
     so fall through to the semantic index and take the top hit if it clears
-    the same relevance bar `search_notes` uses for its semantic pass.
+    the relevance bar.
+
+    Reads use the default (loose) bar and accept any note — a wrong guess just
+    reads the wrong thing aloud. Writes (`append_to_note`) pass a stricter
+    `min_score` and `exclude_daily=True`: a loose semantic match would silently
+    *write* into the nearest-by-meaning note (a date-like title once landed an
+    append in an unrelated daily journal), so the write path takes the first
+    qualifying non-daily hit and otherwise misses.
     """
     if not query:
         return None
     try:
-        results = _get_index().search(query, k=1)
+        # When filtering, look past the top hit so a leading daily note doesn't
+        # mask a valid named note below it.
+        results = _get_index().search(query, k=5 if exclude_daily else 1)
     except Exception as e:
         logger.error(f"Semantic note lookup failed for '{query}': {e}")
         return None
-    if not results:
-        return None
-    score, chunk = results[0]
-    if score < SEMANTIC_MIN_SCORE:
-        return None
-    last_retrieval['chunks'] = 1
-    path = NOTES_DIR / chunk.file
-    return path if path.exists() else None
+    for score, chunk in results:
+        if score < min_score:
+            break  # index results are score-sorted; nothing further qualifies
+        path = NOTES_DIR / chunk.file
+        if not path.exists():
+            continue
+        if exclude_daily and _is_daily_note(path):
+            continue
+        last_retrieval['chunks'] = 1
+        return path
+    return None
 
 
-_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+# A named append resolved only by topic is a *write*, so demand real confidence
+# (well above the loose read-time `SEMANTIC_MIN_SCORE`) before touching a file.
+WRITE_SEMANTIC_MIN_SCORE = 0.5
+
+
+def _appendable_titles() -> list[str]:
+    """Spoken titles of notes a named append may target (no facts, no daily)."""
+    titles: list[str] = []
+    for p in _iter_notes():
+        if p.name == f'{FACTS_NOTE}.md' or _is_daily_note(p):
+            continue
+        titles.append(p.stem.replace('-', ' '))
+    return titles
 
 
 def _daily_base() -> Path:
@@ -346,12 +391,34 @@ def write_note(title: str, content: str) -> str:
     aliases=["add_to_note", "extend_note"],
 )
 def append_to_note(title: str, content: str) -> str:
-    note = _find_note(title) or _find_note_semantic(title)
-    if note is None:
-        return f"I couldn't find a note about {title} to append to."
     line = content.strip()
     if not line:
         return "There was nothing to append."
+    # A literal title can exact-match a dated journal (e.g. "2026 06 05" →
+    # daily/2026-06-05.md). Refuse it: a named append must never edit a daily
+    # log — that's another day's journal. Daily entries go through
+    # append_to_today (today only).
+    literal = _find_note(title)
+    if literal is not None and _is_daily_note(literal):
+        return (
+            f"Reactive question: {title!r} is a dated daily journal — I won't "
+            "write to a past day's log. Save this to a general note instead: "
+            "write_note to create one, or append_to_note to an existing named note."
+        )
+    # Semantic fallback is write-guarded (stricter score, no daily notes) so a
+    # loose nearest-by-meaning match can't silently corrupt an unrelated file.
+    note = literal or _find_note_semantic(
+        title, min_score=WRITE_SEMANTIC_MIN_SCORE, exclude_daily=True
+    )
+    if note is None:
+        # No confident match — bounce back so the agent picks a real title or
+        # creates the note, rather than guessing or speaking a dead end.
+        existing = ', '.join(_appendable_titles()) or 'none'
+        return (
+            f"Reactive question: I couldn't find an existing note titled "
+            f"{title!r} to append to. Existing notes: {existing}. Append to one "
+            f"of those by its exact title, or create a new note with write_note."
+        )
     try:
         with note.open('a', encoding='utf-8') as f:
             f.write(f"\n- {line}\n")
@@ -394,10 +461,9 @@ def append_to_today(content: str) -> str:
     name="read_today",
     description=(
         "Read back the daily note — the dated journal of entries saved with "
-        "append_to_today. Use for 'read my notes from today', 'what did I log "
-        "today', 'read today's note'. Pass an optional YYYY-MM-DD date to read "
-        "a past day's note; omit it for today. This is the correct tool for "
-        "the daily log — do not use semantic search to find today's note."
+        "append_to_today. Pass an optional YYYY-MM-DD date for a past day; "
+        "omit for today. This is the correct tool for the daily log — never "
+        "use semantic search to find today's note."
     ),
     aliases=["read_daily_note", "todays_note", "read_today_note"],
 )
@@ -486,12 +552,10 @@ def _semantic_search(query: str) -> list[tuple[str, str]]:
 @tool(
     name="search_notes",
     description=(
-        "Search the user's saved markdown notes by keyword, name, meaning, or "
-        "topic. Combines exact keyword matching with semantic similarity, so it "
-        "works whether the user recalls the exact words or just the gist — use "
-        "it for 'what did I write about X', 'find my note on Y', or 'what does "
-        "my note about Z say'. Returns the closest matches; confirm a note "
-        "actually covers the topic from the returned text before answering."
+        "Search the user's saved markdown notes by keyword, name, meaning or "
+        "topic (hybrid keyword + semantic, so exact words or just the gist "
+        "both work). Confirm a returned note actually covers the topic from "
+        "its text before answering."
     ),
     aliases=[
         "find_notes", "lookup_notes",

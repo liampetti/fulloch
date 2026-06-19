@@ -36,7 +36,7 @@ with wave.open("alarm.wav", "w") as wf:
         if r != repeats - 1:
             frames.extend(silence_samples(gap_ms))
 
-    # write frames
+    # Clamp to [-1, 1] and pack each sample as little-endian 16-bit PCM.
     wf.writeframes(b"".join(struct.pack("<h", int(max(-1.0, min(1.0, x)) * 32767)) for x in frames))
 
 print("Wrote alarm.wav")

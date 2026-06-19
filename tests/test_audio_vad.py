@@ -51,6 +51,14 @@ def make_endpointer(events):
     return ep
 
 
+def make_endpointer_with_soft(hard_events, soft_events):
+    """Endpointer with both the hard and a scripted *soft* iterator installed."""
+    ep = VadEndpointer(MagicMock(), sample_rate=16000)
+    ep._iterator = FakeIterator(hard_events)
+    ep._soft_iterator = FakeIterator(soft_events)
+    return ep
+
+
 def _windows(n):
     """`n` windows' worth of (silent) float32 samples."""
     return np.zeros(n * VAD_WINDOW_SAMPLES, dtype=np.float32)
@@ -142,3 +150,45 @@ def test_reset_clears_last_speech_samples():
     ep.reset()
     assert ep.last_speech_samples == 0
     assert ep._seg_start_sample is None
+
+
+# --- soft endpoint (early-commit signal) ----------------------------------
+
+def test_soft_endpoint_disabled_by_default():
+    # No soft iterator → flag never sets, even across a full start/end.
+    ep = make_endpointer([{"start": 0}, {"end": 100}])
+    ep.process(_windows(2))
+    assert ep.soft_endpointed is False
+
+
+def test_soft_endpoint_latches_on_soft_end():
+    # Soft iterator ends earlier than the hard one (still mid-silence here).
+    ep = make_endpointer_with_soft(
+        hard_events=[{"start": 0}, None, None],
+        soft_events=[{"start": 0}, {"end": 50}, None],
+    )
+    ep.process(_windows(3))
+    assert ep.soft_endpointed is True
+    assert ep.endpointed is False  # hard endpoint hasn't fired yet
+
+
+def test_soft_endpoint_rearms_on_resumed_speech():
+    # Pause (soft end) → speaker resumes (soft start) → flag clears again.
+    ep = make_endpointer_with_soft(
+        hard_events=[{"start": 0}, None, None, None],
+        soft_events=[{"start": 0}, {"end": 50}, {"start": 60}, None],
+    )
+    ep.process(_windows(4))
+    assert ep.soft_endpointed is False
+
+
+def test_reset_clears_soft_endpointed():
+    ep = make_endpointer_with_soft(
+        hard_events=[{"start": 0}, None],
+        soft_events=[{"start": 0}, {"end": 50}],
+    )
+    ep.process(_windows(2))
+    assert ep.soft_endpointed is True
+    ep.reset()
+    assert ep.soft_endpointed is False
+    assert ep._soft_iterator.reset_calls == 1

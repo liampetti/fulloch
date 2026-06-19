@@ -344,6 +344,115 @@ class TestBareStopBargeIn:
         assert atticus._check_barge_in("it was cancelled yesterday") is False
 
 
+class TestIsPureStop:
+    """A bare stop barge-in ("Atticus, stop") must terminate the turn and
+    stand down — no follow-up window. A redirect ("stop — play jazz instead")
+    carries a real command after the stop word, so it keeps the follow-up.
+    `_is_pure_stop` draws that line; the transcriber uses it to decide whether
+    to call `_mark_turn_end()` after a barge-in cancel.
+    """
+
+    @pytest.fixture
+    def atticus(self):
+        return _make_assistant(
+            wakeword="hey atticus",
+            wakeword_pattern=r"\b(?:hey|hay|hi)\W+attic\W*u[sz]\b",
+        )
+
+    # --- Pure stop: stand down, no follow-up ---
+
+    def test_bare_stop_word(self, atticus):
+        assert atticus._is_pure_stop("stop") is True
+
+    def test_name_plus_stop(self, atticus):
+        assert atticus._is_pure_stop("atticus stop") is True
+        assert atticus._is_pure_stop("hey atticus, stop") is True
+
+    def test_other_stop_words(self, atticus):
+        for word in ("halt", "cancel", "pause", "quiet", "enough"):
+            assert atticus._is_pure_stop(f"atticus {word}") is True, word
+
+    def test_stop_with_innocuous_filler(self, atticus):
+        # Filler around the stop word doesn't make it a new command.
+        assert atticus._is_pure_stop("atticus, stop talking now please") is True
+        assert atticus._is_pure_stop("ok stop that") is True
+        assert atticus._is_pure_stop("be quiet please") is True
+
+    # --- Redirect: keep the follow-up window ---
+
+    def test_stop_then_new_command(self, atticus):
+        assert atticus._is_pure_stop("atticus stop, play jazz instead") is False
+        assert atticus._is_pure_stop("stop and turn on the lights") is False
+
+    def test_no_stop_word_is_not_pure_stop(self, atticus):
+        # A wakeword-alone barge-in (user pauses before asking) carries no
+        # stop word — it must keep the follow-up window, so not a pure stop.
+        assert atticus._is_pure_stop("atticus") is False
+        assert atticus._is_pure_stop("hey atticus") is False
+
+    def test_question_is_not_pure_stop(self, atticus):
+        assert atticus._is_pure_stop("atticus what time is it") is False
+
+
+class TestContextEchoGuard:
+    """A wakeword command built solely from `asr_context_terms` is the ASR
+    decoder echoing its bias prompt off non-speech (a sigh/cough Silero
+    scored as speech). `_is_context_echo` must drop those while leaving real
+    commands (which carry non-bias words) untouched. The token pool spans
+    every term, single- or multi-word, so the guard works regardless of how
+    many context terms are configured.
+    """
+
+    def test_single_short_term_echo_is_dropped(self):
+        # One short context term, command == that term (the failure mode:
+        # a cough transcribed as wakeword + the lone bias word).
+        a = _make_assistant(wakeword="hey atticus", asr_context_terms=["zephyr"])
+        assert a._is_context_echo("zephyr") is True
+
+    def test_real_command_with_bias_term_kept(self):
+        a = _make_assistant(wakeword="hey atticus", asr_context_terms=["zephyr"])
+        # A genuine query carries non-bias words, so it must survive.
+        assert a._is_context_echo("what is the weather in zephyr") is False
+
+    def test_multiple_terms_single_word_echo_dropped(self):
+        a = _make_assistant(
+            wakeword="hey atticus",
+            asr_context_terms=["zephyr", "north study"],
+        )
+        assert a._is_context_echo("zephyr") is True
+
+    def test_multiple_terms_multiword_echo_dropped(self):
+        # A command equal to a whole multi-word term is still pure-bias.
+        a = _make_assistant(
+            wakeword="hey atticus",
+            asr_context_terms=["zephyr", "north study"],
+        )
+        assert a._is_context_echo("north study") is True
+
+    def test_mixed_bias_and_real_words_kept(self):
+        a = _make_assistant(
+            wakeword="hey atticus",
+            asr_context_terms=["zephyr", "north study"],
+        )
+        assert a._is_context_echo("turn on north study") is False
+
+    def test_punctuation_and_case_ignored(self):
+        a = _make_assistant(wakeword="hey atticus", asr_context_terms=["zephyr"])
+        assert a._is_context_echo("Zephyr.") is True
+
+    def test_no_context_terms_means_guard_off(self):
+        # With no terms configured the guard must never fire — otherwise it
+        # could swallow real one-word commands.
+        a = _make_assistant(wakeword="hey atticus", asr_context_terms=[])
+        assert a._is_context_echo("zephyr") is False
+
+    def test_empty_command_is_not_echo(self):
+        # Wakeword-alone (empty command) is handled by the follow-up path,
+        # not the echo guard — it must not register as an echo.
+        a = _make_assistant(wakeword="hey atticus", asr_context_terms=["zephyr"])
+        assert a._is_context_echo("") is False
+
+
 class TestPromptStripCharset:
     """The post-wakeword strip must peel off leading/trailing punctuation
     (notably "!"/"?") so a barge-in like "Hey Atticus! Stop." reduces to

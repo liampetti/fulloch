@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 def _import_assistant_module():
     fake = {
-        "core.audio": ["AudioCapture"],
+        "core.audio": ["AudioCapture", "resolve_device"],
         "core.asr": ["load_asr_pipeline"],
         "core.tts": [
             "set_voice", "warmup_model", "synthesize", "play_chunks",

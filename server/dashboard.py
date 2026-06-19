@@ -175,6 +175,13 @@ def create_app(assistant) -> FastAPI:
         assistant.audio_capture.transcribing = req.enabled
         return {"ok": True, "mic_enabled": req.enabled}
 
+    @app.post("/stop")
+    def stop_turn() -> dict:
+        # Complete, silent stop: aborts the SLM/TTS of whatever turn is in
+        # flight (voice or text) and stands down without a follow-up window.
+        assistant.request_stop()
+        return {"ok": True}
+
     @app.post("/chat")
     def chat(req: ChatRequest) -> dict:
         answer = assistant.handle_text_turn(req.text)

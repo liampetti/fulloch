@@ -1,9 +1,4 @@
-"""
-Small Language Model module using Qwen via llama.cpp.
-
-Handles loading and running the Qwen language model for intent
-detection and conversational AI.
-"""
+"""Small language model (Qwen via llama.cpp) for intent detection and chat."""
 
 import logging
 import time

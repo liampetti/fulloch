@@ -12,11 +12,8 @@
 use_default_settings:
   engines:
     keep_only:
-      - brave
       - startpage
-      - qwant
       - mojeek
-      - wikipedia
 
 general:
   debug: false
@@ -55,11 +52,6 @@ outgoing:
   enable_http2: true
 
 engines:
-  - name: brave
-    engine: brave
-    shortcut: br
-    disabled: false
-
   - name: startpage
     engine: startpage
     shortcut: sp
@@ -71,10 +63,3 @@ engines:
     engine: mojeek
     shortcut: mjk
     disabled: false
-
-  - name: wikipedia
-    engine: wikipedia
-    shortcut: wp
-    # "infobox" for the side panel, "list" so it also appears in results
-    display_type: ["infobox", "list"]
-    categories: [general]

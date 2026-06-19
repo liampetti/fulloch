@@ -19,16 +19,40 @@ def _match(label: str, pattern: re.Pattern, command: str):
     return match
 
 
-_PLAY_RE = re.compile(r'play\s+(.+)$', re.IGNORECASE)
+# "play" is an ordinary English word ("...games I can play with my daughter"),
+# so this MUST anchor to the start of the command — an unanchored search grabs
+# a mid-sentence "play" and routes a web-search request to play_song. Only an
+# optional polite prefix may precede the verb ("please play the Beatles").
+_PLAY_RE = re.compile(
+    r'^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|will\s+you\s+|'
+    r'i\s+want\s+you\s+to\s+|i\s+want\s+to\s+|i\s+wanna\s+|go\s+ahead\s+and\s+)*'
+    r'play\s+(.+)$',
+    re.IGNORECASE,
+)
 _STOP_RE = re.compile(r'^\s*(stop|pause|halt)\b', re.IGNORECASE)
 _SKIP_RE = re.compile(r'^\s*skip\b', re.IGNORECASE)
 _RESUME_RE = re.compile(r'^\s*resume\b', re.IGNORECASE)
-_TIME_QUERY_RE = re.compile(r"(what time is it|what'?s the time|what time it is)", re.IGNORECASE)
+# Leading context is fine ("do you know what time is it"), so the start stays
+# unanchored — but the phrase must END the question (bar a few benign tail
+# adverbs / trailing punctuation). Without the end-anchor, "what time is it
+# GOING TO BE ON" matched the "what time is it" substring and answered with the
+# current wall-clock time instead of letting the SLM resolve "it" (an event's
+# broadcast time) from context. Same guard rejects "what's the time IN LONDON".
+_TIME_QUERY_RE = re.compile(
+    r"(?:what time is it|what'?s the time|what time it is)"
+    r"(?:\s+(?:right\s+now|now|currently|today|please|exactly))?"
+    r"\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
+# Anchored like _PLAY_RE so a mid-sentence "set a timer for the eggs" mention
+# can't hijack the turn.
 _TIMER_RE = re.compile(
+    r'^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*'
     r'(?:start|set)\s+(?:a\s+)?(?:timer|time)\s+(?:for\s+)?(.+?)(?:\s+please)?$',
     re.IGNORECASE,
 )
 _LIST_TIMERS_RE = re.compile(
+    r'^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*'
     r'get\s+(?:a\s+)?(?:timers|timer|time)(?:\s+(.*?))?(?:\s+status)?$',
     re.IGNORECASE,
 )
@@ -442,6 +466,36 @@ def extract_summarize_thinking(command: str) -> Optional[bool]:
     return None
 
 
+# Deleting or editing notes is deliberately NOT a capability — the voice
+# assistant can only add to notes (there is no delete/edit tool). Without this
+# guard, an asked-to-delete SLM emits a free-text reply claiming it removed the
+# note when it did nothing, leaving the user to believe data is gone when it
+# isn't. Catch the explicit phrasings deterministically and short-circuit to a
+# fixed refusal *before* the SLM runs, so it can't confabulate. Requires both a
+# removal/edit verb near the start AND a note-domain object ("note", "fact",
+# "journal"), so "turn off the lights" or "add a note to delete the config
+# tomorrow" don't trip it. A false refusal is recoverable (the user rephrases);
+# a false claim of deletion is silent and corrosive — so we err toward refusing.
+_NOTE_DELETE_RE = re.compile(
+    r"^\s*(?:please\s+|hey\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|"
+    r"will\s+you\s+|i\s+(?:want|need|'?d\s+like)\s+you\s+to\s+|just\s+)*"
+    r"(?:delete|remove|erase|clear|wipe|scrub|undo|forget|"
+    r"get\s+rid\s+of|take\s+out|edit|change|modify|update|rewrite|amend)\b"
+    r".*\b(?:notes?|facts?|journal)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_NOTE_DELETE_REPLY = (
+    "I can't delete or edit notes by voice. You can remove or change them "
+    "from the dashboard's Notes or Facts tab."
+)
+
+
+def extract_note_delete(command: str) -> Optional[bool]:
+    """True if `command` asks to delete or edit a note/fact (an unsupported op)."""
+    return True if _match("Note delete", _NOTE_DELETE_RE, command) else None
+
+
 # Each rule: (extractor, intent_dict_builder). The builder receives the
 # extractor's return value (string or True). Order matters — summarize_thinking
 # is listed before deep_think so "summarise what you've been thinking" doesn't
@@ -484,6 +538,12 @@ def catchAll(user_message: str):
     `{"actions": [{"intent": ..., "args": ...}]}`; otherwise return the
     original message string unchanged for the SLM to handle.
     """
+    # Deletion/editing of notes isn't supported — refuse deterministically
+    # before the SLM can claim it did it. Returns a `reply` emission, so the
+    # agent loop speaks the refusal directly without an SLM call or any tool.
+    if extract_note_delete(user_message):
+        logger.debug("Caught note delete/edit request; refusing")
+        return {"reply": _NOTE_DELETE_REPLY}
     for extract, build in _INTENT_RULES:
         value = extract(user_message)
         if value is not None:

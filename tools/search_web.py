@@ -32,6 +32,17 @@ SEARXNG_TIMEOUT_S = 12
 # JS-only shell or a nav/link dump) and the caller falls back to the search
 # engine's own result snippet rather than summarising boilerplate.
 MIN_BODY_CHARS = 200
+# Many sites (formula1.com, news/sports sites) 403 the bare `python-requests`
+# User-Agent, so page fetches silently fail and the agent is left with only the
+# search-engine snippet. Present as a normal browser to get the real page.
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 def _results_from_json(query, num_results):
@@ -113,8 +124,20 @@ def extract_main_text(html: str) -> str:
     for bad in soup(["script", "style", "noscript", "footer", "header", "nav", "aside", "form"]):
         bad.decompose()
     blocks = [el.get_text(" ", strip=True) for el in soup.find_all(["p", "li"])]
+    # Prose chrome (nav labels, one-liners) is filtered by length; real
+    # paragraphs are long.
     texts = [t for t in blocks if len(t) > 40]
-    text = re.sub(r"\s+", " ", "\n".join(texts))
+    # Tabular data (standings, scores, prices, schedules) lives in <table>
+    # cells, not <p>/<li>. Join each row's cells into one block — a multi-cell
+    # row is structured data by construction, so it bypasses the prose length
+    # filter (a standings row like "1 | Max Verstappen | Red Bull | 250" is
+    # only ~35 chars but is exactly what we want to keep).
+    for row in soup.find_all("tr"):
+        cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
+        cells = [c for c in cells if c]
+        if len(cells) >= 2:
+            texts.append(" | ".join(cells))
+    text = re.sub(r"[ \t]+", " ", "\n".join(texts)).strip()
     return text if len(text) >= MIN_BODY_CHARS else ""
 
 
@@ -126,7 +149,7 @@ def fetch_website_summary(url: str, fallback: str = "", max_length: int = SNIPPE
     and returns "" only when both are empty.
     """
     try:
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, timeout=10, headers=_BROWSER_HEADERS)
         resp.raise_for_status()
         body = extract_main_text(resp.text)
         if body:

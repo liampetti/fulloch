@@ -145,10 +145,9 @@ def _normalize_expr(text: str) -> str:
 @tool(
     name="calculate",
     description=(
-        "Evaluate a maths expression and speak the result. Use for any sum, "
-        "percentage, power, or root ('15% of 340', 'sqrt(144)', '3*8+7', "
-        "'12.5 * 4'). expression: a maths string supporting + - * / ** %, "
-        "parentheses, and functions like sqrt, abs, round, log, sin, cos."
+        "Evaluate a maths expression and speak the result. Handles sums, "
+        "percentages, powers and roots; supports + - * / ** %, parentheses "
+        "and functions like sqrt, abs, round, log, sin, cos."
     ),
     aliases=["calc", "math", "evaluate_expression"],
 )
@@ -210,10 +209,9 @@ def _friendly_date(d: date) -> str:
 @tool(
     name="days_between",
     description=(
-        "Count whole days between two dates. Use for 'how many days until X', "
-        "'how long between A and B'. date_a and date_b: ISO dates (YYYY-MM-DD) "
-        "or the words today/tomorrow/yesterday. For 'days until' questions pass "
-        "today's date as date_a and the target as date_b."
+        "Count whole days between two dates. Dates are ISO (YYYY-MM-DD) or "
+        "today/tomorrow/yesterday; for 'days until X', pass today as date_a "
+        "and the target as date_b."
     ),
     aliases=["date_difference", "days_until"],
 )
@@ -237,10 +235,9 @@ def days_between(date_a: str, date_b: str) -> str:
 @tool(
     name="date_of",
     description=(
-        "Resolve a weekday to an absolute calendar date. Use for 'what date is "
-        "next Sunday', 'when is this Thursday'. weekday: a day name "
-        "(Monday..Sunday). which: 'next' (default — the upcoming one, never "
-        "today), 'this'/'coming' (nearest upcoming including today), or 'last'."
+        "Resolve a weekday to an absolute calendar date. which: 'next' "
+        "(default — the upcoming one, never today), 'this'/'coming' (nearest "
+        "upcoming including today), or 'last'."
     ),
     aliases=["resolve_weekday", "what_date_is"],
 )
@@ -304,12 +301,9 @@ def _pint_unit(u: str) -> str:
 @tool(
     name="convert_units",
     description=(
-        "Convert a value between units of length, mass, volume, temperature, "
-        "or speed. Use for 'convert 5 miles to km', 'how many litres in 3 "
-        "gallons', '20 celsius to fahrenheit'. value: a number; from_unit and "
-        "to_unit: unit names like miles, km, kg, lb, litres, gallons, celsius, "
-        "fahrenheit, mph. Gallons/pints default to imperial; say 'US gallon' "
-        "for US measures."
+        "Convert a value between units of length, mass, volume, temperature "
+        "or speed (miles, km, kg, lb, litres, gallons, celsius, fahrenheit, "
+        "mph). Gallons/pints default to imperial; say 'US gallon' for US."
     ),
     aliases=["unit_conversion", "convert"],
 )

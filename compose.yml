@@ -17,11 +17,12 @@ services:
       - audio
     environment:
       - PULSE_SERVER=unix:${XDG_RUNTIME_DIR}/pulse/native
-      # Route the container's "default" audio through the host's
-      # module-echo-cancel devices (loaded by launch.sh / pactl). Scopes AEC
-      # to Fulloch — other host apps stay on the system default sink/source.
-      - PULSE_SOURCE=echocancel_source
-      - PULSE_SINK=echocancel_sink
+      # Route the container's "default" audio through specific Pulse/PipeWire
+      # devices (PipeWire handles resampling, unlike a raw ALSA hw: device).
+      # Defaults to the host's system-default source/sink; set PULSE_SOURCE /
+      # PULSE_SINK in .env to pin a specific device by its pactl name.
+      - PULSE_SOURCE=${PULSE_SOURCE:-@DEFAULT_SOURCE@}
+      - PULSE_SINK=${PULSE_SINK:-@DEFAULT_SINK@}
     volumes:
       - ./data:/app/data:rw
       - ${XDG_RUNTIME_DIR}/pulse:${XDG_RUNTIME_DIR}/pulse:ro

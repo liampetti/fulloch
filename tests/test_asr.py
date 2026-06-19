@@ -45,6 +45,31 @@ def test_sink_holds_onset_of_the_yielded_buffer():
     assert sink["t"] == 22.0  # advanced only when the next buffer is pulled
 
 
+def test_loudness_sink_holds_dbfs_of_the_yielded_buffer():
+    q = queue.Queue()
+    q.put((_buf(), 11.0, -42.0))
+    q.put((_buf(), 22.0, -18.5))
+    q.put(None)
+    onset = {"t": 0.0}
+    loud = {"db": None}
+    gen = stream_generator(q, onset, loud)
+
+    next(gen)
+    assert loud["db"] == -42.0
+    next(gen)
+    assert loud["db"] == -18.5
+
+
+def test_missing_loudness_is_tolerated():
+    # 2-tuples (no loudness) still unpack; sink reports None.
+    q = queue.Queue()
+    q.put((_buf(), 5.0))
+    q.put(None)
+    loud = {"db": 1.0}
+    assert len(list(stream_generator(q, None, loud))) == 1
+    assert loud["db"] is None
+
+
 def test_no_sink_is_tolerated():
     q = queue.Queue()
     q.put((_buf(), 5.0))

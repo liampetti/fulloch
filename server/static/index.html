@@ -200,18 +200,15 @@
   header .logo {
     width: 40px;
     height: 40px;
-    border-radius: 12px;
-    background: var(--surface-2);
     display: grid;
     place-items: center;
-    overflow: hidden;
     flex-shrink: 0;
   }
 
   header .logo img {
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    object-fit: contain;
   }
 
   header .meta { flex: 1; min-width: 0; }
@@ -242,7 +239,7 @@
     letter-spacing: 0.01em;
   }
 
-  #reset-btn {
+  #reset-btn, #settings-btn {
     width: 34px;
     height: 34px;
     border-radius: 9px;
@@ -257,7 +254,8 @@
     margin-right: 6px;
   }
   #reset-btn:hover { color: #ef4444; border-color: #ef4444; background: var(--surface-2); }
-  #reset-btn svg { width: 16px; height: 16px; fill: currentColor; }
+  #settings-btn:hover { color: var(--primary); border-color: var(--primary); background: var(--surface-2); }
+  #reset-btn svg, #settings-btn svg { width: 16px; height: 16px; fill: currentColor; }
 
   /* Always-show-details toggle: when active, every turn's trace group and
      inference-stats panel start expanded (persisted in localStorage). */
@@ -375,6 +373,56 @@
   }
   .tab:hover { color: var(--text); background: var(--surface-2); }
   .tab.active { color: var(--primary); background: var(--surface-2); }
+
+  /* Remote-LLM-unreachable banner (Fulloch degraded to regex/fast-path only) */
+  .llm-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    margin: 0.5rem 0 0;
+    padding: 0.6rem 0.85rem;
+    border: 1px solid #ef4444;
+    border-radius: 8px;
+    background: rgba(239, 68, 68, 0.12);
+    color: #ef4444;
+    font-size: 0.85rem;
+    font-weight: 500;
+  }
+  .llm-banner[hidden] { display: none; }
+  .llm-banner svg { width: 18px; height: 18px; flex: 0 0 auto; }
+  .llm-banner span { flex: 1 1 auto; }
+  #llm-banner-min {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: #ef4444;
+    cursor: pointer;
+    opacity: 0.75;
+    transition: opacity 0.15s, background 0.15s;
+  }
+  #llm-banner-min:hover { opacity: 1; background: rgba(239, 68, 68, 0.18); }
+  /* Minimised state: a small warning chip sitting after the tabs */
+  #llm-alert {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.35rem;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: #ef4444;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  #llm-alert[hidden] { display: none; }
+  #llm-alert:hover { background: rgba(239, 68, 68, 0.15); }
+  #llm-alert svg { width: 18px; height: 18px; }
 
   /* Facts panel */
   #facts-form {
@@ -704,16 +752,12 @@
   .empty .logo-lg {
     width: 96px;
     height: 96px;
-    border-radius: 22px;
-    background: var(--surface);
     margin: 0 auto 14px;
     display: grid;
     place-items: center;
-    box-shadow: var(--shadow-md);
-    overflow: hidden;
     filter: drop-shadow(0 16px 26px rgba(5, 150, 105, 0.30));
   }
-  .empty .logo-lg img { width: 100%; height: 100%; object-fit: cover; }
+  .empty .logo-lg img { width: 100%; height: 100%; object-fit: contain; }
   .empty h2 { font-size: 1.05rem; margin: 0 0 6px; color: var(--text); font-weight: 600; }
   .empty p { margin: 0; font-size: 0.88rem; line-height: 1.5; }
   .empty p + p { margin-top: 8px; }
@@ -839,6 +883,11 @@
   .trace.plan        { color: var(--primary); }
   .trace.step        { color: var(--tag-text); }
   .trace.observation { color: var(--text-muted); }
+  /* A replanned plan re-decides from new observations; prefix its label with a
+     ↻ and dim it slightly so it reads as a follow-up to (not a failure of) the
+     plan above it. */
+  .trace.plan.replan .label { opacity: 0.85; }
+  .trace.plan.replan .label::before { content: '↻ '; }
   .trace .label {
     display: inline-block;
     min-width: 64px;
@@ -996,10 +1045,10 @@
 <body>
 <div class="app">
   <header>
-    <div class="logo"><img src="/logo.png" alt=""></div>
+    <div class="logo"><img id="brand-logo" src="/logo.png" alt=""></div>
     <div class="meta">
-      <div class="name">Fulloch</div>
-      <div class="sub">fully-local home assistant</div>
+      <div class="name" id="brand-name">Fulloch</div>
+      <div class="sub" id="brand-sub">fully-local home assistant</div>
     </div>
     <button id="appearance-switcher" type="button" aria-label="Toggle light or dark theme" title="Toggle light/dark — right-click to follow your system">
       <span class="icon-moon" aria-hidden="true"><svg viewBox="0 0 512 512"><path fill="currentColor" d="M32 256c0-123.8 100.3-224 223.8-224c11.36 0 29.7 1.668 40.9 3.746c9.616 1.777 11.75 14.63 3.279 19.44C245 86.5 211.2 144.6 211.2 207.8c0 109.7 99.71 193 208.3 172.3c9.561-1.805 16.28 9.324 10.11 16.95C387.9 448.6 324.8 480 255.8 480C132.1 480 32 379.6 32 256z"/></svg></span>
@@ -1011,17 +1060,32 @@
     <button id="reset-btn" type="button" aria-label="Clear conversation" title="Clear conversation">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
     </button>
+    <button id="settings-btn" type="button" aria-label="Settings" title="Settings &amp; configuration" onclick="location.href='/setup'">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54A.484.484 0 0 0 14 2h-4c-.24 0-.44.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.25 8.47a.49.49 0 0 0 .12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.03.24.23.41.47.41h4c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.01-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>
+    </button>
     <div id="status" aria-live="polite">
       <span id="status-dot"></span>
       <span id="status-text">connecting</span>
     </div>
   </header>
 
+  <div id="llm-banner" class="llm-banner" role="alert" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
+    <span>Remote language model unreachable — running in regex / fast-path mode only. Check the OpenAI endpoint and model in settings.</span>
+    <button id="llm-banner-min" type="button" aria-label="Minimise warning" title="Minimise — keep a small indicator by the tabs">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M19 13H5v-2h14v2z"/></svg>
+    </button>
+  </div>
+
   <nav class="tabs" role="tablist">
     <button class="tab active" data-tab="chat" role="tab" aria-selected="true">Chat</button>
     <button class="tab" data-tab="facts" role="tab" aria-selected="false">Facts</button>
     <button class="tab" data-tab="notes" role="tab" aria-selected="false">Notes</button>
     <button class="tab" data-tab="entities" role="tab" aria-selected="false">Entities</button>
+    <button id="llm-alert" type="button" hidden aria-label="Remote language model unreachable"
+            title="Remote language model unreachable — running in regex / fast-path mode only. Check the OpenAI endpoint and model in settings. Click to show details.">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
+    </button>
   </nav>
 
   <main>
@@ -1322,10 +1386,17 @@
 
   const renderTrace = (ev) => {
     const wrap = document.createElement('div');
-    wrap.className = `trace ${ev.kind}`;
+    const isReplan = ev.kind === 'plan' && ev.replan;
+    wrap.className = `trace ${ev.kind}${isReplan ? ' replan' : ''}`;
+    if (isReplan) {
+      // Make it explicit the agent re-decided: the prior plan was superseded
+      // (e.g. actions bundled after a web search are dropped and re-decided
+      // from the findings), not a failure of the previous plan.
+      wrap.title = 'Agent re-decided from new observations — the previous plan was superseded, not failed';
+    }
     const label = document.createElement('span');
     label.className = 'label';
-    label.textContent = ev.kind;
+    label.textContent = isReplan ? 'replan' : ev.kind;
     wrap.appendChild(label);
 
     const body = document.createElement('span');
@@ -1440,6 +1511,8 @@
     L.push('-'.repeat(50));
     if (s.vram)
       L.push(`VRAM Usage          : ${s.vram.used.toFixed(1)} GB / ${s.vram.total.toFixed(1)} GB`);
+    if (s.ram)
+      L.push(`RAM Usage           : ${s.ram.used.toFixed(1)} GB / ${s.ram.total.toFixed(1)} GB`);
     return L.join('\n');
   };
 
@@ -2069,10 +2142,64 @@
       const r = await fetch('/status');
       if (!r.ok) return;
       const s = await r.json();
+      // The dashboard is only usable once the assistant is READY (models loaded
+      // + greeting done). If the server is pre-READY — e.g. it restarted under
+      // an already-open tab — bounce to '/', which serves the loading screen
+      // until READY. Normal load never trips this (index.html is only served
+      // when READY).
+      if (s.phase && s.phase !== 'READY') { location.href = '/'; return; }
       const busy = s.state !== 'idle';
       if (busy !== voiceBusy) { voiceBusy = busy; syncButton(); }
+      applyBranding(!!s.remote_llm);
+      setLlmUnreachable(!!s.llm_unreachable);
     } catch (e) { /* transient; next tick retries */ }
   };
+
+  // Remote-LLM mode: when the LLM runs off-device (remote OpenAI endpoint) the
+  // assistant isn't fully local — swap the character/favicon (server-side at
+  // /logo.png) and update the tagline, but keep the Fulloch name throughout.
+  let brandRemote = null;
+  const applyBranding = (remote) => {
+    if (remote === brandRemote) return;
+    brandRemote = remote;
+    const sub = document.getElementById('brand-sub');
+    const logo = document.getElementById('brand-logo');
+    if (remote) {
+      sub.textContent = 'language model is off-device';
+      if (logo) logo.title = "Fulloch's gone travelling — the language model is running on a remote server, so this isn't fully local.";
+    } else {
+      sub.textContent = 'fully-local home assistant';
+      if (logo) logo.title = '';
+    }
+  };
+  // Remote-LLM-unreachable surface: a full banner the user can minimise to a
+  // small warning chip beside the tabs (choice persisted in localStorage) and
+  // re-expand by clicking the chip. Hidden entirely while the LLM is reachable.
+  const LLM_MIN_KEY = 'fulloch.llmAlertMinimised';
+  let llmMinimised = localStorage.getItem(LLM_MIN_KEY) === '1';
+  let llmUnreachable = false;
+  const renderLlmAlert = () => {
+    const banner = document.getElementById('llm-banner');
+    const chip = document.getElementById('llm-alert');
+    if (banner) banner.hidden = !(llmUnreachable && !llmMinimised);
+    if (chip) chip.hidden = !(llmUnreachable && llmMinimised);
+  };
+  const setLlmUnreachable = (v) => {
+    if (v === llmUnreachable) return;
+    llmUnreachable = v;
+    renderLlmAlert();
+  };
+  document.getElementById('llm-banner-min')?.addEventListener('click', () => {
+    llmMinimised = true;
+    localStorage.setItem(LLM_MIN_KEY, '1');
+    renderLlmAlert();
+  });
+  document.getElementById('llm-alert')?.addEventListener('click', () => {
+    llmMinimised = false;
+    localStorage.removeItem(LLM_MIN_KEY);
+    renderLlmAlert();
+  });
+
   setInterval(pollStatus, 1000);
 
   syncButton();

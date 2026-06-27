@@ -279,12 +279,24 @@ class TestTurnOnOff:
 
     @pytest.mark.parametrize("utterance", [
         "turn it off",                       # vague entity
+        "turn those lights back off",        # leading anaphor → resolve in SLM
+        "turn these lamps off",              # leading anaphor
+        "turn that light off",               # leading anaphor
         "turn on the lamp and the fan",      # compound
         "what time is it",
         "play some music",
     ])
     def test_non_matches(self, utterance):
         assert extract_turn_onoff(utterance) is None
+
+    @pytest.mark.parametrize("utterance,state,entity", [
+        # A re-do adverb ("back"/"again") must not corrupt an explicit entity.
+        ("turn the dining room lights back off", "off", "dining room lights"),
+        ("turn the porch light back on", "on", "porch light"),
+        ("turn the kitchen lights off again", "off", "kitchen lights"),
+    ])
+    def test_redo_adverb_stripped(self, utterance, state, entity):
+        assert extract_turn_onoff(utterance) == (state, entity)
 
     def test_catch_all_routes_to_turn_on(self):
         assert catchAll("turn on the kitchen lights") == {

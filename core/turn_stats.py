@@ -19,10 +19,23 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Display labels for the dashboard stats panel. These are defaults; the assistant
+# overrides them at model-load time via `set_model_labels` so the panel reflects
+# the backends actually in use (e.g. Moonshine / ONNX ASR, Kokoro TTS, the chosen
+# LLM) rather than always showing the full-tier Qwen names.
 STT_MODEL = "Qwen3-ASR-1.7B"
-LLM_MODEL = "Qwen3.5-9B-Q5_K_M"
+LLM_MODEL = "Qwen3.5-9B-UD-Q4_K_XL"
 RETRIEVAL_MODEL = "bge-small-en-v1.5"
 TTS_MODEL = "Qwen3-TTS-1.7B"
+
+_LABELS = {"stt": STT_MODEL, "llm": LLM_MODEL, "retrieval": RETRIEVAL_MODEL, "tts": TTS_MODEL}
+
+
+def set_model_labels(*, stt=None, llm=None, retrieval=None, tts=None) -> None:
+    """Override the stats-panel model labels to the live backend selection."""
+    for key, val in (("stt", stt), ("llm", llm), ("retrieval", retrieval), ("tts", tts)):
+        if val:
+            _LABELS[key] = val
 
 
 @dataclass
@@ -69,7 +82,7 @@ class TurnStats:
         """The `tts` sub-dict, for the post-playback patch event. None if unset."""
         if self.tts_seconds is None:
             return None
-        return {"seconds": round(self.tts_seconds, 2), "model": TTS_MODEL}
+        return {"seconds": round(self.tts_seconds, 2), "model": _LABELS["tts"]}
 
     def total_with_tts(self) -> float:
         """Total Response Time including TTS time-to-first-audio (i.e. time until
@@ -90,13 +103,13 @@ class TurnStats:
         if self.stt_seconds is not None:
             payload["stt"] = {
                 "seconds": round(self.stt_seconds, 2),
-                "model": STT_MODEL,
+                "model": _LABELS["stt"],
             }
 
         if self.retrieval_seconds is not None:
             payload["retrieval"] = {
                 "seconds": round(self.retrieval_seconds, 2),
-                "model": RETRIEVAL_MODEL,
+                "model": _LABELS["retrieval"],
                 "chunks": self.retrieval_chunks,
             }
 
@@ -104,7 +117,7 @@ class TurnStats:
             tps = self.tokens_per_sec()
             payload["llm"] = {
                 "seconds": round(self.llm_gen_seconds, 2),
-                "model": LLM_MODEL,
+                "model": _LABELS["llm"],
                 "ttft": round(self.llm_ttft, 2) if self.llm_ttft is not None else None,
                 "tps": round(tps, 1) if tps is not None else None,
                 "prompt_tokens": self.llm_prompt_tokens,
@@ -116,13 +129,18 @@ class TurnStats:
         if self.tts_seconds is not None:
             payload["tts"] = {
                 "seconds": round(self.tts_seconds, 2),
-                "model": TTS_MODEL,
+                "model": _LABELS["tts"],
             }
 
         vram = read_vram_gb()
         if vram is not None:
             used, total = vram
             payload["vram"] = {"used": round(used, 1), "total": round(total, 1)}
+        else:
+            ram = read_ram_gb()
+            if ram is not None:
+                used, total = ram
+                payload["ram"] = {"used": round(used, 1), "total": round(total, 1)}
 
         return payload
 
@@ -142,4 +160,16 @@ def read_vram_gb() -> Optional[tuple[float, float]]:
         return (total - free) / gb, total / gb
     except Exception as e:
         logger.debug(f"VRAM read failed: {e}")
+        return None
+
+
+def read_ram_gb() -> Optional[tuple[float, float]]:
+    """Return (used_gb, total_gb) of system RAM via psutil, or None on error."""
+    try:
+        import psutil
+        m = psutil.virtual_memory()
+        gb = 1024 ** 3
+        return m.used / gb, m.total / gb
+    except Exception as e:
+        logger.debug(f"RAM read failed: {e}")
         return None

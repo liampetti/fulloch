@@ -48,7 +48,12 @@ Home Assistant is the sole smart-home backend; all third-party device protocols 
 
 ### Credentials
 
-- The Home Assistant long-lived access token in `data/config.yml` is the only credential Fulloch holds. Treat it as a secret.
+Fulloch may hold a few secrets — keep them in `.env` (or `data/.env`), not in `config.yml`, and treat them as sensitive:
+- **Home Assistant** long-lived token (`FULLOCH_HA_TOKEN`).
+- **Dashboard access token** (`FULLOCH_DASHBOARD_TOKEN`) — required when binding the dashboard to a non-loopback address. The setup wizard can generate one (shown once, persisted to `data/.env`), after which the settings console is token-gated.
+- **Remote LLM API key** (`FULLOCH_LLM_API_KEY`) if using an OpenAI-compatible endpoint.
+
+> First-run setup serves the wizard with no token yet, so during initial setup keep the dashboard on a trusted/loopback network until you've generated a token.
 
 ## Supported Versions
 

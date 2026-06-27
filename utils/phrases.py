@@ -81,6 +81,31 @@ THINKING_STALL_PHRASES = [
     "Just a little more thought needed.",
 ]
 
+# Spoken when no language model is available — either the no-LLM tier
+# (llm.backend: none) or a remote OpenAI-compatible endpoint that's
+# unreachable (Step 6). Played when the regex fast-path doesn't catch the
+# request, so the user knows only basic commands work right now. Pre-rendered
+# to `no_ai_cache` in `_warm_and_announce` and played via
+# `_play_random_ack(cache=...)`.
+NO_AI_PHRASES = [
+    "I can't do that one without an AI model running.",
+    "No AI model's connected.",
+    "That needs the AI model.",
+    "I'm running without an AI model just now.",
+    "Can't reach an AI model for that one.",
+]
+
+# Spoken when the agent invokes a tool that isn't loaded (a hallucinated tool
+# name). The hallucinated-tool guard (core/agent_loop.py) blocks the turn here
+# instead of letting the model fabricate an answer from priors. Pre-rendered to
+# `tool_unavailable_cache` in `_warm_and_announce`, played via
+# `_speak_tool_unavailable_fallback`. Keep these honest — no guessed data.
+TOOL_UNAVAILABLE_PHRASES = [
+    "Sorry, I don't have a tool for that setup yet.",
+    "That's not something I have the tool for currently.",
+    "I don't have a tool to do that at the moment."
+]
+
 # Prefix phrases for calendar reminders spoken by the poll thread.
 # The event summary is appended after a pause dash.
 REMINDER_PREFIX_PHRASES = [

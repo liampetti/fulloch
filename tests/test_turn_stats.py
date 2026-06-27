@@ -12,7 +12,25 @@ from core.turn_stats import (  # noqa: E402
     TTS_MODEL,
     TurnStats,
     read_vram_gb,
+    set_model_labels,
 )
+
+
+def test_set_model_labels_reflected_in_payload():
+    """The stats panel shows the live backend selection, not the defaults."""
+    try:
+        set_model_labels(stt="Moonshine Base", llm="none (regex-only)", tts="Kokoro 82M")
+        s = TurnStats(stt_seconds=0.1)
+        s.llm_calls = 1
+        s.tts_seconds = 0.2
+        p = s.to_payload()
+        assert p["stt"]["model"] == "Moonshine Base"
+        assert p["llm"]["model"] == "none (regex-only)"
+        assert p["tts"]["model"] == "Kokoro 82M"
+        assert s.tts_payload()["model"] == "Kokoro 82M"
+    finally:
+        # Restore defaults so other tests see the originals.
+        set_model_labels(stt=STT_MODEL, llm=LLM_MODEL, retrieval=RETRIEVAL_MODEL, tts=TTS_MODEL)
 
 
 class TestTokensPerSec:

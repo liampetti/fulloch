@@ -169,3 +169,35 @@ def test_external_information_includes_snippets(monkeypatch):
     assert "A web search has retrieved" in out
     assert "real body text" in out
     assert "From http://x" in out
+
+
+class TestStripSummariseDirective:
+    def test_strips_summarize_verb(self):
+        assert search_web._strip_summarise_directive("summarize today's news") == "today's news"
+        assert search_web._strip_summarise_directive("Summarise the latest headlines") == "the latest headlines"
+
+    def test_strips_phrasal_directives(self):
+        assert search_web._strip_summarise_directive("give me a summary of the budget") == "the budget"
+        assert search_web._strip_summarise_directive("recap of the game") == "the game"
+
+    def test_leaves_plain_query_untouched(self):
+        assert search_web._strip_summarise_directive("today's news") == "today's news"
+
+    def test_bare_directive_falls_back_to_original(self):
+        # Nothing left after stripping -> keep the original so we still search.
+        assert search_web._strip_summarise_directive("summarize") == "summarize"
+
+
+def test_search_query_strips_summarise_but_keeps_user_question(monkeypatch):
+    seen = {}
+
+    def fake_search(q, num_results=3):
+        seen["q"] = q
+        return []
+
+    monkeypatch.setattr(search_web, "searxng_search", fake_search)
+    out = search_web.external_information("summarize today's news")
+    # SearXNG gets the topic, not the directive...
+    assert seen["q"] == "today's news"
+    # ...but the summariser still sees the user's full intent.
+    assert out.startswith("User question: summarize today's news")

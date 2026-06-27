@@ -12,7 +12,9 @@ reported value while samples keep arriving; once they stop, samples age out of
 the window and it falls back to the floor — the dynamic, self-timing behaviour
 without a background thread.
 
-Nothing is acted on yet: this only produces the number logged alongside each
+Consumed by `Assistant._verify_bare_wakeword`: a bare (command-less) wakeword at
+or below this baseline is treated as background noise (a bias-prompt
+hallucination) rather than a real activation. Also logged alongside each
 transcription for tuning.
 """
 

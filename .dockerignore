@@ -84,3 +84,11 @@ Thumbs.db
 Makefile
 docker-compose*.yml
 compose*.yml
+
+# =============================================================================
+# Re-include first-run seed files the Dockerfiles COPY into /app/seed
+# (must come AFTER the broad excludes above — last match wins)
+# =============================================================================
+!data/config.example.yml
+!data/models/grammars/
+!data/models/grammars/agent.gbnf

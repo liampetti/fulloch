@@ -1,0 +1,14 @@
+# CPU image override for compose.
+#
+#   docker compose -f compose.yml -f compose.cpu.yml up --build -d
+#
+# Builds/runs the slim CPU image (Dockerfile.cpu) instead of the GPU one, and
+# drops the NVIDIA GPU reservation. Everything else — audio passthrough, the
+# ./data volume, SearXNG — is inherited from compose.yml.
+services:
+  app:
+    image: ghcr.io/liampetti/fulloch:cpu
+    build:
+      dockerfile: Dockerfile.cpu
+    # Remove the GPU device reservation from compose.yml (CPU image has none).
+    deploy: !reset {}

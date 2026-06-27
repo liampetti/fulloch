@@ -19,6 +19,13 @@ import pytest
 # test module imports tools.home_assistant (conftest is loaded first).
 os.environ.setdefault("FULLOCH_HA_ALIAS_RETRIES", "0")
 
+# Force a token-free HA env for the suite: tools.home_assistant now loads its
+# alias map / role entities lazily on first tool use (_ensure_loaded), gated on
+# HA_TOKEN. With no token that load is a no-op, so tests that patch the alias map
+# or role-entity globals aren't clobbered by a real fetch — deterministic even if
+# a dev has FULLOCH_HA_TOKEN exported. Tests that need a token patch HA_TOKEN.
+os.environ.pop("FULLOCH_HA_TOKEN", None)
+
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))

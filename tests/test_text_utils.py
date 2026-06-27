@@ -5,7 +5,7 @@ TTS jobs so the CUDA-graph cache picks up multiple prefill shapes during
 warmup (smooths first-real-turn latency).
 """
 
-from core.text_utils import split_sentences
+from core.text_utils import clean_for_tts, split_sentences
 
 
 def test_empty_string_returns_empty_list():
@@ -38,3 +38,31 @@ def test_extra_whitespace_between_sentences():
 
 def test_trailing_whitespace_stripped():
     assert split_sentences("  Hi.  ") == ["Hi."]
+
+
+# --- clean_for_tts: reasoning-block stripping ------------------------------
+
+def test_strips_qwen_think_block():
+    out = clean_for_tts("<think>weighing options</think>The answer is yes.")
+    assert out == "The answer is yes."
+
+
+def test_strips_gemma_thought_channel():
+    # Gemma 4 wraps reasoning in a `<|channel>thought ... <channel|>` block.
+    raw = "<|channel>thought\nlet me reason about this\n<channel|>The answer is yes."
+    assert clean_for_tts(raw) == "The answer is yes."
+
+
+def test_strips_gemma_empty_ghost_channel():
+    # The template emits an empty thought channel even with thinking off.
+    raw = "<|channel>thought\n<channel|>It's sunny today."
+    assert clean_for_tts(raw) == "It's sunny today."
+
+
+def test_strips_stray_gemma_channel_markers():
+    out = clean_for_tts("Hello <channel|> there.")
+    assert "channel" not in out and "Hello" in out and "there." in out
+
+
+def test_keeps_plain_text_untouched():
+    assert clean_for_tts("The answer is forty two.") == "The answer is forty two."

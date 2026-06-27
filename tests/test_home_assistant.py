@@ -11,6 +11,57 @@ import datetime
 from unittest.mock import MagicMock, patch
 
 
+def test_import_does_no_network_load_lazily(monkeypatch):
+    """Importing the module must not fetch from HA; the load is lazy + one-shot.
+
+    Guards the regression where importing tools.home_assistant connected to HA
+    (default URL + .env token) at import time, re-enabling HA via a stray import.
+    """
+    import tools.home_assistant as ha
+
+    # No eager load happened at import (token-free test env).
+    assert ha._loaded is False
+
+    calls = {"n": 0}
+
+    def fake_fetch():
+        calls["n"] += 1
+        return {"kitchen": "light.kitchen"}, {"kitchen": ["light.kitchen"]}
+
+    # Patch every global _ensure_loaded writes, so the module is restored after.
+    for _name, _val in (
+        ("_loaded", False), ("HA_TOKEN", "tok"),
+        ("_ENTITY_ALIASES", {}), ("_ENTITY_ALIASES_MULTI", {}),
+        ("_DEFAULT_WEATHER_ENTITY", None), ("SPOTIFY_ENTITY", None),
+        ("TV_ENTITY", None), ("AVR_ENTITY", None),
+        ("CALENDAR_ENTITY", None), ("TODO_ENTITY", None),
+    ):
+        monkeypatch.setattr(ha, _name, _val)
+    monkeypatch.setattr(ha, "_fetch_entity_aliases", fake_fetch)
+
+    assert calls["n"] == 0          # nothing fetched yet
+    ha._ensure_loaded()
+    assert calls["n"] == 1          # first use loads
+    assert ha._ENTITY_ALIASES == {"kitchen": "light.kitchen"}
+    ha._ensure_loaded()
+    assert calls["n"] == 1          # idempotent — no refetch
+
+
+def test_ensure_loaded_is_noop_without_token(monkeypatch):
+    """No token → nothing to fetch, and patched globals are left untouched."""
+    import tools.home_assistant as ha
+    monkeypatch.setattr(ha, "_loaded", False)
+    monkeypatch.setattr(ha, "HA_TOKEN", "")
+    monkeypatch.setattr(ha, "SPOTIFY_ENTITY", "media_player.spotify")
+    called = {"n": 0}
+    monkeypatch.setattr(ha, "_fetch_entity_aliases",
+                        lambda: called.__setitem__("n", called["n"] + 1) or ({}, {}))
+
+    ha._ensure_loaded()
+    assert called["n"] == 0                       # never fetched
+    assert ha.SPOTIFY_ENTITY == "media_player.spotify"  # patch not clobbered
+
+
 def test_set_climate_passes_temperature_through():
     """No application-level clamp — HA enforces its own min/max bounds."""
     with patch("tools.home_assistant._resolve_entity", return_value="climate.office"), \
@@ -83,6 +134,22 @@ def test_play_song_returns_friendly_error_when_spotify_entity_unset():
         from tools.home_assistant import play_song
         result = play_song("anything")
         assert "spotify" in result.lower()
+
+
+def test_humanize_condition_maps_ha_slugs_to_speech():
+    from tools.home_assistant import _humanize_condition
+    # The no-separator slug a bare "-"→" " swap can't fix (and that the CPU TTS
+    # front-end silently drops).
+    assert _humanize_condition("partlycloudy") == "partly cloudy"
+    # Valid-but-wrong words no splitter could fix.
+    assert _humanize_condition("exceptional") == "severe weather"
+    assert _humanize_condition("windy-variant") == "windy"
+    assert _humanize_condition("lightning-rainy") == "thunderstorms"
+    # Case/whitespace tolerant; empty → empty.
+    assert _humanize_condition(" PartlyCloudy ") == "partly cloudy"
+    assert _humanize_condition(None) == ""
+    # Unknown slug falls back to a hyphen swap rather than dropping it.
+    assert _humanize_condition("some-new-state") == "some new state"
 
 
 def test_calendar_window_today_is_midnight_to_midnight():
@@ -363,3 +430,48 @@ def test_list_entities_reports_deny_state():
     assert by_id["light.kitchen"]["domain"] == "light"
     # Deny-listed entities stay listed so they can be re-enabled.
     assert "lock.front_door" in by_id
+
+
+def _history_response(states):
+    """Build a mock /api/history/period response: [[state, ...]]."""
+    resp = MagicMock()
+    resp.raise_for_status = lambda: None
+    resp.json = lambda: [states]
+    return resp
+
+
+def _patch_history(ha, states):
+    """Stub entity resolution + the HA history GET for get_entity_history tests."""
+    return [
+        patch.object(ha, "HA_TOKEN", "tok"),
+        patch.object(ha, "_loaded", True),
+        patch("tools.home_assistant._resolve_entity", return_value="light.dining_room"),
+        patch("tools.home_assistant._friendly_for", return_value="Dining Room Lights"),
+        patch("tools.home_assistant.requests.get", return_value=_history_response(states)),
+    ]
+
+
+def test_entity_history_no_longer_accepts_state_arg():
+    """The state= pre-filter was removed — the agent now distills the list via a
+    composing replan (intents.LOOKUP_TOOLS), so the tool no longer takes state."""
+    import inspect
+    import tools.home_assistant as ha
+    params = inspect.signature(ha.get_entity_history).parameters
+    assert "state" not in params
+
+
+def test_entity_history_returns_full_change_list_for_the_agent():
+    """The tool returns the raw state-change list; the agent loop composes the
+    spoken answer from it (see intents.is_lookup)."""
+    import contextlib
+    import tools.home_assistant as ha
+    states = [
+        {"state": "on", "last_changed": "2026-06-24T19:30:00+00:00"},
+        {"state": "off", "last_changed": "2026-06-24T23:00:00+00:00"},
+    ]
+    with contextlib.ExitStack() as stack:
+        for cm in _patch_history(ha, states):
+            stack.enter_context(cm)
+        result = ha.get_entity_history("dining room lights")
+    assert "History for" in result
+    assert ": on" in result and ": off" in result

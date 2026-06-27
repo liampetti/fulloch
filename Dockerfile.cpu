@@ -1,0 +1,65 @@
+# Fulloch — CPU image (slim "tiny + remote" variant).
+#
+# No CUDA, no flash-attn, no llama-cpp, no Qwen speech. Ships Moonshine ASR +
+# Kokoro TTS (both CPU) and the regex-only / remote-OpenAI LLM paths, so a
+# low-power / no-GPU host can run the tiny tier or offload reasoning to a remote
+# endpoint. Much smaller than the GPU image. The wizard hides GPU-only backends
+# (FULLOCH_VARIANT=cpu).
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+WORKDIR /app
+
+ENV HF_HOME=/app/data/models
+# HF_HUB_OFFLINE is managed at runtime by app.py (online for the first-run
+# wizard download, offline once models are cached) — not pinned here.
+# Image variant — the wizard offers only the CPU-runnable backends/tiers.
+ENV FULLOCH_VARIANT=cpu
+
+# Runtime system deps:
+# - espeak-ng: Kokoro TTS grapheme-to-phoneme
+# - libsndfile1: soundfile I/O; ffmpeg: audio decode
+# - libportaudio2: PortAudio (sounddevice); libasound2-plugins + libpulse0:
+#   ALSA->PulseAudio bridge for host audio passthrough
+# - gcc: a couple of wheels JIT/compile at runtime
+RUN apt-get update && apt-get install -y \
+    gcc \
+    ffmpeg \
+    espeak-ng \
+    libsndfile1 \
+    libportaudio2 \
+    libasound2-plugins \
+    libpulse0 \
+    procps \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Route ALSA's default device through PulseAudio (same as the GPU image).
+RUN printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/asound.conf
+
+# CPU PyTorch from the CPU wheel index (keeps the CUDA build out), then the
+# CPU dependency set.
+RUN pip install --no-cache-dir torch==2.8.0 torchaudio==2.8.0 \
+        --index-url https://download.pytorch.org/whl/cpu
+COPY requirements-cpu.txt /tmp/requirements-cpu.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-cpu.txt
+RUN python -m spacy download en_core_web_sm
+
+# Non-root user
+RUN useradd -m -u 1000 -s /bin/bash appuser
+USER appuser
+
+# Application code
+COPY --chown=appuser:appuser app.py fulloch.png parloch.png ./
+COPY --chown=appuser:appuser core/ core/
+COPY --chown=appuser:appuser tools/ tools/
+COPY --chown=appuser:appuser utils/ utils/
+COPY --chown=appuser:appuser audio/ audio/
+COPY --chown=appuser:appuser server/ server/
+COPY --chown=appuser:appuser wav/ wav/
+
+# First-run seeds (copied into the empty ./data volume by core/bootstrap.py).
+COPY --chown=appuser:appuser data/config.example.yml /app/seed/config.example.yml
+COPY --chown=appuser:appuser data/models/grammars/agent.gbnf /app/seed/grammars/agent.gbnf
+
+CMD ["python", "app.py"]

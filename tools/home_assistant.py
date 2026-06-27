@@ -7,6 +7,7 @@ first-wins collision rule applies.
 """
 
 import datetime as _dt
+import functools
 import json
 import logging
 import os
@@ -18,11 +19,30 @@ from typing import Optional
 import requests
 
 from core.datetime_utils import tts_friendly_event_summary
+from core.url_utils import normalize_url
 
 from ._config import config
-from .tool_registry import tool
+from .tool_registry import tool as _register_tool
 
 logger = logging.getLogger(__name__)
+
+
+def tool(*dargs, **dkwargs):
+    """`tool_registry.tool`, wrapped so the first call to any HA tool triggers
+    the one-time entity-alias / role-entity load (see `_ensure_loaded`).
+
+    Importing this module no longer connects to HA — the load is deferred to
+    first use — so a stray import can never reach out to Home Assistant.
+    """
+    register = _register_tool(*dargs, **dkwargs)
+
+    def decorate(fn):
+        @functools.wraps(fn)  # preserves __name__/__doc__/signature for the registry
+        def wrapper(*args, **kwargs):
+            _ensure_loaded()
+            return fn(*args, **kwargs)
+        return register(wrapper)
+    return decorate
 
 HA_CONFIG = config.get('home_assistant', {})
 
@@ -31,9 +51,16 @@ HA_CONFIG = config.get('home_assistant', {})
 # FULLOCH_HA_TOKEN environment variable first — set it in `.env` to keep it out
 # of plaintext config.yml — and falls back to home_assistant.token in config.yml
 # for backward compatibility.
-HA_URL = HA_CONFIG.get('url', 'http://localhost:8123')
+# Normalise so a missing scheme / trailing slash doesn't break requests, e.g.
+# "host:8123/" -> "http://host:8123" (not "host:8123//api/states").
+HA_URL = normalize_url(HA_CONFIG.get('url', 'http://localhost:8123'))
 HA_TOKEN = os.environ.get('FULLOCH_HA_TOKEN', '').strip() or HA_CONFIG.get('token', '')
 TIMEOUT = HA_CONFIG.get('timeout', 10)
+
+# Default lookback for get_entity_history when the agent gives no start date —
+# covers a plain "when was X last on" in one call (HA recorder retention, ~10
+# days, is the hard ceiling anyway).
+HISTORY_DEFAULT_LOOKBACK_DAYS = 7
 
 # Role entities (SPOTIFY_ENTITY / TV_ENTITY / AVR_ENTITY / CALENDAR_ENTITY)
 # are auto-detected from /api/states after the alias map is fetched.
@@ -154,7 +181,13 @@ def _fetch_entity_aliases() -> tuple:
     return aliases, aliases_multi
 
 
-_ENTITY_ALIASES, _ENTITY_ALIASES_MULTI = _fetch_entity_aliases()
+# Entity alias map + role entities are loaded lazily on first tool use (see
+# `_ensure_loaded`), NOT at import — so importing this module performs no network
+# I/O. They start empty/None and are populated once a tool actually runs.
+_ENTITY_ALIASES: dict = {}
+_ENTITY_ALIASES_MULTI: dict = {}
+_loaded = False
+_load_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +276,7 @@ def list_entities() -> list:
     they remain visible — and re-enableable — in the dashboard). Sorted by
     domain then name.
     """
+    _ensure_loaded()  # dashboard path — not a @tool, so load the map explicitly
     denied = _DENIED_ENTITIES
     seen: dict = {}
     for eids in _ENTITY_ALIASES_MULTI.values():
@@ -1184,33 +1218,6 @@ def whats_on(day: str = "today") -> str:
     return _ha_get_events(day)
 
 
-@tool(
-    name="whats_on_today",
-    description="Get today's calendar events",
-    aliases=["todays_events", "todays_schedule"],
-)
-def whats_on_today() -> str:
-    return _ha_get_events("today")
-
-
-@tool(
-    name="whats_on_tomorrow",
-    description="Get tomorrow's calendar events",
-    aliases=["tomorrows_events", "tomorrows_schedule"],
-)
-def whats_on_tomorrow() -> str:
-    return _ha_get_events("tomorrow")
-
-
-@tool(
-    name="whats_on_this_week",
-    description="Get this week's calendar events",
-    aliases=["this_weeks_events", "weekly_events"],
-)
-def whats_on_this_week() -> str:
-    return _ha_get_events("this_week")
-
-
 # ---------------------------------------------------------------------------
 # Calendar write — wraps the HA `calendar.create_event` service.
 # Requires `home_assistant.calendar` in config.yml to name the target calendar.
@@ -1278,6 +1285,7 @@ def _reminder_calendar_entity() -> Optional[str]:
     Reads `home_assistant.calendar` from config (friendly name or direct
     entity_id). Returns None if not configured or not found in the alias map.
     """
+    _ensure_loaded()  # reminder-poll path — not a @tool, so load the map explicitly
     name = HA_CONFIG.get('calendar')
     if not name:
         return None
@@ -1473,12 +1481,39 @@ def _autodetect_todo_entity() -> Optional[str]:
     return None
 
 
-_DEFAULT_WEATHER_ENTITY = _autodetect_weather_entity()
-SPOTIFY_ENTITY = _autodetect_spotify_entity()
-TV_ENTITY = _autodetect_tv_entity()
-AVR_ENTITY = _autodetect_avr_entity()
-CALENDAR_ENTITY = _autodetect_calendar_entity()
-TODO_ENTITY = _autodetect_todo_entity()
+# Role entities — populated by _ensure_loaded() on first tool use, not at import.
+_DEFAULT_WEATHER_ENTITY = None
+SPOTIFY_ENTITY = None
+TV_ENTITY = None
+AVR_ENTITY = None
+CALENDAR_ENTITY = None
+TODO_ENTITY = None
+
+
+def _ensure_loaded() -> None:
+    """Fetch the entity alias map + autodetect role entities, once, on first use.
+
+    Deferred out of import time so importing this module has NO network side
+    effects: a stray import can't connect to HA. Idempotent and thread-safe.
+    With no token configured there's nothing to fetch, so it's a cheap no-op
+    that stays re-checkable in case a token is set later.
+    """
+    global _loaded, _ENTITY_ALIASES, _ENTITY_ALIASES_MULTI
+    global _DEFAULT_WEATHER_ENTITY, SPOTIFY_ENTITY, TV_ENTITY, AVR_ENTITY
+    global CALENDAR_ENTITY, TODO_ENTITY
+    if _loaded or not HA_TOKEN:
+        return
+    with _load_lock:
+        if _loaded:
+            return
+        _ENTITY_ALIASES, _ENTITY_ALIASES_MULTI = _fetch_entity_aliases()
+        _DEFAULT_WEATHER_ENTITY = _autodetect_weather_entity()
+        SPOTIFY_ENTITY = _autodetect_spotify_entity()
+        TV_ENTITY = _autodetect_tv_entity()
+        AVR_ENTITY = _autodetect_avr_entity()
+        CALENDAR_ENTITY = _autodetect_calendar_entity()
+        TODO_ENTITY = _autodetect_todo_entity()
+        _loaded = True
 
 
 # ---------------------------------------------------------------------------
@@ -1547,8 +1582,43 @@ def _temperature_unit(attrs: dict) -> str:
     return "degrees Fahrenheit" if "F" in raw else "degrees Celsius"
 
 
+# HA returns weather as machine condition slugs (homeassistant.components.weather):
+# some are concatenated with no separator ("partlycloudy"), some are semantically
+# off for speech ("exceptional", "windy-variant"). A bare "-"→" " swap can't fix
+# the no-separator slug or the valid-but-wrong words — and an unsplit
+# "partlycloudy" is silently *dropped* by the CPU TTS front-end (misaki has no
+# entry for the run-on token), so the word just vanishes from the forecast. Map
+# the closed set explicitly; unknown values fall back to a hyphen swap. Improves
+# every TTS backend, not only the tiny one.
+_WEATHER_CONDITIONS = {
+    "clear-night": "clear",
+    "cloudy": "cloudy",
+    "exceptional": "severe weather",
+    "fog": "foggy",
+    "hail": "hail",
+    "lightning": "thunderstorms",
+    "lightning-rainy": "thunderstorms",
+    "partlycloudy": "partly cloudy",
+    "pouring": "heavy rain",
+    "rainy": "rainy",
+    "snowy": "snowy",
+    "snowy-rainy": "sleet",
+    "sunny": "sunny",
+    "windy": "windy",
+    "windy-variant": "windy",
+}
+
+
+def _humanize_condition(state: Optional[str]) -> str:
+    """HA weather condition slug → spoken phrase (closed set; hyphen-swap fallback)."""
+    slug = (state or "").strip().lower()
+    if not slug:
+        return ""
+    return _WEATHER_CONDITIONS.get(slug, slug.replace("-", " "))
+
+
 def _format_day(label: str, day: dict, unit: str) -> str:
-    cond = (day.get("condition") or "").replace("-", " ").strip()
+    cond = _humanize_condition(day.get("condition"))
     hi = day.get("temperature")
     lo = day.get("templow")
     precip = day.get("precipitation_probability")
@@ -1598,7 +1668,7 @@ def _weather_history_summary(entity_id: str, start: _dt.date, days: int, unit: s
         except Exception:
             continue
         entry = daily.setdefault(day, {"conditions": [], "temps": []})
-        cond = (s.get("state") or "").replace("-", " ").strip()
+        cond = _humanize_condition(s.get("state"))
         if cond and cond not in ("unavailable", "unknown"):
             entry["conditions"].append(cond)
         temp = (s.get("attributes") or {}).get("temperature")
@@ -1677,7 +1747,7 @@ def get_weather_forecast(
     if start < today:
         return _weather_history_summary(entity_id, start, days, unit)
 
-    current_cond = (state.get("state") or "unknown").replace("-", " ")
+    current_cond = _humanize_condition(state.get("state")) or "unknown"
     current_temp = attrs.get("temperature")
 
     parts = [f"Forecast for {_friendly_for(entity_id).replace('forecast', '')}"]
@@ -1792,18 +1862,33 @@ def _fetch_history_states(entity_id: str, start_dt, end_dt) -> list:
         "When a Home Assistant entity changed state — any entity, plus "
         "Fulloch's own conversation sensors 'sensor.fulloch_last_utterance' "
         "(what was said) and 'sensor.fulloch_last_response' (what Fulloch "
-        "replied). start/end take an ISO date (whole-day window) or datetime; "
-        "end defaults to end-of-day for a date start, or start+2h for a "
-        "datetime start."
+        "replied). start/end take an ISO date (whole-day window) or datetime. "
+        "Omit start for a recent-history question like 'when was X last on' — "
+        "it defaults to the last 7 days. end defaults to end-of-day for a date "
+        "start, or start+2h for a datetime start. Returns the state changes in "
+        "the window; answer the user's actual question from them (e.g. for 'when "
+        "did X last turn on' give just the most recent on)."
     ),
     aliases=["entity_history", "check_history", "light_history"],
 )
-def get_entity_history(entity: str, start: str, end: Optional[str] = None) -> str:
+def get_entity_history(
+    entity: str,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> str:
     """Return state-change history for a HA entity over a time window.
+
+    Returns the raw list of state changes; the agent loop hands it back for a
+    composing replan (see ``intents.LOOKUP_TOOLS``) so a focused question like
+    "when did the lights last turn on" is answered from the records rather than
+    read aloud in full.
 
     Args:
         entity: Friendly name or entity_id.
-        start: Start of the time window (ISO date or datetime).
+        start: Start of the time window (ISO date or datetime). Omit (or pass
+            empty) for a recent-history question — defaults to
+            ``HISTORY_DEFAULT_LOOKBACK_DAYS`` ago through now, so a plain "when
+            was X last on" resolves in one agent call without picking a date.
         end: End of the time window (ISO date or datetime). Defaults to end of day
             for a date-only start, or start+2h for a datetime start.
     """
@@ -1822,18 +1907,26 @@ def get_entity_history(entity: str, start: str, end: Optional[str] = None) -> st
                 f"Ask the user for the exact entity ID (e.g. 'light.kitchen', 'sensor.outdoor_temperature')."
             )
 
-    try:
-        if "T" in start or " " in start:
-            start_dt = _dt.datetime.fromisoformat(start)
-            if start_dt.tzinfo is None:
-                start_dt = start_dt.astimezone()
-            default_end_dt = start_dt + _dt.timedelta(hours=2)
-        else:
-            d = _dt.date.fromisoformat(start)
-            start_dt = _dt.datetime(d.year, d.month, d.day, 0, 0, 0).astimezone()
-            default_end_dt = start_dt + _dt.timedelta(days=1) - _dt.timedelta(seconds=1)
-    except ValueError:
-        return f"Reactive question: Could not parse start '{start}'. Ask the user to clarify the date."
+    if not start or not start.strip():
+        # No date given — default to a recent window so "when was X last on"
+        # answers in one agent call instead of a replan just to pick a start.
+        start_dt = (
+            _dt.datetime.now() - _dt.timedelta(days=HISTORY_DEFAULT_LOOKBACK_DAYS)
+        ).astimezone()
+        default_end_dt = _dt.datetime.now().astimezone()
+    else:
+        try:
+            if "T" in start or " " in start:
+                start_dt = _dt.datetime.fromisoformat(start)
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.astimezone()
+                default_end_dt = start_dt + _dt.timedelta(hours=2)
+            else:
+                d = _dt.date.fromisoformat(start)
+                start_dt = _dt.datetime(d.year, d.month, d.day, 0, 0, 0).astimezone()
+                default_end_dt = start_dt + _dt.timedelta(days=1) - _dt.timedelta(seconds=1)
+        except ValueError:
+            return f"Reactive question: Could not parse start '{start}'. Ask the user to clarify the date."
 
     if end:
         try:
@@ -1872,23 +1965,21 @@ def get_entity_history(entity: str, start: str, end: Optional[str] = None) -> st
         return f"Reactive question: Could not fetch history for '{entity}'. Tell the user there was an error."
 
     if not history or not history[0]:
-        window = f"{start}" + (f" to {end}" if end else "")
-        return f"No recorded state changes for {_friendly_for(entity_id)} on {window}."
+        if start and start.strip():
+            window = f"{start}" + (f" to {end}" if end else "")
+            window = f"on {window}"
+        else:
+            window = f"in the last {HISTORY_DEFAULT_LOOKBACK_DAYS} days"
+        return f"No recorded state changes for {_friendly_for(entity_id)} {window}."
 
     states = history[0]
-    MAX_RESULTS = 15
-    truncated = len(states) > MAX_RESULTS
-    if truncated:
-        states = states[-MAX_RESULTS:]
-
     friendly = _friendly_for(entity_id)
-    lines = [f"History for {friendly}"]
     today = _dt.date.today()
     yesterday = today - _dt.timedelta(days=1)
 
-    for s in states:
+    def _when(s) -> str:
+        """A spoken 'today/yesterday/<weekday> at <time>' label for one state."""
         ts_str = s.get("last_changed") or s.get("last_updated") or ""
-        state_val = s.get("state", "unknown")
         try:
             ts = _dt.datetime.fromisoformat(ts_str).astimezone()
             ts_date = ts.date()
@@ -1898,10 +1989,18 @@ def get_entity_history(entity: str, start: str, end: Optional[str] = None) -> st
                 day_label = "yesterday"
             else:
                 day_label = ts.strftime("%A")
-            time_label = ts.strftime("%I:%M %p").lstrip("0")
-            lines.append(f"{day_label} at {time_label}: {state_val}")
+            return f"{day_label} at {ts.strftime('%I:%M %p').lstrip('0')}"
         except Exception:
-            lines.append(f"{ts_str}: {state_val}")
+            return ts_str
+
+    MAX_RESULTS = 15
+    truncated = len(states) > MAX_RESULTS
+    if truncated:
+        states = states[-MAX_RESULTS:]
+
+    lines = [f"History for {friendly}"]
+    for s in states:
+        lines.append(f"{_when(s)}: {s.get('state', 'unknown')}")
 
     if truncated:
         lines.append(f"showing the last {MAX_RESULTS} changes only")

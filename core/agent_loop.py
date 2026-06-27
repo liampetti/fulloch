@@ -35,7 +35,7 @@ from utils.intents import MAX_AGENT_CALLS_PER_TURN, StepKind, StepResult
 from utils.phrases import STALL_PHRASES
 from utils.prompts import get_agent_system_prompt, get_thinking_system_prompt
 
-from .slm import ContextExhaustedError
+from .slm import ContextExhaustedError, RemoteUnreachable
 from .text_utils import clean_for_tts
 from .thinking_watchdog import ThinkingWatchdog
 
@@ -60,10 +60,21 @@ def _normalise_search_query(args) -> Optional[str]:
     trivial variants of the same query dedupe. A no-arg call (the search tool
     falls back to its default query) maps to a fixed sentinel so repeated
     default-news lookups also dedupe. Returns None for a non-string first arg.
+
+    Shape-robust: a grammar-less remote model may emit `args` as a kwargs object
+    (`{"query": "x"}`) or a bare string rather than the list the grammar forces,
+    so indexing `args[0]` blindly would raise `KeyError(0)` on a dict.
     """
-    if not args:
+    if isinstance(args, dict):
+        q = next(iter(args.values()), None)   # kwargs-style: first value
+    elif isinstance(args, (list, tuple)):
+        q = args[0] if args else None         # positional: first arg
+    elif isinstance(args, str):
+        q = args
+    else:
+        q = None
+    if q is None:
         return "__default__"
-    q = args[0]
     if not isinstance(q, str):
         return None
     q = re.sub(r"\s+", " ", q).strip().lower().strip(_PROMPT_STRIP_CHARS)
@@ -127,6 +138,12 @@ class AgentLoop:
         if first_emission is not None:
             logger.debug(f"Regex caught: {first_emission}")
 
+        # No-LLM tier (llm.backend: none): the regex catch is the only path.
+        # Dispatch a match, or speak the 'basic commands only' fallback —
+        # never touch the SLM.
+        if not host.llm_enabled:
+            return self._run_without_llm(user_prompt, first_emission)
+
         slm_started = False
         # Holds the most recent web-search summary produced this turn.
         # Persists across replan iterations so a follow-up action (e.g. a
@@ -142,6 +159,16 @@ class AgentLoop:
         # + summarise. A genuinely different follow-up query is a cache miss
         # and still searches, so chained "drill into a result" research works.
         search_cache: dict = {}
+        # Set true once a note-write tool actually dispatches this turn, so a
+        # confabulated "I saved this to your notes" can be scrubbed from the
+        # spoken reply when no write happened (see strip_unfounded_save_claim).
+        note_written = False
+        # Set true once a data-lookup result (intents.LOOKUP_TOOLS) has been
+        # handed back for a composing replan this turn. Bounds the cost to a
+        # single extra agent call: a second lookup result (or the same one
+        # re-fetched) falls through to the verbatim path rather than looping
+        # replan→re-fetch up to the call cap. Mirrors the web-search contract.
+        lookup_composed = False
         for iteration in range(MAX_AGENT_CALLS_PER_TURN):
             if session is not None and session.cancelled:
                 return ""
@@ -172,49 +199,168 @@ class AgentLoop:
                         ).start()
                 logger.debug(f"Agent call (iter {iteration})")
                 try:
-                    # Recovery wrapper sheds oldest history and retries on
-                    # overflow; only re-raises if the recent floor won't fit.
-                    emission_text = host._generate_with_context_recovery(
-                        user_prompt=None,
-                        grammar=host.grammar,
-                        system_prompt=get_agent_system_prompt(),
-                        cancel_check=cancel_check,
-                        history=host._history,
-                        stats=stats,
-                    )
+                    # Periodic progress stalls so a slow generation isn't silent
+                    # — esp. a remote LLM, where a long reply can be many seconds
+                    # of dead air (the one-shot replan/ack stall above plays only
+                    # at the start). The first stall fires after one interval, so
+                    # fast local calls (the GBNF grammar stops them quickly) never
+                    # trigger it. Recovery wrapper sheds oldest history and retries
+                    # on overflow; only re-raises if the recent floor won't fit.
+                    with ThinkingWatchdog(
+                        host.replan_stall_cache, host.play_chunks,
+                        session or host.tts_session,
+                    ):
+                        emission_text = host._generate_with_context_recovery(
+                            user_prompt=None,
+                            grammar=host.grammar,
+                            system_prompt=get_agent_system_prompt(host.wakeword_name),
+                            cancel_check=cancel_check,
+                            history=host._history,
+                            stats=stats,
+                        )
                 except ContextExhaustedError:
                     return host._context_exhausted_reply()
+                except RemoteUnreachable as e:
+                    # Remote LLM down — degrade this turn to regex-only so the
+                    # user still gets basic commands + the no-AI fallback.
+                    logger.warning("Remote LLM unreachable; regex-only this turn")
+                    host._note_llm_remote_status(False, str(e))
+                    return self._run_without_llm(user_prompt, first_emission)
+                host._note_llm_remote_status(True)
                 logger.debug(f"Agent emission: {emission_text}")
 
                 if session is not None and session.cancelled:
                     return ""
 
                 try:
-                    emission = json.loads(emission_text)
+                    # Tolerant parse: strips reasoning artefacts (<think> blocks,
+                    # stray </think>, repeated objects) a grammar-less remote LLM
+                    # can wrap around the JSON, and takes the first balanced object.
+                    emission = intents.parse_agent_emission(emission_text)
                 except Exception as e:
-                    logger.error(f"Failed to parse agent emission: {emission_text!r} ({e})")
-                    return random.choice([
-                        "Sorry, can you repeat that",
-                        "I don't understand",
-                    ])
+                    # A grammar-less remote model often answers in plain prose
+                    # instead of the JSON envelope (response_format is only a hint;
+                    # some servers ignore it, and even the one repair retry can come
+                    # back as prose). That prose is almost always a valid spoken
+                    # reply, so don't drop the turn — treat it as `{"reply": ...}`
+                    # and fall through to the reply branch (which also prefers a
+                    # grounded web summary after a search). Only genuinely empty
+                    # output, or a malformed JSON *fragment* (starts with { or [ —
+                    # speaking that would read brace-junk aloud), gives up.
+                    prose = (emission_text or "").strip()
+                    if not prose or prose[:1] in ("{", "["):
+                        logger.error(f"Failed to parse agent emission: {emission_text!r} ({e})")
+                        return random.choice([
+                            "Sorry, can you repeat that",
+                            "I don't understand",
+                        ])
+                    logger.warning(
+                        f"Agent emission was prose, not JSON; treating as a reply ({e})"
+                    )
+                    emission = {"reply": prose}
+                # Cap actions to 3 — GBNF enforces this for local llama; do
+                # it structurally here so the remote path (no grammar) can't
+                # emit a 20-room scan. Applies before history, plan event, and
+                # dispatch all see the emission, so they stay consistent.
+                if (isinstance(emission.get("actions"), list)
+                        and len(emission["actions"]) > 3):
+                    logger.warning(
+                        "Agent emitted %d actions; capping to 3",
+                        len(emission["actions"]),
+                    )
+                    emission = {**emission, "actions": emission["actions"][:3]}
+                # Canonicalise what goes into history so reasoning junk doesn't
+                # pollute the context the model sees on the next call.
+                emission_text = json.dumps(emission)
+
+            # A grammar-less model sometimes bundles its spoken answer as a
+            # `reply` pseudo-action *inside* `actions` (e.g. [append_to_today(...),
+            # reply("Done")]) instead of using the {"reply": ...} envelope. Split
+            # it out: the real tools still dispatch, the text becomes the spoken
+            # reply, and the hallucinated-tool guard doesn't block the whole turn
+            # on the non-tool `reply`.
+            bundled_reply = None
+            _acts = emission.get("actions")
+            if isinstance(_acts, list):
+                kept = []
+                for a in _acts:
+                    _intent = a.get("intent") if isinstance(a, dict) else None
+                    if (isinstance(_intent, str)
+                            and _intent.lower() in intents.REPLY_PSEUDO_INTENTS
+                            and not intents.is_registered_tool(_intent)):
+                        text = intents.coerce_reply_text(a.get("args"))
+                        if text:
+                            bundled_reply = text
+                    else:
+                        kept.append(a)
+                if len(kept) != len(_acts):  # a pseudo-reply was split out
+                    # Only a pseudo-reply (no real tools) → it's just a reply.
+                    emission = {"actions": kept} if kept else {"reply": bundled_reply or ""}
+                    if not kept:
+                        bundled_reply = None
+                    emission_text = json.dumps(emission)
 
             host._history.append({"role": "assistant", "content": emission_text})
             host._trim_history()
 
             # Emit a `plan` event so dashboards can show what the agent decided.
-            host._emit_agent_event("plan", emission, source=source)
+            # iteration > 0 means the agent was re-called: this plan supersedes
+            # the previous one (e.g. a web search dropped the actions bundled
+            # after it and re-decided from the findings). Flag it as a replan so
+            # the trace shows the prior plan was scrapped, not silently failed.
+            host._emit_agent_event(
+                "plan", emission, source=source, replan=(iteration > 0),
+            )
 
             # Reply branch — agent's final spoken answer.
             if "reply" in emission:
                 reply = (emission.get("reply") or "").strip()
+                # Grounding guard: if a web search ran this turn, the inline
+                # summariser already built a grounded answer from the actual
+                # SearXNG snippets (`web_summary_text`). A replan `reply` here is
+                # the model re-answering from a compressed summary in history —
+                # a fabrication opening a weak model takes (Gemma invented news
+                # items — inflation figures, sports results — in testing). Speak
+                # the grounded summary instead, and reconcile the just-appended
+                # history entry to it so the fabricated reply doesn't linger for
+                # the next turn. (A search followed by a real follow-up action
+                # goes through the actions branch + terminal path, not here.)
+                if web_summary_text and web_summary_text.strip():
+                    grounded = web_summary_text.strip()
+                    host._history[-1] = {
+                        "role": "assistant",
+                        "content": json.dumps({"reply": grounded}),
+                    }
+                    return grounded
                 if not reply:
                     return random.choice(STALL_PHRASES)
-                return reply
+                return intents.strip_unfounded_save_claim(reply, note_written)
 
             actions = emission.get("actions") or []
             if not actions:
                 logger.warning("Agent emitted empty actions; stalling")
                 return random.choice(STALL_PHRASES)
+
+            # Hallucinated-tool guard (direct registry match, not a heuristic
+            # read of the observation): a weaker model — especially a remote one
+            # without the GBNF grammar — sometimes invents a tool name that was
+            # never in its prompt, then fabricates an answer from priors when
+            # told it "failed". If ANY action this emission names a tool that
+            # isn't loaded, block the turn up front (before dispatching the valid
+            # ones, so no partial side effects) and speak a canned "can't do
+            # that" instead of letting it replan into a fabrication.
+            unknown = [a.get("intent", "?") for a in actions[:3]
+                       if not intents.is_registered_tool(a.get("intent"))]
+            if unknown:
+                logger.warning(
+                    "Agent called unregistered tool(s) %s; blocking fabrication",
+                    unknown,
+                )
+                host._emit_agent_event("observation", {
+                    "intent": unknown[0],
+                    "result": f"Blocked: tool {unknown[0]!r} is not available.",
+                }, source=source)
+                return host._speak_tool_unavailable_fallback(session, source)
 
             # Dispatch each action in order. Stop on the first replan trigger.
             result_strs: list = []
@@ -276,6 +422,11 @@ class AgentLoop:
                     # classify_step maps any leading sentinel to a StepKind so
                     # the rest of the loop routes on the kind, not the raw text.
                     step = intents.classify_step(intents.handle_action(action))
+                    # Record a genuine note write (dispatched and didn't bounce
+                    # to a reactive question / error) so the reply guard knows a
+                    # save really happened.
+                    if intents.is_note_write(intent_name) and step.kind is StepKind.NORMAL:
+                        note_written = True
                     if stats is not None:
                         stats.tool_dispatches += 1
                         if action.get("intent") in NOTE_SEARCH_INTENTS:
@@ -304,9 +455,14 @@ class AgentLoop:
                                 args=(session or host.tts_session,),
                                 daemon=True,
                             ).start()
-                        summary = host._summarise_search_result(
-                            step.text, cancel_check, stats=stats
-                        )
+                        try:
+                            summary = host._summarise_search_result(
+                                step.text, cancel_check, stats=stats
+                            )
+                        except RemoteUnreachable as e:
+                            logger.warning("Remote LLM unreachable mid-turn; regex-only")
+                            host._note_llm_remote_status(False, str(e))
+                            return self._run_without_llm(user_prompt, first_emission)
                         if session is not None and session.cancelled:
                             return ""
                         # Replace the raw payload with the summary; the loop
@@ -336,7 +492,20 @@ class AgentLoop:
                         _parts[1].strip() if len(_parts) > 1 else user_prompt
                     )
                     saw_thinking = True
-                if step.in_output:
+                # A data-lookup tool returns raw records (a state-change dump, a
+                # conversation transcript, note chunks), not a spoken answer.
+                # Hand the result — now in history above — back for one composing
+                # replan so the agent answers the actual question from it, rather
+                # than the verbatim path reading the whole dump aloud. Guarded by
+                # `lookup_composed` so it fires at most once per turn.
+                lookup_replan = (
+                    not lookup_composed
+                    and step.kind is StepKind.NORMAL
+                    and intents.is_lookup(intent_name)
+                )
+                # A result destined for a replan must not also be joined into the
+                # spoken output (it would be both read raw AND recomposed).
+                if step.in_output and not lookup_replan:
                     result_strs.append(step.text)
                 # A web search always hands control back to the agent: its
                 # summary is now in history, so the agent decides the next
@@ -344,7 +513,9 @@ class AgentLoop:
                 # the actual findings. Any later actions the agent bundled
                 # with the search are dropped here and re-decided on replan,
                 # so a save is composed from real findings, never a stub.
-                if web_summarised or step.should_replan:
+                if web_summarised or step.should_replan or lookup_replan:
+                    if lookup_replan:
+                        lookup_composed = True
                     replan = True
                     break
             host._trim_history()
@@ -381,7 +552,7 @@ class AgentLoop:
                     ):
                         answer = host._generate_with_context_recovery(
                             user_prompt=query,
-                            system_prompt=get_thinking_system_prompt(),
+                            system_prompt=get_thinking_system_prompt(host.wakeword_name),
                             cancel_check=cancel_check,
                             history=host._history,
                             thinking_mode=True,
@@ -389,6 +560,10 @@ class AgentLoop:
                         )
                 except ContextExhaustedError:
                     return host._context_exhausted_reply()
+                except RemoteUnreachable as e:
+                    logger.warning("Remote LLM unreachable mid-think; regex-only")
+                    host._note_llm_remote_status(False, str(e))
+                    return self._run_without_llm(user_prompt, first_emission)
                 if session is not None and session.cancelled:
                     # Stash the partial reasoning for a follow-up
                     # summarize_thinking ("what have you got so far?").
@@ -414,7 +589,15 @@ class AgentLoop:
                 # are intercepted earlier by the inline summariser.
                 continue
 
-            # All actions succeeded without replan — speak joined outputs.
+            # All actions succeeded without replan — speak the answer.
+            # If the model bundled its spoken reply with the tool actions (split
+            # out above), the tools have now run, so speak that reply (e.g.
+            # "Done, saved to your notes") rather than raw joined tool outputs —
+            # unless a web search ran, where the grounded summary wins (below).
+            if bundled_reply and not web_summary_text:
+                spoken = intents.strip_unfounded_save_claim(bundled_reply, note_written)
+                host._record_spoken(spoken)
+                return spoken
             parts = [s.strip() for s in result_strs if s and s.strip()]
             # If the turn researched something and the agent then took a
             # follow-up action (e.g. saving a note), the web summary lives
@@ -428,6 +611,7 @@ class AgentLoop:
             spoken = ". ".join(parts)
             if not spoken:
                 spoken = "Done."
+            spoken = intents.strip_unfounded_save_claim(spoken, note_written)
             host._record_spoken(spoken)
             return spoken
 
@@ -443,3 +627,73 @@ class AgentLoop:
                 host._record_spoken(spoken)
                 return spoken
         return "Sorry, I couldn't finish that."
+
+    def _run_without_llm(self, user_prompt: str, first_emission) -> str:
+        """Regex-only turn for `llm.backend: none` — never calls the SLM.
+
+        A `catchAll` match dispatches its action(s) and speaks the joined
+        tool output (a regex `{"reply": ...}` like the notes-refusal is spoken
+        directly). Anything that would normally replan into the SLM — an
+        unresolved-entity / error `Reactive question:` sentinel, a web search,
+        or `deep_think` — can't proceed without a model, so it (and an outright
+        miss) falls back to a spoken "basic commands only" phrase.
+        """
+        host = self.host
+        session = self.session
+        source = self.source
+
+        if first_emission is None:
+            return host._speak_no_ai_fallback(session, source)
+
+        host._history.append(
+            {"role": "assistant", "content": json.dumps(first_emission)}
+        )
+        host._trim_history()
+        host._emit_agent_event("plan", first_emission, source=source)
+
+        if "reply" in first_emission:
+            reply = (first_emission.get("reply") or "").strip()
+            return reply or host._speak_no_ai_fallback(session, source)
+
+        actions = first_emission.get("actions") or []
+        if not actions:
+            return host._speak_no_ai_fallback(session, source)
+
+        result_strs: list = []
+        for action in actions[:3]:
+            if session is not None and session.cancelled:
+                return ""
+            intent_name = action.get("intent", "?")
+            host._emit_agent_event("step", {
+                "intent": intent_name,
+                "args": action.get("args", []),
+            }, source=source)
+            step = intents.classify_step(intents.handle_action(action))
+            host._history.append({
+                "role": "tool",
+                "name": intent_name,
+                "content": step.text,
+            })
+            host._emit_agent_event("observation", {
+                "intent": intent_name,
+                "result": step.text,
+            }, source=source)
+            # No SLM to replan with. A REACTIVE step still ran the tool and
+            # produced a real observation (e.g. HA "couldn't find that entity")
+            # — speak that directly rather than the generic "no AI" phrase, since
+            # the tool didn't need AI. Other replan kinds (web search, deep_think,
+            # summary, dispatch error) genuinely need the model → fall back.
+            if step.should_replan:
+                if step.kind is intents.StepKind.REACTIVE:
+                    spoken = intents.reactive_to_speech(step.text)
+                    host._record_spoken(spoken)
+                    return spoken
+                return host._speak_no_ai_fallback(session, source)
+            if step.in_output:
+                result_strs.append(step.text)
+        host._trim_history()
+
+        parts = [s.strip() for s in result_strs if s and s.strip()]
+        spoken = ". ".join(parts) or "Done."
+        host._record_spoken(spoken)
+        return spoken

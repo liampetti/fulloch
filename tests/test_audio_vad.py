@@ -64,6 +64,27 @@ def _windows(n):
     return np.zeros(n * VAD_WINDOW_SAMPLES, dtype=np.float32)
 
 
+def test_update_params_adjusts_both_iterators():
+    # Real VADIterators (built against a mock model) so threshold /
+    # min_silence_samples are the actual attributes the live setter mutates.
+    ep = VadEndpointer(MagicMock(), sample_rate=16000,
+                       soft_model=MagicMock(), soft_endpoint_silence_ms=500)
+    ep.update_params(threshold=0.8, endpoint_silence_ms=2000,
+                     soft_endpoint_silence_ms=300)
+    assert ep._iterator.threshold == 0.8
+    assert ep._soft_iterator.threshold == 0.8
+    assert ep._iterator.min_silence_samples == 16000 * 2000 / 1000
+    assert ep._soft_iterator.min_silence_samples == 16000 * 300 / 1000
+
+
+def test_update_params_partial_and_soft_safe_without_soft_iterator():
+    ep = VadEndpointer(MagicMock(), sample_rate=16000)  # no soft iterator
+    assert ep._soft_iterator is None
+    # Only threshold supplied; a soft-silence update must be a harmless no-op.
+    ep.update_params(threshold=0.7, soft_endpoint_silence_ms=200)
+    assert ep._iterator.threshold == 0.7
+
+
 def test_start_then_end_sets_transitions():
     ep = make_endpointer([{"start": 0}, None, {"end": 100}])
     ep.process(_windows(3))

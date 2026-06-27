@@ -26,3 +26,5 @@ word2number>=1.1
 simpleeval>=1.0
 pint>=0.24
 python-dateutil>=2.9
+ruamel.yaml>=0.18           # config_store round-trip (test_config_store, /setup/schema)
+openai>=1.40                # remote LLM client (test_llm_openai; importorskip'd if absent)

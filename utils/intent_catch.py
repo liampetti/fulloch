@@ -108,6 +108,15 @@ _VAGUE_ENTITIES = frozenset({
     "it", "that", "this", "them", "those", "these", "everything", "all",
 })
 
+# Anaphoric determiners that, when they *lead* a multi-word entity ("those
+# lights", "that lamp"), mark a back-reference to something said earlier — a
+# real device alias never starts with one. Without this, "turn those lights
+# off" captures the literal entity "those lights", which HA can't resolve;
+# bailing here routes the turn to the SLM, which resolves the reference from
+# conversation history instead. (Single-token forms like "it"/"them" are
+# already caught by _VAGUE_ENTITIES above.)
+_ANAPHORA_DETERMINERS = frozenset({"it", "that", "this", "them", "those", "these"})
+
 _PERCENT_ONES = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
     "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
@@ -125,7 +134,12 @@ def _has_compound(command: str) -> bool:
 
 
 def _is_vague_entity(entity: str) -> bool:
-    return entity.lower().strip() in _VAGUE_ENTITIES
+    e = entity.lower().strip()
+    if e in _VAGUE_ENTITIES:
+        return True
+    # Leading anaphor ("those lights", "that lamp") → needs history to resolve.
+    first = e.split(None, 1)[0] if e.split() else ""
+    return first in _ANAPHORA_DETERMINERS
 
 
 def _parse_percent(text: str) -> Optional[int]:
@@ -173,10 +187,19 @@ _TURN_ONOFF_RE = re.compile(
     r"^\s*(?:please\s+)?turn\s+(on|off)\s+(?:the\s+)?(.+?)\s*$",
     re.IGNORECASE,
 )
+# Trailing "again" sits after the state ("turn the kitchen lights off again");
+# a "back" re-do adverb sits before it ("...lights back off") and is swept into
+# the entity capture (stripped by _REDO_ADVERB_RE in extract_turn_onoff).
 _TURN_ONOFF_REV_RE = re.compile(
-    r"^\s*(?:please\s+)?turn\s+(?:the\s+)?(.+?)\s+(on|off)\s*$",
+    r"^\s*(?:please\s+)?turn\s+(?:the\s+)?(.+?)\s+(on|off)(?:\s+again)?\s*$",
     re.IGNORECASE,
 )
+
+# Re-do adverbs that trail a turn on/off command ("turn the lights back off",
+# "turn it off again"). The reversed pattern captures these into the entity
+# ("dining room lights back"), which HA can't resolve — strip them so the real
+# entity survives.
+_REDO_ADVERB_RE = re.compile(r"\s+(?:back|again)\s*$", re.IGNORECASE)
 
 _TOGGLE_RE = re.compile(
     r"^\s*(?:please\s+)?toggle\s+(?:the\s+)?(.+?)\s*$",
@@ -230,6 +253,9 @@ def extract_turn_onoff(command: str) -> Optional[tuple]:
         if not m:
             return None
         entity, state = m.group(1).strip(), m.group(2).lower()
+    # "turn the lights back off" / "turn it off again" — drop the re-do adverb
+    # the pattern swept into the entity before resolving / vague-checking.
+    entity = _REDO_ADVERB_RE.sub("", entity).strip()
     if not entity or _is_vague_entity(entity):
         return None
     return (state, entity)

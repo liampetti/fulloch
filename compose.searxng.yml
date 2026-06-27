@@ -1,11 +1,19 @@
 services:
+  app:
+    depends_on:
+      searxng:
+        condition: service_started
+
   searxng:
     image: searxng/searxng:latest
     container_name: searxng
     ports:
       - "8080:8080"
     environment:
-      - SEARXNG_SECRET=${SEARXNG_SECRET:?set SEARXNG_SECRET in .env}
+      # Set SEARXNG_SECRET in .env (`openssl rand -hex 32`) before exposing
+      # SearXNG beyond localhost. Defaults to a local-dev placeholder so
+      # `docker compose up` works with no .env.
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-fulloch-local-dev-change-me}
     volumes:
       - ./searxng_data:/etc/searxng:rw
     restart: unless-stopped

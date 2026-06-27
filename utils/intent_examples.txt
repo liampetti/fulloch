@@ -1,18 +1,6 @@
-- User: "Turn on the lights"
-  Output:
-  {"actions": [{"intent": "turn_on", "args": ["lights"]}]}
-
 - User: "Set the office temperature to 19 degrees"
   Output:
   {"actions": [{"intent": "ha_set_climate", "args": ["Office", 19]}]}
-
-- User: "Set the volume to 40"
-  Output:
-  {"actions": [{"intent": "ha_volume_set", "args": ["TV", 40]}]}
-
-- User: "Open the blinds"
-  Output:
-  {"actions": [{"intent": "ha_open_cover", "args": ["blinds"]}]}
 
 - User: "What time did the downstairs lights turn off last night"
   Output:
@@ -35,17 +23,9 @@
   Output:
   {"reply": "Around 3pm you were asking about the Formula 1 at Monaco — the top three finishers, and whether Hadjar picked up any penalties."}
 
-- User: "What's 15% of 340?"
+- User: "Are the living room lights on?"
   Output:
-  {"actions": [{"intent": "calculate", "args": ["15% of 340"]}]}
-
-- User: "How many days until Christmas?"
-  Output:
-  {"actions": [{"intent": "days_between", "args": ["2026-06-02", "2026-12-25"]}]}
-
-- User: "What date is next Sunday?"
-  Output:
-  {"actions": [{"intent": "date_of", "args": ["Sunday", "next"]}]}
+  {"actions": [{"intent": "get_entity_state", "args": ["living room lights"]}]}
 
 - User: "What's the weather forecast"
   Output:
@@ -53,7 +33,7 @@
 
 - User: "What's on today"
   Output:
-  {"actions": [{"intent": "whats_on_today", "args": []}]}
+  {"actions": [{"intent": "whats_on", "args": ["today"]}]}
 
 - User: "Who is the current US president"
   Output:
@@ -130,23 +110,9 @@
   Output:
   {"actions": [{"intent": "external_information", "args": ["where is the red flag warning for gusty winds in effect"]}]}
 
-- Conversation context:
-    Assistant: "The next match is against France on Sunday."
-  User: "Are you sure it's France and not Paraguay?"
-  Output:
-  {"actions": [{"intent": "external_information", "args": ["Australia World Cup opponent after USA match"]}]}
-
-- User: "What notes do I have?"
-  Output:
-  {"actions": [{"intent": "list_notes", "args": []}]}
-
 - User: "Find anything I wrote about the Darwin trip"
   Output:
   {"actions": [{"intent": "search_notes", "args": ["Darwin"]}]}
-
-- User: "Get my Australia climate note"
-  Output:
-  {"actions": [{"intent": "read_note", "args": ["Australia climate"]}]}
 
 - User: "Read me back my notes from today"
   Output:
@@ -155,10 +121,6 @@
 - User: "Remind me to turn off the stove in 10 minutes"
   Output:
   {"actions": [{"intent": "start_countdown", "args": ["10 minutes", "Turn off the stove"]}]}
-
-- User: "Remind me to have lunch at noon today"
-  Output:
-  {"actions": [{"intent": "create_calendar_event", "args": ["Lunch", "2026-06-02", "12:00", "13:00", "none"]}]}
 
 - User: "Cancel my timer"
   Output:
@@ -173,10 +135,6 @@
 - User: "Remind me to put the bins out every Thursday at 8pm"
   Output:
   {"actions": [{"intent": "create_calendar_event", "args": ["Bin night", "2026-06-04", "20:00", null, "weekly"]}]}
-
-- User: "Change the time of that dentist appointment to 2pm"
-  Output:
-  {"reply": "I can't edit calendar events, only add them. I can put a new dentist appointment at 2pm on your calendar — you'd just need to delete the old one in Home Assistant. Want me to do that?"}
 
 - Conversation context:
     Assistant: "Want me to save that as a note, or set up a weekly calendar reminder for Thursday evenings?"
@@ -193,7 +151,3 @@
     Tool — search_notes: "Reactive question: Found 2 possible matches for 'kitchen appliances' in the user's notes (matched by keyword or by topic, so some may not contain 'kitchen appliances' literally). in 'dishwasher manual': descaling cycle every three months...; in 'kitchen reno': replaced the old appliances..."
   Output:
   {"reply": "Your dishwasher manual note covers the descaling cycle, and a kitchen reno note touches on the appliances. Want me to read the manual note?"}
-
-- User: "Set up a movie scene"
-  Output:
-  {"actions": [{"intent": "ha_activate_scene", "args": ["movie"]}]}

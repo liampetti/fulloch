@@ -1,0 +1,76 @@
+name: Release images
+
+# Tag-triggered build: the slow CUDA + flash-attn compile happens once here and
+# is pushed to GHCR, so users `docker pull` instead of building. Two variants:
+#   - GPU (default): ghcr.io/<owner>/fulloch:<version> + :latest
+#   - CPU (slim):    ghcr.io/<owner>/fulloch:<version>-cpu + :latest-cpu + :cpu
+# Weights stay out of the images (the first-run wizard downloads them).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:  # allow a manual build of the current ref
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: gpu
+            dockerfile: Dockerfile
+            suffix: ""
+          - variant: cpu
+            dockerfile: Dockerfile.cpu
+            suffix: "-cpu"
+    steps:
+      - uses: actions/checkout@v4
+
+      # The CUDA devel base + flash-attn build is large; reclaim runner disk so
+      # the GPU build doesn't run out of space (cheap no-op for the CPU build).
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/fulloch
+          flavor: |
+            latest=false
+            suffix=${{ matrix.suffix }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+            # Short, suffix-free alias for the CPU image (README/run docs pull
+            # `:cpu`). suffix= overrides the global `-cpu` flavor so it lands as
+            # exactly `:cpu`, not `:cpu-cpu`; only emitted on the CPU matrix leg.
+            type=raw,value=cpu,suffix=,enable=${{ matrix.variant == 'cpu' }}
+
+      - name: Build and push (${{ matrix.variant }})
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}

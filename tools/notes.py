@@ -7,8 +7,8 @@ in `notes_index.py` and is loaded lazily on first use so the embedding model
 isn't paid for until the first semantic query (or `warm_index()` call).
 
 Optional config under `notes:` overrides defaults — `path` (default
-`./data/notes`) and `daily_subdir` (default unset, daily notes go in the
-top-level folder).
+`./data/notes`) and `daily_subdir` (default `"daily"`; set empty/null to keep
+daily notes in the top-level folder).
 """
 
 import logging
@@ -27,9 +27,10 @@ logger = logging.getLogger(__name__)
 
 _notes_config = config.get('notes', {}) or {}
 NOTES_DIR = Path(_notes_config.get('path', './data/notes')).expanduser().resolve()
-# When set, `append_to_today` writes to <NOTES_DIR>/<DAILY_SUBDIR>/YYYY-MM-DD.md
-# instead of cluttering the top-level notes folder with date-stamped files.
-DAILY_SUBDIR: Optional[str] = _notes_config.get('daily_subdir')
+# `append_to_today` writes to <NOTES_DIR>/<DAILY_SUBDIR>/YYYY-MM-DD.md so daily
+# journals don't clutter the top-level notes folder. Defaults to "daily" when the
+# key is absent; set it empty/null in config to keep daily notes at the top level.
+DAILY_SUBDIR: Optional[str] = _notes_config.get('daily_subdir', 'daily')
 # Voice replies are read aloud — long bodies make for a tedious TTS, so cap
 # the spoken content and tell the user we truncated.
 MAX_READ_CHARS = 2000

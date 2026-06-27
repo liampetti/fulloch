@@ -7,6 +7,8 @@ from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 
+from core.url_utils import normalize_url
+
 from ._config import config
 from .tool_registry import tool
 
@@ -15,9 +17,9 @@ logger = logging.getLogger(__name__)
 # Defensive read so importing this module never crashes when no `search` config
 # is present (e.g. the test suite / CI with no data/config.yml). In production
 # the module is only loaded when the `search` key exists (see tools/__init__.py).
-SEARXNG_URL = (config.get('search') or {}).get(
+SEARXNG_URL = normalize_url((config.get('search') or {}).get(
     'searxng_url', 'http://localhost:8080/search'
-)
+))  # adds scheme if missing, drops trailing slash
 
 # Per-snippet cap. Wide enough to give the agent rich source material to
 # triangulate from; the inline summariser (see core/assistant.py) does the
@@ -159,6 +161,28 @@ def fetch_website_summary(url: str, fallback: str = "", max_length: int = SNIPPE
     return fallback[:max_length]
 
 
+# Leading "summarise/recap/give me a summary of …" directive. external_information
+# summarises its own results, so this verb must not reach SearXNG (it returns
+# pages about summarising rather than the topic). Anchored at the start only.
+_SUMMARISE_DIRECTIVE_RE = re.compile(
+    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)?"
+    r"(?:summari[sz]e|summari[sz]e\s+for\s+me|give\s+me\s+a\s+summary\s+of|"
+    r"(?:a\s+)?summary\s+of|sum\s+up|recap(?:\s+of)?|brief\s+me\s+on|"
+    r"tell\s+me\s+about)\s+",
+    re.IGNORECASE,
+)
+
+
+def _strip_summarise_directive(query: str) -> str:
+    """Strip a leading summarise/recap directive so the search hits the topic.
+
+    'summarize today's news' -> "today's news". Falls back to the original query
+    if stripping would leave it empty (e.g. the query was just "summarize").
+    """
+    cleaned = _SUMMARISE_DIRECTIVE_RE.sub("", query or "").strip()
+    return cleaned or query
+
+
 @tool(
     name="external_information",
     description=(
@@ -173,9 +197,15 @@ def fetch_website_summary(url: str, fallback: str = "", max_length: int = SNIPPE
 def external_information(query: str = "get me the latest news stories") -> str:
     """Fetch top SearXNG snippets and wrap them with a `User question:` sentinel
     that `_handle_wakeword` routes to the chat fallback."""
+    # Search the TOPIC, not a meta-instruction. The model often phrases the query
+    # as "summarize today's news" — but this tool does its own summarising, so
+    # searching that verbatim pulls articles *about summarising news* instead of
+    # the news. Strip the directive for the SearXNG query; keep the original for
+    # the "User question:" line so the summariser still knows the user's intent.
+    search_query = _strip_summarise_directive(query)
     website_snippets = []
     try:
-        for result in searxng_search(query, num_results=NUM_RESULTS):
+        for result in searxng_search(search_query, num_results=NUM_RESULTS):
             snippet = fetch_website_summary(result["url"], fallback=result["content"])
             if snippet:
                 website_snippets.append(f"\n\nFrom {result['url']}: {snippet}")

@@ -25,6 +25,7 @@ respecting the job's `TtsSession.cancelled` flag for barge-in.
 """
 
 import logging
+import os
 import queue
 import threading
 import time
@@ -88,18 +89,38 @@ def set_tts_active_event(event: Optional[threading.Event]) -> None:
     _TTS_ACTIVE_EVENT = event
 
 
-model = Qwen3TTSModel.from_pretrained(
-    "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-    torch_dtype=torch.bfloat16,
-    device_map=DEVICE,
-    attn_implementation="flash_attention_2",
-)
+# Populated by `load_tts()` once a backend is chosen — `import core.tts`
+# itself loads nothing, so the module can be imported in setup mode (before
+# any model is selected) without touching the GPU. The worker thread reads
+# this global lazily inside `_worker_loop`, so it only needs to be set before
+# the first generation job is submitted (warmup).
+model = None
 
-model.enable_streaming_optimizations(
-    decode_window_frames=80,
-    use_compile=True,
-    compile_mode="reduce-overhead",
-)
+DEFAULT_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+
+
+def load_tts(model_id: str = DEFAULT_MODEL_ID, decode_window_frames: int = 80, **opts):
+    """Load the Qwen3-TTS model and enable streaming optimizations.
+
+    Sets the module-global `model` and returns it. Called from
+    `Assistant._load_models` (via the backend registry) so loading is
+    deferred until a TTS backend has actually been selected. `opts` absorbs
+    any extra per-model config keys forwarded by the registry.
+    """
+    global model
+    logger.info(f"Loading TTS model {model_id} on {DEVICE}...")
+    model = Qwen3TTSModel.from_pretrained(
+        model_id,
+        torch_dtype=torch.bfloat16,
+        device_map=DEVICE,
+        attn_implementation="flash_attention_2",
+    )
+    model.enable_streaming_optimizations(
+        decode_window_frames=decode_window_frames,
+        use_compile=True,
+        compile_mode="reduce-overhead",
+    )
+    return model
 
 
 @dataclass
@@ -185,12 +206,40 @@ def _drain_job(out: "queue.Queue") -> None:
 
 
 def set_voice(voice_name: str):
-    """Build a voice-clone prompt from data/voices/<voice_name>.{wav,txt}."""
+    """Build a voice-clone prompt from data/voices/<voice_name>.wav + transcript.
+
+    The transcript is `<voice_name>.txt`, falling back to `data/voices/default.txt`
+    — the shared transcript every bundled sample clip is recorded with — so a clip
+    needs no per-voice .txt of its own.
+    """
     ref_audio = f"{VOICES_DIR}/{voice_name}.wav"
-    with open(f"{VOICES_DIR}/{voice_name}.txt") as f:
+    txt_path = f"{VOICES_DIR}/{voice_name}.txt"
+    if not os.path.isfile(txt_path):
+        txt_path = f"{VOICES_DIR}/default.txt"
+    with open(txt_path) as f:
         ref_text = f.read()
     logger.info(f"Setting voice clone to: {voice_name}")
     return model.create_voice_clone_prompt(ref_audio=ref_audio, ref_text=ref_text)
+
+
+_speed_warned = False
+
+
+def set_speed(speed) -> None:
+    """Accept the speed-control contract, but no-op — Qwen3 TTS has no rate knob.
+
+    The clone's pace is baked in by the voice-clone reference recording, not a
+    generation parameter. Warn once so a configured `tts_speed` isn't silently
+    ignored; the value otherwise has no effect here.
+    """
+    global _speed_warned
+    if speed in (None, 1.0) or _speed_warned:
+        return
+    logger.warning(
+        "Qwen TTS has no speed control — tts_speed=%s ignored. Set the pace via "
+        "the voice-clone reference recording instead.", speed
+    )
+    _speed_warned = True
 
 
 def warmup_model(prompt):

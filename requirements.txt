@@ -22,11 +22,15 @@ simpleeval==1.0.7
 pint==0.25.3
 python-dateutil==2.9.0.post0
 
-# Dashboard (text chat UI)
+# Dashboard (text chat UI) + setup wizard / settings console
 fastapi==0.128.0
 uvicorn==0.38.0
 beautifulsoup4==4.14.2
 python-dotenv==1.2.1
+ruamel.yaml==0.18.16          # comment-preserving config.yml round-trip (config_store)
+huggingface_hub==0.36.2       # in-container model download manager (downloader)
+openai==2.16.0                # advanced OpenAI-compatible remote LLM backend (llm_openai)
+httpx==0.28.1                 # split connect/read timeouts for the remote LLM
 
 # Audio processing
 sounddevice==0.5.3
@@ -40,6 +44,10 @@ onnxruntime==1.23.2
 llama_cpp_python==0.3.23
 qwen-asr==0.0.6
 sentence-transformers==5.1.2
+# Tiny tier (CPU-friendly backends): Moonshine ASR rides on transformers
+# above; Kokoro TTS needs its own package (+ espeak-ng system dep for G2P).
+misaki[en]==0.9.4   # G2P for the Kokoro ONNX TTS backend (pulls spacy en_core_web_sm)
+librosa==0.11.0   # Qwen3-ASR ONNX backend (asr.backend: qwen-onnx) mel features
 
 # These packages require special install flags - see Dockerfile
 # qwen-tts: pip install --no-deps git+https://github.com/liampetti/Qwen3-TTS-streaming.git@97da215

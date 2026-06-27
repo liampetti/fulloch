@@ -8,11 +8,11 @@
 
 _The **Ful**ly **Loc**al **H**ome Voice Assistant - private, conversational, 100% on-device._
 
-A voice assistant with agentic memory, web research, and smart-home control running entirely on your own GPU. Speech recognition, the language model, and the spoken voice never leave your machine.
+A voice assistant with agentic memory, web research, and smart-home control running entirely on your own home computer or server. Speech recognition, the language model, and the spoken voice never needs to leave your machine.
 
-Fulloch is the conversational brain on top of your existing setup: it drives **[Home Assistant](https://github.com/home-assistant)** for smart-home control and reads/writes plain **Markdown notes**, so it plugs straight into an **[Obsidian](https://github.com/obsidianmd/obsidian-releases)** vault or any Markdown workflow.
+Fulloch is the conversational brain on top of your existing setup: it drives **[Home Assistant](https://github.com/home-assistant)** for smart-home control and reads/writes plain **Markdown notes**, so it plugs straight into an **[Obsidian](https://github.com/obsidianmd/obsidian-releases)** vault or any Markdown workflow, it can also search the web and return information summaries using **[SearXNG](https://github.com/searxng/searxng)**.
 
-**Minimum hardware:** 16GB VRAM GPU (e.g. RTX 5060 Ti). The full pipeline is GPU-resident.
+**Hardware:** the **GPU Tier** all-in-one stack needs a GPU (tested on an NVIDIA RTX 5060 Ti, 16GB VRAM); the **CPU Tier** stacks run on a standard CPU-only PC (tested on an AMD Ryzen 9 7900, 32GB RAM), for simple regex commands fully locally, or with an OpenAI-compatible LLM on another server (e.g. your GPU box) for full conversation.
 
 ## Features
 
@@ -27,25 +27,31 @@ Fulloch is the conversational brain on top of your existing setup: it drives **[
 - **Music search & play** - *"play the Beatles"* via [SpotifyPlus](https://github.com/thlucas1/homeassistantcomponent_spotifyplus)
 - **Calendar reminders** - creates events on a dedicated HA calendar and speaks them at the right time
 - **Thinking mode** - *"think about X"* for a slower, deeper answer; interrupt to get a partial summary
-- **Cloned voice** - speaks in a voice cloned from a few seconds of reference audio
-- **Web dashboard** *(optional)* - type from your phone; voice and text share the same brain and history
+- **Cloned voice** *(Full GPU stack)* - speaks in a voice cloned from a few seconds of reference audio; the CPU stacks use fast built-in named voices instead
+- **Web dashboard** - setup wizard, settings console, and a phone-friendly chat UI in one place; voice and text share the same brain and history
 
-## Installation
+## Quick installation
 
-Requires an NVIDIA GPU with CUDA (16GB VRAM) and Docker.
-
-### Linux (Docker)
-
+### Docker Compose
+- **GPU (no SearXNG)**
 ```bash
-git clone https://github.com/liampetti/fulloch.git
-cd fulloch
-./launch.sh
+docker compose up -d
+```
+- **GPU + SearXNG**
+```bash
+docker compose -f compose.yml -f compose.searxng.yml up -d
+```
+- **CPU (no SearXNG)**
+```bash
+docker compose -f compose.yml -f compose.cpu.yml up -d
+```
+- **CPU + SearXNG**
+```bash
+docker compose -f compose.yml -f compose.cpu.yml -f compose.searxng.yml up -d
 ```
 
-`launch.sh` creates `data/config.yml` and `.env` from templates (pausing for you to edit them), downloads the models, and starts Docker Compose.
-
 ### Windows
-
+- **Directsound access for Windows users**
 ```bat
 git clone https://github.com/liampetti/fulloch.git
 cd fulloch
@@ -53,53 +59,26 @@ pip install -r requirements.txt
 launch.bat
 ```
 
-Requires Python 3.10+ and Docker Desktop. SearXNG runs in Docker; the assistant runs natively in Python, with no audio-passthrough setup.
-
-> **Reproducible installs:** `requirements.txt` pins direct dependencies, but the CUDA stack (`torch`, git-installed `qwen-tts` / `flash-attn`) can't be PyPI-locked cleanly. Freeze a known-good image with `docker compose run --rm app pip freeze > requirements.lock`.
+### Once launched
+- Open `http://localhost:8765` and follow the wizard.
 
 ## Configuration
 
-Everything lives in `data/config.yml`; secrets live in `.env`. Key settings:
+The **setup wizard** configures Fulloch on first boot, and the **settings console** (gear icon, the same web UI) edits every option afterwards. Everything is reachable from the UI: wakeword, barge-in, voice, the Home Assistant connection, notes path, and web search. But if you'd rather hand-edit, the full annotated reference is [`data/config.example.yml`](data/config.example.yml).
 
-```yaml
-general:
-  wakeword: "hey atticus"         # activation phrase
-  barge_in: "wakeword"            # "off" | "wakeword" (interrupt mid-response)
-  follow_up_time: "5s"            # wakeword-free reply window after TTS ends
-  voice_clone: "atticus"          # data/voices/<name>.{wav,txt}
-  dashboard_port: 8765            # web chat UI; remove to disable
-  dashboard_host: "127.0.0.1"     # local-only; "0.0.0.0" to reach it from other devices
-  use_vad: true                   # drop non-speech buffers (coughs, taps) before ASR
-  asr_context_hint: true          # bias ASR decoder toward the wakeword spelling
-  asr_context_terms:              # optional extra terms to bias (max 10)
-    - "phoebe bridgers"
-
-home_assistant:
-  url: "http://192.168.1.50:8123"
-  token: "your_long_lived_access_token"  # or set FULLOCH_HA_TOKEN in .env (preferred)
-  calendar: "Fulloch"             # HA calendar for voice reminders (optional)
-
-notes:
-  path: "/path/to/obsidian/vault" # defaults to data/notes/
-  daily_subdir: "daily"           # optional daily journal subfolder
-
-search:
-  searxng_url: "http://localhost:8080/search"
-```
-
-Secrets in `.env`: `SEARXNG_SECRET` (required), `FULLOCH_DASHBOARD_TOKEN` (dashboard auth), `FULLOCH_HA_TOKEN` (overrides `home_assistant.token`). Full reference: [`data/config.example.yml`](data/config.example.yml) and [`.env.example`](.env.example).
+Secrets live in `.env`, all optional. See [`.env.example`](.env.example).
 
 ## Web Dashboard
 
-Setting `general.dashboard_port` serves a phone-friendly chat UI; voice and text share the same brain and history. While Fulloch is thinking or speaking, whether the turn started by voice or text, the send button becomes a **Stop** button that halts it instantly and silently. It also exposes **Facts**, **Notes**, and **Entities** management tabs.
+The web dashboard is **unauthenticated and bound to `127.0.0.1` by default**. To reach it from another device you need to set dashboard host to 0.0.0.0 and set a `FULLOCH_DASHBOARD_TOKEN` in `.env`. 
 
-Because it can read/write notes, toggle the mic, speak through your speakers, and drive Home Assistant, it is **unauthenticated and bound to `127.0.0.1` by default**. To reach it from another device:
+### OpenAI Endpoint
 
-1. **Bind to your network** - `general.dashboard_host: "0.0.0.0"`.
-2. **Require a token** - set `FULLOCH_DASHBOARD_TOKEN` in `.env` (`openssl rand -hex 32`). Mandatory: without it anyone on your LAN gets full control, and Fulloch warns at startup.
-3. **Open it once** at `http://<host-ip>:<port>/?token=<token>` (find the IP with `hostname -I`). The browser stores the token and strips it from the URL, so you can bookmark the bare address.
+<img src="parloch.png" alt="Fulloch being Parloch" width="180" align="right">
 
-> **HTTPS (optional):** over plain HTTP the token is sent in clear text, which is fine on a trusted LAN. To encrypt, set `dashboard_ssl_certfile` and `dashboard_ssl_keyfile` (both required) in `config.yml`. For certs that don't trip browser warnings, use [mkcert](https://github.com/FiloSottile/mkcert). In Docker the cert/key must live under `./data` (the only mounted host folder). Don't expose this to the public internet without a reverse proxy doing TLS.
+The moment you point the language model at an OpenAI-compatible endpoint, the avatar and favicon swap to a travelling version of the character (Let's call him *Parloch*: The **Par**tially **loc**al **h**ome voice assistant), and the tagline reads *"language model is off-device."* Pick a local model again (**None** or the GPU 9B) and Fulloch comes home. It triggers as soon as a remote endpoint is *configured*, even if it is on your home network.
+
+> **Important:** If you are using an OpenAI endpoint you will lose the GBNF enforced JSON formatting that comes with the built-in LLM. This means there is a higher risk of tool call errors when running the LLM remotely.
 
 ## Home Assistant Integration
 
@@ -171,15 +150,6 @@ Common commands take a regex fast-path that skips the language model entirely, f
 | *"what time is it"* | time |
 | *"think about …"* · *"summarise your thinking"* | thinking mode |
 
-## The Local Stack
-
-| Model | Role |
-| -- | -- |
-| Qwen3.5-9B GGUF Q5_K_M (llama.cpp) | Language model |
-| Qwen3-ASR-1.7B | Speech recognition |
-| Qwen3-TTS-12Hz-1.7B-Base | Text-to-speech |
-| bge-small-en-v1.5 | Semantic note search |
-
 ## Reporting a Problem
 
 Submit a [Bug Report](https://github.com/liampetti/fulloch/issues/new?labels=bug) or a [Feature Request](https://github.com/liampetti/fulloch/issues/new?labels=enhancement).
@@ -193,6 +163,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add tools and submit changes.
 Voices in `data/voices/`:
 - **`atticus` / `tulloch`** - generated with [Qwen3-TTS-12Hz-1.7B-VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) (Apache-2.0) from text descriptions; synthetic, not clones of real people
 - **`cori`** - sample from [Piper](https://github.com/rhasspy/piper) `en_GB/cori/high` by Bryce Beattie, trained on LibriVox recordings (MIT / public domain)
+- **`All Kokoro voices`** - generated with [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) (Apache-2.0)
 
 ## License
 

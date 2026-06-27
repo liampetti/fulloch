@@ -103,6 +103,9 @@ def _import_tts():
     fake_sd = types.ModuleType("sounddevice")
     fake_sd.OutputStream = _FakeStream
     tts.sd = fake_sd
+    # The model load is deferred behind load_tts() now — call it so the
+    # module-global `model` is populated with the fake before the worker runs.
+    tts.load_tts()
     return tts
 
 

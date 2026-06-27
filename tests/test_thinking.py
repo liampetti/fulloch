@@ -41,8 +41,10 @@ class TestGenerateSlmThinkingMode:
 
     @pytest.fixture
     def fake_model(self):
-        """A stand-in for Llama that records the messages it was given."""
+        """A stand-in for a Qwen-loaded Llama that records its messages."""
         model = MagicMock()
+        # load_slm stamps this; the Qwen family uses the /think text directive.
+        model._fulloch_think_style = "qwen"
         model.create_chat_completion.return_value = iter([
             {"choices": [{"delta": {"content": "ok"}}]}
         ])
@@ -68,6 +70,18 @@ class TestGenerateSlmThinkingMode:
         messages = fake_model.create_chat_completion.call_args.kwargs["messages"]
         user_msg = messages[-1]
         assert user_msg["content"] == "what should I do"
+
+    def test_non_qwen_family_gets_no_directive(self, fake_model):
+        # Gemma (think_style "") has no working in-process /think handle, so the
+        # prompt is sent unchanged even in thinking_mode.
+        fake_model._fulloch_think_style = ""
+        slm.generate_slm(
+            fake_model,
+            user_prompt="what should I do",
+            thinking_mode=True,
+        )
+        messages = fake_model.create_chat_completion.call_args.kwargs["messages"]
+        assert messages[-1]["content"] == "what should I do"
 
     def test_thinking_mode_with_history(self, fake_model):
         history = [

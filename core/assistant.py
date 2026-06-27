@@ -30,13 +30,21 @@ from .agent_loop import (
     AgentLoop,
 )
 from .audio import AudioCapture, resolve_device
+from .backends import ASR, LLM, TTS, get_module, resolve_models
 from .noise_baseline import BackgroundNoiseBaseline
-from .slm import ContextExhaustedError, generate_slm, load_slm
+from .slm import ContextExhaustedError, RemoteUnreachable, generate_slm, load_slm
 from .text_utils import clean_for_tts, split_sentences
 from .tts_session import TtsSession, parse_barge_time
-from .turn_stats import TurnStats
+from .turn_stats import TurnStats, set_model_labels
 
 logger = logging.getLogger(__name__)
+
+# Names accepted by general.log_level, for the settings-console hot-apply
+# (mirrors the map in app.py; the root logger level is the live handle).
+_LOG_LEVELS = {
+    "debug": logging.DEBUG, "info": logging.INFO,
+    "warning": logging.WARNING, "error": logging.ERROR,
+}
 
 # Strips every non-word character. The self-echo check uses this so ASR's
 # "1254" / "am" still match the assistant's spoken "12 54" / "a m" — the
@@ -134,11 +142,13 @@ def _build_barge_pattern(wakeword: str, base_pattern: str) -> str:
 from utils.phrases import (  # noqa: E402
     ACK_PHRASES,
     GREETING_TOPICS,
+    NO_AI_PHRASES,
     NOTE_WRITE_STALL_PHRASES,
     PRE_THINKING_STALL_PHRASES,
     REMINDER_PREFIX_PHRASES,
     REPLAN_STALL_PHRASES,
     THINKING_STALL_PHRASES,
+    TOOL_UNAVAILABLE_PHRASES,
     WEB_SEARCH_STALL_PHRASES,
 )
 
@@ -146,6 +156,15 @@ from utils.phrases import (  # noqa: E402
 # thoughts' request returns a graceful 'no recent thoughts' message
 # rather than dredging up a stale reasoning trace.
 THINKING_PARTIAL_TTL_S = 60.0
+
+# Token cap for the free-text *spoken* summaries (web-search result + cancelled
+# thinking). Both prompts ask for a few sentences, but they run WITHOUT the agent
+# GBNF grammar, so on a remote endpoint nothing bounds length — Qwen3.5 was seen
+# generating 3000+ tokens (~45s) "summarising" web snippets. A spoken answer of a
+# few sentences is well under this; truncating free text past it is harmless
+# (unlike the JSON agent call, where a cap could break parsing). The local path
+# was unaffected only because its grammar stops generation almost immediately.
+SUMMARY_MAX_NEW_TOKENS = 256
 
 # Unified conversation memory cap. Holds user / assistant (raw agent JSON) /
 # tool entries so the agent sees the full turn trace on each replan. Sized
@@ -176,6 +195,16 @@ CONTEXT_EXHAUSTED_REPLY = (
 # enqueued by the recorder, so it lands well clear of this window.
 DROP_AFTER_CANCEL_S = 0.5
 
+# A bare wakeword (no command following) is the shape the ASR decoder most
+# readily fabricates from voiced non-speech: the `asr_context_hint` prompt primes
+# the wakeword spelling with nothing to anchor it, so a cough/sigh/TV burst
+# decodes to "hey atticus". `_verify_bare_wakeword` gates opening the follow-up
+# window on one. The loudness gate rejects a bare wakeword that sits at or below
+# the background-speech baseline by this margin (dBFS) — a genuine wakeword is
+# the user, closer/louder than ambient media. 0.0 = must be at least as loud as
+# the baseline; raise it to demand a clearer margin over background.
+BARE_WAKEWORD_MIN_OVER_BASELINE_DB = 0.0
+
 
 class Assistant:
     """Owns the audio capture and runs the wakeword → intent → TTS loop."""
@@ -185,6 +214,7 @@ class Assistant:
         wakeword: str,
         wakeword_pattern: Optional[str] = None,
         voice_clone: Optional[str] = None,
+        tts_speed: Optional[float] = None,
         barge_in: str = "off",
         barge_in_threshold_dbfs: Optional[float] = None,
         follow_up_time: str = "0s",
@@ -198,6 +228,8 @@ class Assistant:
         vad_endpoint_silence_ms: Optional[int] = None,
         vad_min_speech_ms: Optional[int] = None,
         vad_soft_endpoint_silence_ms: Optional[int] = None,
+        models: Optional[dict] = None,
+        lifecycle=None,
     ):
         """
         Initialize the assistant.
@@ -258,6 +290,7 @@ class Assistant:
             re.IGNORECASE,
         )
         self.voice_clone = voice_clone
+        self.tts_speed = tts_speed
         self.asr_language = asr_language
         self.asr_context_hint = asr_context_hint
         self.asr_context_terms = asr_context_terms or []
@@ -270,6 +303,11 @@ class Assistant:
             for term in self.asr_context_terms
             for tok in re.sub(r"[^\w\s]", "", term.lower()).split()
         )
+        # Leading scaffolding of the `asr_context_hint` prompt (e.g. "technical
+        # terms"); set when the context is built in `_load_models`. The decoder
+        # echoes it verbatim off non-speech, so the transcriber drops any result
+        # containing it. Empty when the hint is off.
+        self._context_prompt_marker = ""
         self.use_vad = use_vad
         # Built in `_load_models()` once the TTS model is in memory.
         self.voice_clone_prompt = None
@@ -311,6 +349,11 @@ class Assistant:
         # result may only commit a turn at the dispatch gate — never trigger the
         # follow-up/stand-down/baseline side effects — and is ignored mid-turn.
         self._asr_provisional: dict = {'flag': False}
+        # Written by the ASR stream generator: the raw audio buffer currently
+        # being transcribed, kept so a bare wakeword can be re-transcribed
+        # without the context bias to confirm it isn't a bias-prompt echo (see
+        # `_verify_bare_wakeword`).
+        self._asr_audio: dict = {'buf': None}
         self._noise_baseline = BackgroundNoiseBaseline()
 
         # Turn state (only meaningful in barge-in mode). A "turn" runs the SLM
@@ -366,6 +409,38 @@ class Assistant:
         # so the same reminder can re-fire on a different day or after a restart.
         self._spoken_reminders: dict[tuple[str, str], float] = {}
 
+        # Backend selection. `models` is the parsed `models:` config block
+        # (or None — defaults to the Qwen stack). Resolved once through the
+        # registry so `_load_models` and the no-LLM gate share one source of
+        # truth. `llm_enabled` is False for `llm.backend: none`, which runs a
+        # regex-only assistant that never touches the SLM.
+        self._models = resolve_models(models)
+        self.llm_enabled = self._models[LLM]["backend"] != "none"
+        # The resolved LLM backend name (e.g. "llama"/"openai"/"none"). The
+        # dashboard reads this to swap to the "Parloch" branding when the model
+        # runs off-device over a remote OpenAI-compatible endpoint.
+        self.llm_backend = self._models[LLM]["backend"]
+        # Remote-LLM reachability, for the dashboard's "Parloch unreachable" banner.
+        # Only meaningful when llm_backend == "openai". None = not yet probed;
+        # True/False = last known reachability. Set by a startup probe and updated
+        # on every turn (a RemoteUnreachable catch flips it False, a successful
+        # remote generation flips it True). The branding (Parloch) keys off the
+        # *configured* backend, not this — an off-device LLM that's down is still
+        # Parloch, just degraded to regex/fast-path only.
+        self._llm_remote_ok: bool | None = None
+        self._llm_remote_error: str = ""
+        # Optional startup-lifecycle handle (server.lifecycle.Lifecycle). When
+        # present, `_load_models` advances it LOADING -> READY so the dashboard
+        # can show a loading screen and hand off to the assistant when the
+        # greeting fires. None in tests / non-server use.
+        self.lifecycle = lifecycle
+        logger.info(
+            "Backends: asr=%s tts=%s llm=%s",
+            self._models["asr"]["backend"],
+            self._models["tts"]["backend"],
+            self._models[LLM]["backend"],
+        )
+
         # Models loaded lazily in transcriber thread
         self.asr_pipe = None
         self.asr_stream_generator = None
@@ -373,6 +448,12 @@ class Assistant:
         self.grammar = None
         self.greeting_prompt = None
         self.web_summary_prompt = None
+        # Pre-rendered "no AI model" fallback clips (see NO_AI_PHRASES).
+        # Populated in `_warm_and_announce`; played on a no-LLM miss.
+        self.no_ai_cache: list = []
+        # Pre-rendered "tool not available" clips (see TOOL_UNAVAILABLE_PHRASES).
+        # Played by the hallucinated-tool guard instead of a fabricated answer.
+        self.tool_unavailable_cache: list = []
 
         # Serializes SLM access. Voice turns run on the transcriber or barge-in
         # worker; text turns from the dashboard run on the FastAPI thread —
@@ -391,12 +472,134 @@ class Assistant:
         # wait on this before calling into the pipeline.
         self.models_ready = threading.Event()
 
-    def _load_models(self):
-        """Load ASR, TTS and SLM models."""
-        from .asr import load_asr_model, stream_generator
-        logger.info("Using Qwen ASR")
+    @staticmethod
+    def _llm_stat_label(llm_cfg: dict) -> str:
+        """A concise LLM label for the dashboard stats panel."""
+        backend = llm_cfg["backend"]
+        if backend == "none":
+            return "none (regex-only)"
+        if backend == "openai":
+            return f"OpenAI: {llm_cfg.get('model') or '?'}"
+        # Local llama.cpp — show the gguf filename without the extension.
+        import os
+        name = os.path.basename(str(llm_cfg.get("model") or ""))
+        return name[:-5] if name.endswith(".gguf") else (name or llm_cfg["spec"].display_name)
 
-        self.asr_pipe = load_asr_model(language=self.asr_language)
+    def _diagnose_failure(self, exc, spec=None) -> tuple:
+        """Return ``(fatal, message)`` for a model load/runtime failure.
+
+        Turns an opaque backend exception into a plain-language line for the
+        setup screen's red alert, so the user can pick a working configuration
+        without trawling debug logs. ``fatal`` is True for GPU / out-of-memory
+        class failures — the model or CUDA context is poisoned and every later
+        turn would fail too, which is the signal to bounce back to setup.
+
+        The common failure on this hardware is simply too large a model for the
+        card, so when VRAM is readable we name the free / required amounts.
+        """
+        # Markers of an unrecoverable GPU failure. llama.cpp reports an OOM at
+        # context creation as the opaque "Failed to create llama_context";
+        # torch / CUDA say "out of memory" or raise a CUDA error.
+        markers = (
+            "out of memory", "failed to create llama_context", "cudamalloc",
+            "cuda error", "cublas", "cudnn", "device-side assert",
+            "illegal memory access", "ggml_cuda",
+        )
+        name = getattr(spec, "display_name", None) or "the model"
+        msg = (str(exc) or exc.__class__.__name__).strip()
+        low = msg.lower()
+        fatal = any(m in low for m in markers)
+        looks_oom = any(
+            m in low for m in ("out of memory", "llama_context", "cudamalloc")
+        )
+
+        vram = ""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                free, total = torch.cuda.mem_get_info()
+                free_gb, total_gb = free / 1e9, total / 1e9
+                need = getattr(spec, "vram_gb", 0) or 0
+                vram = f" ({free_gb:.1f} GB of {total_gb:.1f} GB GPU memory free"
+                if need:
+                    vram += f"; {name} needs about {need:.0f} GB"
+                    if free_gb + 0.3 < need:  # short of the model's own estimate
+                        fatal = looks_oom = True
+                vram += ")."
+        except Exception:  # noqa: BLE001 — diagnostics must never raise
+            pass
+
+        if looks_oom:
+            return True, (
+                f"Out of GPU memory — the current setup is too large for your "
+                f"hardware.{vram} Choose a lighter tier or a smaller model below."
+            )
+        if fatal:
+            return True, (
+                f"{name} hit an unrecoverable GPU error and stopped: {msg}.{vram} "
+                f"Try a lighter configuration below."
+            )
+        return False, f"{name} error: {msg}"
+
+    def _enter_error_state(self, detail: str) -> None:
+        """Flip the app to the ERROR lifecycle phase with a user-facing detail.
+
+        The web UI polls ``/status``; on ERROR the dashboard redirects to the
+        setup screen, which shows ``detail`` in a red alert and drops into the
+        wizard so the user can choose a working configuration. Safe no-op when
+        there's no lifecycle (tests / headless runs).
+        """
+        if self.lifecycle is not None:
+            self.lifecycle.set("ERROR", detail)
+
+    def _note_runtime_error(self, exc) -> None:
+        """Escalate a fatal mid-turn crash to the ERROR state.
+
+        Per-turn errors are otherwise just logged so one bad turn can't take the
+        assistant down. But a GPU / out-of-memory class failure poisons the
+        model for every following turn, so we bounce the user back to setup with
+        an explanation instead of failing silently turn after turn.
+        """
+        fatal, detail = self._diagnose_failure(exc)
+        if fatal:
+            logger.error("Fatal runtime error — switching to setup: %s", detail)
+            self._enter_error_state(detail)
+
+    def _load_models(self):
+        """Load the configured ASR, TTS and (optionally) LLM backends.
+
+        Backends are resolved through `core.backends`: each domain's module is
+        imported from the registry and its load + helper functions are pulled
+        from it, so swapping `models.<domain>.backend` swaps the implementation
+        with no orchestrator change. `llm.backend: none` skips the SLM entirely.
+        """
+        if self.lifecycle is not None:
+            self.lifecycle.set("LOADING", "loading models")
+
+        # Backend currently being loaded — read by `_diagnose_failure` so a load
+        # crash names the culprit (and its VRAM estimate) on the setup alert.
+        self._loading_backend = None
+
+        asr_cfg = self._models[ASR]
+        tts_cfg = self._models[TTS]
+        llm_cfg = self._models[LLM]
+
+        # Make the dashboard stats panel show the backends actually in use.
+        set_model_labels(
+            stt=asr_cfg["spec"].display_name,
+            tts=tts_cfg["spec"].display_name,
+            llm=self._llm_stat_label(llm_cfg),
+        )
+
+        # --- ASR -----------------------------------------------------------
+        self._loading_backend = asr_cfg["spec"]
+        asr_mod = get_module(ASR, asr_cfg["backend"])
+        logger.info(f"Using {asr_cfg['spec'].display_name}")
+        self.asr_pipe = asr_mod.load_asr_model(
+            model_name=asr_cfg["model"],
+            language=self.asr_language,
+            **asr_cfg["opts"],
+        )
         if self.asr_context_hint:
             _MAX_CONTEXT_TERMS = 10
             extras = [t for t in self.asr_context_terms if t]
@@ -409,29 +612,47 @@ class Assistant:
             terms = [self.wakeword] + extras
             self.asr_pipe.context = "Technical terms: " + ", ".join(terms)
             logger.info(f"ASR context hint enabled: {self.asr_pipe.context!r}")
-        self.asr_stream_generator = stream_generator
+            # The decoder sometimes regurgitates the prompt scaffolding verbatim
+            # off non-speech ("Technical terms: hey atticus, <garbage>") — that
+            # carries the wakeword plus a non-term tail, so neither
+            # _is_context_echo nor the bare-wakeword guard catches it. The leading
+            # marker (everything before the first colon) is an unambiguous tell a
+            # user never utters; the transcriber drops any result containing it.
+            self._context_prompt_marker = (
+                self.asr_pipe.context.split(":", 1)[0].strip().lower()
+            )
+        self.asr_stream_generator = asr_mod.stream_generator
+        # Pay the ONNX cold-start (ORT kernel/arena init) now, not on the user's
+        # first command. No-op on backends that don't implement it (e.g. GPU Qwen).
+        if hasattr(self.asr_pipe, "warmup"):
+            self.asr_pipe.warmup()
 
-        from .tts import (
-            play_chunks,
-            set_output_device,
-            set_tts_active_event,
-            set_voice,
-            speak_stream,
-            synthesize,
-            warmup_model,
-        )
+        # --- TTS -----------------------------------------------------------
+        self._loading_backend = tts_cfg["spec"]
+        tts_mod = get_module(TTS, tts_cfg["backend"])
+        # Kept for the settings-console hot-apply (set_voice/set_speed live).
+        # The backend gates which of those can apply without a restart: Kokoro
+        # swaps voice/speed instantly; Qwen's clone needs a warmup + phrase-cache
+        # re-render, so it stays restart-only (see apply_hot_config).
+        self._tts_module = tts_mod
+        self._tts_backend = tts_cfg["backend"]
         output_device = resolve_device(self.output_device, want_input=False)
-        set_output_device(output_device)
+        tts_mod.set_output_device(output_device)
         # The recorder uses this to switch to a stricter silence threshold
         # while we're talking, so AEC residue doesn't keep utterances alive.
-        set_tts_active_event(self.audio_capture.tts_active)
-        logger.info(f"Using Qwen TTS Base with voice clone: {self.voice_clone}")
-        self.voice_clone_prompt = set_voice(self.voice_clone)
-        warmup_model(self.voice_clone_prompt)
+        tts_mod.set_tts_active_event(self.audio_capture.tts_active)
+        logger.info(
+            f"Using {tts_cfg['spec'].display_name} with voice clone: {self.voice_clone}"
+        )
+        tts_mod.load_tts(model_id=tts_cfg["model"], **tts_cfg["opts"])
+        if self.tts_speed is not None and hasattr(tts_mod, "set_speed"):
+            tts_mod.set_speed(self.tts_speed)
+        self.voice_clone_prompt = tts_mod.set_voice(self.voice_clone)
+        tts_mod.warmup_model(self.voice_clone_prompt)
 
-        self.speak_stream = speak_stream
-        self.synthesize = synthesize
-        self.play_chunks = play_chunks
+        self.speak_stream = tts_mod.speak_stream
+        self.synthesize = tts_mod.synthesize
+        self.play_chunks = tts_mod.play_chunks
         self.web_search_stall_cache: list = []
         self.note_write_stall_cache: list = []
         self.pre_thinking_stall_cache: list = []
@@ -439,12 +660,40 @@ class Assistant:
         self.ack_cache: list = []
         self.replan_stall_cache: list = []
 
-        self.grammar, self.slm_model = load_slm()
-        self.greeting_prompt = get_greeting_system_prompt(self.wakeword_name)
-        self.web_summary_prompt = get_web_summary_system_prompt()
+        # --- LLM -----------------------------------------------------------
+        if self.llm_enabled:
+            self._loading_backend = llm_cfg["spec"]
+            logger.info(f"Using {llm_cfg['spec'].display_name}")
+            backend = llm_cfg["backend"]
+            if backend == "openai":
+                from .llm_openai import load_openai
+                self.grammar, self.slm_model = load_openai(
+                    model=llm_cfg["model"], **llm_cfg["opts"]
+                )
+            else:  # local llama.cpp (default)
+                load_kwargs = {
+                    "model_path": llm_cfg["model"],
+                    # Reasoning-directive family (qwen | "" for Gemma/other).
+                    "think_style": llm_cfg["spec"].think_style,
+                }
+                if llm_cfg["n_context"]:
+                    load_kwargs["n_ctx"] = llm_cfg["n_context"]
+                self.grammar, self.slm_model = load_slm(**load_kwargs, **llm_cfg["opts"])
+            self.greeting_prompt = get_greeting_system_prompt(self.wakeword_name)
+            self.web_summary_prompt = get_web_summary_system_prompt()
+        else:
+            logger.info("No LLM backend — running regex-only (basic commands)")
 
         self.models_ready.set()
+        # Probe the remote LLM (if any) in the background so a down/misconfigured
+        # endpoint surfaces the dashboard banner without waiting for a first turn.
+        if self.llm_backend == "openai":
+            threading.Thread(target=self._probe_remote_llm, daemon=True).start()
         self._warm_and_announce()
+        # The opening greeting has played — the assistant is live. Flip the
+        # lifecycle so the dashboard hands off from the loading screen.
+        if self.lifecycle is not None:
+            self.lifecycle.set("READY")
         self._start_reminder_poll()
         try:
             from tools.time_tools import set_beep_device, set_speak_callback
@@ -452,6 +701,41 @@ class Assistant:
             set_beep_device(output_device)
         except ImportError:
             pass
+
+    def _note_llm_remote_status(self, ok: bool, error: str = "") -> None:
+        """Record the last-known reachability of the remote LLM endpoint.
+
+        No-op unless the LLM is the remote OpenAI backend. Called from the agent
+        loop (failure on a RemoteUnreachable catch, success after a generation)
+        and the startup probe, so the dashboard reflects live reachability.
+        """
+        if self.llm_backend != "openai":
+            return
+        self._llm_remote_ok = ok
+        self._llm_remote_error = "" if ok else (error or "unreachable")
+
+    @property
+    def remote_llm_unreachable(self) -> bool:
+        """True when the off-device LLM is configured but not reachable — the
+        dashboard shows a red 'regex/fast-path only' banner. False while
+        reachable or not yet probed (None), so the banner never flashes on a
+        healthy or still-starting endpoint."""
+        return self.llm_backend == "openai" and self._llm_remote_ok is False
+
+    def _probe_remote_llm(self) -> None:
+        """One-shot reachability probe so the dashboard banner reflects a down
+        endpoint *before* the user speaks. Runs on a daemon thread (the 1-token
+        ping can block on a dead connect)."""
+        client = self.slm_model
+        if client is None or not getattr(client, "_fulloch_remote", False):
+            return
+        try:
+            ok, error = client.ping()
+        except Exception as e:  # noqa: BLE001 — never let the probe crash startup
+            ok, error = False, f"{type(e).__name__}: {e}"
+        self._note_llm_remote_status(ok, error)
+        if not ok:
+            logger.warning("Remote LLM probe failed (%s) — regex/fast-path only", error)
 
     def _warm_and_announce(self):
         """Prime every cache, then speak the opening greeting.
@@ -467,71 +751,107 @@ class Assistant:
         """
         self.audio_capture.transcribing = False
         try:
-            # Prime the agent prompt's KV-cache so the first real user
-            # request reuses the prefilled prefix.
-            logger.info("Priming agent cache...")
-            generate_slm(
-                self.slm_model,
-                user_prompt=CACHE_PRIMING_USER_PROMPT,
-                grammar=self.grammar,
-                system_prompt=get_agent_system_prompt(),
-            )
-
-            # Pre-render the context-specific stall phrases so each plays
-            # instantly and in the cloned voice (synthesizing them live each
-            # turn made them too short for the clone to lock in).
-            logger.info("Caching web-search stall phrases...")
-            self.web_search_stall_cache = [
+            # Pre-render the "no AI model" fallback + ack clips. The fallback
+            # is the no-LLM tier's spoken miss-handler (and the remote-down
+            # path in Step 6); both play regardless of whether an SLM loaded.
+            logger.info("Caching no-AI fallback phrases...")
+            self.no_ai_cache = [
                 self.synthesize(phrase, self.voice_clone_prompt)
-                for phrase in WEB_SEARCH_STALL_PHRASES
-            ]
-            logger.info("Caching note-write stall phrases...")
-            self.note_write_stall_cache = [
-                self.synthesize(phrase, self.voice_clone_prompt)
-                for phrase in NOTE_WRITE_STALL_PHRASES
-            ]
-            logger.info("Caching pre-thinking stall phrases...")
-            self.pre_thinking_stall_cache = [
-                self.synthesize(phrase, self.voice_clone_prompt)
-                for phrase in PRE_THINKING_STALL_PHRASES
-            ]
-            logger.info("Caching thinking stall phrases...")
-            self.thinking_stall_cache = [
-                self.synthesize(phrase, self.voice_clone_prompt)
-                for phrase in THINKING_STALL_PHRASES
+                for phrase in NO_AI_PHRASES
             ]
             logger.info("Caching ack phrases...")
             self.ack_cache = [
                 self.synthesize(phrase, self.voice_clone_prompt)
                 for phrase in ACK_PHRASES
             ]
-            logger.info("Caching replan stall phrases...")
-            self.replan_stall_cache = [
+            logger.info("Caching tool-unavailable phrases...")
+            self.tool_unavailable_cache = [
                 self.synthesize(phrase, self.voice_clone_prompt)
-                for phrase in REPLAN_STALL_PHRASES
+                for phrase in TOOL_UNAVAILABLE_PHRASES
             ]
 
-            # Pre-load the BGE embedding model + restore the persisted notes
-            # index so the first semantic-search query doesn't pay the
-            # SentenceTransformer load + initial scan latency.
-            try:
-                from tools.notes import warm_index
-                logger.info("Warming notes index...")
-                if warm_index():
-                    logger.info("Notes index ready.")
-            except Exception:
-                logger.exception("Notes index warmup failed; semantic search will load lazily")
+            if self.llm_enabled:
+                # Prime the agent prompt's KV-cache so the first real user
+                # request reuses the prefilled prefix. A remote endpoint that's
+                # down at startup mustn't crash boot — skip the prime and carry
+                # on (turns degrade to regex-only until it's reachable).
+                logger.info("Priming agent cache...")
+                try:
+                    generate_slm(
+                        self.slm_model,
+                        user_prompt=CACHE_PRIMING_USER_PROMPT,
+                        grammar=self.grammar,
+                        system_prompt=get_agent_system_prompt(self.wakeword_name),
+                    )
+                except RemoteUnreachable:
+                    logger.warning("Remote LLM unreachable at startup — skipping cache prime")
+
+                # Pre-render the context-specific stall phrases so each plays
+                # instantly and in the cloned voice (synthesizing them live each
+                # turn made them too short for the clone to lock in). These are
+                # only reached on SLM-driven turns, so skip them with no LLM.
+                logger.info("Caching web-search stall phrases...")
+                self.web_search_stall_cache = [
+                    self.synthesize(phrase, self.voice_clone_prompt)
+                    for phrase in WEB_SEARCH_STALL_PHRASES
+                ]
+                logger.info("Caching note-write stall phrases...")
+                self.note_write_stall_cache = [
+                    self.synthesize(phrase, self.voice_clone_prompt)
+                    for phrase in NOTE_WRITE_STALL_PHRASES
+                ]
+                logger.info("Caching pre-thinking stall phrases...")
+                self.pre_thinking_stall_cache = [
+                    self.synthesize(phrase, self.voice_clone_prompt)
+                    for phrase in PRE_THINKING_STALL_PHRASES
+                ]
+                logger.info("Caching thinking stall phrases...")
+                self.thinking_stall_cache = [
+                    self.synthesize(phrase, self.voice_clone_prompt)
+                    for phrase in THINKING_STALL_PHRASES
+                ]
+                logger.info("Caching replan stall phrases...")
+                self.replan_stall_cache = [
+                    self.synthesize(phrase, self.voice_clone_prompt)
+                    for phrase in REPLAN_STALL_PHRASES
+                ]
+
+                # Pre-load the BGE embedding model + restore the persisted notes
+                # index so the first semantic-search query doesn't pay the
+                # SentenceTransformer load + initial scan latency. Semantic
+                # note search is only reachable via the SLM agent, so skip the
+                # (heavy) warmup with no LLM — it loads lazily if ever needed.
+                try:
+                    from tools.notes import warm_index
+                    logger.info("Warming notes index...")
+                    if warm_index():
+                        logger.info("Notes index ready.")
+                except Exception:
+                    logger.exception("Notes index warmup failed; semantic search will load lazily")
 
             # Greeting comes last — last audible event of startup.
-            topic = random.choice(GREETING_TOPICS)
-            logger.info(f"Generating opening greeting (topic: {topic})...")
-            greeting = generate_slm(
-                self.slm_model,
-                user_prompt=get_greeting_user_prompt(topic),
-                system_prompt=self.greeting_prompt,
-                temperature=1.0,
-            )
-            cleaned = clean_for_tts(greeting)
+            cleaned = None
+            if self.llm_enabled:
+                topic = random.choice(GREETING_TOPICS)
+                logger.info(f"Generating opening greeting (topic: {topic})...")
+                try:
+                    greeting = generate_slm(
+                        self.slm_model,
+                        user_prompt=get_greeting_user_prompt(topic),
+                        system_prompt=self.greeting_prompt,
+                        temperature=1.0,
+                    )
+                    cleaned = clean_for_tts(greeting)
+                except RemoteUnreachable:
+                    logger.warning("Remote LLM unreachable — using a basic greeting")
+            if not cleaned:
+                # No SLM (or remote down) to compose a greeting — speak a fixed
+                # line that also sets expectations about basic-commands-only mode.
+                cleaned = (
+                    "Hello, I'm running in basic mode "
+                    "without an AI model, so I can handle simple commands like "
+                    "lights, timers, and music."
+                )
 
             # Splitting the greeting into individual sentences and
             # synthesising each as its own worker job populates the
@@ -591,6 +911,15 @@ class Assistant:
 
     def _start_reminder_poll(self) -> None:
         """Start the reminder poll thread if calendar and polling are configured."""
+        # Respect the same config gate as the tool loader (tools/__init__.py):
+        # with `home_assistant:` absent from config.yml, never import
+        # tools.home_assistant. Importing it has side effects — it registers the
+        # HA tools into the global registry and connects to HA (default URL + the
+        # .env token) — so importing it here would silently re-enable HA for the
+        # agent despite it being disabled in config.
+        from tools._config import config as _cfg
+        if "home_assistant" not in _cfg:
+            return
         try:
             from tools.home_assistant import HA_CONFIG, _reminder_calendar_entity
         except ImportError:
@@ -744,13 +1073,22 @@ class Assistant:
             "patch": patch,
         })
 
-    def _emit_agent_event(self, kind: str, payload: dict, source: str = "voice") -> None:
+    def _emit_agent_event(
+        self, kind: str, payload: dict, source: str = "voice",
+        replan: bool = False,
+    ) -> None:
         """Emit a `plan` / `step` / `observation` event to listeners.
 
         kind:
           - "plan"        — payload = {"actions": [{...}]}  (or {"reply": "..."})
           - "step"        — payload = {"intent": str, "args": list}
           - "observation" — payload = {"intent": str, "result": str}
+
+        `replan=True` marks a `plan` emitted on a re-call (the agent re-decided
+        from new observations); the prior plan was deliberately superseded, not
+        failed. Surfaced so dashboards can label it instead of looking like the
+        previous plan silently failed. Kept off `payload` (which mirrors the raw
+        emission shape the frontend parses) — it's event metadata, not the plan.
         """
         event = {
             "role": "agent",
@@ -759,6 +1097,8 @@ class Assistant:
             "source": source,
             "payload": payload,
         }
+        if replan:
+            event["replan"] = True
         self._dispatch_event(event)
 
     def _dispatch_event(self, event: dict) -> None:
@@ -769,6 +1109,129 @@ class Assistant:
                 cb(event)
             except Exception as e:
                 logger.warning(f"Turn listener failed: {e}")
+
+    def set_llm_model(self, model: str) -> dict:
+        """Hot-swap the remote LLM model on the live handle — no restart.
+
+        Only valid when the running LLM backend is the remote OpenAI client: the
+        model is a per-request string there (`core/llm_openai.py`), so switching
+        it needs no reload, just a guarded attribute swap. A local llama / none
+        backend loads its weights at startup and can't switch live, so we refuse
+        and the caller tells the user a restart is required.
+
+        Serialised under `_turn_lock` (llama-cpp-python isn't thread-safe and the
+        handle is shared with the transcriber / barge-in worker) so an in-flight
+        turn never reads a half-swapped model.
+        """
+        model = (model or "").strip()
+        if not model:
+            return {"ok": False, "error": "model name required"}
+        handle = self.slm_model
+        if not getattr(handle, "_fulloch_remote", False):
+            return {"ok": False,
+                    "error": "live LLM backend is not OpenAI; restart to apply"}
+        with self._turn_lock:
+            handle.set_model(model)
+        logger.info("Live LLM model switched to %s", model)
+        return {"ok": True, "model": model}
+
+    # Config paths the running assistant can apply without a restart. Two are
+    # conditional on the TTS backend (Kokoro only) — see apply_hot_config.
+    _HOT_CONFIG_PATHS = frozenset({
+        "general.log_level", "general.barge_in", "general.follow_up_time",
+        "general.tts_speed", "general.voice_clone", "general.use_vad",
+        "general.barge_in_threshold_dbfs", "general.vad_threshold",
+        "general.vad_endpoint_silence_ms", "general.vad_min_speech_ms",
+        "general.vad_soft_endpoint_silence_ms",
+    })
+
+    # (cache attribute, phrase pool, llm_only) — the phrase clips pre-rendered at
+    # startup. Re-rendered on a live voice change so stalls/acks don't keep
+    # playing in the old voice. LLM-only pools are skipped without an SLM.
+    _PHRASE_CACHE_SPECS = (
+        ("no_ai_cache", NO_AI_PHRASES, False),
+        ("tool_unavailable_cache", TOOL_UNAVAILABLE_PHRASES, False),
+        ("ack_cache", ACK_PHRASES, False),
+        ("web_search_stall_cache", WEB_SEARCH_STALL_PHRASES, True),
+        ("note_write_stall_cache", NOTE_WRITE_STALL_PHRASES, True),
+        ("pre_thinking_stall_cache", PRE_THINKING_STALL_PHRASES, True),
+        ("thinking_stall_cache", THINKING_STALL_PHRASES, True),
+        ("replan_stall_cache", REPLAN_STALL_PHRASES, True),
+    )
+
+    def _rerender_phrase_caches(self) -> None:
+        """Re-synthesise the pre-rendered phrase clips in the current voice.
+
+        Each cache is rebuilt fully then rebound (atomic), so the transcriber
+        thread reading a cache mid-rebuild sees the old or new list, never a
+        partial one — same discipline as the HA deny-list swap.
+        """
+        for attr, phrases, llm_only in self._PHRASE_CACHE_SPECS:
+            if llm_only and not self.llm_enabled:
+                continue
+            rendered = [self.synthesize(p, self.voice_clone_prompt) for p in phrases]
+            setattr(self, attr, rendered)
+        logger.info("Phrase caches re-rendered for voice %r", self.voice_clone)
+
+    def apply_hot_config(self, changes: list) -> set:
+        """Apply config changes to the running assistant where possible.
+
+        `changes` is `[{"path", "value"}, ...]` of already-coerced values (from
+        update_config). Returns the set of dotted-paths actually applied live;
+        anything not in that set still needs a restart, which is how the route
+        decides `restart_required`. Each branch is best-effort and isolated so
+        one failure doesn't block the others.
+        """
+        applied: set = set()
+        kokoro = self._tts_backend == "kokoro-onnx"
+        for ch in changes:
+            path, value = ch["path"], ch["value"]
+            if path not in self._HOT_CONFIG_PATHS:
+                continue
+            try:
+                if path == "general.log_level":
+                    lvl = _LOG_LEVELS.get(str(value).lower())
+                    if lvl is None:
+                        continue
+                    logging.getLogger().setLevel(lvl)
+                elif path == "general.barge_in":
+                    self.barge_in = value
+                elif path == "general.follow_up_time":
+                    self.follow_up_seconds = parse_barge_time(value)
+                elif path == "general.tts_speed":
+                    # Qwen has no speed knob — the change is a no-op there, so a
+                    # restart wouldn't help either: report applied (don't nag).
+                    if kokoro and hasattr(self._tts_module, "set_speed"):
+                        self._tts_module.set_speed(value)
+                        self.tts_speed = value
+                elif path == "general.voice_clone":
+                    # Kokoro swaps the voice instantly; Qwen needs a clone warmup
+                    # + phrase-cache re-render, so leave it restart-only.
+                    if not kokoro:
+                        continue
+                    self.voice_clone_prompt = self._tts_module.set_voice(value)
+                    self.voice_clone = value
+                    threading.Thread(
+                        target=self._rerender_phrase_caches,
+                        daemon=True, name="voice-rerender",
+                    ).start()
+                elif path == "general.use_vad":
+                    if not self.audio_capture.set_use_vad(bool(value)):
+                        continue  # VAD model wasn't loaded — needs a restart
+                elif path == "general.barge_in_threshold_dbfs":
+                    self.audio_capture.set_barge_in_threshold_dbfs(value)
+                elif path == "general.vad_threshold":
+                    self.audio_capture.set_vad_params(threshold=value)
+                elif path == "general.vad_endpoint_silence_ms":
+                    self.audio_capture.set_vad_params(endpoint_silence_ms=value)
+                elif path == "general.vad_min_speech_ms":
+                    self.audio_capture.set_vad_min_speech_ms(value)
+                elif path == "general.vad_soft_endpoint_silence_ms":
+                    self.audio_capture.set_vad_params(soft_endpoint_silence_ms=value)
+                applied.add(path)
+            except Exception as e:  # noqa: BLE001 — one bad field mustn't block the rest
+                logger.warning("Hot-apply of %s failed: %s", path, e)
+        return applied
 
     def handle_text_turn(self, text: str) -> str:
         """Run a typed input through the full intent/SLM/tool pipeline.
@@ -818,6 +1281,7 @@ class Assistant:
             return cleaned
         except Exception as e:
             logger.error(f"Text turn error: {e}")
+            self._note_runtime_error(e)
             err = "Sorry, something went wrong handling that."
             self._emit_turn_event("assistant", err, "text")
             return err
@@ -853,6 +1317,51 @@ class Assistant:
         except Exception:
             logger.exception("ack playback failed")
 
+    def _speak_no_ai_fallback(self, session: Optional[TtsSession], source: str) -> str:
+        """No-LLM miss handler: surface a 'basic commands only' phrase.
+
+        Records the phrase in `_history`. For a voice turn with a populated
+        cache it plays the matching pre-rendered clip and emits the assistant
+        bubble itself, returning "" so the voice caller doesn't speak it again
+        (see the `if cleaned:` guards in `_run_turn` / `_run_half_duplex`).
+        Otherwise it returns the phrase for the caller to speak/show.
+        """
+        i = random.randrange(len(NO_AI_PHRASES))
+        phrase = NO_AI_PHRASES[i]
+        self._record_spoken(phrase)
+        if source == "voice" and self.no_ai_cache:
+            self._emit_turn_event("assistant", phrase, "voice")
+            chunks, sr = self.no_ai_cache[i]
+            try:
+                self.play_chunks(chunks, sr, session=session or self.tts_session)
+            except Exception:
+                logger.exception("no-AI fallback playback failed")
+            return ""
+        return phrase
+
+    def _speak_tool_unavailable_fallback(self, session: Optional[TtsSession], source: str) -> str:
+        """Hallucinated-tool guard handler: the agent named a tool that isn't
+        loaded. Speak a canned 'can't do that' instead of letting the model
+        fabricate an answer from priors.
+
+        Same contract as `_speak_no_ai_fallback`: records the phrase in
+        `_history`; for a voice turn with a populated cache it plays the matching
+        pre-rendered clip, emits the assistant bubble, and returns "" so the
+        caller doesn't speak it again. Otherwise returns the phrase to speak/show.
+        """
+        i = random.randrange(len(TOOL_UNAVAILABLE_PHRASES))
+        phrase = TOOL_UNAVAILABLE_PHRASES[i]
+        self._record_spoken(phrase)
+        if source == "voice" and self.tool_unavailable_cache:
+            self._emit_turn_event("assistant", phrase, "voice")
+            chunks, sr = self.tool_unavailable_cache[i]
+            try:
+                self.play_chunks(chunks, sr, session=session or self.tts_session)
+            except Exception:
+                logger.exception("tool-unavailable fallback playback failed")
+            return ""
+        return phrase
+
     def _summarise_search_result(self, payload: str, cancel_check, stats=None) -> str:
         """Compress a `User question:` web-search payload into a short spoken answer.
 
@@ -867,6 +1376,7 @@ class Assistant:
             user_prompt=payload,
             system_prompt=self.web_summary_prompt,
             cancel_check=cancel_check,
+            max_new_tokens=SUMMARY_MAX_NEW_TOKENS,
             stats=stats,
         )
 
@@ -896,6 +1406,7 @@ class Assistant:
             user_prompt=get_partial_thinking_summary_prompt(question, partial),
             system_prompt=self.greeting_prompt,
             cancel_check=cancel_check,
+            max_new_tokens=SUMMARY_MAX_NEW_TOKENS,
             stats=stats,
         )
 
@@ -992,18 +1503,21 @@ class Assistant:
                 # answer bubble, no speech.
                 if session.cancelled:
                     return
-                # Emit before speaking so the dashboard can reveal the text while
-                # TTS plays, not only after playback finishes.
-                ts = self._emit_turn_event("assistant", cleaned, "voice", stats=stats)
-                # Emit the TTS stat as soon as the first audio chunk is ready, so the
-                # panel doesn't wait for the whole reply to finish playing.
-                self.speak_stream(
-                    cleaned, self.voice_clone_prompt, session=session, stats=stats,
-                    on_first_audio=lambda: self._emit_stats_patch(
-                        ts, "voice",
-                        {"tts": stats.tts_payload(), "total": stats.total_with_tts()},
-                    ),
-                )
+                # Empty answer = the no-LLM bypass already played a pre-rendered
+                # fallback clip (and emitted its bubble), so don't speak again.
+                if cleaned:
+                    # Emit before speaking so the dashboard can reveal the text while
+                    # TTS plays, not only after playback finishes.
+                    ts = self._emit_turn_event("assistant", cleaned, "voice", stats=stats)
+                    # Emit the TTS stat as soon as the first audio chunk is ready, so the
+                    # panel doesn't wait for the whole reply to finish playing.
+                    self.speak_stream(
+                        cleaned, self.voice_clone_prompt, session=session, stats=stats,
+                        on_first_audio=lambda: self._emit_stats_patch(
+                            ts, "voice",
+                            {"tts": stats.tts_payload(), "total": stats.total_with_tts()},
+                        ),
+                    )
             finally:
                 self.audio_capture.transcribing = True
         finally:
@@ -1065,22 +1579,25 @@ class Assistant:
                     logger.info("Turn cancelled during ack")
                     return
             cleaned = clean_for_tts(answer)
-            # Recorded for self-echo suppression in `_check_barge_in`.
-            self._last_spoken_text = cleaned.lower()
-            self.tts_start_time = time.monotonic()
-            # Emit before speaking so the dashboard reveals the text while TTS
-            # plays. Barge-in may cut speech short; the full text still shows,
-            # while _history is reconciled to the spoken text via _record_spoken.
-            ts = self._emit_turn_event("assistant", cleaned, "voice", stats=stats)
-            # Emit the TTS stat as soon as the first audio chunk is ready, so the
-            # panel doesn't wait for the whole reply to finish playing.
-            self.speak_stream(
-                cleaned, self.voice_clone_prompt, session=session, stats=stats,
-                on_first_audio=lambda: self._emit_stats_patch(
-                    ts, "voice",
-                    {"tts": stats.tts_payload(), "total": stats.total_with_tts()},
-                ),
-            )
+            # Empty answer = the no-LLM bypass already played a pre-rendered
+            # fallback clip (and emitted its bubble), so don't speak again.
+            if cleaned:
+                # Recorded for self-echo suppression in `_check_barge_in`.
+                self._last_spoken_text = cleaned.lower()
+                self.tts_start_time = time.monotonic()
+                # Emit before speaking so the dashboard reveals the text while TTS
+                # plays. Barge-in may cut speech short; the full text still shows,
+                # while _history is reconciled to the spoken text via _record_spoken.
+                ts = self._emit_turn_event("assistant", cleaned, "voice", stats=stats)
+                # Emit the TTS stat as soon as the first audio chunk is ready, so the
+                # panel doesn't wait for the whole reply to finish playing.
+                self.speak_stream(
+                    cleaned, self.voice_clone_prompt, session=session, stats=stats,
+                    on_first_audio=lambda: self._emit_stats_patch(
+                        ts, "voice",
+                        {"tts": stats.tts_payload(), "total": stats.total_with_tts()},
+                    ),
+                )
             if not session.cancelled:
                 # Mic stays live during barge-in TTS, so the queue contains
                 # audio of our own voice captured while we were speaking.
@@ -1094,6 +1611,7 @@ class Assistant:
                 self._mark_turn_end()
         except Exception as e:
             logger.error(f"Turn error: {e}")
+            self._note_runtime_error(e)
         finally:
             self._turn_active = False
             self._active_session = None
@@ -1156,6 +1674,81 @@ class Assistant:
             return False
         tokens = re.sub(r"[^\w\s]", "", command.lower()).split()
         return bool(tokens) and all(t in self._asr_context_tokens for t in tokens)
+
+    def _verify_bare_wakeword(self, loudness_db, baseline_db) -> bool:
+        """Guard a bare (command-less) wakeword against context-bias hallucination.
+
+        A wakeword with no command is the shape the ASR decoder most readily
+        invents from voiced non-speech (a cough/sigh/TV burst): the
+        `asr_context_hint` prompt primes the wakeword spelling with nothing to
+        anchor it. Two cheap checks gate opening the follow-up window on one:
+
+        1. **Loudness** — a genuine wakeword spoken to the device sits above the
+           background-speech baseline (the user is closer/louder than ambient
+           media). A bare wakeword at or below baseline is almost certainly the
+           room, so reject it for free. (In a quiet room the baseline floors low,
+           so most utterances clear this and fall through to check 2.)
+        2. **Unbiased re-transcribe** — re-run ASR on the same buffer with the
+           context bias removed. If the wakeword no longer appears, the bias
+           prompt fabricated it. Only runs when a bias is actually active
+           (skipped for non-biasing backends / hint off), so the extra transcribe
+           is paid rarely and during the natural pause after a bare wakeword.
+
+        Returns True to proceed (genuine), False to drop.
+        """
+        # (1) Loudness gate — free, catches the loud-background case.
+        if (
+            loudness_db is not None
+            and loudness_db < baseline_db + BARE_WAKEWORD_MIN_OVER_BASELINE_DB
+        ):
+            logger.info(
+                f"Bare wakeword rejected (at/below background baseline: "
+                f"{loudness_db:.1f} < {baseline_db:.1f} dBFS) — likely noise"
+            )
+            return False
+
+        # (2) Unbiased re-transcribe — only meaningful when a context bias is
+        # actually steering the decoder.
+        if self.asr_context_hint and getattr(self.asr_pipe, "context", ""):
+            buf = self._asr_audio.get('buf')
+            if buf is not None and not self._wakeword_in_unbiased_pass(buf):
+                logger.info(
+                    "Bare wakeword rejected (absent in unbiased re-transcribe) "
+                    "— context-bias echo"
+                )
+                return False
+
+        return True
+
+    def _wakeword_in_unbiased_pass(self, buf) -> bool:
+        """Re-transcribe `buf` with the ASR context bias dropped; True if the
+        wakeword still appears.
+
+        Tells a genuine bare wakeword from a bias-prompt hallucination: if the
+        decoder only produced the wakeword because the "Technical terms" prompt
+        steered it there, an unbiased pass over the same audio won't reproduce it.
+        Best-effort — on any ASR error, assume genuine (True) so a transient
+        failure never silently swallows real wakewords. Runs in the transcriber
+        thread (the only caller of `self.asr_pipe`), so mutating `.context` here
+        is safe.
+        """
+        pipe = self.asr_pipe
+        saved = pipe.context
+        try:
+            pipe.context = ""
+            results = pipe(buf, batch_size=1, generate_kwargs={"max_new_tokens": 256})
+        except Exception:  # noqa: BLE001 — verification must never break routing
+            logger.debug("Unbiased re-transcribe failed; assuming genuine", exc_info=True)
+            return True
+        finally:
+            pipe.context = saved
+        text = (results[0].get("text") if results else "") or ""
+        appears = bool(self._wakeword_re.search(text.lower()))
+        logger.debug(
+            f"Unbiased re-transcribe: {text!r} "
+            f"(wakeword {'present' if appears else 'absent'})"
+        )
+        return appears
 
     def _is_self_echo(self, text_lower: str, short_only: bool = False) -> bool:
         """True if `text_lower` looks like AEC residue of the assistant's voice.
@@ -1242,15 +1835,33 @@ class Assistant:
 
     def _transcriber_thread(self):
         """ASR results → wakeword/intent/TTS. Owns model loading on first call."""
-        self._load_models()
+        try:
+            self._load_models()
+        except Exception as exc:  # noqa: BLE001 — surface any load failure to the UI
+            _, detail = self._diagnose_failure(
+                exc, spec=getattr(self, "_loading_backend", None)
+            )
+            logger.exception("Model loading failed — switching to setup")
+            self._enter_error_state(detail)
+            return
         logger.info("Transcriber started")
 
+        try:
+            self._run_transcriber_loop()
+        except Exception as exc:  # noqa: BLE001 — the ASR pipeline itself died
+            _, detail = self._diagnose_failure(exc)
+            logger.exception("Transcriber loop crashed — switching to setup")
+            self._enter_error_state(detail)
+
+    def _run_transcriber_loop(self):
+        """Drain the ASR pipeline, routing each utterance through a turn."""
         for result in self.asr_pipe(
             self.asr_stream_generator(
                 self.audio_capture.audio_queue,
                 self._asr_onset,
                 self._asr_loudness,
                 self._asr_provisional,
+                self._asr_audio,
             ),
             batch_size=1,
             generate_kwargs={"max_new_tokens": 256}
@@ -1274,6 +1885,16 @@ class Assistant:
                     logger.debug(f"Dropped noise token: {text!r}")
                     continue
 
+                # Context-prompt echo: the decoder occasionally regurgitates the
+                # asr_context_hint scaffolding verbatim off non-speech
+                # ("Technical terms: hey atticus, <garbage>"). That carries the
+                # wakeword plus a non-term tail, so neither _is_context_echo nor
+                # the bare-wakeword guard catches it — but the leading marker is
+                # an unambiguous tell a user never utters. Drop the whole result.
+                if self._context_prompt_marker and self._context_prompt_marker in text.lower():
+                    logger.debug(f"Dropped context-prompt echo: {text!r}")
+                    continue
+
                 # Provisional (soft-endpoint) snapshot of an unfinished
                 # utterance. It may only *commit* a turn at the dispatch gate
                 # below; the side-effecting special cases (stand-down, follow-up
@@ -1291,8 +1912,9 @@ class Assistant:
                 just_barged_in = False
 
                 # Tag every transcription with its dBFS volume and the current
-                # background-speech baseline (logged for tuning; not acted on
-                # yet). The baseline is fed only by *genuine background* — see
+                # background-speech baseline (logged for tuning; the baseline
+                # also gates bare wakewords — see `_verify_bare_wakeword`). It is
+                # fed only by *genuine background* — see
                 # the background-suppression branch below, which is the single
                 # feed site. Non-wakeword alone isn't enough: an accepted
                 # follow-up is the user (loud, close) and our own TTS bleed
@@ -1436,6 +2058,12 @@ class Assistant:
                     if provisional:
                         continue
                     if wakeword_present:
+                        # A bare wakeword is the ASR's favourite context-bias
+                        # hallucination (a cough decoded as "hey atticus"). Gate
+                        # it on loudness + an unbiased re-transcribe before
+                        # opening the follow-up window; a rejected one is noise.
+                        if not self._verify_bare_wakeword(loudness_db, baseline_db):
+                            continue
                         # Wakeword said alone (often to barge in and then
                         # pause before asking) — open the follow-up window
                         # from this moment so the next utterance is heard
@@ -1480,6 +2108,7 @@ class Assistant:
 
             except Exception as e:
                 logger.error(f"Transcription error: {e}")
+                self._note_runtime_error(e)
 
     def get_state(self) -> str:
         """Return the current assistant state: idle | thinking | speaking."""

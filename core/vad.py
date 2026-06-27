@@ -161,6 +161,36 @@ class VadEndpointer:
 
         self._residual = samples[offset:].copy()
 
+    def update_params(
+        self,
+        threshold: Optional[float] = None,
+        endpoint_silence_ms: Optional[int] = None,
+        soft_endpoint_silence_ms: Optional[int] = None,
+    ) -> None:
+        """Live-tune the endpointer without rebuilding it (settings console).
+
+        `VADIterator` keeps `threshold` and `min_silence_samples` as plain
+        attributes (the latter = sampling_rate * ms / 1000, matching its own
+        constructor), so a settings change can adjust them in place — no model
+        reload, and any in-flight `process()` simply reads the new value on its
+        next window. Rebinding the soft silence only applies when a soft
+        iterator exists; turning the soft endpoint on from off needs a restart
+        (no second Silero handle was loaded).
+        """
+        if threshold is not None:
+            t = float(threshold)
+            self._iterator.threshold = t
+            if self._soft_iterator is not None:
+                self._soft_iterator.threshold = t
+        if endpoint_silence_ms is not None:
+            self._iterator.min_silence_samples = (
+                self.sample_rate * int(endpoint_silence_ms) / 1000
+            )
+        if soft_endpoint_silence_ms is not None and self._soft_iterator is not None:
+            self._soft_iterator.min_silence_samples = (
+                self.sample_rate * int(soft_endpoint_silence_ms) / 1000
+            )
+
     def reset(self) -> None:
         """Clear all per-utterance state, ready for the next utterance."""
         self._iterator.reset_states()

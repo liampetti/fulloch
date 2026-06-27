@@ -109,15 +109,17 @@ class TestExecution:
         mock_tool_registry.register_tool(noisy, name="noisy")
         assert mock_tool_registry.execute_tool("noisy") == ""
 
-    def test_execute_returns_empty_string_on_exception(self, mock_tool_registry):
-        """Exceptions are logged but not surfaced to the user as text — the
-        assistant falls through to its random 'sorry, can you repeat that'
-        fallback instead of speaking 'Error executing X: ...' aloud."""
+    def test_execute_propagates_tool_exception(self, mock_tool_registry):
+        """A tool that raises propagates the exception to the caller instead of
+        being swallowed into "". `handle_action` maps it to None -> ERROR ->
+        replan; swallowing it would surface an empty observation and a
+        misleading "Done." reply (the tool never actually ran)."""
         def boom():
             raise RuntimeError("nope")
 
         mock_tool_registry.register_tool(boom, name="boom")
-        assert mock_tool_registry.execute_tool("boom") == ""
+        with pytest.raises(RuntimeError):
+            mock_tool_registry.execute_tool("boom")
 
 
 class TestDescribeTools:

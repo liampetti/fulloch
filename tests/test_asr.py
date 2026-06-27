@@ -60,6 +60,23 @@ def test_loudness_sink_holds_dbfs_of_the_yielded_buffer():
     assert loud["db"] == -18.5
 
 
+def test_audio_sink_holds_the_yielded_buffer():
+    # The audio sink stashes the raw buffer so a bare wakeword can be
+    # re-transcribed without the context bias to confirm it.
+    q = queue.Queue()
+    b1, b2 = _buf(), _buf()
+    q.put((b1, 11.0, -42.0, False))
+    q.put((b2, 22.0, -18.5, False))
+    q.put(None)
+    audio = {"buf": None}
+    gen = stream_generator(q, None, None, None, audio)
+
+    next(gen)
+    assert audio["buf"] is b1
+    next(gen)
+    assert audio["buf"] is b2
+
+
 def test_missing_loudness_is_tolerated():
     # 2-tuples (no loudness) still unpack; sink reports None.
     q = queue.Queue()

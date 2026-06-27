@@ -56,6 +56,36 @@ general:
   #   - "downstairs office"
 
 # =============================================================================
+# Models — ASR / TTS / LLM backend selection
+# =============================================================================
+# Optional. Omit the whole block to run the default Qwen stack for your GPU or CPU setup. 
+# Each domain takes a `backend` and an optional `model` (defaults come from core/backends.py). See docs for the wizard tiers.
+#
+# models:
+#   asr:
+#     backend: qwen          # qwen (Qwen3-ASR 1.7B, GPU default) | qwen-small (Qwen3-ASR 0.6B, GPU experimental) | qwen-onnx (Qwen3-ASR 1.7B ONNX, CPU default) | qwen-onnx-small (Qwen3-ASR 0.6B, CPU experimental) | moonshine (CPU experimental) | moonshine-tiny (CPU experimental)
+#   tts:
+#     backend: qwen          # qwen (Qwen3-TTS-Base 1.7B, GPU default) | qwen-small (Qwen3-TTS-Base 0.6B, GPU experimental) | kokoro-onnx (Kokoro-82m ONNX, CPU default)
+#   llm:
+#     backend: llama         # llama (Qwen3.5 9B, default) | gemma (Gemma 4 12B QAT, experimental) | none (regex-only) | openai (remote)
+#     model: "./data/models/Qwen3.5-9B-UD-Q4_K_XL.gguf" # Custom model file location
+#     n_context: 12288
+#
+# Advanced: an OpenAI-compatible remote LLM (llama.cpp server / vLLM / Ollama /
+# hosted API). An unreachable endpoint degrades to regex-only commands.
+#   llm:
+#     backend: openai
+#     model: "qwen2.5"              # optional; blank = the server's default (single-model servers ignore it)
+#     base_url: "http://localhost:8888/v1"
+#     api_key: ""                   # prefer FULLOCH_LLM_API_KEY in .env
+#     connect_timeout: 0.4          # seconds; fail fast when the endpoint is down
+#     read_timeout: 60              # seconds; raise if first-token latency is high
+#
+# llm.backend: none runs a regex-only assistant — basic commands (lights,
+# timers, media, time) work; anything needing reasoning gets a spoken
+# "basic commands only" reply. No SLM is loaded.
+
+# =============================================================================
 # Home Assistant — smart-home backend
 # =============================================================================
 # Create a long-lived token at http://<your-ha>:8123/profile.

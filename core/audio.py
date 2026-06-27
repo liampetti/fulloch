@@ -205,7 +205,11 @@ class AudioCapture:
         # Streaming endpointer (None when VAD is off/unavailable). When present
         # it — not RMS — decides end-of-speech outside TTS; RMS remains the
         # endpoint mechanism on the fallback path and while TTS is playing.
+        # `_endpointer` is the *live* handle the recorder reads; `_endpointer_built`
+        # retains the constructed object so `set_use_vad` can toggle VAD off and
+        # back on without a model reload (None on _built means VAD never loaded).
         self._endpointer = None
+        self._endpointer_built = None
         if use_vad:
             try:
                 from silero_vad import get_speech_timestamps, load_silero_vad
@@ -221,7 +225,7 @@ class AudioCapture:
                 # The soft endpoint needs its own Silero handle so it can't
                 # corrupt the hard iterator's LSTM state (see VadEndpointer).
                 soft_model = load_silero_vad() if soft_ms else None
-                self._endpointer = VadEndpointer(
+                self._endpointer_built = VadEndpointer(
                     self._vad_model,
                     sample_rate=sample_rate,
                     threshold=VAD_THRESHOLD if vad_threshold is None else vad_threshold,
@@ -233,6 +237,7 @@ class AudioCapture:
                     soft_model=soft_model,
                     soft_endpoint_silence_ms=soft_ms,
                 )
+                self._endpointer = self._endpointer_built
                 logger.info(
                     "Silero VAD loaded — speech-based endpointing enabled"
                     + (f" (soft endpoint {soft_ms}ms)" if soft_ms else "")
@@ -292,6 +297,38 @@ class AudioCapture:
         # (the endpointer re-arms `soft_endpointed`), so each pause yields at most
         # one provisional snapshot rather than one per chunk.
         self._soft_probe_emitted = False
+
+    # --- Live config setters (settings console hot-apply) ------------------
+    # Each mutates a single derived value the recorder reads on its next loop
+    # iteration; rebinding a scalar/handle is atomic, so no lock is needed (the
+    # recorder thread sees either the old or new value, never a torn one).
+
+    def set_use_vad(self, enabled: bool) -> bool:
+        """Toggle VAD endpointing live. Returns False if it can't (VAD model
+        was never loaded, so enabling needs a restart)."""
+        if enabled and self._endpointer_built is None:
+            return False
+        self._endpointer = self._endpointer_built if enabled else None
+        return True
+
+    def set_barge_in_threshold_dbfs(self, dbfs: float) -> None:
+        """Update the TTS-path silence floor (dBFS) and its linear-RMS cache."""
+        self.barge_in_threshold_dbfs = float(dbfs)
+        self._barge_in_rms = dbfs_to_rms(self.barge_in_threshold_dbfs)
+
+    def set_vad_min_speech_ms(self, ms: int) -> None:
+        """Update the minimum voiced duration sent to ASR."""
+        self.vad_min_speech_samples = int(self.sample_rate * int(ms) / 1000)
+
+    def set_vad_params(self, threshold=None, endpoint_silence_ms=None,
+                       soft_endpoint_silence_ms=None) -> None:
+        """Live-tune the endpointer thresholds/silences (no-op without VAD)."""
+        if self._endpointer_built is not None:
+            self._endpointer_built.update_params(
+                threshold=threshold,
+                endpoint_silence_ms=endpoint_silence_ms,
+                soft_endpoint_silence_ms=soft_endpoint_silence_ms,
+            )
 
     def arm_follow_up(self, window_seconds: float) -> None:
         """Open the follow-up window for `window_seconds` (plus capture slack).

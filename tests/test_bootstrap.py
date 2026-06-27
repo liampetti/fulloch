@@ -1,0 +1,58 @@
+"""First-run scaffolding for the precompiled image (v2.2 Step 7)."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from core.bootstrap import _SUBDIRS, ensure_scaffolding  # noqa: E402
+
+
+def _make_seed(tmp_path):
+    seed = tmp_path / "seed"
+    (seed / "grammars").mkdir(parents=True)
+    (seed / "grammars" / "agent.gbnf").write_text("root ::= \"x\"")
+    (seed / "config.example.yml").write_text("general:\n  wakeword: hey atticus\n")
+    return seed
+
+
+def test_creates_data_subtree(tmp_path):
+    data = tmp_path / "data"
+    ensure_scaffolding(str(data), seed_dir=str(tmp_path / "noseed"))
+    for sub in _SUBDIRS:
+        assert (data / sub).is_dir()
+
+
+def test_seeds_config_and_grammar_on_first_run(tmp_path):
+    seed = _make_seed(tmp_path)
+    data = tmp_path / "data"
+    ensure_scaffolding(str(data), seed_dir=str(seed))
+    assert (data / "config.yml").read_text().startswith("general:")
+    assert (data / "models" / "grammars" / "agent.gbnf").is_file()
+
+
+def test_does_not_overwrite_existing(tmp_path):
+    seed = _make_seed(tmp_path)
+    data = tmp_path / "data"
+    (data / "models" / "grammars").mkdir(parents=True)
+    (data / "config.yml").write_text("general:\n  wakeword: custom\n")
+    (data / "models" / "grammars" / "agent.gbnf").write_text("MINE")
+    ensure_scaffolding(str(data), seed_dir=str(seed))
+    assert "custom" in (data / "config.yml").read_text()
+    assert (data / "models" / "grammars" / "agent.gbnf").read_text() == "MINE"
+
+
+def test_noop_when_no_seed_dir(tmp_path):
+    data = tmp_path / "data"
+    # Missing seed dir: dirs created, nothing seeded, no error.
+    ensure_scaffolding(str(data), seed_dir=str(tmp_path / "absent"))
+    assert (data / "voices").is_dir()
+    assert not (data / "config.yml").exists()
+
+
+def test_seed_dir_from_env(tmp_path, monkeypatch):
+    seed = _make_seed(tmp_path)
+    monkeypatch.setenv("FULLOCH_SEED_DIR", str(seed))
+    data = tmp_path / "data"
+    ensure_scaffolding(str(data))  # seed_dir defaults to the env var
+    assert (data / "config.yml").is_file()

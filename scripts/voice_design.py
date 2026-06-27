@@ -5,7 +5,8 @@ language voice description using Qwen3-TTS-12Hz-1.7B-VoiceDesign. The
 runtime Base clone (`core/tts.py`) picks that pair up via the
 `general.voice_clone` config key on next launch.
 
-Driven from `voice_design.sh`, which handles deps + model download.
+Standalone CLI alternative to the in-app voice designer (the setup wizard's
+`/setup/voice`); run with the project venv: `python scripts/voice_design.py`.
 """
 
 import os

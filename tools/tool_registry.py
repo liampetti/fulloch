@@ -118,12 +118,13 @@ class ToolRegistry:
         func = self.get_tool(name)
         if not func:
             raise UnknownToolError(name)
-        try:
-            result = func(*(args or []), **(kwargs or {}))
-            return result if result is not None else ""
-        except Exception:
-            logger.exception(f"Error executing tool {name}")
-            return ""
+        # Let tool exceptions propagate to the caller. `handle_action` maps them
+        # to None -> StepKind.ERROR -> replan, so a tool that raises (e.g. the
+        # agent omitted a required arg) hands control back to the agent instead
+        # of being swallowed into "" — which would surface as an empty
+        # observation and a misleading "Done." spoken reply.
+        result = func(*(args or []), **(kwargs or {}))
+        return result if result is not None else ""
 
     def describe_tools(self) -> str:
         """Render the registered tools as a human-readable block for the intent prompt.

@@ -6,7 +6,6 @@ from typing import Generator, Optional, Union
 
 import numpy as np
 import torch
-from qwen_asr import Qwen3ASRModel
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +63,21 @@ class QwenASRPipelineWrapper:
         return [{"text": getattr(r, "text", str(r))} for r in results]
 
 
-def load_asr_model(language: Optional[str] = None):
-    logger.info(f"Loading {ASR_MODEL_NAME} on {DEVICE}...")
+def load_asr_model(model_name: Optional[str] = None, language: Optional[str] = None, **opts):
+    """Load the Qwen3-ASR model and wrap it in the streaming pipeline.
+
+    `model_name` defaults to the built-in `ASR_MODEL_NAME`; the backend
+    registry passes the configured model id. `opts` absorbs any extra
+    per-model config keys forwarded by the registry.
+    """
+    # Imported here (not at module top) so core.asr — and the CPU backends that
+    # re-export stream_generator from it — import without qwen_asr (CPU image).
+    from qwen_asr import Qwen3ASRModel
+
+    model_name = model_name or ASR_MODEL_NAME
+    logger.info(f"Loading {model_name} on {DEVICE}...")
     model = Qwen3ASRModel.from_pretrained(
-        ASR_MODEL_NAME,
+        model_name,
         device_map=DEVICE,
         dtype=DTYPE,
         attn_implementation="flash_attention_2",
@@ -82,17 +92,20 @@ def stream_generator(
     onset_sink: Optional[dict] = None,
     loudness_sink: Optional[dict] = None,
     provisional_sink: Optional[dict] = None,
+    audio_sink: Optional[dict] = None,
 ) -> Generator:
     """Yield audio buffers from a queue until a None sentinel.
 
     Queue items are `(buf, speech_onset_monotonic, loudness_dbfs[, provisional])`
     tuples (loudness and the provisional flag are optional for backward
-    compatibility). When `onset_sink` / `loudness_sink` / `provisional_sink` are
-    given, each yielded buffer's onset time, dBFS volume, and provisional flag
-    (True for a soft-endpoint snapshot of an unfinished utterance) are written to
-    `onset_sink['t']` / `loudness_sink['db']` / `provisional_sink['flag']` before
-    it's yielded, so the consumer can correlate the resulting transcription with
-    them. Generators are lazy, so no further item is dequeued between yielding a
+    compatibility). When `onset_sink` / `loudness_sink` / `provisional_sink` /
+    `audio_sink` are given, each yielded buffer's onset time, dBFS volume,
+    provisional flag (True for a soft-endpoint snapshot of an unfinished
+    utterance), and the buffer itself are written to `onset_sink['t']` /
+    `loudness_sink['db']` / `provisional_sink['flag']` / `audio_sink['buf']`
+    before it's yielded, so the consumer can correlate the resulting
+    transcription with them (and re-transcribe the same audio if needed).
+    Generators are lazy, so no further item is dequeued between yielding a
     buffer and the consumer receiving its transcription — the sinks stay correct
     for that result.
     """
@@ -106,4 +119,6 @@ def stream_generator(
             loudness_sink['db'] = loudness_db
         if provisional_sink is not None:
             provisional_sink['flag'] = provisional
+        if audio_sink is not None:
+            audio_sink['buf'] = buf
         yield buf

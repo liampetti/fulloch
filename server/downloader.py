@@ -1,0 +1,273 @@
+"""In-container model download manager (v2.2 Step 4).
+
+Runs the `hf download` steps in Python so the wizard can pull the selected
+backends' weights on a background thread and stream per-asset progress to the
+browser. Online only during setup; the runtime stays `HF_HUB_OFFLINE=1`.
+
+Asset kinds:
+  - ``snapshot`` — a full HF repo into the hub cache (ASR/TTS/BGE)
+  - ``file``     — a single file from an HF repo (the GGUF SLM)
+  - ``url``      — a plain HTTP file (json.gbnf grammar)
+
+The heavy `huggingface_hub` / network calls are injected (defaulting to lazy
+real implementations) so tests drive the manager with fakes — no network.
+"""
+
+import logging
+import os
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Optional
+
+from core.backends import DOMAINS
+
+logger = logging.getLogger(__name__)
+
+GRAMMAR_URL = "https://raw.githubusercontent.com/ggml-org/llama.cpp/master/grammars/json.gbnf"
+BGE_REPO = "BAAI/bge-small-en-v1.5"
+
+# Asset states.
+PENDING = "pending"
+DOWNLOADING = "downloading"
+DONE = "done"
+ERROR = "error"
+
+
+@dataclass
+class Asset:
+    key: str
+    label: str
+    kind: str                  # "snapshot" | "file" | "url"
+    dest: str                  # directory (snapshot/file) or file path (url)
+    repo: Optional[str] = None
+    filename: Optional[str] = None
+    url: Optional[str] = None
+    allow: Optional[list] = None   # allow_patterns for a dir_snapshot
+    size_gb: Optional[float] = None
+    status: str = PENDING
+    error: Optional[str] = None
+
+    def snapshot(self) -> dict:
+        return {
+            "key": self.key, "label": self.label, "kind": self.kind,
+            "size_gb": self.size_gb, "status": self.status, "error": self.error,
+            # `domain` (asr/tts/llm) lets the wizard attach a custom-path input to
+            # the right model; `present` drives the install pre-scan (on disk vs
+            # needs download); `dest` is the path it'll load from / download to.
+            "domain": self.key.split(":")[0] if ":" in self.key else None,
+            "present": _already_present(self),
+            "dest": self.dest,
+        }
+
+
+_WEIGHT_SUFFIXES = (".gguf", ".bin", ".safetensors")
+
+
+def _is_dir_model(model) -> bool:
+    """A local *directory* model path (vs an HF repo id or a single weight file)."""
+    if not model:
+        return False
+    s = str(model)
+    looks_local = s.startswith(("./", "../", "/", ".\\")) or os.path.isabs(s)
+    return looks_local and Path(s).suffix not in _WEIGHT_SUFFIXES
+
+
+def _is_file_model(model) -> bool:
+    """A single local weight file (e.g. a custom .gguf path the user points at)."""
+    return bool(model) and Path(str(model)).suffix in _WEIGHT_SUFFIXES
+
+
+def plan_assets(resolved: dict, models_dir: str = "./data/models") -> list:
+    """Build the asset list for a resolved `models` selection + always-required.
+
+    Always includes the BGE embedding model (semantic note search) and the
+    json.gbnf grammar, regardless of the selected backends.
+    """
+    hub = str(Path(models_dir) / "hub")
+    grammars = str(Path(models_dir) / "grammars")
+    assets: list = []
+
+    for domain in DOMAINS:
+        cfg = resolved[domain]
+        spec = cfg["spec"]
+        model = cfg["model"]
+        # Nothing to fetch for the no-LLM bypass or a remote endpoint (no HF
+        # repo/file), so skip those domains.
+        if not (spec.hf_repo or spec.hf_file):
+            continue
+        # A custom LOCAL model path the user points at is honoured as-is —
+        # present-checked + loaded in place, regardless of the backend's default
+        # form — so the scan reflects the *actual* path, not the default repo's
+        # hub presence. Checked before the hf_file/snapshot defaults.
+        if _is_file_model(model):
+            # A single weight file: the default GGUF, or a custom .gguf path.
+            fpath = Path(str(model))
+            assets.append(Asset(
+                key=f"{domain}:{spec.backend}", label=spec.display_name,
+                kind="file", dest=str(fpath.parent), repo=spec.hf_repo,
+                filename=fpath.name, size_gb=spec.download_size_gb,
+            ))
+        elif _is_dir_model(model):
+            # A directory model (the ONNX bundle, or a custom folder): snapshot
+            # flat into that dir, not the hub cache, so the loader finds it.
+            # `hf_allow` (if set) fetches only the needed files from a big repo.
+            assets.append(Asset(
+                key=f"{domain}:{spec.backend}", label=spec.display_name,
+                kind="dir_snapshot", dest=str(model), repo=spec.hf_repo,
+                allow=list(spec.hf_allow) or None, size_gb=spec.download_size_gb,
+            ))
+        elif spec.hf_file:
+            # hf_file backend whose model isn't a local file path -> default file.
+            assets.append(Asset(
+                key=f"{domain}:{spec.backend}", label=spec.display_name,
+                kind="file", dest=models_dir, repo=spec.hf_repo,
+                filename=spec.hf_file, size_gb=spec.download_size_gb,
+            ))
+        else:
+            assets.append(Asset(
+                key=f"{domain}:{spec.backend}", label=spec.display_name,
+                kind="snapshot", dest=hub, repo=(spec.hf_repo or model),
+                size_gb=spec.download_size_gb,
+            ))
+
+    assets.append(Asset(
+        key="bge", label="BGE-small (semantic note search)",
+        kind="snapshot", dest=hub, repo=BGE_REPO, size_gb=0.13,
+    ))
+    assets.append(Asset(
+        key="grammar", label="JSON grammar (json.gbnf)",
+        kind="url", dest=str(Path(grammars) / "json.gbnf"), url=GRAMMAR_URL,
+    ))
+    return assets
+
+
+# --- default (real) download implementations (lazy heavy imports) -----------
+
+def _default_snapshot(repo: str, dest: str) -> None:
+    from huggingface_hub import snapshot_download
+    Path(dest).mkdir(parents=True, exist_ok=True)
+    snapshot_download(repo_id=repo, cache_dir=dest)
+
+
+def _default_file(repo: str, filename: str, dest: str) -> None:
+    from huggingface_hub import hf_hub_download
+    Path(dest).mkdir(parents=True, exist_ok=True)
+    hf_hub_download(repo_id=repo, filename=filename, local_dir=dest)
+
+
+def _default_dir_snapshot(repo: str, dest: str, allow=None) -> None:
+    # Snapshot the repo *flat* into dest (not the hub cache) so a directory-style
+    # model (e.g. the ONNX bundle) lands where the loader reads it. `allow`
+    # (allow_patterns) fetches only the needed files from a large repo.
+    from huggingface_hub import snapshot_download
+    Path(dest).mkdir(parents=True, exist_ok=True)
+    snapshot_download(repo_id=repo, local_dir=dest, allow_patterns=allow)
+
+
+def _default_url(url: str, dest: str) -> None:
+    import urllib.request
+    Path(dest).parent.mkdir(parents=True, exist_ok=True)
+    urllib.request.urlretrieve(url, dest)
+
+
+def _already_present(asset: Asset) -> bool:
+    """Skip an asset already on disk (cheap resume — hf also resumes internally)."""
+    if asset.kind == "url":
+        return Path(asset.dest).is_file()
+    if asset.kind == "file":
+        return (Path(asset.dest) / asset.filename).is_file()
+    if asset.kind == "dir_snapshot":
+        d = Path(asset.dest)
+        return d.is_dir() and any(d.iterdir())
+    # snapshot: hub dir for the repo
+    hub_dir = Path(asset.dest) / f"models--{asset.repo.replace('/', '--')}"
+    return hub_dir.is_dir()
+
+
+class DownloadManager:
+    """Runs a planned asset list on a background thread; exposes live progress."""
+
+    def __init__(self, snapshot_fn=None, file_fn=None, url_fn=None, dir_snapshot_fn=None):
+        self._snapshot_fn: Callable = snapshot_fn or _default_snapshot
+        self._file_fn: Callable = file_fn or _default_file
+        self._url_fn: Callable = url_fn or _default_url
+        self._dir_snapshot_fn: Callable = dir_snapshot_fn or _default_dir_snapshot
+        self._lock = threading.Lock()
+        self._assets: list = []
+        self._state = "idle"   # idle | downloading | done | error
+        self._error: Optional[str] = None
+        self._thread: Optional[threading.Thread] = None
+
+    @property
+    def active(self) -> bool:
+        return self._state == "downloading"
+
+    def start(self, assets: list, on_complete: Optional[Callable[[bool], None]] = None) -> bool:
+        """Begin downloading `assets` on a daemon thread. No-op if already active."""
+        with self._lock:
+            if self._state == "downloading":
+                return False
+            self._assets = assets
+            self._state = "downloading"
+            self._error = None
+        self._thread = threading.Thread(
+            target=self._run, args=(on_complete,), daemon=True, name="downloader"
+        )
+        self._thread.start()
+        return True
+
+    def _set(self, asset: Asset, status: str, error: Optional[str] = None) -> None:
+        with self._lock:
+            asset.status = status
+            asset.error = error
+
+    def _run(self, on_complete) -> None:
+        ok = True
+        for asset in self._assets:
+            try:
+                if _already_present(asset):
+                    self._set(asset, DONE)
+                    continue
+                self._set(asset, DOWNLOADING)
+                logger.info("Downloading %s (%s)", asset.label, asset.key)
+                if asset.kind == "snapshot":
+                    self._snapshot_fn(asset.repo, asset.dest)
+                elif asset.kind == "dir_snapshot":
+                    self._dir_snapshot_fn(asset.repo, asset.dest, asset.allow)
+                elif asset.kind == "file":
+                    self._file_fn(asset.repo, asset.filename, asset.dest)
+                elif asset.kind == "url":
+                    self._url_fn(asset.url, asset.dest)
+                else:
+                    raise ValueError(f"unknown asset kind {asset.kind!r}")
+                self._set(asset, DONE)
+            except Exception as e:  # noqa: BLE001 — surface, don't crash the thread
+                logger.exception("Download failed: %s", asset.key)
+                self._set(asset, ERROR, f"{type(e).__name__}: {e}")
+                ok = False
+                break
+        with self._lock:
+            self._state = DONE if ok else ERROR
+            if not ok:
+                self._error = next(
+                    (a.error for a in self._assets if a.status == ERROR), "download failed"
+                )
+        if on_complete is not None:
+            try:
+                on_complete(ok)
+            except Exception:
+                logger.exception("download on_complete hook raised")
+
+    def snapshot(self) -> dict:
+        """Current overall + per-asset state, for `/status` and the SSE stream."""
+        with self._lock:
+            assets = [a.snapshot() for a in self._assets]
+            done = sum(1 for a in assets if a["status"] == DONE)
+            return {
+                "state": self._state,
+                "error": self._error,
+                "completed": done,
+                "total": len(assets),
+                "assets": assets,
+            }

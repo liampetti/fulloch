@@ -3,6 +3,7 @@ Pytest configuration and fixtures for Fulloch tests.
 """
 
 import importlib
+import importlib.machinery
 import os
 import sys
 import tempfile
@@ -59,20 +60,80 @@ _HEAVY_MODULES = (
 #: is listed here.
 STUBBED_MODULES: set[str] = set()
 
+# Probes that should return False on the stub (so call sites like
+# `torch.cuda.is_available()` take the "no GPU" / "not available" branch
+# instead of seeing a truthy MagicMock and crashing later on a `>` comparison).
+_STUB_FALSE_PROBES = frozenset(
+    {"is_available", "is_initialized", "is_built"}
+)
+
+
+def _make_stub_class(name: str):
+    """Build a stub class whose instantiation returns a fresh MagicMock.
+
+    The kwargs to `stub_cls(...)` are set as attributes on the returned mock,
+    so `VADIterator(model, threshold=0.5, min_silence_duration_ms=1500)` gives
+    back a mock you can read `.threshold` / `.min_silence_duration_ms` from.
+    Each call returns a NEW mock — critical for tests that compare two
+    separately-constructed objects (e.g. `VadEndpointer._iterator` vs
+    `_soft_iterator`); MagicMock's `return_value` reuse would alias them and
+    make per-iterator updates clobber each other.
+
+    Names in `_STUB_FALSE_PROBES` return `False` instead of a mock, so probe
+    calls like `torch.cuda.is_available()` are falsy and call sites skip the
+    GPU/load branch.
+
+    A metaclass on the returned class routes `cls.SubName` through
+    `_make_stub_class` again, so chains like `torch.cuda.is_available()`
+    resolve (each link is a fresh stub class; the `is_available` one returns
+    False per the probe list).
+    """
+
+    def __new__(cls, *args, **kwargs):
+        if name in _STUB_FALSE_PROBES:
+            return False
+        m = MagicMock()
+        for k, v in kwargs.items():
+            setattr(m, k, v)
+        return m
+
+    return _StubClassMeta(name, (), {"__new__": __new__})
+
+
+class _StubClassMeta(type):
+    def __getattr__(cls, name):
+        return _make_stub_class(name)
+
 
 class _StubModule(types.ModuleType):
-    """A module whose every attribute access returns a fresh MagicMock, so
-    `import x`, `from x import Y`, and `x.Y(...)` all succeed harmlessly."""
+    """Stand-in for a heavy module that isn't installed (CI without GPU stack).
+
+    `import x` returns this; `from x import Y` resolves Y via `__getattr__`
+    to a stub class (see `_make_stub_class`). `x.Y(...)` instantiates that
+    class and returns a fresh MagicMock with kwargs as attributes.
+    """
 
     def __getattr__(self, name):  # noqa: D401 - simple delegation
-        return MagicMock(name=f"{self.__name__}.{name}")
+        # `__path__` is iterated by the import machinery when treating a
+        # module as a package; returning a non-iterable stub class here
+        # would break transitively-imported real packages that touch torch
+        # (e.g. thinc via spacy via misaki). An empty list is what the
+        # machinery would default to anyway.
+        if name == "__path__":
+            return []
+        return _make_stub_class(name)
 
 
 for _name in _HEAVY_MODULES:
     try:
         importlib.import_module(_name)
     except Exception:
-        sys.modules[_name] = _StubModule(_name)
+        stub = _StubModule(_name)
+        # Set a real __spec__ — the default ModuleType has __spec__ = None
+        # which makes importlib.util.find_spec raise ValueError and breaks
+        # tests that probe the dep via find_spec (e.g. test_cpu_imports).
+        stub.__spec__ = importlib.machinery.ModuleSpec(name=_name, loader=None)
+        sys.modules[_name] = stub
         STUBBED_MODULES.add(_name)
 
 

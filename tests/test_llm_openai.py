@@ -175,13 +175,15 @@ def test_prose_in_json_mode_skips_repair_roundtrip():
 
 
 def test_malformed_json_still_attempts_repair():
-    # Truncated/wrapped JSON (has a '{') is worth one repair round-trip.
+    # Genuinely malformed JSON (has a '{' but isn't fixable by appending
+    # closing brackets) is worth one repair round-trip. A truncated-but-
+    # closable response is handled by the local fast-path and skips repair.
     calls = []
 
     def behavior(kwargs):
         calls.append(kwargs)
         if len(calls) == 1:
-            return iter([_chunk('{"reply": "hi"')])  # truncated -> has '{'
+            return iter([_chunk('{"reply": hi}')])  # unquoted value -> not closeable
         return types.SimpleNamespace(
             choices=[types.SimpleNamespace(message=types.SimpleNamespace(content='{"reply":"hi"}'))]
         )

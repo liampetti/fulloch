@@ -30,9 +30,7 @@ DEFAULT_RESET_MARKER = "./data/.setup_pending"
 # Keys the app hard-requires to construct the assistant. A populated config
 # that lacks one of these is a version mismatch — surfaced as a clear update
 # error rather than silently defaulting. Extend as the schema grows.
-REQUIRED_KEYS = (
-    ("general", "wakeword"),
-)
+REQUIRED_KEYS = (("general", "wakeword"),)
 
 
 @dataclass
@@ -153,8 +151,7 @@ def detect_setup_state(
             return SetupDecision(
                 needs_setup=True,
                 config_present=True,
-                reason="GPU-only backends can't run on the CPU image: "
-                       + ", ".join(gpu_only),
+                reason="GPU-only backends can't run on the CPU image: " + ", ".join(gpu_only),
             )
 
     missing_assets = []

@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 # Defensive read so importing this module never crashes when no `search` config
 # is present (e.g. the test suite / CI with no data/config.yml). In production
 # the module is only loaded when the `search` key exists (see tools/__init__.py).
-SEARXNG_URL = normalize_url((config.get('search') or {}).get(
-    'searxng_url', 'http://localhost:8080/search'
-))  # adds scheme if missing, drops trailing slash
+SEARXNG_URL = normalize_url(
+    (config.get("search") or {}).get("searxng_url", "http://localhost:8080/search")
+)  # adds scheme if missing, drops trailing slash
 
 # Per-snippet cap. Wide enough to give the agent rich source material to
 # triangulate from; the inline summariser (see core/assistant.py) does the
@@ -56,16 +56,17 @@ def _results_from_json(query, num_results):
     """
     resp = requests.get(
         SEARXNG_URL,
-        params={'q': query, 'format': 'json', 'categories': 'general'},
+        params={"q": query, "format": "json", "categories": "general"},
         timeout=SEARXNG_TIMEOUT_S,
     )
     resp.raise_for_status()
     if not resp.text.strip():
         raise ValueError("empty JSON response from SearXNG")
-    results = resp.json().get('results', [])
+    results = resp.json().get("results", [])
     return [
         {"url": r["url"], "content": (r.get("content") or "").strip()}
-        for r in results[:num_results] if r.get("url")
+        for r in results[:num_results]
+        if r.get("url")
     ]
 
 
@@ -78,7 +79,7 @@ def _results_from_html(query, num_results):
     """
     resp = requests.get(
         SEARXNG_URL,
-        params={'q': query, 'categories': 'general'},
+        params={"q": query, "categories": "general"},
         timeout=SEARXNG_TIMEOUT_S,
     )
     resp.raise_for_status()
@@ -89,10 +90,12 @@ def _results_from_html(query, num_results):
         if not link or not link.get("href"):
             continue
         content_el = art.select_one("p.content")
-        out.append({
-            "url": link["href"],
-            "content": content_el.get_text(" ", strip=True) if content_el else "",
-        })
+        out.append(
+            {
+                "url": link["href"],
+                "content": content_el.get_text(" ", strip=True) if content_el else "",
+            }
+        )
         if len(out) >= num_results:
             break
     return out
@@ -192,7 +195,7 @@ def _strip_summarise_directive(query: str) -> str:
         "general knowledge, math, definitions, history, science, opinions, "
         "jokes, or anything the assistant can answer from its own training."
     ),
-    aliases=["web_search", "current_events", "fact_search"]
+    aliases=["web_search", "current_events", "fact_search"],
 )
 def external_information(query: str = "get me the latest news stories") -> str:
     """Fetch top SearXNG snippets and wrap them with a `User question:` sentinel

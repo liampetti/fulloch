@@ -20,9 +20,9 @@ def _wait_done(mgr, timeout=5.0):
 
 
 def test_plan_assets_covers_backends_and_always_required():
-    resolved = resolve_models({"asr": {"backend": "qwen"},
-                               "tts": {"backend": "qwen"},
-                               "llm": {"backend": "llama"}})
+    resolved = resolve_models(
+        {"asr": {"backend": "qwen"}, "tts": {"backend": "qwen"}, "llm": {"backend": "llama"}}
+    )
     assets = dl.plan_assets(resolved, models_dir="/tmp/nope")
     keys = {a.key for a in assets}
     assert "asr:qwen" in keys and "tts:qwen" in keys and "llm:llama" in keys
@@ -33,9 +33,13 @@ def test_plan_assets_covers_backends_and_always_required():
 
 
 def test_plan_skips_none_llm():
-    resolved = resolve_models({"asr": {"backend": "moonshine"},
-                               "tts": {"backend": "kokoro-onnx"},
-                               "llm": {"backend": "none"}})
+    resolved = resolve_models(
+        {
+            "asr": {"backend": "moonshine"},
+            "tts": {"backend": "kokoro-onnx"},
+            "llm": {"backend": "none"},
+        }
+    )
     keys = {a.key for a in dl.plan_assets(resolved)}
     assert not any(k.startswith("llm:") for k in keys)
     assert "asr:moonshine" in keys and "tts:kokoro-onnx" in keys
@@ -89,8 +93,13 @@ def test_already_present_assets_skip(tmp_path):
         url_fn=lambda *a: ran.append("url"),
         dir_snapshot_fn=lambda *a: ran.append("dir"),
     )
-    resolved = resolve_models({"asr": {"backend": "moonshine"}, "tts": {"backend": "kokoro-onnx"},
-                               "llm": {"backend": "none"}})
+    resolved = resolve_models(
+        {
+            "asr": {"backend": "moonshine"},
+            "tts": {"backend": "kokoro-onnx"},
+            "llm": {"backend": "none"},
+        }
+    )
     assets = dl.plan_assets(resolved, models_dir=str(tmp_path))
     mgr.start(assets)
     _wait_done(mgr)
@@ -100,8 +109,13 @@ def test_already_present_assets_skip(tmp_path):
 
 
 def test_snapshot_exposes_domain_and_present(tmp_path):
-    resolved = resolve_models({"asr": {"backend": "moonshine"},
-                               "tts": {"backend": "kokoro-onnx"}, "llm": {"backend": "none"}})
+    resolved = resolve_models(
+        {
+            "asr": {"backend": "moonshine"},
+            "tts": {"backend": "kokoro-onnx"},
+            "llm": {"backend": "none"},
+        }
+    )
     assets = dl.plan_assets(resolved, models_dir=str(tmp_path))
     asr = next(a for a in assets if a.key == "asr:moonshine").snapshot()
     assert asr["domain"] == "asr" and asr["present"] is False and "dest" in asr
@@ -116,10 +130,16 @@ def test_custom_gguf_path_is_planned_and_present_in_place(tmp_path):
     gguf = tmp_path / "mine" / "custom-model.gguf"
     gguf.parent.mkdir(parents=True)
     gguf.write_text("weights")
-    resolved = resolve_models({"asr": {"backend": "moonshine"},
-                               "tts": {"backend": "kokoro-onnx"},
-                               "llm": {"backend": "llama", "model": str(gguf)}})
-    llm = next(a for a in dl.plan_assets(resolved, models_dir=str(tmp_path)) if a.key == "llm:llama")
+    resolved = resolve_models(
+        {
+            "asr": {"backend": "moonshine"},
+            "tts": {"backend": "kokoro-onnx"},
+            "llm": {"backend": "llama", "model": str(gguf)},
+        }
+    )
+    llm = next(
+        a for a in dl.plan_assets(resolved, models_dir=str(tmp_path)) if a.key == "llm:llama"
+    )
     assert llm.kind == "file" and llm.filename == "custom-model.gguf"
     assert Path(llm.dest) == gguf.parent
     assert llm.snapshot()["present"] is True  # already on disk -> no download
@@ -131,15 +151,20 @@ def test_custom_dir_path_honoured_for_snapshot_backend(tmp_path):
     tts_dir = tmp_path / "my-tts"
     tts_dir.mkdir()
     (tts_dir / "model.bin").write_text("x")  # non-empty -> present
-    resolved = resolve_models({"asr": {"backend": "moonshine"},
-                               "tts": {"backend": "qwen", "model": str(tts_dir)},
-                               "llm": {"backend": "none"}})
+    resolved = resolve_models(
+        {
+            "asr": {"backend": "moonshine"},
+            "tts": {"backend": "qwen", "model": str(tts_dir)},
+            "llm": {"backend": "none"},
+        }
+    )
     tts = next(a for a in dl.plan_assets(resolved, models_dir=str(tmp_path)) if a.key == "tts:qwen")
     assert tts.kind == "dir_snapshot" and Path(tts.dest) == tts_dir
     assert tts.snapshot()["present"] is True
 
 
 # --- preflight --------------------------------------------------------------
+
 
 def test_disk_free_is_positive():
     assert pf.disk_free_gb(".") > 0
@@ -206,6 +231,7 @@ def test_ram_info_returns_dict():
     assert "total_gb" in info and "available_gb" in info
     # On Linux (CI / dev box) both should be readable; skip assertion on other OS.
     import os
+
     if os.path.exists("/proc/meminfo"):
         assert info["total_gb"] is not None and info["total_gb"] > 0
         assert info["available_gb"] is not None

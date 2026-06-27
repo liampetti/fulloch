@@ -120,9 +120,9 @@ class VadEndpointer:
         offset = 0
         n = samples.size
         while offset + VAD_WINDOW_SAMPLES <= n:
-            window = samples[offset:offset + VAD_WINDOW_SAMPLES]
+            window = samples[offset : offset + VAD_WINDOW_SAMPLES]
             offset += VAD_WINDOW_SAMPLES
-            rms = float(np.sqrt(np.mean(window ** 2)))
+            rms = float(np.sqrt(np.mean(window**2)))
             # Soft endpoint: re-arm on a fresh speech start, latch on its (early)
             # end. Fed the same window as the hard iterator but with its own
             # model state, so it never disturbs the hard endpoint below.
@@ -150,9 +150,7 @@ class VadEndpointer:
             if "end" in event:
                 self.endpointed = True
                 start = (
-                    self._seg_start_sample
-                    if self._seg_start_sample is not None
-                    else event["end"]
+                    self._seg_start_sample if self._seg_start_sample is not None else event["end"]
                 )
                 self.last_speech_samples = max(0, event["end"] - start)
                 if self._voiced_rms_vals:
@@ -183,9 +181,7 @@ class VadEndpointer:
             if self._soft_iterator is not None:
                 self._soft_iterator.threshold = t
         if endpoint_silence_ms is not None:
-            self._iterator.min_silence_samples = (
-                self.sample_rate * int(endpoint_silence_ms) / 1000
-            )
+            self._iterator.min_silence_samples = self.sample_rate * int(endpoint_silence_ms) / 1000
         if soft_endpoint_silence_ms is not None and self._soft_iterator is not None:
             self._soft_iterator.min_silence_samples = (
                 self.sample_rate * int(soft_endpoint_silence_ms) / 1000

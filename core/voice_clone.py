@@ -61,6 +61,7 @@ def safe_name(raw: str) -> str:
 def audio_to_wav_bytes(audio: np.ndarray, sr: int) -> bytes:
     """Encode float32 audio to in-memory 16-bit PCM WAV for browser playback."""
     import soundfile as sf
+
     buf = io.BytesIO()
     sf.write(buf, np.clip(audio, -1.0, 1.0), sr, format="WAV", subtype="PCM_16")
     return buf.getvalue()
@@ -72,6 +73,7 @@ def _load_model():
         if _model is None:
             import torch
             from qwen_tts import Qwen3TTSModel
+
             device = "cuda" if torch.cuda.is_available() else "cpu"
             logger.info("Loading %s on %s...", MODEL_NAME, device)
             kwargs = {"torch_dtype": torch.bfloat16, "device_map": device}
@@ -91,9 +93,7 @@ def generate(instruct: str, phrase: Optional[str] = None) -> tuple:
         raise ValueError("a voice description is required")
 
     model = _load_model()
-    wavs, sr = model.generate_voice_design(
-        text=phrase, instruct=instruct, language="english"
-    )
+    wavs, sr = model.generate_voice_design(text=phrase, instruct=instruct, language="english")
     audio = wavs[0]
     if not isinstance(audio, np.ndarray):
         audio = np.asarray(audio)
@@ -104,10 +104,12 @@ def generate(instruct: str, phrase: Optional[str] = None) -> tuple:
     return audio, sr
 
 
-def save_voice(name: str, audio: np.ndarray, sr: int, phrase: str,
-               voices_dir: Optional[str] = None) -> tuple:
+def save_voice(
+    name: str, audio: np.ndarray, sr: int, phrase: str, voices_dir: Optional[str] = None
+) -> tuple:
     """Write a `<name>.{wav,txt}` reference pair. Returns (wav_path, txt_path)."""
     import soundfile as sf
+
     name = safe_name(name)
     d = Path(voices_dir or VOICES_DIR)
     d.mkdir(parents=True, exist_ok=True)

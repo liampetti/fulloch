@@ -22,8 +22,14 @@ def _import_assistant_module():
         "core.audio": ["AudioCapture"],
         "core.asr": ["load_asr_pipeline"],
         "core.tts": [
-            "set_voice", "warmup_model", "synthesize", "play_chunks",
-            "speak_stream", "set_output_device", "set_tts_active_event", "model",
+            "set_voice",
+            "warmup_model",
+            "synthesize",
+            "play_chunks",
+            "speak_stream",
+            "set_output_device",
+            "set_tts_active_event",
+            "model",
         ],
     }
     for name, attrs in fake.items():
@@ -34,6 +40,7 @@ def _import_assistant_module():
             setattr(mod, attr, lambda *a, **k: None)
         sys.modules[name] = mod
     import core.assistant as assistant  # noqa: E402
+
     return assistant
 
 

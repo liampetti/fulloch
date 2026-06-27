@@ -18,9 +18,13 @@ from core.turn_stats import TurnStats  # noqa: E402
 
 # --- fakes ------------------------------------------------------------------
 
+
 def _chunk(content=None, usage=None):
-    choices = [types.SimpleNamespace(delta=types.SimpleNamespace(content=content))] \
-        if content is not None else []
+    choices = (
+        [types.SimpleNamespace(delta=types.SimpleNamespace(content=content))]
+        if content is not None
+        else []
+    )
     return types.SimpleNamespace(choices=choices, usage=usage)
 
 
@@ -42,6 +46,7 @@ def _make_client(behavior):
 
 
 # --- generate ---------------------------------------------------------------
+
 
 def test_streams_and_records_stats():
     usage = types.SimpleNamespace(completion_tokens=2, prompt_tokens=5)
@@ -132,6 +137,7 @@ def test_midstream_failure_with_no_text_raises_remote_unreachable():
         def it():
             raise httpx.RemoteProtocolError("peer closed connection")
             yield  # pragma: no cover — make it a generator
+
         return it()
 
     c, _ = _make_client(gen)
@@ -146,6 +152,7 @@ def test_midstream_failure_after_partial_returns_partial():
             yield _chunk("Partial ")
             yield _chunk("answer")
             raise httpx.RemoteProtocolError("peer closed connection")
+
         return it()
 
     c, _ = _make_client(gen)
@@ -175,9 +182,9 @@ def test_malformed_json_still_attempts_repair():
         calls.append(kwargs)
         if len(calls) == 1:
             return iter([_chunk('{"reply": "hi"')])  # truncated -> has '{'
-        return types.SimpleNamespace(choices=[
-            types.SimpleNamespace(message=types.SimpleNamespace(content='{"reply":"hi"}'))
-        ])
+        return types.SimpleNamespace(
+            choices=[types.SimpleNamespace(message=types.SimpleNamespace(content='{"reply":"hi"}'))]
+        )
 
     c, _ = _make_client(behavior)
     out = c.generate(user_prompt="hi", grammar=llm_openai.AGENT_JSON_SENTINEL)
@@ -194,6 +201,7 @@ def test_is_context_error_mapping():
 def test_generate_slm_dispatches_to_remote():
     class Remote:
         _fulloch_remote = True
+
         def generate(self, **kw):
             return "REMOTE:" + kw["user_prompt"]
 
@@ -216,11 +224,14 @@ def test_load_openai_returns_sentinel_and_client():
 
 # --- test_connection --------------------------------------------------------
 
+
 def test_connection_ok(monkeypatch):
     class _OK:
         def __init__(self, **kw):
             self.chat = types.SimpleNamespace(
-                completions=types.SimpleNamespace(create=lambda **k: object()))
+                completions=types.SimpleNamespace(create=lambda **k: object())
+            )
+
     monkeypatch.setattr("openai.OpenAI", _OK)
     assert llm_openai.test_connection("http://x/v1", "m")["ok"] is True
 
@@ -230,8 +241,9 @@ def test_connection_failure(monkeypatch):
         def __init__(self, **kw):
             def _raise(**k):
                 raise RuntimeError("refused")
-            self.chat = types.SimpleNamespace(
-                completions=types.SimpleNamespace(create=_raise))
+
+            self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=_raise))
+
     monkeypatch.setattr("openai.OpenAI", _Bad)
     out = llm_openai.test_connection("http://x/v1", "m")
     assert out["ok"] is False and "refused" in out["error"]
@@ -248,13 +260,16 @@ def test_connection_blank_key_falls_back_to_env(monkeypatch):
         def __init__(self, **kw):
             seen["api_key"] = kw.get("api_key")
             self.chat = types.SimpleNamespace(
-                completions=types.SimpleNamespace(create=lambda **k: object()))
+                completions=types.SimpleNamespace(create=lambda **k: object())
+            )
+
     monkeypatch.setattr("openai.OpenAI", _OK)
     assert llm_openai.test_connection("http://x/v1", "m", api_key="")["ok"] is True
     assert seen["api_key"] == "envkey"
 
 
 # --- set_model + list_models ------------------------------------------------
+
 
 def test_set_model_swaps_model_used_per_request():
     c, comp = _make_client(lambda kw: iter([_chunk("x")]))
@@ -269,6 +284,7 @@ def test_list_models_returns_sorted_ids(monkeypatch):
         def __init__(self, **kw):
             data = [types.SimpleNamespace(id="zeta"), types.SimpleNamespace(id="alpha")]
             self.models = types.SimpleNamespace(list=lambda: types.SimpleNamespace(data=data))
+
     monkeypatch.setattr("openai.OpenAI", _OK)
     out = llm_openai.list_models("http://x/v1")
     assert out["ok"] is True and out["models"] == ["alpha", "zeta"]
@@ -279,13 +295,16 @@ def test_list_models_failure_degrades(monkeypatch):
         def __init__(self, **kw):
             def _raise():
                 raise RuntimeError("no endpoint")
+
             self.models = types.SimpleNamespace(list=_raise)
+
     monkeypatch.setattr("openai.OpenAI", _Bad)
     out = llm_openai.list_models("http://x/v1")
     assert out["ok"] is False and out["models"] == [] and "no endpoint" in out["error"]
 
 
 # --- degrade path (agent loop) ---------------------------------------------
+
 
 def test_agent_loop_degrades_to_regex_on_remote_unreachable():
     import core.agent_loop as al
@@ -297,19 +316,23 @@ def test_agent_loop_degrades_to_regex_on_remote_unreachable():
         grammar=object(),
         wakeword_name="Fulloch",
         tts_session=None,
-        replan_stall_cache=[],   # empty -> progress watchdog is a no-op
+        replan_stall_cache=[],  # empty -> progress watchdog is a no-op
         play_chunks=lambda *a, **k: None,
         _compact_completed_turns=lambda: None,
         _trim_history=lambda: None,
         _emit_agent_event=lambda *a, **k: None,
         _note_llm_remote_status=lambda ok, error="": calls["remote_status"].append(ok),
     )
+
     def _raise(**k):
         raise RemoteUnreachable("down")
+
     host._generate_with_context_recovery = _raise
+
     def _fallback(session, source):
         calls["fallback"] += 1
         return "BASIC COMMANDS ONLY"
+
     host._speak_no_ai_fallback = _fallback
 
     loop = al.AgentLoop(host, session=None, source="text")

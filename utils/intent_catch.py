@@ -24,14 +24,14 @@ def _match(label: str, pattern: re.Pattern, command: str):
 # a mid-sentence "play" and routes a web-search request to play_song. Only an
 # optional polite prefix may precede the verb ("please play the Beatles").
 _PLAY_RE = re.compile(
-    r'^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|will\s+you\s+|'
-    r'i\s+want\s+you\s+to\s+|i\s+want\s+to\s+|i\s+wanna\s+|go\s+ahead\s+and\s+)*'
-    r'play\s+(.+)$',
+    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|will\s+you\s+|"
+    r"i\s+want\s+you\s+to\s+|i\s+want\s+to\s+|i\s+wanna\s+|go\s+ahead\s+and\s+)*"
+    r"play\s+(.+)$",
     re.IGNORECASE,
 )
-_STOP_RE = re.compile(r'^\s*(stop|pause|halt)\b', re.IGNORECASE)
-_SKIP_RE = re.compile(r'^\s*skip\b', re.IGNORECASE)
-_RESUME_RE = re.compile(r'^\s*resume\b', re.IGNORECASE)
+_STOP_RE = re.compile(r"^\s*(stop|pause|halt)\b", re.IGNORECASE)
+_SKIP_RE = re.compile(r"^\s*skip\b", re.IGNORECASE)
+_RESUME_RE = re.compile(r"^\s*resume\b", re.IGNORECASE)
 # Leading context is fine ("do you know what time is it"), so the start stays
 # unanchored — but the phrase must END the question (bar a few benign tail
 # adverbs / trailing punctuation). Without the end-anchor, "what time is it
@@ -47,13 +47,13 @@ _TIME_QUERY_RE = re.compile(
 # Anchored like _PLAY_RE so a mid-sentence "set a timer for the eggs" mention
 # can't hijack the turn.
 _TIMER_RE = re.compile(
-    r'^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*'
-    r'(?:start|set)\s+(?:a\s+)?(?:timer|time)\s+(?:for\s+)?(.+?)(?:\s+please)?$',
+    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*"
+    r"(?:start|set)\s+(?:a\s+)?(?:timer|time)\s+(?:for\s+)?(.+?)(?:\s+please)?$",
     re.IGNORECASE,
 )
 _LIST_TIMERS_RE = re.compile(
-    r'^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*'
-    r'get\s+(?:a\s+)?(?:timers|timer|time)(?:\s+(.*?))?(?:\s+status)?$',
+    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*"
+    r"get\s+(?:a\s+)?(?:timers|timer|time)(?:\s+(.*?))?(?:\s+status)?$",
     re.IGNORECASE,
 )
 
@@ -104,9 +104,18 @@ _COMPOUND_RE = re.compile(r"\b(?:and|then)\b", re.IGNORECASE)
 
 # Entity references too vague to resolve to a single entity_id — let the SLM
 # decide (it may expand "everything" into several actions).
-_VAGUE_ENTITIES = frozenset({
-    "it", "that", "this", "them", "those", "these", "everything", "all",
-})
+_VAGUE_ENTITIES = frozenset(
+    {
+        "it",
+        "that",
+        "this",
+        "them",
+        "those",
+        "these",
+        "everything",
+        "all",
+    }
+)
 
 # Anaphoric determiners that, when they *lead* a multi-word entity ("those
 # lights", "that lamp"), mark a back-reference to something said earlier — a
@@ -118,14 +127,35 @@ _VAGUE_ENTITIES = frozenset({
 _ANAPHORA_DETERMINERS = frozenset({"it", "that", "this", "them", "those", "these"})
 
 _PERCENT_ONES = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
-    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
-    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
-    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
 }
 _PERCENT_TENS = {
-    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
-    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
 }
 
 
@@ -303,9 +333,19 @@ _LOCK_RE = re.compile(
 # Leading particles mark a phrasal/idiomatic verb ("lock in", "lock down")
 # rather than a real device name — device names never start with these, so a
 # match here is an idiom, not a command.
-_VERB_PARTICLES = frozenset({
-    "in", "up", "down", "into", "onto", "out", "off", "on", "away",
-})
+_VERB_PARTICLES = frozenset(
+    {
+        "in",
+        "up",
+        "down",
+        "into",
+        "onto",
+        "out",
+        "off",
+        "on",
+        "away",
+    }
+)
 
 
 def _starts_with_particle(entity: str) -> bool:
@@ -330,11 +370,27 @@ def extract_lock(command: str) -> Optional[tuple]:
 # "open"/"close" are generic verbs, so this rule (unlike turn on/off) requires a
 # cover-ish noun in the entity — otherwise "open Spotify" would needlessly
 # bounce off HA before replanning.
-_COVER_KEYWORDS = frozenset({
-    "blind", "blinds", "curtain", "curtains", "garage", "shutter", "shutters",
-    "shade", "shades", "awning", "awnings", "cover", "covers", "gate", "gates",
-    "door", "doors",
-})
+_COVER_KEYWORDS = frozenset(
+    {
+        "blind",
+        "blinds",
+        "curtain",
+        "curtains",
+        "garage",
+        "shutter",
+        "shutters",
+        "shade",
+        "shades",
+        "awning",
+        "awnings",
+        "cover",
+        "covers",
+        "gate",
+        "gates",
+        "door",
+        "doors",
+    }
+)
 _COVER_RE = re.compile(
     r"^\s*(?:please\s+)?(open|close|shut)\s+(?:the\s+)?(.+?)\s*$",
     re.IGNORECASE,
@@ -362,8 +418,18 @@ def extract_cover(command: str) -> Optional[tuple]:
 # phrasing. Multi-word colours are listed first so the alternation prefers them.
 # RGB phrasing ("set the lights to 255,0,0") is left to the SLM.
 _COLOR_NAMES = (
-    "warm white", "cool white", "white", "red", "green", "blue", "yellow",
-    "orange", "purple", "pink", "cyan", "magenta",
+    "warm white",
+    "cool white",
+    "white",
+    "red",
+    "green",
+    "blue",
+    "yellow",
+    "orange",
+    "purple",
+    "pink",
+    "cyan",
+    "magenta",
 )
 _COLOR_RE = re.compile(
     r"^\s*(?:please\s+)?(?:set|change|make|turn)\s+(?:the\s+)?(.+?)\s+"
@@ -445,7 +511,7 @@ def extract_deep_think(command: str) -> Optional[str]:
         match = pattern.search(command)
         if not match:
             continue
-        topic = match.group(1).strip(' .,?!').strip()
+        topic = match.group(1).strip(" .,?!").strip()
         if topic:
             logger.debug(f"Caught Deep Think Match: {topic}")
             return topic
@@ -529,23 +595,26 @@ def extract_note_delete(command: str) -> Optional[bool]:
 _INTENT_RULES = [
     # Smart-home control first — these skip the SLM entirely (HA resolves the
     # entity; a miss replans into the agent), so let them win the common case.
-    (extract_light_brightness,
-     lambda v: {"intent": "ha_set_brightness", "args": [v[0], v[1]]}),
-    (extract_dim_brighten,
-     lambda v: {"intent": "ha_set_brightness", "args": [v[0], v[1]]}),
-    (extract_color,
-     lambda v: {"intent": "ha_set_color", "args": [v[0], v[1]]}),
+    (extract_light_brightness, lambda v: {"intent": "ha_set_brightness", "args": [v[0], v[1]]}),
+    (extract_dim_brighten, lambda v: {"intent": "ha_set_brightness", "args": [v[0], v[1]]}),
+    (extract_color, lambda v: {"intent": "ha_set_color", "args": [v[0], v[1]]}),
     (extract_volume_up, lambda _: {"intent": "ha_volume_up", "args": []}),
     (extract_volume_down, lambda _: {"intent": "ha_volume_down", "args": []}),
-    (extract_lock,
-     lambda v: {"intent": "ha_lock" if v[0] == "lock" else "ha_unlock",
-                "args": [v[1]]}),
-    (extract_cover,
-     lambda v: {"intent": "ha_open_cover" if v[0] == "open" else "ha_close_cover",
-                "args": [v[1]]}),
-    (extract_turn_onoff,
-     lambda v: {"intent": "turn_on" if v[0] == "on" else "turn_off",
-                "args": [v[1]]}),
+    (
+        extract_lock,
+        lambda v: {"intent": "ha_lock" if v[0] == "lock" else "ha_unlock", "args": [v[1]]},
+    ),
+    (
+        extract_cover,
+        lambda v: {
+            "intent": "ha_open_cover" if v[0] == "open" else "ha_close_cover",
+            "args": [v[1]],
+        },
+    ),
+    (
+        extract_turn_onoff,
+        lambda v: {"intent": "turn_on" if v[0] == "on" else "turn_off", "args": [v[1]]},
+    ),
     (extract_toggle, lambda v: {"intent": "toggle", "args": [v]}),
     (extract_after_play, lambda v: {"intent": "play_song", "args": [v]}),
     (extract_stop, lambda _: {"intent": "pause", "args": []}),

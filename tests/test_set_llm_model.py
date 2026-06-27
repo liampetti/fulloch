@@ -43,8 +43,9 @@ def test_endpoint_swaps_and_persists(tmp_path):
     cfg.write_text("models:\n  llm:\n    backend: openai\n    model: old\n")
     assistant = MagicMock()
     assistant.set_llm_model.return_value = {"ok": True, "model": "fresh"}
-    context = AppContext(lifecycle=Lifecycle(phase=READY), assistant=assistant,
-                         config_path=str(cfg))
+    context = AppContext(
+        lifecycle=Lifecycle(phase=READY), assistant=assistant, config_path=str(cfg)
+    )
     client = TestClient(create_app(context=context))
 
     r = client.post("/llm/model", json={"model": "fresh"})
@@ -53,4 +54,5 @@ def test_endpoint_swaps_and_persists(tmp_path):
     assistant.set_llm_model.assert_called_once_with("fresh")
     # persisted so it survives a restart
     from server import config_store as cs
+
     assert cs.read_config(str(cfg))["models"]["llm"]["model"] == "fresh"

@@ -42,6 +42,7 @@ def test_trailing_whitespace_stripped():
 
 # --- clean_for_tts: reasoning-block stripping ------------------------------
 
+
 def test_strips_qwen_think_block():
     out = clean_for_tts("<think>weighing options</think>The answer is yes.")
     assert out == "The answer is yes."

@@ -13,6 +13,7 @@ from utils import intents  # noqa: E402
 
 # --- parse_agent_emission (tolerant JSON) -------------------------------
 
+
 class TestParseAgentEmission:
     def test_plain_json(self):
         assert intents.parse_agent_emission('{"reply": "hi"}') == {"reply": "hi"}
@@ -44,8 +45,9 @@ class TestParseAgentEmission:
 
 class TestStripUnfoundedSaveClaim:
     def test_strips_claim_when_no_write(self):
-        reply = ("The latest news includes Egypt's first-ever win. "
-                 "I've saved this to your daily log.")
+        reply = (
+            "The latest news includes Egypt's first-ever win. I've saved this to your daily log."
+        )
         out = intents.strip_unfounded_save_claim(reply, note_written=False)
         assert "saved this to your daily log" not in out
         assert "Egypt's first-ever win" in out
@@ -82,6 +84,7 @@ class TestStripUnfoundedSaveClaim:
 
 # --- handle_action ------------------------------------------------------
 
+
 class TestHandleAction:
     def test_dispatches_known_tool_returns_string(self):
         with patch.object(tool_registry, "execute_tool", return_value="ok"):
@@ -102,7 +105,8 @@ class TestHandleAction:
         # Unknown tools return a Reactive question: sentinel so the agent
         # loop replans with the failure visible in history.
         with patch.object(
-            tool_registry, "execute_tool",
+            tool_registry,
+            "execute_tool",
             side_effect=UnknownToolError("nope"),
         ):
             result = intents.handle_action({"intent": "nope", "args": []})
@@ -114,7 +118,8 @@ class TestHandleAction:
 
     def test_tool_exception_returns_none(self):
         with patch.object(
-            tool_registry, "execute_tool",
+            tool_registry,
+            "execute_tool",
             side_effect=RuntimeError("boom"),
         ):
             result = intents.handle_action({"intent": "foo", "args": []})
@@ -133,12 +138,8 @@ class TestHandleAction:
         # of the list the grammar forces; route it through as kwargs rather than
         # crashing (the dict indexed as args[0] raised KeyError(0)).
         with patch.object(tool_registry, "execute_tool", return_value="ok") as mock_exec:
-            intents.handle_action(
-                {"intent": "external_information", "args": {"query": "news"}}
-            )
-        mock_exec.assert_called_once_with(
-            "external_information", args=[], kwargs={"query": "news"}
-        )
+            intents.handle_action({"intent": "external_information", "args": {"query": "news"}})
+        mock_exec.assert_called_once_with("external_information", args=[], kwargs={"query": "news"})
 
     def test_scalar_args_wrapped_positional(self):
         with patch.object(tool_registry, "execute_tool", return_value="ok") as mock_exec:
@@ -183,6 +184,7 @@ class TestCoerceArgs:
 
 # --- is_registered_tool (hallucinated-tool guard) -----------------------
 
+
 class TestIsRegisteredTool:
     def test_true_for_loaded_tool(self):
         # Direct registry match — a loaded tool (resolved via canonical_name).
@@ -202,10 +204,12 @@ class TestIsRegisteredTool:
 
 # --- is_web_search ------------------------------------------------------
 
+
 class TestIsWebSearch:
     def test_true_for_canonical_web_search_tool(self):
         with patch.object(
-            tool_registry, "canonical_name",
+            tool_registry,
+            "canonical_name",
             return_value=intents.WEB_SEARCH_TOOL,
         ):
             assert intents.is_web_search("web_search") is True
@@ -228,11 +232,14 @@ class TestIsWebSearch:
 
 # --- is_lookup ----------------------------------------------------------
 
+
 class TestIsLookup:
     def test_true_for_lookup_tool(self):
         for canonical in intents.LOOKUP_TOOLS:
             with patch.object(
-                tool_registry, "canonical_name", return_value=canonical,
+                tool_registry,
+                "canonical_name",
+                return_value=canonical,
             ):
                 assert intents.is_lookup("any_alias") is True
 
@@ -257,6 +264,7 @@ class TestIsLookup:
 
 # --- should_replan ------------------------------------------------------
 
+
 class TestShouldReplan:
     def test_none_triggers_replan(self):
         assert intents.should_replan(None) is True
@@ -265,12 +273,15 @@ class TestShouldReplan:
         assert intents.should_replan("Set Lounge to 20 percent") is False
         assert intents.should_replan("") is False
 
-    @pytest.mark.parametrize("prefix", [
-        "User question:",
-        "Thinking question:",
-        "Summary question:",
-        "Reactive question:",
-    ])
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "User question:",
+            "Thinking question:",
+            "Summary question:",
+            "Reactive question:",
+        ],
+    )
     def test_sentinel_prefix_triggers_replan(self, prefix):
         assert intents.should_replan(f"{prefix} some payload") is True
 
@@ -287,6 +298,7 @@ class TestShouldReplan:
 
 
 # --- classify_step (typed boundary) -------------------------------------
+
 
 class TestClassifyStep:
     def test_none_is_error_and_replans(self):
@@ -312,12 +324,15 @@ class TestClassifyStep:
         assert step.should_replan is False
         assert step.text == "42"
 
-    @pytest.mark.parametrize("prefix,kind", [
-        ("User question:", "WEB_SEARCH"),
-        ("Thinking question:", "THINKING"),
-        ("Summary question:", "SUMMARY"),
-        ("Reactive question:", "REACTIVE"),
-    ])
+    @pytest.mark.parametrize(
+        "prefix,kind",
+        [
+            ("User question:", "WEB_SEARCH"),
+            ("Thinking question:", "THINKING"),
+            ("Summary question:", "SUMMARY"),
+            ("Reactive question:", "REACTIVE"),
+        ],
+    )
     def test_sentinel_prefix_maps_to_kind(self, prefix, kind):
         step = intents.classify_step(f"{prefix} payload")
         assert step.kind is intents.StepKind[kind]
@@ -341,6 +356,7 @@ class TestClassifyStep:
 
 # --- module surface -----------------------------------------------------
 
+
 class TestModuleSurface:
     def test_describe_tools_proxies_to_registry(self):
         with patch.object(tool_registry, "describe_tools", return_value="<list>") as m:
@@ -363,35 +379,48 @@ class TestAgentGrammarParses:
         # (CI without the GPU stack). The grammar still gets validated for real
         # on any machine with llama_cpp installed.
         from tests.conftest import STUBBED_MODULES
+
         if "llama_cpp" in STUBBED_MODULES:
             pytest.skip("requires real llama_cpp (grammar parser)")
 
         from llama_cpp import LlamaGrammar
 
         from core import slm
+
         # Will raise on a parse error.
         LlamaGrammar.from_file(slm.GRAMMAR_FILE)
 
 
 class TestReactiveToSpeech:
     def test_strips_prefix_keeps_user_observation(self):
-        raw = ("Reactive question: Couldn't find an entity matching "
-               "'light.downstairs_office_lights'. Try a different name or be more specific.")
+        raw = (
+            "Reactive question: Couldn't find an entity matching "
+            "'light.downstairs_office_lights'. Try a different name or be more specific."
+        )
         assert intents.reactive_to_speech(raw) == (
             "Couldn't find an entity matching 'light.downstairs_office_lights'. "
-            "Try a different name or be more specific.")
+            "Try a different name or be more specific."
+        )
 
     def test_drops_agent_directive_sentences(self):
-        assert intents.reactive_to_speech(
-            "Reactive question: Could not fetch history for 'x'. Tell the user there was an error."
-        ) == "Could not fetch history for 'x'."
-        assert intents.reactive_to_speech(
-            "Reactive question: Could not parse start 'foo'. Ask the user to clarify the date."
-        ) == "Could not parse start 'foo'."
+        assert (
+            intents.reactive_to_speech(
+                "Reactive question: Could not fetch history for 'x'. Tell the user there was an error."
+            )
+            == "Could not fetch history for 'x'."
+        )
+        assert (
+            intents.reactive_to_speech(
+                "Reactive question: Could not parse start 'foo'. Ask the user to clarify the date."
+            )
+            == "Could not parse start 'foo'."
+        )
 
     def test_empty_after_stripping_falls_back(self):
-        assert intents.reactive_to_speech(
-            "Reactive question: Ask the user to clarify.") == "Sorry, I couldn't do that."
+        assert (
+            intents.reactive_to_speech("Reactive question: Ask the user to clarify.")
+            == "Sorry, I couldn't do that."
+        )
 
 
 class TestNoLlmReactive:
@@ -400,34 +429,45 @@ class TestNoLlmReactive:
 
     def _host(self, spoken):
         import types
+
         return types.SimpleNamespace(
-            llm_enabled=False, _history=[],
+            llm_enabled=False,
+            _history=[],
             _trim_history=lambda: None,
             _emit_agent_event=lambda *a, **k: None,
             _record_spoken=lambda s: spoken.__setitem__("said", s),
             _speak_no_ai_fallback=lambda session, source: (
-                spoken.__setitem__("said", "NO_AI") or "NO_AI"),
+                spoken.__setitem__("said", "NO_AI") or "NO_AI"
+            ),
         )
 
     def test_reactive_observation_spoken_not_no_ai(self, monkeypatch):
         import core.agent_loop as al
+
         spoken = {}
         loop = al.AgentLoop(self._host(spoken), source="voice")
-        monkeypatch.setattr(intents, "handle_action", lambda a: (
-            "Reactive question: Couldn't find an entity matching 'light.x'. "
-            "Try a different name or be more specific."))
+        monkeypatch.setattr(
+            intents,
+            "handle_action",
+            lambda a: (
+                "Reactive question: Couldn't find an entity matching 'light.x'. "
+                "Try a different name or be more specific."
+            ),
+        )
         out = loop._run_without_llm(
-            "dim x", {"actions": [{"intent": "ha_set_brightness", "args": ["x", 30]}]})
+            "dim x", {"actions": [{"intent": "ha_set_brightness", "args": ["x", 30]}]}
+        )
         assert "Couldn't find an entity" in out and "AI model" not in out
         assert spoken["said"] == out
 
     def test_web_search_still_falls_back_to_no_ai(self, monkeypatch):
         import core.agent_loop as al
+
         spoken = {}
         loop = al.AgentLoop(self._host(spoken), source="voice")
         # A WEB_SEARCH-kind result genuinely needs the SLM to summarise → no-AI.
-        monkeypatch.setattr(intents, "handle_action",
-                            lambda a: "User question: what's the weather")
+        monkeypatch.setattr(intents, "handle_action", lambda a: "User question: what's the weather")
         out = loop._run_without_llm(
-            "weather", {"actions": [{"intent": "external_information", "args": ["x"]}]})
+            "weather", {"actions": [{"intent": "external_information", "args": ["x"]}]}
+        )
         assert out == "NO_AI"

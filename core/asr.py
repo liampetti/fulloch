@@ -49,16 +49,23 @@ class QwenASRPipelineWrapper:
                 elif not isinstance(chunk, np.ndarray):
                     chunk = np.array(chunk)
                 _t0 = time.monotonic()
-                results = self.model.transcribe(audio=[(chunk, SAMPLE_RATE)], context=self.context, return_time_stamps=False, **lang_kwargs)
+                results = self.model.transcribe(
+                    audio=[(chunk, SAMPLE_RATE)],
+                    context=self.context,
+                    return_time_stamps=False,
+                    **lang_kwargs,
+                )
                 self.last_transcribe_seconds = time.monotonic() - _t0
-                for res in (results if isinstance(results, list) else [results]):
+                for res in results if isinstance(results, list) else [results]:
                     yield {"text": getattr(res, "text", str(res))}
             return
 
         # Non-streaming path: single array in, list of dicts out.
         if not isinstance(audio_input, np.ndarray):
             audio_input = np.array(audio_input)
-        results = self.model.transcribe(audio=[(audio_input, SAMPLE_RATE)], context=self.context, **lang_kwargs)
+        results = self.model.transcribe(
+            audio=[(audio_input, SAMPLE_RATE)], context=self.context, **lang_kwargs
+        )
         results = results if isinstance(results, list) else [results]
         return [{"text": getattr(r, "text", str(r))} for r in results]
 
@@ -114,11 +121,11 @@ def stream_generator(
         loudness_db = item[2] if len(item) > 2 else None
         provisional = item[3] if len(item) > 3 else False
         if onset_sink is not None:
-            onset_sink['t'] = onset_t
+            onset_sink["t"] = onset_t
         if loudness_sink is not None:
-            loudness_sink['db'] = loudness_db
+            loudness_sink["db"] = loudness_db
         if provisional_sink is not None:
-            provisional_sink['flag'] = provisional
+            provisional_sink["flag"] = provisional
         if audio_sink is not None:
-            audio_sink['buf'] = buf
+            audio_sink["buf"] = buf
         yield buf

@@ -10,7 +10,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core import backends as b  # noqa: E402
 
 _MODEL_DIR = Path("data/models/kokoro-82m-onnx")
-_HAVE_MODEL = any((_MODEL_DIR / "onnx").glob("model*.onnx")) if (_MODEL_DIR / "onnx").is_dir() else False
+_HAVE_MODEL = (
+    any((_MODEL_DIR / "onnx").glob("model*.onnx")) if (_MODEL_DIR / "onnx").is_dir() else False
+)
 
 
 def test_kokoro_onnx_registered_cpu_offerable():
@@ -31,6 +33,7 @@ def test_torch_kokoro_backend_removed():
 
 def test_cpu_stacks_use_kokoro_onnx():
     from server.config_schema import TIER_PRESETS
+
     for tid in ("cpu_local", "cpu_server"):
         tier = next(t for t in TIER_PRESETS if t.id == tid)
         assert tier.models["tts"]["backend"] == "kokoro-onnx"
@@ -38,8 +41,11 @@ def test_cpu_stacks_use_kokoro_onnx():
 
 def test_fragmenter_splits_on_clause_punctuation():
     from core import tts_onnx
-    text = ("Sure, the weather today is mostly sunny with a high of twenty-two "
-            "degrees, and a light breeze. Tomorrow looks similar though.")
+
+    text = (
+        "Sure, the weather today is mostly sunny with a high of twenty-two "
+        "degrees, and a light breeze. Tomorrow looks similar though."
+    )
     frags = list(tts_onnx._iter_fragments(text))
     # One fragment per clause/sentence boundary (commas + the period).
     assert frags == [
@@ -56,6 +62,7 @@ def test_fragmenter_splits_on_clause_punctuation():
 
 def test_fragmenter_handles_short_and_empty():
     from core import tts_onnx
+
     assert list(tts_onnx._iter_fragments("Hi there.")) == ["Hi there."]
     assert list(tts_onnx._iter_fragments("   ")) == []
 
@@ -65,6 +72,7 @@ def test_desegment_splits_runons_but_leaves_real_words():
     import wordninja
 
     from core import tts_onnx
+
     tts_onnx._wordninja = wordninja
     # The OOV run-on that misaki drops is recovered into its real words.
     assert tts_onnx._desegment("partlycloudy") == "partly cloudy"
@@ -77,15 +85,16 @@ def test_desegment_splits_runons_but_leaves_real_words():
 
 def test_set_speed_clamps_and_ignores_bad():
     from core import tts_onnx
+
     saved = tts_onnx._speed
     try:
         tts_onnx.set_speed(1.5)
         assert tts_onnx._speed == 1.5
-        tts_onnx.set_speed(9)        # clamp high
+        tts_onnx.set_speed(9)  # clamp high
         assert tts_onnx._speed == 2.0
-        tts_onnx.set_speed(0.0)      # clamp low
+        tts_onnx.set_speed(0.0)  # clamp low
         assert tts_onnx._speed == 0.5
-        tts_onnx.set_speed("nope")   # bad value ignored, left unchanged
+        tts_onnx.set_speed("nope")  # bad value ignored, left unchanged
         assert tts_onnx._speed == 0.5
     finally:
         tts_onnx._speed = saved
@@ -93,6 +102,7 @@ def test_set_speed_clamps_and_ignores_bad():
 
 def test_desegment_is_noop_without_wordninja():
     from core import tts_onnx
+
     saved = tts_onnx._wordninja
     tts_onnx._wordninja = None
     try:

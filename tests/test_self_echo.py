@@ -27,6 +27,7 @@ def assistant():
     with patch("core.assistant.AudioCapture") as mock_ac:
         mock_ac.return_value = MagicMock()
         from core.assistant import Assistant
+
         a = Assistant(
             wakeword="atticus",
             barge_in="wakeword",
@@ -89,6 +90,7 @@ def multiword_assistant():
     with patch("core.assistant.AudioCapture") as mock_ac:
         mock_ac.return_value = MagicMock()
         from core.assistant import Assistant
+
         a = Assistant(
             wakeword="hey atticus",
             barge_in="wakeword",
@@ -116,14 +118,10 @@ class TestTolerantWakewordMatcher:
 
     def test_two_word_wakeword_with_comma_between(self, multiword_assistant):
         # ASR routinely inserts a comma after the leading word.
-        assert multiword_assistant._wakeword_re.search(
-            "hey, atticus what time is it"
-        ) is not None
+        assert multiword_assistant._wakeword_re.search("hey, atticus what time is it") is not None
 
     def test_two_word_wakeword_with_extra_whitespace(self, multiword_assistant):
-        assert multiword_assistant._wakeword_re.search(
-            "hey   atticus play some music"
-        ) is not None
+        assert multiword_assistant._wakeword_re.search("hey   atticus play some music") is not None
 
     def test_two_word_wakeword_partial_does_not_match(self, multiword_assistant):
         # "atticus" alone is not the wakeword.
@@ -134,18 +132,14 @@ class TestTolerantWakewordMatcher:
     def test_two_word_wakeword_self_echo(self, multiword_assistant):
         # The assistant's reply mentioned the wakeword, so a stray
         # "hey atticus" transcript is AEC residue, not a real barge-in.
-        multiword_assistant._last_spoken_text = (
-            "hey atticus is a friendly australian voice"
-        )
+        multiword_assistant._last_spoken_text = "hey atticus is a friendly australian voice"
         assert multiword_assistant._is_self_echo("hey atticus") is True
 
     def test_s_in_wakeword_matches_z_transcript(self, multiword_assistant):
         # ASR routinely transcribes the trailing /s/ of names like
         # "Atticus" as "z" (and vice versa). Either spelling should hit.
         assert multiword_assistant._wakeword_re.search("hey atticuz stop") is not None
-        assert multiword_assistant._wakeword_re.search(
-            "hey, atticuz what time is it"
-        ) is not None
+        assert multiword_assistant._wakeword_re.search("hey, atticuz what time is it") is not None
 
     def test_z_in_wakeword_matches_s_transcript(self):
         """A configured wakeword spelt with `z` should accept the `s`
@@ -154,6 +148,7 @@ class TestTolerantWakewordMatcher:
         with patch("core.assistant.AudioCapture") as mock_ac:
             mock_ac.return_value = MagicMock()
             from core.assistant import Assistant
+
             a = Assistant(wakeword="atticuz", barge_in="wakeword")
             a._turn_active = True
         assert a._wakeword_re.search("atticuz stop") is not None
@@ -162,9 +157,7 @@ class TestTolerantWakewordMatcher:
     def test_two_word_wakeword_barge_in_with_comma(self, multiword_assistant):
         multiword_assistant._last_spoken_text = "it is sunny and warm today"
         # Even with a comma inserted by ASR, the barge-in should fire.
-        assert multiword_assistant._check_barge_in(
-            "hey, atticus stop"
-        ) is True
+        assert multiword_assistant._check_barge_in("hey, atticus stop") is True
 
 
 def _make_assistant(**kwargs):
@@ -172,6 +165,7 @@ def _make_assistant(**kwargs):
     with patch("core.assistant.AudioCapture") as mock_ac:
         mock_ac.return_value = MagicMock()
         from core.assistant import Assistant
+
         a = Assistant(barge_in="wakeword", **kwargs)
     a._turn_active = True
     return a
@@ -210,9 +204,7 @@ class TestWakewordPatternOverride:
         auto = _make_assistant(wakeword="hey fulloch")
         assert auto._wakeword_re.search("hey tulloch stop") is None
         # With it, it can.
-        override = _make_assistant(
-            wakeword="hey fulloch", wakeword_pattern=self.PATTERN
-        )
+        override = _make_assistant(wakeword="hey fulloch", wakeword_pattern=self.PATTERN)
         assert override._wakeword_re.search("hey tulloch stop") is not None
 
     def test_invalid_pattern_falls_back_to_auto_builder(self):
@@ -268,8 +260,8 @@ class TestPrefixOptionalBargeIn:
         # auto-built wakeword too.
         a = _make_assistant(wakeword="hey atticus")
         a._last_spoken_text = "it is sunny and warm today"
-        assert a._wakeword_re.search("atticus stop") is None      # idle: needs prefix
-        assert a._check_barge_in("atticus stop") is True           # barge: prefix optional
+        assert a._wakeword_re.search("atticus stop") is None  # idle: needs prefix
+        assert a._check_barge_in("atticus stop") is True  # barge: prefix optional
 
 
 class TestBareStopBargeIn:
@@ -462,15 +454,18 @@ class TestPromptStripCharset:
     @pytest.fixture
     def strip_chars(self):
         from core.assistant import _PROMPT_STRIP_CHARS
+
         return _PROMPT_STRIP_CHARS
 
-    @pytest.mark.parametrize("residue,expected", [
-        ("! stop.", "stop"),
-        ("! stop", "stop"),
-        ("? stop talking?", "stop talking"),
-        (", be quiet!", "be quiet"),
-        (". stop ", "stop"),
-    ])
+    @pytest.mark.parametrize(
+        "residue,expected",
+        [
+            ("! stop.", "stop"),
+            ("! stop", "stop"),
+            ("? stop talking?", "stop talking"),
+            (", be quiet!", "be quiet"),
+            (". stop ", "stop"),
+        ],
+    )
     def test_strip_yields_bare_command(self, strip_chars, residue, expected):
         assert residue.strip(strip_chars) == expected
-

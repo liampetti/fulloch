@@ -17,6 +17,7 @@ def _assistant():
     with patch("core.assistant.AudioCapture") as mac:
         mac.return_value = MagicMock()
         from core.assistant import Assistant
+
         a = Assistant(barge_in="wakeword", wakeword="hey atticus")
     a.audio_capture.transcribing = False  # real bool so /status serialises
     return a

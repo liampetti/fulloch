@@ -34,11 +34,9 @@ def test_reminder_poll_skipped_when_ha_not_configured(monkeypatch):
     # imported despite HA being disabled. The gate must return before the import.
     class _Tripwire(types.ModuleType):
         def __getattr__(self, name):
-            raise AssertionError(
-                f"tools.home_assistant.{name} accessed despite HA disabled")
+            raise AssertionError(f"tools.home_assistant.{name} accessed despite HA disabled")
 
-    monkeypatch.setitem(sys.modules, "tools.home_assistant",
-                        _Tripwire("tools.home_assistant"))
+    monkeypatch.setitem(sys.modules, "tools.home_assistant", _Tripwire("tools.home_assistant"))
     started = {"n": 0}
     _patch_thread(monkeypatch, started)
     monkeypatch.setattr(cfg, "config", {"general": {}})

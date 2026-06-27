@@ -31,12 +31,7 @@ def tts_friendly_event_summary(events: list[dict]) -> str:
         else:
             start_dt = datetime.datetime.fromisoformat(raw_start)
             day = start_dt.strftime("%A")
-            time = (
-                start_dt.strftime("%-I %M %p")
-                .lower()
-                .replace("am", "a m")
-                .replace("pm", "p m")
-            )
+            time = start_dt.strftime("%-I %M %p").lower().replace("am", "a m").replace("pm", "p m")
             time = re.sub(r"\b00\b", "o'clock", time)
             spoken.append(f"At {time} on {day}, {summary}.")
 

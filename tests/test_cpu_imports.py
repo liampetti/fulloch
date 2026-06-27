@@ -26,15 +26,17 @@ def _top_level_imports(path: Path, module: str) -> list:
 
 def test_asr_does_not_import_qwen_asr_at_top():
     p = ROOT / "core" / "asr.py"
-    assert not _top_level_imports(p, "qwen_asr"), \
+    assert not _top_level_imports(p, "qwen_asr"), (
         "qwen_asr must be imported lazily in load_asr_model (CPU image has none)"
+    )
     assert "from qwen_asr import" in p.read_text(), "should still import it lazily"
 
 
 def test_slm_does_not_import_llama_cpp_at_top():
     p = ROOT / "core" / "slm.py"
-    assert not _top_level_imports(p, "llama_cpp"), \
+    assert not _top_level_imports(p, "llama_cpp"), (
         "llama_cpp must be imported lazily in load_slm (CPU image has none)"
+    )
 
 
 def test_tiny_asr_backends_reexport_stream_generator():
@@ -49,8 +51,9 @@ def test_onnx_asr_backends_are_torch_free():
     # The ONNX backends (onnxruntime, no torch) must not import torch at top —
     # unlike asr_tiny/Moonshine, which is transformers/torch-based.
     for name in ("asr_onnx", "asr_onnx_qwen17b"):
-        assert not _top_level_imports(ROOT / "core" / f"{name}.py", "torch"), \
+        assert not _top_level_imports(ROOT / "core" / f"{name}.py", "torch"), (
             f"{name} must stay torch-free (onnxruntime-only CPU backend)"
+        )
 
 
 def test_cpu_image_modules_import_without_gpu_libs():
@@ -61,18 +64,25 @@ def test_cpu_image_modules_import_without_gpu_libs():
     we shadow modules.
     """
     import importlib.util as iu
+
     for dep in ("torch", "transformers", "onnxruntime", "librosa", "sounddevice"):
         if iu.find_spec(dep) is None:
             import pytest
+
             pytest.skip(f"{dep} not installed")
 
-    saved = {m: sys.modules.get(m) for m in
-             ("qwen_asr", "qwen_tts", "llama_cpp", "flash_attn")}
+    saved = {m: sys.modules.get(m) for m in ("qwen_asr", "qwen_tts", "llama_cpp", "flash_attn")}
     for m in saved:
         sys.modules[m] = None  # 'from m import X' -> ImportError
     try:
-        for mod in ("core.asr", "core.asr_tiny", "core.asr_onnx",
-                    "core.asr_onnx_qwen17b", "core.tts_onnx", "core.slm"):
+        for mod in (
+            "core.asr",
+            "core.asr_tiny",
+            "core.asr_onnx",
+            "core.asr_onnx_qwen17b",
+            "core.tts_onnx",
+            "core.slm",
+        ):
             sys.modules.pop(mod, None)
             __import__(mod)
     finally:

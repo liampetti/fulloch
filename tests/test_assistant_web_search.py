@@ -43,8 +43,13 @@ def _import_assistant_module():
         "core.audio": ["AudioCapture", "resolve_device"],
         "core.asr": ["load_asr_pipeline"],
         "core.tts": [
-            "set_voice", "warmup_model", "synthesize", "play_chunks",
-            "speak_stream", "set_output_device", "set_tts_active_event",
+            "set_voice",
+            "warmup_model",
+            "synthesize",
+            "play_chunks",
+            "speak_stream",
+            "set_output_device",
+            "set_tts_active_event",
             "model",
         ],
         "core.slm": ["load_slm", "generate_slm"],
@@ -60,15 +65,12 @@ def _import_assistant_module():
             # ContextExhaustedError`, which a lambda stub can't satisfy.
             # Both are imported by name in core.agent_loop, so the stub must
             # provide them for this file to import in isolation.
-            mod.ContextExhaustedError = type(
-                "ContextExhaustedError", (RuntimeError,), {}
-            )
-            mod.RemoteUnreachable = type(
-                "RemoteUnreachable", (RuntimeError,), {}
-            )
+            mod.ContextExhaustedError = type("ContextExhaustedError", (RuntimeError,), {})
+            mod.RemoteUnreachable = type("RemoteUnreachable", (RuntimeError,), {})
         sys.modules[name] = mod
 
     import core.assistant as assistant  # noqa: E402
+
     return assistant
 
 
@@ -105,6 +107,7 @@ def test_agent_generation_wrapped_in_progress_watchdog():
 
 def test_is_web_search_importable():
     import utils.intents as intents
+
     assert callable(intents.is_web_search)
     assert intents.WEB_SEARCH_TOOL == "external_information"
 
@@ -131,7 +134,7 @@ def test_bundled_reply_pseudo_action_split_out():
     # The split must happen before the hallucinated-tool guard, so a bundled
     # `reply` doesn't trip it.
     split_pos = src.index("REPLY_PSEUDO_INTENTS")
-    guard_pos = src.index("is_registered_tool(a.get(\"intent\"))")
+    guard_pos = src.index('is_registered_tool(a.get("intent"))')
     assert split_pos < guard_pos, "pseudo-reply split must run before the tool guard"
 
 
@@ -144,8 +147,9 @@ def test_reply_branch_prefers_grounded_web_summary():
     reply_branch = src.index("# Reply branch")
     grounded_use = src.index("web_summary_text", reply_branch)
     model_reply_return = src.index("strip_unfounded_save_claim(reply", reply_branch)
-    assert grounded_use < model_reply_return, \
+    assert grounded_use < model_reply_return, (
         "reply branch must prefer the grounded web summary over the model's reply"
+    )
 
 
 def test_hallucinated_tool_blocked_before_dispatch():
@@ -165,7 +169,7 @@ def test_hallucinated_tool_blocked_before_dispatch():
 def test_tool_unavailable_cache_wired():
     a = _import_assistant_module()
     # The canned clips are pre-rendered and re-rendered on a voice change.
-    specs = dict((attr, pool) for attr, pool, _ in a.Assistant._PHRASE_CACHE_SPECS)
+    specs = {attr: pool for attr, pool, _ in a.Assistant._PHRASE_CACHE_SPECS}
     assert "tool_unavailable_cache" in specs
     src = inspect.getsource(a.Assistant._speak_tool_unavailable_fallback)
     assert "tool_unavailable_cache" in src and "_record_spoken" in src
@@ -188,16 +192,17 @@ def test_web_search_always_replans():
     # A summarised web search must hand control back to the agent every time
     # (not only when bundled with other actions), so the agent decides the
     # next move from the findings. The old `len(actions) > 1` gate is gone.
-    assert "if web_summarised or step.should_replan or lookup_replan:" in src, \
+    assert "if web_summarised or step.should_replan or lookup_replan:" in src, (
         "web search should unconditionally replan"
-    assert "pending_side_effects" not in src, \
-        "deferred side-effect machinery should be removed"
+    )
+    assert "pending_side_effects" not in src, "deferred side-effect machinery should be removed"
 
 
 def _normalise():
     # _normalise_search_query moved to core.agent_loop with the loop extraction.
     _import_assistant_module()  # installs the stubs core.agent_loop loads under
     import core.agent_loop as al
+
     return al._normalise_search_query
 
 

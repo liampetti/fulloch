@@ -45,7 +45,7 @@ def _first_json_object(text: str) -> Optional[str]:
         elif c == "}":
             depth -= 1
             if depth == 0:
-                return text[start:i + 1]
+                return text[start : i + 1]
     return None
 
 
@@ -65,6 +65,7 @@ def parse_agent_emission(text: str) -> Dict[str, Any]:
         raise ValueError("no balanced JSON object in emission")
     return json.loads(obj)
 
+
 # Leading sentinels a tool can emit to request an SLM follow-up. Tools that
 # need a re-call embed one at the start of their return string. `classify_step`
 # is the SINGLE place these prefixes are matched — the agent loop then routes on
@@ -78,12 +79,12 @@ REACTIVE_PREFIX = "Reactive question:"
 class StepKind(enum.Enum):
     """Routing class of a dispatched action's result."""
 
-    NORMAL = "normal"          # plain output — joined into the spoken reply
+    NORMAL = "normal"  # plain output — joined into the spoken reply
     WEB_SEARCH = "web_search"  # raw SearXNG payload — summarise inline, replan
-    THINKING = "thinking"      # deep_think flagged — run the /think branch
-    SUMMARY = "summary"        # summarize_thinking — surface captured partial
-    REACTIVE = "reactive"      # tool error / HA 4xx — replan with failure shown
-    ERROR = "error"            # dispatch returned None / raised — replan
+    THINKING = "thinking"  # deep_think flagged — run the /think branch
+    SUMMARY = "summary"  # summarize_thinking — surface captured partial
+    REACTIVE = "reactive"  # tool error / HA 4xx — replan with failure shown
+    ERROR = "error"  # dispatch returned None / raised — replan
 
 
 # Prefix → kind, in match priority order.
@@ -95,10 +96,15 @@ _SENTINEL_KINDS = (
 )
 
 # Kinds that hand control back to the agent for another call.
-_REPLAN_KINDS = frozenset({
-    StepKind.WEB_SEARCH, StepKind.THINKING, StepKind.SUMMARY,
-    StepKind.REACTIVE, StepKind.ERROR,
-})
+_REPLAN_KINDS = frozenset(
+    {
+        StepKind.WEB_SEARCH,
+        StepKind.THINKING,
+        StepKind.SUMMARY,
+        StepKind.REACTIVE,
+        StepKind.ERROR,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -156,9 +162,10 @@ def reactive_to_speech(text: str) -> str:
     """
     msg = text.lstrip()
     if msg.startswith(REACTIVE_PREFIX):
-        msg = msg[len(REACTIVE_PREFIX):].strip()
+        msg = msg[len(REACTIVE_PREFIX) :].strip()
     kept = [
-        s.strip() for s in re.split(r"(?<=[.?!])\s+", msg)
+        s.strip()
+        for s in re.split(r"(?<=[.?!])\s+", msg)
         if s.strip() and not _AGENT_DIRECTIVE.match(s.strip())
     ]
     return " ".join(kept).strip() or "Sorry, I couldn't do that."
@@ -185,11 +192,13 @@ NOTE_WRITE_TOOLS = frozenset({"write_note", "append_to_note", "remember_fact"})
 # so it instead hands a lookup result back for one composing replan, letting the
 # agent answer the actual question from the records. See `is_lookup` + the agent
 # loop's dispatch step.
-LOOKUP_TOOLS = frozenset({
-    "get_entity_history",
-    "get_conversation_history",
-    "search_notes",
-})
+LOOKUP_TOOLS = frozenset(
+    {
+        "get_entity_history",
+        "get_conversation_history",
+        "search_notes",
+    }
+)
 
 
 def describe_tools() -> str:
@@ -308,8 +317,10 @@ def is_lookup(intent_name: Optional[str]) -> bool:
 # A sentence claiming the assistant saved/logged something to notes. The SLM —
 # especially a remote one without the GBNF grammar — sometimes tacks "I've saved
 # this to your notes" onto a plain answer when no note-write tool actually ran.
-_SAVE_VERB = (r"saved|added|noted|logged|recorded|wrote|written|jotted|stored|"
-              r"made a note|making a note|taken a note|put (?:this|it|that) in")
+_SAVE_VERB = (
+    r"saved|added|noted|logged|recorded|wrote|written|jotted|stored|"
+    r"made a note|making a note|taken a note|put (?:this|it|that) in"
+)
 _NOTE_NOUN = r"notes?|journal|diary|daily log|log|memo|to-?do list"
 _SAVE_CLAIM_RE = re.compile(
     rf"(?:\b(?:{_SAVE_VERB})\b.*?\b(?:{_NOTE_NOUN})\b"

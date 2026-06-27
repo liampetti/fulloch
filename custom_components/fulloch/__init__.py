@@ -8,6 +8,7 @@ exposes:
   - notify.fulloch notification target
   - fulloch_wakeword_detected / fulloch_turn_ended HA events (via SSE)
 """
+
 from __future__ import annotations
 
 import asyncio

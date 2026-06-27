@@ -24,7 +24,7 @@ def _pyproject_version() -> str:
         PYPROJECT.read_text(encoding="utf-8"),
         re.MULTILINE,
     )
-    assert match, "no top-level `version = \"...\"` found in pyproject.toml"
+    assert match, 'no top-level `version = "..."` found in pyproject.toml'
     return match.group("v")
 
 

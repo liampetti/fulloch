@@ -38,20 +38,24 @@ ERROR = "error"
 class Asset:
     key: str
     label: str
-    kind: str                  # "snapshot" | "file" | "url"
-    dest: str                  # directory (snapshot/file) or file path (url)
+    kind: str  # "snapshot" | "file" | "url"
+    dest: str  # directory (snapshot/file) or file path (url)
     repo: Optional[str] = None
     filename: Optional[str] = None
     url: Optional[str] = None
-    allow: Optional[list] = None   # allow_patterns for a dir_snapshot
+    allow: Optional[list] = None  # allow_patterns for a dir_snapshot
     size_gb: Optional[float] = None
     status: str = PENDING
     error: Optional[str] = None
 
     def snapshot(self) -> dict:
         return {
-            "key": self.key, "label": self.label, "kind": self.kind,
-            "size_gb": self.size_gb, "status": self.status, "error": self.error,
+            "key": self.key,
+            "label": self.label,
+            "kind": self.kind,
+            "size_gb": self.size_gb,
+            "status": self.status,
+            "error": self.error,
             # `domain` (asr/tts/llm) lets the wizard attach a custom-path input to
             # the right model; `present` drives the install pre-scan (on disk vs
             # needs download); `dest` is the path it'll load from / download to.
@@ -103,55 +107,92 @@ def plan_assets(resolved: dict, models_dir: str = "./data/models") -> list:
         if _is_file_model(model):
             # A single weight file: the default GGUF, or a custom .gguf path.
             fpath = Path(str(model))
-            assets.append(Asset(
-                key=f"{domain}:{spec.backend}", label=spec.display_name,
-                kind="file", dest=str(fpath.parent), repo=spec.hf_repo,
-                filename=fpath.name, size_gb=spec.download_size_gb,
-            ))
+            assets.append(
+                Asset(
+                    key=f"{domain}:{spec.backend}",
+                    label=spec.display_name,
+                    kind="file",
+                    dest=str(fpath.parent),
+                    repo=spec.hf_repo,
+                    filename=fpath.name,
+                    size_gb=spec.download_size_gb,
+                )
+            )
         elif _is_dir_model(model):
             # A directory model (the ONNX bundle, or a custom folder): snapshot
             # flat into that dir, not the hub cache, so the loader finds it.
             # `hf_allow` (if set) fetches only the needed files from a big repo.
-            assets.append(Asset(
-                key=f"{domain}:{spec.backend}", label=spec.display_name,
-                kind="dir_snapshot", dest=str(model), repo=spec.hf_repo,
-                allow=list(spec.hf_allow) or None, size_gb=spec.download_size_gb,
-            ))
+            assets.append(
+                Asset(
+                    key=f"{domain}:{spec.backend}",
+                    label=spec.display_name,
+                    kind="dir_snapshot",
+                    dest=str(model),
+                    repo=spec.hf_repo,
+                    allow=list(spec.hf_allow) or None,
+                    size_gb=spec.download_size_gb,
+                )
+            )
         elif spec.hf_file:
             # hf_file backend whose model isn't a local file path -> default file.
-            assets.append(Asset(
-                key=f"{domain}:{spec.backend}", label=spec.display_name,
-                kind="file", dest=models_dir, repo=spec.hf_repo,
-                filename=spec.hf_file, size_gb=spec.download_size_gb,
-            ))
+            assets.append(
+                Asset(
+                    key=f"{domain}:{spec.backend}",
+                    label=spec.display_name,
+                    kind="file",
+                    dest=models_dir,
+                    repo=spec.hf_repo,
+                    filename=spec.hf_file,
+                    size_gb=spec.download_size_gb,
+                )
+            )
         else:
-            assets.append(Asset(
-                key=f"{domain}:{spec.backend}", label=spec.display_name,
-                kind="snapshot", dest=hub, repo=(spec.hf_repo or model),
-                size_gb=spec.download_size_gb,
-            ))
+            assets.append(
+                Asset(
+                    key=f"{domain}:{spec.backend}",
+                    label=spec.display_name,
+                    kind="snapshot",
+                    dest=hub,
+                    repo=(spec.hf_repo or model),
+                    size_gb=spec.download_size_gb,
+                )
+            )
 
-    assets.append(Asset(
-        key="bge", label="BGE-small (semantic note search)",
-        kind="snapshot", dest=hub, repo=BGE_REPO, size_gb=0.13,
-    ))
-    assets.append(Asset(
-        key="grammar", label="JSON grammar (json.gbnf)",
-        kind="url", dest=str(Path(grammars) / "json.gbnf"), url=GRAMMAR_URL,
-    ))
+    assets.append(
+        Asset(
+            key="bge",
+            label="BGE-small (semantic note search)",
+            kind="snapshot",
+            dest=hub,
+            repo=BGE_REPO,
+            size_gb=0.13,
+        )
+    )
+    assets.append(
+        Asset(
+            key="grammar",
+            label="JSON grammar (json.gbnf)",
+            kind="url",
+            dest=str(Path(grammars) / "json.gbnf"),
+            url=GRAMMAR_URL,
+        )
+    )
     return assets
 
 
 # --- default (real) download implementations (lazy heavy imports) -----------
 
+
 def _default_snapshot(repo: str, dest: str) -> None:
     from huggingface_hub import snapshot_download
+
     Path(dest).mkdir(parents=True, exist_ok=True)
     snapshot_download(repo_id=repo, cache_dir=dest)
 
 
 def _default_file(repo: str, filename: str, dest: str) -> None:
     from huggingface_hub import hf_hub_download
+
     Path(dest).mkdir(parents=True, exist_ok=True)
     hf_hub_download(repo_id=repo, filename=filename, local_dir=dest)
 
@@ -161,12 +202,14 @@ def _default_dir_snapshot(repo: str, dest: str, allow=None) -> None:
     # model (e.g. the ONNX bundle) lands where the loader reads it. `allow`
     # (allow_patterns) fetches only the needed files from a large repo.
     from huggingface_hub import snapshot_download
+
     Path(dest).mkdir(parents=True, exist_ok=True)
     snapshot_download(repo_id=repo, local_dir=dest, allow_patterns=allow)
 
 
 def _default_url(url: str, dest: str) -> None:
     import urllib.request
+
     Path(dest).parent.mkdir(parents=True, exist_ok=True)
     urllib.request.urlretrieve(url, dest)
 
@@ -195,7 +238,7 @@ class DownloadManager:
         self._dir_snapshot_fn: Callable = dir_snapshot_fn or _default_dir_snapshot
         self._lock = threading.Lock()
         self._assets: list = []
-        self._state = "idle"   # idle | downloading | done | error
+        self._state = "idle"  # idle | downloading | done | error
         self._error: Optional[str] = None
         self._thread: Optional[threading.Thread] = None
 

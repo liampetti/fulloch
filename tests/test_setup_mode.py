@@ -19,6 +19,7 @@ from server.lifecycle import Lifecycle  # noqa: E402
 
 # --- detect_setup_state -----------------------------------------------------
 
+
 def _mk_hub(models_dir: Path, repo_id: str) -> None:
     (models_dir / "hub" / f"models--{repo_id.replace('/', '--')}").mkdir(parents=True)
 
@@ -44,8 +45,7 @@ def test_existing_install_with_assets_present(tmp_path):
     models = tmp_path / "models"
     _mk_hub(models, "Qwen/Qwen3-ASR-1.7B")
     _mk_hub(models, "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-    config = {"general": {"wakeword": "hey atticus"},
-              "models": {"llm": {"backend": "none"}}}
+    config = {"general": {"wakeword": "hey atticus"}, "models": {"llm": {"backend": "none"}}}
     d = detect_setup_state(config, models_dir=str(models))
     assert not d.needs_setup
     assert d.missing_assets == []
@@ -56,6 +56,7 @@ def test_cpu_variant_forces_setup_for_gpu_only_backends(tmp_path, monkeypatch):
     defaults, even with the GPU assets on disk from a shared ./data) must route
     to the wizard, not try to load qwen_asr and crash."""
     import core.setup as setup
+
     models = tmp_path / "models"
     _mk_hub(models, "Qwen/Qwen3-ASR-1.7B")
     _mk_hub(models, "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
@@ -78,6 +79,7 @@ def test_cpu_variant_forces_setup_for_gpu_only_backends(tmp_path, monkeypatch):
 def test_cpu_variant_runs_with_cpu_backends(tmp_path, monkeypatch):
     """The CPU image runs normally when the config picks CPU-capable backends."""
     import core.setup as setup
+
     # Explicit paths under tmp_path so the asset check is hermetic (path-style
     # models resolve to the literal path, not models_dir).
     asr_dir = tmp_path / "asr-onnx"
@@ -86,10 +88,14 @@ def test_cpu_variant_runs_with_cpu_backends(tmp_path, monkeypatch):
     tts_dir = tmp_path / "tts-onnx"
     tts_dir.mkdir()
     (tts_dir / "model.onnx").write_text("x")
-    config = {"general": {"wakeword": "hey atticus"},
-              "models": {"asr": {"backend": "qwen-onnx", "model": str(asr_dir)},
-                         "tts": {"backend": "kokoro-onnx", "model": str(tts_dir)},
-                         "llm": {"backend": "none"}}}
+    config = {
+        "general": {"wakeword": "hey atticus"},
+        "models": {
+            "asr": {"backend": "qwen-onnx", "model": str(asr_dir)},
+            "tts": {"backend": "kokoro-onnx", "model": str(tts_dir)},
+            "llm": {"backend": "none"},
+        },
+    }
     monkeypatch.setattr(setup, "variant", lambda: "cpu")
     d = detect_setup_state(config, models_dir=str(tmp_path / "models"))
     assert not d.needs_setup
@@ -100,8 +106,7 @@ def test_reset_marker_forces_setup(tmp_path):
     models = tmp_path / "models"
     _mk_hub(models, "Qwen/Qwen3-ASR-1.7B")
     _mk_hub(models, "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-    config = {"general": {"wakeword": "hey atticus"},
-              "models": {"llm": {"backend": "none"}}}
+    config = {"general": {"wakeword": "hey atticus"}, "models": {"llm": {"backend": "none"}}}
     marker = tmp_path / ".setup_pending"
 
     # No marker -> ready.
@@ -121,9 +126,10 @@ def test_remote_llm_needs_no_local_asset(tmp_path):
     models = tmp_path / "models"
     _mk_hub(models, "Qwen/Qwen3-ASR-1.7B")
     _mk_hub(models, "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-    config = {"general": {"wakeword": "hey atticus"},
-              "models": {"llm": {"backend": "openai", "model": "gpt-x",
-                                 "base_url": "http://x/v1"}}}
+    config = {
+        "general": {"wakeword": "hey atticus"},
+        "models": {"llm": {"backend": "openai", "model": "gpt-x", "base_url": "http://x/v1"}},
+    }
     d = detect_setup_state(config, models_dir=str(models))
     assert not d.needs_setup
     assert d.missing_assets == []
@@ -132,8 +138,7 @@ def test_remote_llm_needs_no_local_asset(tmp_path):
 def test_missing_model_assets_needs_setup(tmp_path):
     models = tmp_path / "models"
     models.mkdir()
-    config = {"general": {"wakeword": "hey atticus"},
-              "models": {"llm": {"backend": "none"}}}
+    config = {"general": {"wakeword": "hey atticus"}, "models": {"llm": {"backend": "none"}}}
     d = detect_setup_state(config, models_dir=str(models))
     assert d.needs_setup
     # Both Qwen backends' hub dirs are absent.
@@ -146,8 +151,10 @@ def test_llama_requires_gguf_and_grammar(tmp_path):
     _mk_hub(models, "Qwen/Qwen3-ASR-1.7B")
     _mk_hub(models, "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
     gguf = models / "model.gguf"
-    config = {"general": {"wakeword": "hey atticus"},
-              "models": {"llm": {"backend": "llama", "model": str(gguf)}}}
+    config = {
+        "general": {"wakeword": "hey atticus"},
+        "models": {"llm": {"backend": "llama", "model": str(gguf)}},
+    }
 
     # gguf + grammar both missing
     d = detect_setup_state(config, models_dir=str(models))
@@ -158,12 +165,13 @@ def test_llama_requires_gguf_and_grammar(tmp_path):
     # provide both -> ready
     gguf.write_text("x")
     (models / "grammars").mkdir()
-    (models / "grammars" / "agent.gbnf").write_text("root ::= \"x\"")
+    (models / "grammars" / "agent.gbnf").write_text('root ::= "x"')
     d2 = detect_setup_state(config, models_dir=str(models))
     assert not d2.needs_setup
 
 
 # --- Lifecycle --------------------------------------------------------------
+
 
 def test_lifecycle_transitions_and_snapshot():
     life = Lifecycle(phase=lc.NEEDS_SETUP, detail="first run", missing_assets=["asr"])
@@ -184,9 +192,11 @@ def test_lifecycle_transitions_and_snapshot():
 
 # --- Dashboard setup mode (no assistant) ------------------------------------
 
+
 def _setup_client():
-    life = Lifecycle(phase=lc.NEEDS_SETUP, detail="first run",
-                     missing_assets=["asr:qwen (Qwen/Qwen3-ASR-1.7B)"])
+    life = Lifecycle(
+        phase=lc.NEEDS_SETUP, detail="first run", missing_assets=["asr:qwen (Qwen/Qwen3-ASR-1.7B)"]
+    )
     return TestClient(create_app(None, lifecycle=life)), life
 
 
@@ -229,6 +239,7 @@ def test_loading_phase_serves_setup_loading_view_not_dashboard():
     # warming up — the dashboard must NOT be served yet; '/' returns the setup
     # page (which routes itself to the loading screen by phase).
     from unittest.mock import MagicMock
+
     life = Lifecycle(phase=lc.LOADING, detail="loading models")
     client = TestClient(create_app(MagicMock(), lifecycle=life))
     body = client.get("/").text
@@ -237,6 +248,7 @@ def test_loading_phase_serves_setup_loading_view_not_dashboard():
 
 def test_ready_phase_serves_dashboard():
     from unittest.mock import MagicMock
+
     life = Lifecycle(phase=lc.READY)
     client = TestClient(create_app(MagicMock(), lifecycle=life))
     body = client.get("/").text

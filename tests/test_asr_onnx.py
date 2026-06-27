@@ -15,6 +15,7 @@ _HAVE_MODEL = (_MODEL_DIR / "onnx_models").is_dir()
 
 # --- registry (always) ------------------------------------------------------
 
+
 def test_qwen_onnx_registered_and_cpu_offerable():
     spec = b.get_spec("asr", "qwen-onnx-small")
     assert spec.implemented and spec.cpu_ok and not spec.gpu_only
@@ -30,6 +31,7 @@ def test_qwen_onnx_default_is_local_dir():
 
 
 # --- functional (skips without the model + onnxruntime/librosa) --------------
+
 
 @pytest.mark.skipif(not _HAVE_MODEL, reason="ONNX model dir not present")
 def test_warmup_primes_via_short_silent_buffer():
@@ -47,9 +49,9 @@ def test_warmup_primes_via_short_silent_buffer():
     w = asr_onnx.QwenOnnxASRPipelineWrapper(_FakePipe(), language="English")
     w.context = "Technical terms: hey atticus"
     w.warmup()
-    assert calls["length"] == asr_onnx.SAMPLE_RATE // 2   # 0.5s buffer
+    assert calls["length"] == asr_onnx.SAMPLE_RATE // 2  # 0.5s buffer
     assert calls["context"] == "Technical terms: hey atticus"  # same bias seam
-    assert calls["max_new_tokens"] == 4                   # cheap, just prime kernels
+    assert calls["max_new_tokens"] == 4  # cheap, just prime kernels
 
 
 def test_warmup_swallows_errors():

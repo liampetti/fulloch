@@ -48,5 +48,6 @@ def test_moonshine_non_streaming_path_returns_list():
 
 def test_moonshine_load_signature_matches_registry():
     import inspect
+
     params = inspect.signature(asr_tiny.load_asr_model).parameters
     assert "model_name" in params and "language" in params

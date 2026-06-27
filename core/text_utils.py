@@ -4,12 +4,12 @@ import re
 
 _EMOJI_PATTERN = re.compile(
     "["
-    "\U0001F600-\U0001F64F"  # emoticons
-    "\U0001F300-\U0001F5FF"  # symbols & pictographs
-    "\U0001F680-\U0001F6FF"  # transport & map symbols
-    "\U0001F1E0-\U0001F1FF"  # flags
-    "☀-⛿"          # misc symbols
-    "✀-➿"          # dingbats
+    "\U0001f600-\U0001f64f"  # emoticons
+    "\U0001f300-\U0001f5ff"  # symbols & pictographs
+    "\U0001f680-\U0001f6ff"  # transport & map symbols
+    "\U0001f1e0-\U0001f1ff"  # flags
+    "☀-⛿"  # misc symbols
+    "✀-➿"  # dingbats
     "]+",
     flags=re.UNICODE,
 )
@@ -30,7 +30,7 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 def clean_for_tts(text: str, strip_think: bool = True) -> str:
     """Prepare raw SLM output for speech: strip quotes, asterisks, <think>, emoji."""
-    text = text.replace('"', '').replace('*', '')
+    text = text.replace('"', "").replace("*", "")
     if strip_think:
         text = _THINK_PATTERN.sub("", text)
         text = _GEMMA_THINK_PATTERN.sub("", text)

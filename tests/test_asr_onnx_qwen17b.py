@@ -13,11 +13,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core import backends as b  # noqa: E402
 from core import asr_onnx_qwen17b as m17  # noqa: E402
-
+from core import backends as b  # noqa: E402
 
 # --- registry (always) ------------------------------------------------------
+
 
 def test_qwen_onnx_17b_registered_and_cpu_offerable():
     spec = b.get_spec("asr", "qwen-onnx")
@@ -34,6 +34,7 @@ def test_qwen_onnx_17b_default_is_local_dir():
 def test_every_tier_preset_uses_1_7b_asr():
     # The recommended ASR is the same across all stacks.
     from server.config_schema import TIER_PRESETS
+
     for t in TIER_PRESETS:
         assert t.models["asr"]["backend"] == "qwen-onnx", t.id
 
@@ -54,6 +55,7 @@ def test_hf_allow_fetches_only_int4_set():
 
 
 # --- mocked transcribe logic (no model needed) ------------------------------
+
 
 def _logits_peaking_at(token_id: int) -> np.ndarray:
     v = np.full((1, 1, m17.VOCAB_SIZE), -1e9, dtype=np.float32)
@@ -99,7 +101,8 @@ def _make_pipe(num_audio=5, first_token=500):
 
 def _patched_mel(monkeypatch, num_frames=40):
     monkeypatch.setattr(
-        m17, "_compute_mel",
+        m17,
+        "_compute_mel",
         lambda wav, mel_filters=None, **k: np.zeros((128, num_frames), dtype=np.float32),
     )
 

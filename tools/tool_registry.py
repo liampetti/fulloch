@@ -36,11 +36,13 @@ def _extract_params(func: Callable) -> List[Param]:
         if name == "self":
             continue
         required = p.default is inspect.Parameter.empty
-        params.append(Param(
-            name=name,
-            required=required,
-            default=None if required else p.default,
-        ))
+        params.append(
+            Param(
+                name=name,
+                required=required,
+                default=None if required else p.default,
+            )
+        )
     return params
 
 
@@ -83,7 +85,9 @@ class ToolRegistry:
                 # decorator shouldn't break the whole assistant.
                 logger.warning(
                     "Alias collision: '%s' already maps to '%s'; ignoring on '%s'",
-                    alias, self._aliases.get(alias, alias), tool_name,
+                    alias,
+                    self._aliases.get(alias, alias),
+                    tool_name,
                 )
                 continue
             self._aliases[alias] = tool_name
@@ -156,6 +160,8 @@ def tool(
     aliases: Optional[List[str]] = None,
 ):
     """Decorator: register a function as a tool callable by the SLM."""
+
     def decorator(func):
         return tool_registry.register_tool(func, name, description, aliases)
+
     return decorator

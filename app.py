@@ -50,7 +50,7 @@ try:
 except FileNotFoundError:
     config = {}
 
-_GENERAL = config.get('general') or {}
+_GENERAL = config.get("general") or {}
 
 _LOG_LEVELS = {
     "debug": logging.DEBUG,
@@ -58,13 +58,10 @@ _LOG_LEVELS = {
     "warning": logging.WARNING,
     "error": logging.ERROR,
 }
-_log_level_name = str(_GENERAL.get('log_level', 'info')).lower()
+_log_level_name = str(_GENERAL.get("log_level", "info")).lower()
 LOG_LEVEL = _LOG_LEVELS.get(_log_level_name, logging.INFO)
 
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 if _log_level_name not in _LOG_LEVELS:
     logger.warning(f"Unknown general.log_level {_log_level_name!r}; using info")
@@ -113,15 +110,14 @@ for _noisy in (
     logging.getLogger(_noisy).setLevel(_third_party_level)
 # "Setting pad_token_id to eos_token_id" fires at WARNING on every
 # transformers.generate call — silence just that submodule.
-logging.getLogger("transformers.generation.utils").setLevel(
-    max(LOG_LEVEL, logging.ERROR)
-)
+logging.getLogger("transformers.generation.utils").setLevel(max(LOG_LEVEL, logging.ERROR))
 
 # Drop llama-cpp-python's INFO chatter (model loader, CUDA init, KV-cache
 # layout, and per-call perf timings — the dashboard stats panel reports those
 # now). Warnings and errors always pass through. Installed before any
 # `Llama(...)` instantiation. Skipped on the CPU image (no llama_cpp).
 if llama_cpp is not None:
+
     @llama_cpp.llama_log_callback
     def _filtered_llama_log(level, text, user_data):
         # ggml log levels: 1=INFO, 2=WARN, 3=ERROR, 4=DEBUG, 5=CONT.
@@ -160,11 +156,22 @@ os.environ.setdefault("TORCHINDUCTOR_VERBOSE", "0")
 # The values are read fresh in `_assistant_args()` at Phase B (so a config the
 # wizard just wrote is picked up); this is just the key list.
 _ASSISTANT_OPTION_KEYS = (
-    'wakeword_pattern', 'voice_clone', 'tts_speed', 'barge_in', 'barge_in_threshold_dbfs',
-    'follow_up_time', 'input_device', 'output_device', 'asr_language',
-    'asr_context_hint', 'asr_context_terms', 'use_vad', 'vad_threshold',
-    'vad_endpoint_silence_ms', 'vad_min_speech_ms',
-    'vad_soft_endpoint_silence_ms',
+    "wakeword_pattern",
+    "voice_clone",
+    "tts_speed",
+    "barge_in",
+    "barge_in_threshold_dbfs",
+    "follow_up_time",
+    "input_device",
+    "output_device",
+    "asr_language",
+    "asr_context_hint",
+    "asr_context_terms",
+    "use_vad",
+    "vad_threshold",
+    "vad_endpoint_silence_ms",
+    "vad_min_speech_ms",
+    "vad_soft_endpoint_silence_ms",
 )
 
 from core.assistant import Assistant
@@ -188,20 +195,22 @@ def _read_config():
 
 def _assistant_args(cfg):
     """Extract the Assistant constructor args from a fresh config dict."""
-    general = cfg.get('general') or {}
-    options = {
-        k: general[k] for k in _ASSISTANT_OPTION_KEYS if general.get(k) is not None
-    }
-    return general.get('wakeword'), cfg.get('models'), options
+    general = cfg.get("general") or {}
+    options = {k: general[k] for k in _ASSISTANT_OPTION_KEYS if general.get(k) is not None}
+    return general.get("wakeword"), cfg.get("models"), options
 
 
 def _start_dashboard(context, host, port, certfile, keyfile):
     """Start the single dashboard server (setup + run share it). Never fatal."""
     try:
         from server.dashboard import start_dashboard
+
         start_dashboard(
-            host=host, port=int(port),
-            ssl_certfile=certfile, ssl_keyfile=keyfile, context=context,
+            host=host,
+            port=int(port),
+            ssl_certfile=certfile,
+            ssl_keyfile=keyfile,
+            context=context,
         )
         scheme = "https" if (certfile and keyfile) else "http"
         logger.info("=" * 60)
@@ -221,11 +230,11 @@ def main():
     # Read config fresh (it may have just been seeded) and derive dashboard
     # settings + the setup decision from it.
     cfg = _read_config()
-    general = cfg.get('general') or {}
-    dash_port = general.get('dashboard_port')
-    dash_host = general.get('dashboard_host', '127.0.0.1')
-    dash_cert = general.get('dashboard_ssl_certfile')
-    dash_key = general.get('dashboard_ssl_keyfile')
+    general = cfg.get("general") or {}
+    dash_port = general.get("dashboard_port")
+    dash_host = general.get("dashboard_host", "127.0.0.1")
+    dash_cert = general.get("dashboard_ssl_certfile")
+    dash_key = general.get("dashboard_ssl_keyfile")
 
     # Phase A: decide whether first-run setup is needed before loading anything.
     decision = detect_setup_state(cfg)
@@ -240,9 +249,7 @@ def main():
     if decision.needs_setup:
         phase = ERROR if decision.config_error else NEEDS_SETUP
         detail = decision.config_error or decision.reason
-        lifecycle = Lifecycle(
-            phase=phase, detail=detail, missing_assets=decision.missing_assets
-        )
+        lifecycle = Lifecycle(phase=phase, detail=detail, missing_assets=decision.missing_assets)
     else:
         lifecycle = Lifecycle(phase=LOADING)
 
@@ -252,8 +259,7 @@ def main():
     # wizard's install endpoint downloads models then releases the block below,
     # and the assistant is attached to this same server (no second server).
     if decision.needs_setup:
-        _start_dashboard(context, dash_host, dash_port or _SETUP_FALLBACK_PORT,
-                         dash_cert, dash_key)
+        _start_dashboard(context, dash_host, dash_port or _SETUP_FALLBACK_PORT, dash_cert, dash_key)
     elif dash_port:
         _start_dashboard(context, dash_host, dash_port, dash_cert, dash_key)
 
@@ -283,9 +289,7 @@ def main():
     if not wakeword:
         logger.error("No wakeword configured; cannot start. Re-run setup.")
         return
-    assistant = Assistant(
-        wakeword=wakeword, models=models, lifecycle=lifecycle, **options
-    )
+    assistant = Assistant(wakeword=wakeword, models=models, lifecycle=lifecycle, **options)
     context.set_assistant(assistant)
     assistant.run()
 

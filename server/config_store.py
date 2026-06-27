@@ -239,15 +239,21 @@ def _backends_view() -> dict:
     GPU-only backends), so the wizard renders only what this image can run.
     """
     from core.backends import DOMAINS, is_offerable, list_backends
+
     out: dict = {}
     for domain in DOMAINS:
         out[domain] = [
             {
-                "backend": s.backend, "display_name": s.display_name,
-                "implemented": s.implemented, "offerable": is_offerable(s),
-                "cpu_ok": s.cpu_ok, "gpu_only": s.gpu_only,
-                "vram_gb": s.vram_gb, "download_size_gb": s.download_size_gb,
-                "notes": s.notes, "experimental": s.experimental,
+                "backend": s.backend,
+                "display_name": s.display_name,
+                "implemented": s.implemented,
+                "offerable": is_offerable(s),
+                "cpu_ok": s.cpu_ok,
+                "gpu_only": s.gpu_only,
+                "vram_gb": s.vram_gb,
+                "download_size_gb": s.download_size_gb,
+                "notes": s.notes,
+                "experimental": s.experimental,
             }
             for s in list_backends(domain)
         ]
@@ -257,12 +263,12 @@ def _backends_view() -> dict:
 def _tiers_view() -> list:
     """Tier presets tagged with `offerable` for the running image variant."""
     from core.backends import get_spec, is_offerable
+
     tiers = tier_presets_as_dicts()
     for tier in tiers:
         models = tier["models"]
         tier["offerable"] = all(
-            is_offerable(get_spec(domain, models[domain]["backend"]))
-            for domain in models
+            is_offerable(get_spec(domain, models[domain]["backend"])) for domain in models
         )
     return tiers
 
@@ -277,6 +283,7 @@ def settings_view(path: str = DEFAULT_CONFIG_PATH) -> dict:
         value = section.get(spec["name"]) if present else None
         fields.append({**spec, "value": value, "set": present})
     from core.backends import variant
+
     return {
         "groups": list(GROUPS),
         "fields": fields,

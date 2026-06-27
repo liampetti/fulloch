@@ -219,7 +219,7 @@ def generate_slm(
             max_tokens=max_new_tokens,
             grammar=grammar,
             stream=True,
-            temperature=temperature
+            temperature=temperature,
         )
         for chunk in stream:
             if cancel_check is not None and cancel_check():

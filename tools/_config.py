@@ -14,5 +14,5 @@ try:
 except FileNotFoundError:
     config = {}
 
-for _k, _v in (config.get('internal_tools') or {}).items():
+for _k, _v in (config.get("internal_tools") or {}).items():
     config.setdefault(_k, _v)

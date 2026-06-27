@@ -87,13 +87,9 @@ def temp_dir():
 def mock_config():
     """Provide a mock configuration dictionary."""
     return {
-        "general": {
-            "wakeword": "hey test"
-        },
+        "general": {"wakeword": "hey test"},
         "default": "Sydney",
-        "search": {
-            "searxng_url": "http://localhost:8080/search"
-        },
+        "search": {"searxng_url": "http://localhost:8080/search"},
     }
 
 
@@ -113,6 +109,7 @@ def mock_config_file(temp_dir, mock_config):
 def mock_tool_registry():
     """Provide a fresh tool registry for testing."""
     from tools.tool_registry import ToolRegistry
+
     return ToolRegistry()
 
 
@@ -120,6 +117,7 @@ def mock_tool_registry():
 def mock_audio_queue():
     """Provide a mock audio queue."""
     import queue
+
     return queue.Queue()
 
 
@@ -127,6 +125,7 @@ def mock_audio_queue():
 def sample_audio_chunk():
     """Provide a sample audio chunk for testing."""
     import numpy as np
+
     # Generate 200ms of silence at 16kHz
     return np.zeros(3200, dtype=np.float32)
 
@@ -135,6 +134,7 @@ def sample_audio_chunk():
 def sample_audio_with_speech():
     """Provide a sample audio chunk with simulated speech."""
     import numpy as np
+
     # Generate 200ms of noise at 16kHz (simulates speech)
     return np.random.randn(3200).astype(np.float32) * 0.1
 

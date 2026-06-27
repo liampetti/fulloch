@@ -42,8 +42,10 @@ logger = logging.getLogger(__name__)
 # Names accepted by general.log_level, for the settings-console hot-apply
 # (mirrors the map in app.py; the root logger level is the live handle).
 _LOG_LEVELS = {
-    "debug": logging.DEBUG, "info": logging.INFO,
-    "warning": logging.WARNING, "error": logging.ERROR,
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
 }
 
 # Strips every non-word character. The self-echo check uses this so ASR's
@@ -55,24 +57,41 @@ _NON_WORD_RE = re.compile(r"\W+")
 # background noise when English is enforced. None of these can match a real
 # wakeword, so dropping them globally is safe. Checked against the
 # punctuation-stripped lowercase transcription.
-_ASR_NOISE_TOKENS: frozenset[str] = frozenset({
-    "yeah", "yep", "yup",
-    "okay", "ok",
-    "sure",
-    "hmm", "hm", "uh", "um", "uh huh",
-    "thanks", "thank you", "thank you very much",
-    "you're welcome", "welcome",
-    "bye", "goodbye", "see you", "see ya",
-    "alright", "all right",
-    "right",
-    "oh", "so",
-    "cough",
-    # ASR prompt-echo: on non-speech (a cough), the context-biased decoder
-    # regurgitates its context label instead of transcribing. Drop it before
-    # routing so it can't open a spurious follow-up window. See
-    # `asr_context_hint` / asr.py:context.
-    "technical terms"
-})
+_ASR_NOISE_TOKENS: frozenset[str] = frozenset(
+    {
+        "yeah",
+        "yep",
+        "yup",
+        "okay",
+        "ok",
+        "sure",
+        "hmm",
+        "hm",
+        "uh",
+        "um",
+        "uh huh",
+        "thanks",
+        "thank you",
+        "thank you very much",
+        "you're welcome",
+        "welcome",
+        "bye",
+        "goodbye",
+        "see you",
+        "see ya",
+        "alright",
+        "all right",
+        "right",
+        "oh",
+        "so",
+        "cough",
+        # ASR prompt-echo: on non-speech (a cough), the context-biased decoder
+        # regurgitates its context label instead of transcribing. Drop it before
+        # routing so it can't open a spurious follow-up window. See
+        # `asr_context_hint` / asr.py:context.
+        "technical terms",
+    }
+)
 
 # Bare stop commands that interrupt an active turn without any wakeword.
 # Kept separate from _barge_re so the idle wakeword detector stays strict.
@@ -88,10 +107,25 @@ _BARGE_STOP_RE = re.compile(
 # into a redirect. "Atticus, stop talking now please" is still a pure stop —
 # an instruction to cease entirely — not a new command. Used by
 # `_is_pure_stop` to decide whether a barge-in should open a follow-up window.
-_STOP_FILLER_TOKENS = frozenset({
-    "talking", "speaking", "now", "please", "it", "that", "this",
-    "thanks", "thank", "you", "just", "right", "ok", "okay", "be",
-})
+_STOP_FILLER_TOKENS = frozenset(
+    {
+        "talking",
+        "speaking",
+        "now",
+        "please",
+        "it",
+        "that",
+        "this",
+        "thanks",
+        "thank",
+        "you",
+        "just",
+        "right",
+        "ok",
+        "okay",
+        "be",
+    }
+)
 
 
 def _build_wakeword_pattern(wakeword: str) -> str:
@@ -106,6 +140,7 @@ def _build_wakeword_pattern(wakeword: str) -> str:
     Wraps the whole thing in word boundaries so "atticus" doesn't fire
     inside a longer word like "atticuses".
     """
+
     def _tolerant_word(word: str) -> str:
         return "".join("[sz]" if c in "sz" else re.escape(c) for c in word)
 
@@ -337,23 +372,23 @@ class Assistant:
         # the buffer currently being transcribed. The follow-up window
         # measures against this (when the user started talking) rather than
         # when the transcription lands, so a long reply isn't penalised.
-        self._asr_onset: dict = {'t': 0.0}
+        self._asr_onset: dict = {"t": 0.0}
         # Written by the ASR stream generator with the dBFS loudness of the
         # buffer currently being transcribed (voiced-window RMS where VAD is
         # active). Logged alongside each transcription and fed into the
         # background-noise baseline; nothing acts on it yet.
-        self._asr_loudness: dict = {'db': None}
+        self._asr_loudness: dict = {"db": None}
         # Written by the ASR stream generator: True when the buffer currently
         # being transcribed is a *provisional* soft-endpoint snapshot of an
         # unfinished utterance (the speculative early-commit path). Such a
         # result may only commit a turn at the dispatch gate — never trigger the
         # follow-up/stand-down/baseline side effects — and is ignored mid-turn.
-        self._asr_provisional: dict = {'flag': False}
+        self._asr_provisional: dict = {"flag": False}
         # Written by the ASR stream generator: the raw audio buffer currently
         # being transcribed, kept so a bare wakeword can be re-transcribed
         # without the context bias to confirm it isn't a bias-prompt echo (see
         # `_verify_bare_wakeword`).
-        self._asr_audio: dict = {'buf': None}
+        self._asr_audio: dict = {"buf": None}
         self._noise_baseline = BackgroundNoiseBaseline()
 
         # Turn state (only meaningful in barge-in mode). A "turn" runs the SLM
@@ -482,6 +517,7 @@ class Assistant:
             return f"OpenAI: {llm_cfg.get('model') or '?'}"
         # Local llama.cpp — show the gguf filename without the extension.
         import os
+
         name = os.path.basename(str(llm_cfg.get("model") or ""))
         return name[:-5] if name.endswith(".gguf") else (name or llm_cfg["spec"].display_name)
 
@@ -501,21 +537,26 @@ class Assistant:
         # context creation as the opaque "Failed to create llama_context";
         # torch / CUDA say "out of memory" or raise a CUDA error.
         markers = (
-            "out of memory", "failed to create llama_context", "cudamalloc",
-            "cuda error", "cublas", "cudnn", "device-side assert",
-            "illegal memory access", "ggml_cuda",
+            "out of memory",
+            "failed to create llama_context",
+            "cudamalloc",
+            "cuda error",
+            "cublas",
+            "cudnn",
+            "device-side assert",
+            "illegal memory access",
+            "ggml_cuda",
         )
         name = getattr(spec, "display_name", None) or "the model"
         msg = (str(exc) or exc.__class__.__name__).strip()
         low = msg.lower()
         fatal = any(m in low for m in markers)
-        looks_oom = any(
-            m in low for m in ("out of memory", "llama_context", "cudamalloc")
-        )
+        looks_oom = any(m in low for m in ("out of memory", "llama_context", "cudamalloc"))
 
         vram = ""
         try:
             import torch
+
             if torch.cuda.is_available():
                 free, total = torch.cuda.mem_get_info()
                 free_gb, total_gb = free / 1e9, total / 1e9
@@ -618,9 +659,7 @@ class Assistant:
             # _is_context_echo nor the bare-wakeword guard catches it. The leading
             # marker (everything before the first colon) is an unambiguous tell a
             # user never utters; the transcriber drops any result containing it.
-            self._context_prompt_marker = (
-                self.asr_pipe.context.split(":", 1)[0].strip().lower()
-            )
+            self._context_prompt_marker = self.asr_pipe.context.split(":", 1)[0].strip().lower()
         self.asr_stream_generator = asr_mod.stream_generator
         # Pay the ONNX cold-start (ORT kernel/arena init) now, not on the user's
         # first command. No-op on backends that don't implement it (e.g. GPU Qwen).
@@ -641,9 +680,7 @@ class Assistant:
         # The recorder uses this to switch to a stricter silence threshold
         # while we're talking, so AEC residue doesn't keep utterances alive.
         tts_mod.set_tts_active_event(self.audio_capture.tts_active)
-        logger.info(
-            f"Using {tts_cfg['spec'].display_name} with voice clone: {self.voice_clone}"
-        )
+        logger.info(f"Using {tts_cfg['spec'].display_name} with voice clone: {self.voice_clone}")
         tts_mod.load_tts(model_id=tts_cfg["model"], **tts_cfg["opts"])
         if self.tts_speed is not None and hasattr(tts_mod, "set_speed"):
             tts_mod.set_speed(self.tts_speed)
@@ -667,6 +704,7 @@ class Assistant:
             backend = llm_cfg["backend"]
             if backend == "openai":
                 from .llm_openai import load_openai
+
                 self.grammar, self.slm_model = load_openai(
                     model=llm_cfg["model"], **llm_cfg["opts"]
                 )
@@ -697,6 +735,7 @@ class Assistant:
         self._start_reminder_poll()
         try:
             from tools.time_tools import set_beep_device, set_speak_callback
+
             set_speak_callback(self.speak_proactive)
             set_beep_device(output_device)
         except ImportError:
@@ -756,13 +795,11 @@ class Assistant:
             # path in Step 6); both play regardless of whether an SLM loaded.
             logger.info("Caching no-AI fallback phrases...")
             self.no_ai_cache = [
-                self.synthesize(phrase, self.voice_clone_prompt)
-                for phrase in NO_AI_PHRASES
+                self.synthesize(phrase, self.voice_clone_prompt) for phrase in NO_AI_PHRASES
             ]
             logger.info("Caching ack phrases...")
             self.ack_cache = [
-                self.synthesize(phrase, self.voice_clone_prompt)
-                for phrase in ACK_PHRASES
+                self.synthesize(phrase, self.voice_clone_prompt) for phrase in ACK_PHRASES
             ]
             logger.info("Caching tool-unavailable phrases...")
             self.tool_unavailable_cache = [
@@ -823,6 +860,7 @@ class Assistant:
                 # (heavy) warmup with no LLM — it loads lazily if ever needed.
                 try:
                     from tools.notes import warm_index
+
                     logger.info("Warming notes index...")
                     if warm_index():
                         logger.info("Notes index ready.")
@@ -858,9 +896,7 @@ class Assistant:
             # reduce-overhead CUDA-graph cache with extra prefill shapes.
             sentences = split_sentences(cleaned) or [cleaned]
             logger.info(f"Synthesising greeting ({len(sentences)} sentence(s))...")
-            greeting_parts = [
-                self.synthesize(s, self.voice_clone_prompt) for s in sentences
-            ]
+            greeting_parts = [self.synthesize(s, self.voice_clone_prompt) for s in sentences]
             for chunks, sr in greeting_parts:
                 if chunks:
                     self.play_chunks(chunks, sr, session=self.tts_session)
@@ -918,6 +954,7 @@ class Assistant:
         # .env token) — so importing it here would silently re-enable HA for the
         # agent despite it being disabled in config.
         from tools._config import config as _cfg
+
         if "home_assistant" not in _cfg:
             return
         try:
@@ -978,8 +1015,7 @@ class Assistant:
                     emission = None
                 # Drop a bare action-emission (planning scaffolding); keep
                 # replies (what Fulloch actually said) and anything unparseable.
-                if (isinstance(emission, dict)
-                        and "reply" not in emission and "actions" in emission):
+                if isinstance(emission, dict) and "reply" not in emission and "actions" in emission:
                     continue
             kept.append(msg)
         if len(kept) != len(self._history):
@@ -1005,14 +1041,12 @@ class Assistant:
             return False
         drop = max(2, (n - CONTEXT_TRIM_KEEP_MIN + 1) // 2)
         del self._history[:drop]
-        while (
-            len(self._history) > CONTEXT_TRIM_KEEP_MIN
-            and self._history[0].get("role") != "user"
-        ):
+        while len(self._history) > CONTEXT_TRIM_KEEP_MIN and self._history[0].get("role") != "user":
             del self._history[0]
         logger.info(
             "Context overflow: shed %d oldest history entries, %d remain",
-            drop, len(self._history),
+            drop,
+            len(self._history),
         )
         return True
 
@@ -1047,7 +1081,10 @@ class Assistant:
             self._turn_listeners.append(callback)
 
     def _emit_turn_event(
-        self, role: str, content: str, source: str,
+        self,
+        role: str,
+        content: str,
+        source: str,
         stats: Optional[TurnStats] = None,
     ) -> float:
         ts = time.time()
@@ -1065,16 +1102,21 @@ class Assistant:
     def _emit_stats_patch(self, ref_ts: float, source: str, patch: dict) -> None:
         """Patch a stat onto an already-emitted assistant message (keyed by its
         ts). Used for TTS time, which is only known after playback starts."""
-        self._dispatch_event({
-            "role": "stats",
-            "ts": time.time(),
-            "ref_ts": ref_ts,
-            "source": source,
-            "patch": patch,
-        })
+        self._dispatch_event(
+            {
+                "role": "stats",
+                "ts": time.time(),
+                "ref_ts": ref_ts,
+                "source": source,
+                "patch": patch,
+            }
+        )
 
     def _emit_agent_event(
-        self, kind: str, payload: dict, source: str = "voice",
+        self,
+        kind: str,
+        payload: dict,
+        source: str = "voice",
         replan: bool = False,
     ) -> None:
         """Emit a `plan` / `step` / `observation` event to listeners.
@@ -1128,8 +1170,7 @@ class Assistant:
             return {"ok": False, "error": "model name required"}
         handle = self.slm_model
         if not getattr(handle, "_fulloch_remote", False):
-            return {"ok": False,
-                    "error": "live LLM backend is not OpenAI; restart to apply"}
+            return {"ok": False, "error": "live LLM backend is not OpenAI; restart to apply"}
         with self._turn_lock:
             handle.set_model(model)
         logger.info("Live LLM model switched to %s", model)
@@ -1137,13 +1178,21 @@ class Assistant:
 
     # Config paths the running assistant can apply without a restart. Two are
     # conditional on the TTS backend (Kokoro only) — see apply_hot_config.
-    _HOT_CONFIG_PATHS = frozenset({
-        "general.log_level", "general.barge_in", "general.follow_up_time",
-        "general.tts_speed", "general.voice_clone", "general.use_vad",
-        "general.barge_in_threshold_dbfs", "general.vad_threshold",
-        "general.vad_endpoint_silence_ms", "general.vad_min_speech_ms",
-        "general.vad_soft_endpoint_silence_ms",
-    })
+    _HOT_CONFIG_PATHS = frozenset(
+        {
+            "general.log_level",
+            "general.barge_in",
+            "general.follow_up_time",
+            "general.tts_speed",
+            "general.voice_clone",
+            "general.use_vad",
+            "general.barge_in_threshold_dbfs",
+            "general.vad_threshold",
+            "general.vad_endpoint_silence_ms",
+            "general.vad_min_speech_ms",
+            "general.vad_soft_endpoint_silence_ms",
+        }
+    )
 
     # (cache attribute, phrase pool, llm_only) — the phrase clips pre-rendered at
     # startup. Re-rendered on a live voice change so stalls/acks don't keep
@@ -1213,7 +1262,8 @@ class Assistant:
                     self.voice_clone = value
                     threading.Thread(
                         target=self._rerender_phrase_caches,
-                        daemon=True, name="voice-rerender",
+                        daemon=True,
+                        name="voice-rerender",
                     ).start()
                 elif path == "general.use_vad":
                     if not self.audio_capture.set_use_vad(bool(value)):
@@ -1258,7 +1308,7 @@ class Assistant:
         lowered = prompt.lower()
         leading = self._wakeword_re.match(lowered)
         if leading is not None:
-            prompt = prompt[leading.end():].lstrip(" ,.:;-")
+            prompt = prompt[leading.end() :].lstrip(" ,.:;-")
             if not prompt:
                 return ""
 
@@ -1270,9 +1320,7 @@ class Assistant:
         try:
             self._maybe_reset_session()
             stats = TurnStats()  # text turns have no STT/TTS
-            answer = self._handle_wakeword(
-                prompt, session=session, source="text", stats=stats
-            )
+            answer = self._handle_wakeword(prompt, session=session, source="text", stats=stats)
             if session.cancelled:
                 # Stopped from the dashboard — stand down silently, no bubble.
                 return ""
@@ -1297,13 +1345,17 @@ class Assistant:
         """
         if not spoken:
             return
-        self._history.append({
-            "role": "assistant",
-            "content": json.dumps({"reply": spoken}),
-        })
+        self._history.append(
+            {
+                "role": "assistant",
+                "content": json.dumps({"reply": spoken}),
+            }
+        )
         self._trim_history()
 
-    def _play_random_ack(self, session: Optional[TtsSession] = None, cache: Optional[list] = None) -> None:
+    def _play_random_ack(
+        self, session: Optional[TtsSession] = None, cache: Optional[list] = None
+    ) -> None:
         """Play one pre-rendered ack chunk. Safe no-op if the cache is empty
         (e.g. an early failure before `_warm_and_announce` populated it).
         Pass `cache` to use an alternate phrase pool (e.g. replan_stall_cache).
@@ -1491,8 +1543,11 @@ class Assistant:
 
         try:
             answer = self._handle_wakeword(
-                user_prompt, session=session, source="voice",
-                on_slm_start=_start_ack, stats=stats,
+                user_prompt,
+                session=session,
+                source="voice",
+                on_slm_start=_start_ack,
+                stats=stats,
             )
             cleaned = clean_for_tts(answer)
             self.audio_capture.transcribing = False
@@ -1512,9 +1567,13 @@ class Assistant:
                     # Emit the TTS stat as soon as the first audio chunk is ready, so the
                     # panel doesn't wait for the whole reply to finish playing.
                     self.speak_stream(
-                        cleaned, self.voice_clone_prompt, session=session, stats=stats,
+                        cleaned,
+                        self.voice_clone_prompt,
+                        session=session,
+                        stats=stats,
                         on_first_audio=lambda: self._emit_stats_patch(
-                            ts, "voice",
+                            ts,
+                            "voice",
                             {"tts": stats.tts_payload(), "total": stats.total_with_tts()},
                         ),
                     )
@@ -1567,8 +1626,11 @@ class Assistant:
                 ack_thread.append(t)
 
             answer = self._handle_wakeword(
-                user_prompt, session=session, source="voice",
-                on_slm_start=_start_ack, stats=stats,
+                user_prompt,
+                session=session,
+                source="voice",
+                on_slm_start=_start_ack,
+                stats=stats,
             )
             if session.cancelled:
                 logger.info("Turn cancelled before TTS")
@@ -1592,9 +1654,13 @@ class Assistant:
                 # Emit the TTS stat as soon as the first audio chunk is ready, so the
                 # panel doesn't wait for the whole reply to finish playing.
                 self.speak_stream(
-                    cleaned, self.voice_clone_prompt, session=session, stats=stats,
+                    cleaned,
+                    self.voice_clone_prompt,
+                    session=session,
+                    stats=stats,
                     on_first_audio=lambda: self._emit_stats_patch(
-                        ts, "voice",
+                        ts,
+                        "voice",
                         {"tts": stats.tts_payload(), "total": stats.total_with_tts()},
                     ),
                 )
@@ -1710,11 +1776,10 @@ class Assistant:
         # (2) Unbiased re-transcribe — only meaningful when a context bias is
         # actually steering the decoder.
         if self.asr_context_hint and getattr(self.asr_pipe, "context", ""):
-            buf = self._asr_audio.get('buf')
+            buf = self._asr_audio.get("buf")
             if buf is not None and not self._wakeword_in_unbiased_pass(buf):
                 logger.info(
-                    "Bare wakeword rejected (absent in unbiased re-transcribe) "
-                    "— context-bias echo"
+                    "Bare wakeword rejected (absent in unbiased re-transcribe) — context-bias echo"
                 )
                 return False
 
@@ -1745,8 +1810,7 @@ class Assistant:
         text = (results[0].get("text") if results else "") or ""
         appears = bool(self._wakeword_re.search(text.lower()))
         logger.debug(
-            f"Unbiased re-transcribe: {text!r} "
-            f"(wakeword {'present' if appears else 'absent'})"
+            f"Unbiased re-transcribe: {text!r} (wakeword {'present' if appears else 'absent'})"
         )
         return appears
 
@@ -1785,10 +1849,7 @@ class Assistant:
             # runs against the un-stripped `spoken` so it still resolves
             # multi-word wakewords like "hey atticus" (spoken_norm has no
             # whitespace, so a substring check there would always miss).
-            return (
-                words[0] in spoken_norm
-                or self._wakeword_re.search(spoken) is not None
-            )
+            return words[0] in spoken_norm or self._wakeword_re.search(spoken) is not None
         # AEC residue always starts from a fragment the assistant actually spoke.
         # If the first word isn't in the spoken text at all, this is user speech
         # anchored by their own word (e.g. "yes, save a recipe..." after the
@@ -1829,18 +1890,14 @@ class Assistant:
         stripped = self._barge_re.sub(" ", text_lower)
         stripped = _BARGE_STOP_RE.sub(" ", stripped)
         tokens = re.sub(r"[^\w\s]", "", stripped).split()
-        return all(
-            t in _WAKE_GREETINGS or t in _STOP_FILLER_TOKENS for t in tokens
-        )
+        return all(t in _WAKE_GREETINGS or t in _STOP_FILLER_TOKENS for t in tokens)
 
     def _transcriber_thread(self):
         """ASR results → wakeword/intent/TTS. Owns model loading on first call."""
         try:
             self._load_models()
         except Exception as exc:  # noqa: BLE001 — surface any load failure to the UI
-            _, detail = self._diagnose_failure(
-                exc, spec=getattr(self, "_loading_backend", None)
-            )
+            _, detail = self._diagnose_failure(exc, spec=getattr(self, "_loading_backend", None))
             logger.exception("Model loading failed — switching to setup")
             self._enter_error_state(detail)
             return
@@ -1864,7 +1921,7 @@ class Assistant:
                 self._asr_audio,
             ),
             batch_size=1,
-            generate_kwargs={"max_new_tokens": 256}
+            generate_kwargs={"max_new_tokens": 256},
         ):
             try:
                 text = result.get("text", "").strip()
@@ -1901,7 +1958,7 @@ class Assistant:
                 # open, baseline feed) all guard on `provisional` and drop it so
                 # the real hard endpoint stays authoritative. Mid-turn a partial
                 # is ignored outright — barge-in waits for the hard endpoint.
-                provisional = self._asr_provisional.get('flag', False)
+                provisional = self._asr_provisional.get("flag", False)
                 if provisional and self._turn_active:
                     logger.debug(f"Ignoring provisional during active turn: {text!r}")
                     continue
@@ -1920,12 +1977,11 @@ class Assistant:
                 # follow-up is the user (loud, close) and our own TTS bleed
                 # mid-turn is us, not the room — feeding either would poison the
                 # "background is quieter than the user" estimate.
-                loudness_db = self._asr_loudness.get('db')
+                loudness_db = self._asr_loudness.get("db")
                 baseline_db = self._noise_baseline.value()
                 _vol = f"{loudness_db:.1f}" if loudness_db is not None else "n/a"
                 logger.debug(
-                    f"Transcribed: {text} "
-                    f"[volume={_vol} dBFS, baseline={baseline_db:.1f} dBFS]"
+                    f"Transcribed: {text} [volume={_vol} dBFS, baseline={baseline_db:.1f} dBFS]"
                 )
 
                 if self._turn_active:
@@ -1945,9 +2001,7 @@ class Assistant:
                     # audio gets discarded — without swallowing the user's
                     # real reply, which can't arrive for ≥1.5s.
                     self.audio_capture.flush()
-                    self._drop_results_until = (
-                        time.monotonic() + DROP_AFTER_CANCEL_S
-                    )
+                    self._drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
                     just_barged_in = True
                 elif not wakeword_present:
                     # Follow-up window: a brief grace period after TTS ends
@@ -1957,7 +2011,7 @@ class Assistant:
                     # the window means "started replying within N seconds",
                     # and a long answer isn't disqualified by its own length
                     # plus the silence-detection tail and ASR latency.
-                    onset_gap = self._asr_onset['t'] - self._last_turn_end
+                    onset_gap = self._asr_onset["t"] - self._last_turn_end
                     in_follow_up = (
                         self.follow_up_seconds > 0
                         and self._last_turn_end > 0
@@ -2029,15 +2083,19 @@ class Assistant:
 
                 if wakeword_present:
                     logger.debug(f"WAKEWORD: {text}")
-                    user_prompt = text_lower[wakeword_match.end():].strip(_PROMPT_STRIP_CHARS).replace('"', '')
+                    user_prompt = (
+                        text_lower[wakeword_match.end() :]
+                        .strip(_PROMPT_STRIP_CHARS)
+                        .replace('"', "")
+                    )
                 else:
                     # Follow-up: no wakeword required (within follow_up window).
                     # Strip a leading wakeword if the user habitually said it anyway.
                     stripped = text_lower.strip(_PROMPT_STRIP_CHARS)
                     leading_ww = self._wakeword_re.match(stripped)
                     if leading_ww:
-                        stripped = stripped[leading_ww.end():].lstrip(" ,.:;-")
-                    user_prompt = stripped.replace('"', '')
+                        stripped = stripped[leading_ww.end() :].lstrip(" ,.:;-")
+                    user_prompt = stripped.replace('"', "")
 
                 # Context-bias echo guard: a wakeword utterance whose command is
                 # nothing but ASR context terms (e.g. "Hey Atticus, <term>" from
@@ -2046,9 +2104,7 @@ class Assistant:
                 # follow-up path is exempt — a one-word context-term reply there
                 # can be a legitimate answer.
                 if wakeword_present and self._is_context_echo(user_prompt):
-                    logger.debug(
-                        f"Suppressed (context-bias echo, likely non-speech): {text!r}"
-                    )
+                    logger.debug(f"Suppressed (context-bias echo, likely non-speech): {text!r}")
                     continue
 
                 if not user_prompt:
@@ -2086,9 +2142,7 @@ class Assistant:
                 # this path on the full utterance.
                 if provisional:
                     if not should_commit_provisional(user_prompt, catchAll(user_prompt)):
-                        logger.debug(
-                            f"Provisional held (awaiting hard endpoint): {user_prompt!r}"
-                        )
+                        logger.debug(f"Provisional held (awaiting hard endpoint): {user_prompt!r}")
                         continue
                     # Commit: drop the in-progress buffer and drain the queue so
                     # the hard endpoint's duplicate of this same utterance (still
@@ -2151,14 +2205,8 @@ class Assistant:
 
     def run(self):
         """Start the recorder + transcriber threads and block until Ctrl+C."""
-        rec_thread = threading.Thread(
-            target=self.audio_capture.recorder_thread,
-            daemon=True
-        )
-        trans_thread = threading.Thread(
-            target=self._transcriber_thread,
-            daemon=True
-        )
+        rec_thread = threading.Thread(target=self.audio_capture.recorder_thread, daemon=True)
+        trans_thread = threading.Thread(target=self._transcriber_thread, daemon=True)
 
         rec_thread.start()
         trans_thread.start()

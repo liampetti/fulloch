@@ -14,17 +14,17 @@ logger = logging.getLogger(__name__)
 
 # Tools that load whenever their top-level config key is present.
 _OPTIONAL_TOOLS = {
-    'home_assistant': 'home_assistant',
-    'search': 'search_web',
+    "home_assistant": "home_assistant",
+    "search": "search_web",
 }
 
 # Tools that are always loaded — no config dependency.
-_ALWAYS_LOAD = ['time_tools', 'thinking', 'notes', 'calculator']
+_ALWAYS_LOAD = ["time_tools", "thinking", "notes", "calculator"]
 
 
 def _load(module_name: str) -> None:
     try:
-        importlib.import_module(f'.{module_name}', package=__name__)
+        importlib.import_module(f".{module_name}", package=__name__)
         logger.info(f"Loaded tool: {module_name}")
     except Exception as e:
         logger.error(f"Failed to load tool {module_name}: {e}")
@@ -40,4 +40,4 @@ for _key, _name in _OPTIONAL_TOOLS.items():
         logger.info(f"Skipping tool {_name} ('{_key}' not in config)")
 
 
-__all__ = ['tool_registry', 'tool']
+__all__ = ["tool_registry", "tool"]

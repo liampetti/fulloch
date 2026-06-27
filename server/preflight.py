@@ -126,16 +126,24 @@ def tier_fit(gpu: dict, disk_gb: float, ram: Optional[dict] = None) -> list:
                 reason = f"needs ~{need_vram}GB VRAM, device has {vram}GB"
         if need_disk > disk_gb:
             badge = "warn"
-            reason = (reason + "; " if reason else "") + \
-                f"needs ~{need_disk}GB free disk, {disk_gb}GB available"
+            reason = (
+                reason + "; " if reason else ""
+            ) + f"needs ~{need_disk}GB free disk, {disk_gb}GB available"
         if need_ram and ram_available is not None and need_ram > ram_available:
             badge = "warn"
-            reason = (reason + "; " if reason else "") + \
-                f"needs ~{need_ram}GB RAM, {ram_available}GB available"
-        out.append({
-            "id": tier.id, "vram_gb": need_vram, "download_gb": need_disk,
-            "ram_gb": need_ram, "badge": badge, "reason": reason,
-        })
+            reason = (
+                reason + "; " if reason else ""
+            ) + f"needs ~{need_ram}GB RAM, {ram_available}GB available"
+        out.append(
+            {
+                "id": tier.id,
+                "vram_gb": need_vram,
+                "download_gb": need_disk,
+                "ram_gb": need_ram,
+                "badge": badge,
+                "reason": reason,
+            }
+        )
     return out
 
 

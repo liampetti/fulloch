@@ -22,7 +22,7 @@ class BeepManager:
         self.device = device
 
     def _play_beep(self, filename: str):
-        data, samplerate = sf.read(_WAV_DIR / filename, dtype='float32')
+        data, samplerate = sf.read(_WAV_DIR / filename, dtype="float32")
         sd.play(data, samplerate, device=self.device)
         sd.wait()
 

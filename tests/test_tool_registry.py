@@ -114,6 +114,7 @@ class TestExecution:
         being swallowed into "". `handle_action` maps it to None -> ERROR ->
         replan; swallowing it would surface an empty observation and a
         misleading "Done." reply (the tool never actually ran)."""
+
         def boom():
             raise RuntimeError("nope")
 

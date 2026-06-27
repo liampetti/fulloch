@@ -84,6 +84,7 @@ def install_log_capture(level: int = logging.INFO) -> _BufferLogHandler:
     logging.getLogger().addHandler(handler)
     return handler
 
+
 NEEDS_SETUP = "NEEDS_SETUP"
 DOWNLOADING = "DOWNLOADING"
 LOADING = "LOADING"
@@ -145,8 +146,13 @@ class AppContext:
     `set_assistant`.
     """
 
-    def __init__(self, lifecycle: Lifecycle, assistant=None,
-                 downloader=None, config_path: str = "./data/config.yml"):
+    def __init__(
+        self,
+        lifecycle: Lifecycle,
+        assistant=None,
+        downloader=None,
+        config_path: str = "./data/config.yml",
+    ):
         self.lifecycle = lifecycle
         self.assistant = assistant
         self.downloader = downloader

@@ -40,8 +40,8 @@ DEFAULT_BASE_URL = "http://localhost:8888/v1"  # 8080 would clash with SearXNG
 # loaded; only multi-model endpoints (api.openai.com, vLLM with several) need a
 # real name.
 DEFAULT_MODEL = "default"
-DEFAULT_CONNECT_TIMEOUT = 0.4   # seconds — fail fast when the endpoint is down
-DEFAULT_READ_TIMEOUT = 60.0     # seconds — generous; a too-tight value false-trips
+DEFAULT_CONNECT_TIMEOUT = 0.4  # seconds — fail fast when the endpoint is down
+DEFAULT_READ_TIMEOUT = 60.0  # seconds — generous; a too-tight value false-trips
 
 # Hard output ceilings for the remote path. The local llama.cpp backend is bound
 # by the GBNF grammar (it stops at a short JSON emission), so callers pass a huge
@@ -59,8 +59,16 @@ REMOTE_THINK_MAX_TOKENS = 4096
 
 def _is_context_error(exc: Exception) -> bool:
     msg = str(exc).lower()
-    return any(s in msg for s in ("context length", "context window", "maximum context",
-                                  "too long", "reduce the length"))
+    return any(
+        s in msg
+        for s in (
+            "context length",
+            "context window",
+            "maximum context",
+            "too long",
+            "reduce the length",
+        )
+    )
 
 
 class OpenAIClient:
@@ -68,18 +76,26 @@ class OpenAIClient:
 
     _fulloch_remote = True
 
-    def __init__(self, model: str, base_url: str, api_key: str,
-                 connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
-                 read_timeout: float = DEFAULT_READ_TIMEOUT):
+    def __init__(
+        self,
+        model: str,
+        base_url: str,
+        api_key: str,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+        read_timeout: float = DEFAULT_READ_TIMEOUT,
+    ):
         from openai import OpenAI
+
         self.model = model
         self.base_url = base_url
         # Split connect vs read timeout; no retries so a down endpoint fails
         # fast (one connect attempt → RemoteUnreachable).
         timeout = httpx.Timeout(read_timeout, connect=connect_timeout)
         self._client = OpenAI(
-            base_url=base_url, api_key=api_key or "not-needed",
-            timeout=timeout, max_retries=0,
+            base_url=base_url,
+            api_key=api_key or "not-needed",
+            timeout=timeout,
+            max_retries=0,
         )
 
     def set_model(self, model: str) -> None:
@@ -201,8 +217,7 @@ class OpenAIClient:
             # Degrade like an unreachable endpoint: keep any partial text, else
             # raise RemoteUnreachable so the agent loop speaks its fallback. Log
             # the concrete type so the cause is visible next time.
-            logger.warning("Remote LLM stream failed mid-response: %s: %s",
-                           type(e).__name__, e)
+            logger.warning("Remote LLM stream failed mid-response: %s: %s", type(e).__name__, e)
             if not full_text:
                 raise RemoteUnreachable(f"{type(e).__name__}: {e}") from e
 
@@ -286,14 +301,20 @@ class OpenAIClient:
         logger.debug("Remote JSON invalid; attempting one repair")
         try:
             from openai import APIConnectionError, APITimeoutError
+
             repair = messages + [
                 {"role": "assistant", "content": text},
-                {"role": "user", "content":
-                    "That was not valid JSON. Reply with ONLY the corrected JSON object."},
+                {
+                    "role": "user",
+                    "content": "That was not valid JSON. Reply with ONLY the corrected JSON object.",
+                },
             ]
             resp = self._client.chat.completions.create(
-                model=self.model, messages=repair, temperature=0.0,
-                max_tokens=max_new_tokens, response_format={"type": "json_object"},
+                model=self.model,
+                messages=repair,
+                temperature=0.0,
+                max_tokens=max_new_tokens,
+                response_format={"type": "json_object"},
             )
             fixed = resp.choices[0].message.content or text
             json.loads(fixed)
@@ -313,9 +334,14 @@ def _resolve_api_key(opts: dict) -> str:
     )
 
 
-def load_openai(model: Optional[str] = None, base_url: Optional[str] = None,
-                api_key: Optional[str] = None, connect_timeout=None,
-                read_timeout=None, **opts):
+def load_openai(
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    connect_timeout=None,
+    read_timeout=None,
+    **opts,
+):
     """Build the remote client. Returns (AGENT_JSON_SENTINEL, OpenAIClient).
 
     The sentinel stands in for the local GBNF grammar so the agent loop's
@@ -326,8 +352,7 @@ def load_openai(model: Optional[str] = None, base_url: Optional[str] = None,
     model = model or DEFAULT_MODEL
     # Normalise: add a scheme if missing, drop a trailing slash (which would
     # otherwise produce "…//chat/completions").
-    base_url = normalize_url(base_url or os.environ.get("FULLOCH_LLM_BASE_URL")
-                             or DEFAULT_BASE_URL)
+    base_url = normalize_url(base_url or os.environ.get("FULLOCH_LLM_BASE_URL") or DEFAULT_BASE_URL)
     client = OpenAIClient(
         model=model,
         base_url=base_url,
@@ -339,8 +364,13 @@ def load_openai(model: Optional[str] = None, base_url: Optional[str] = None,
     return AGENT_JSON_SENTINEL, client
 
 
-def test_connection(base_url: str, model: str, api_key: str = "",
-                    connect_timeout: float = 2.0, read_timeout: float = 10.0) -> dict:
+def test_connection(
+    base_url: str,
+    model: str,
+    api_key: str = "",
+    connect_timeout: float = 2.0,
+    read_timeout: float = 10.0,
+) -> dict:
     """Probe an endpoint with a 1-token completion. Returns {ok, error}.
 
     Used by the wizard's 'Test connection' button (a deliberate pre-flight,
@@ -350,21 +380,26 @@ def test_connection(base_url: str, model: str, api_key: str = "",
     """
     try:
         from openai import OpenAI
+
         client = OpenAI(
-            base_url=base_url, api_key=_resolve_api_key({"api_key": api_key}),
-            timeout=httpx.Timeout(read_timeout, connect=connect_timeout), max_retries=0,
+            base_url=base_url,
+            api_key=_resolve_api_key({"api_key": api_key}),
+            timeout=httpx.Timeout(read_timeout, connect=connect_timeout),
+            max_retries=0,
         )
         client.chat.completions.create(
             model=model or DEFAULT_MODEL,
-            messages=[{"role": "user", "content": "ping"}], max_tokens=1,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
         )
         return {"ok": True, "error": None}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-def list_models(base_url: str, api_key: str = "",
-                connect_timeout: float = 2.0, read_timeout: float = 10.0) -> dict:
+def list_models(
+    base_url: str, api_key: str = "", connect_timeout: float = 2.0, read_timeout: float = 10.0
+) -> dict:
     """List the models an OpenAI-compatible endpoint advertises (`GET /v1/models`).
 
     Returns {ok, models (sorted ids), error}. Lets the UI offer a picker after a
@@ -374,9 +409,12 @@ def list_models(base_url: str, api_key: str = "",
     """
     try:
         from openai import OpenAI
+
         client = OpenAI(
-            base_url=normalize_url(base_url), api_key=api_key or "not-needed",
-            timeout=httpx.Timeout(read_timeout, connect=connect_timeout), max_retries=0,
+            base_url=normalize_url(base_url),
+            api_key=api_key or "not-needed",
+            timeout=httpx.Timeout(read_timeout, connect=connect_timeout),
+            max_retries=0,
         )
         resp = client.models.list()
         ids = sorted({m.id for m in resp.data if getattr(m, "id", None)})

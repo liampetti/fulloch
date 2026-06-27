@@ -45,12 +45,16 @@ SAMPLE_HTML = """
 def test_json_results_parsed(monkeypatch):
     def fake_get(url, params=None, timeout=None, **kw):
         assert params.get("format") == "json"
-        return FakeResp(text='{"results": []}', json_data={
-            "results": [
-                {"url": "https://x.com/1", "content": "snip one"},
-                {"url": "https://x.com/2", "content": "snip two"},
-            ]
-        })
+        return FakeResp(
+            text='{"results": []}',
+            json_data={
+                "results": [
+                    {"url": "https://x.com/1", "content": "snip one"},
+                    {"url": "https://x.com/2", "content": "snip two"},
+                ]
+            },
+        )
+
     monkeypatch.setattr(search_web.requests, "get", fake_get)
     res = search_web.searxng_search("q", num_results=2)
     assert res == [
@@ -83,6 +87,7 @@ def test_html_respects_num_results(monkeypatch):
         if params.get("format") == "json":
             return FakeResp(text="")
         return FakeResp(text=SAMPLE_HTML)
+
     monkeypatch.setattr(search_web.requests, "get", fake_get)
     assert len(search_web.searxng_search("q", num_results=1)) == 1
 
@@ -136,6 +141,7 @@ def test_fetch_sends_browser_user_agent(monkeypatch):
 def test_fetch_falls_back_to_snippet(monkeypatch):
     def fake_get(url, timeout=None, **kw):
         return FakeResp(text="<html><body><nav>junk</nav></body></html>")
+
     monkeypatch.setattr(search_web.requests, "get", fake_get)
     out = search_web.fetch_website_summary("http://x", fallback="engine snippet here")
     assert out == "engine snippet here"
@@ -144,6 +150,7 @@ def test_fetch_falls_back_to_snippet(monkeypatch):
 def test_fetch_returns_empty_when_no_body_no_fallback(monkeypatch):
     def fake_get(url, timeout=None, **kw):
         raise RuntimeError("boom")
+
     monkeypatch.setattr(search_web.requests, "get", fake_get)
     assert search_web.fetch_website_summary("http://x", fallback="") == ""
 
@@ -158,11 +165,13 @@ def test_external_information_no_results_signals_clearly(monkeypatch):
 
 def test_external_information_includes_snippets(monkeypatch):
     monkeypatch.setattr(
-        search_web, "searxng_search",
+        search_web,
+        "searxng_search",
         lambda q, num_results=3: [{"url": "http://x", "content": "fallback snip"}],
     )
     monkeypatch.setattr(
-        search_web, "fetch_website_summary",
+        search_web,
+        "fetch_website_summary",
         lambda url, fallback="", **kw: "real body text",
     )
     out = search_web.external_information("q")
@@ -174,10 +183,15 @@ def test_external_information_includes_snippets(monkeypatch):
 class TestStripSummariseDirective:
     def test_strips_summarize_verb(self):
         assert search_web._strip_summarise_directive("summarize today's news") == "today's news"
-        assert search_web._strip_summarise_directive("Summarise the latest headlines") == "the latest headlines"
+        assert (
+            search_web._strip_summarise_directive("Summarise the latest headlines")
+            == "the latest headlines"
+        )
 
     def test_strips_phrasal_directives(self):
-        assert search_web._strip_summarise_directive("give me a summary of the budget") == "the budget"
+        assert (
+            search_web._strip_summarise_directive("give me a summary of the budget") == "the budget"
+        )
         assert search_web._strip_summarise_directive("recap of the game") == "the game"
 
     def test_leaves_plain_query_untouched(self):

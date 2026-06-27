@@ -44,9 +44,7 @@ class _FakeModel:
         # llama.cpp raises the overflow error lazily, when the stream is first
         # iterated — mirror that so the backstop's placement is exercised.
         if self._raise_overflow:
-            raise ValueError(
-                "Requested tokens (99) exceed context window of 16384"
-            )
+            raise ValueError("Requested tokens (99) exceed context window of 16384")
         yield {"choices": [{"delta": {"content": "ok"}}]}
 
 
@@ -87,8 +85,14 @@ def _import_assistant_module():
         "core.audio": ["AudioCapture"],
         "core.asr": ["load_asr_pipeline"],
         "core.tts": [
-            "set_voice", "warmup_model", "synthesize", "play_chunks",
-            "speak_stream", "set_output_device", "set_tts_active_event", "model",
+            "set_voice",
+            "warmup_model",
+            "synthesize",
+            "play_chunks",
+            "speak_stream",
+            "set_output_device",
+            "set_tts_active_event",
+            "model",
         ],
     }
     for name, attrs in fake.items():
@@ -99,15 +103,18 @@ def _import_assistant_module():
             setattr(mod, attr, lambda *a, **k: None)
         sys.modules[name] = mod
     import core.assistant as assistant  # noqa: E402
+
     return assistant
 
 
 def test_context_exhausted_reply_clears_history():
     a = _import_assistant_module()
-    fake = SimpleNamespace(_history=[
-        {"role": "user", "content": "x"},
-        {"role": "assistant", "content": "y"},
-    ])
+    fake = SimpleNamespace(
+        _history=[
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": "y"},
+        ]
+    )
     result = a.Assistant._context_exhausted_reply(fake)
     assert result == a.CONTEXT_EXHAUSTED_REPLY
     assert fake._history == []
@@ -125,16 +132,18 @@ def test_shed_oldest_history_keeps_recent_and_turn_boundary():
     """Shedding drops the oldest entries, keeps the recent tail, and leaves the
     trimmed history starting on a `user` turn boundary."""
     a = _import_assistant_module()
-    fake = SimpleNamespace(_history=[
-        {"role": "user", "content": "u1"},
-        {"role": "assistant", "content": "a1"},
-        {"role": "tool", "content": "t1"},
-        {"role": "user", "content": "u2"},
-        {"role": "assistant", "content": "a2"},
-        {"role": "user", "content": "u3"},
-        {"role": "assistant", "content": "a3"},
-        {"role": "user", "content": "u4"},
-    ])
+    fake = SimpleNamespace(
+        _history=[
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "tool", "content": "t1"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "u3"},
+            {"role": "assistant", "content": "a3"},
+            {"role": "user", "content": "u4"},
+        ]
+    )
     assert a.Assistant._shed_oldest_history(fake) is True
     assert len(fake._history) < 8
     assert fake._history[0]["role"] == "user"  # no orphaned tool/assistant head
@@ -152,9 +161,9 @@ def test_recovery_sheds_then_retries_instead_of_clearing(monkeypatch):
     """On overflow the wrapper sheds oldest history and retries — and succeeds
     with the conversation tail intact, rather than wiping everything."""
     a = _import_assistant_module()
-    fake = SimpleNamespace(slm_model=object(), _history=[
-        {"role": "user", "content": f"m{i}"} for i in range(8)
-    ])
+    fake = SimpleNamespace(
+        slm_model=object(), _history=[{"role": "user", "content": f"m{i}"} for i in range(8)]
+    )
     fake._shed_oldest_history = lambda: a.Assistant._shed_oldest_history(fake)
 
     calls = {"n": 0}
@@ -168,7 +177,7 @@ def test_recovery_sheds_then_retries_instead_of_clearing(monkeypatch):
     monkeypatch.setattr(a, "generate_slm", fake_gen)
     result = a.Assistant._generate_with_context_recovery(fake, history=fake._history)
     assert result == "ok"
-    assert calls["n"] == 2            # failed once, retried once
+    assert calls["n"] == 2  # failed once, retried once
     assert 0 < len(fake._history) < 8  # tail preserved, not cleared
 
 
@@ -176,10 +185,13 @@ def test_recovery_reraises_when_nothing_left_to_shed(monkeypatch):
     """If even the recent floor overflows, the error propagates so the caller
     falls back to the clear + apology."""
     a = _import_assistant_module()
-    fake = SimpleNamespace(slm_model=object(), _history=[
-        {"role": "user", "content": "x"},
-        {"role": "assistant", "content": "y"},
-    ])
+    fake = SimpleNamespace(
+        slm_model=object(),
+        _history=[
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": "y"},
+        ],
+    )
     fake._shed_oldest_history = lambda: a.Assistant._shed_oldest_history(fake)
 
     def always_overflow(_model, **_kw):

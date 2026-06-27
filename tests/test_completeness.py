@@ -13,6 +13,7 @@ from utils.completeness import (
 
 # --- is_complete ----------------------------------------------------------
 
+
 def test_closed_clause_is_complete():
     assert is_complete("turn off the kitchen lights") is True
     assert is_complete("what is the capital of France") is True
@@ -56,6 +57,7 @@ def test_single_closed_word_is_complete():
 
 # --- should_commit_provisional --------------------------------------------
 
+
 def _actions(*intents):
     return {"actions": [{"intent": i, "args": []} for i in intents]}
 
@@ -70,8 +72,10 @@ def test_safe_regex_intent_commits_immediately():
 def test_unsafe_regex_intent_waits():
     assert should_commit_provisional("unlock the front door", _actions("ha_unlock")) is False
     assert should_commit_provisional("play the beatles", _actions("play_song")) is False
-    assert should_commit_provisional("set a timer for ten minutes",
-                                     _actions("start_countdown")) is False
+    assert (
+        should_commit_provisional("set a timer for ten minutes", _actions("start_countdown"))
+        is False
+    )
 
 
 def test_mixed_actions_with_any_unsafe_waits():
@@ -80,10 +84,11 @@ def test_mixed_actions_with_any_unsafe_waits():
 
 def test_freeform_commits_only_when_complete():
     # No regex match → catchAll returns the raw string.
-    assert should_commit_provisional("what is the capital of France",
-                                     "what is the capital of France") is True
-    assert should_commit_provisional("what is the capital of",
-                                     "what is the capital of") is False
+    assert (
+        should_commit_provisional("what is the capital of France", "what is the capital of France")
+        is True
+    )
+    assert should_commit_provisional("what is the capital of", "what is the capital of") is False
 
 
 def test_reply_dict_commits_when_complete():
@@ -97,6 +102,7 @@ def test_unsafe_set_membership():
 
 
 # --- integration with the real catchAll (the transcriber's actual call) ----
+
 
 def test_commit_decision_with_real_catchall():
     from utils.intent_catch import catchAll

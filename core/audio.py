@@ -39,9 +39,7 @@ def resolve_device(name: Optional[str], want_input: bool) -> Optional[object]:
         if lowered in dev["name"].lower() and dev[key] > 0:
             logger.info(f"Resolved {kind} device {name!r} -> [{idx}] {dev['name']}")
             return idx
-    logger.warning(
-        f"No {kind} device matching {name!r}; falling back to system default"
-    )
+    logger.warning(f"No {kind} device matching {name!r}; falling back to system default")
     return None
 
 
@@ -112,7 +110,7 @@ def is_silent(chunk: np.ndarray, threshold: float = SILENCE_THRESHOLD) -> bool:
     """True if `chunk`'s RMS energy is below `threshold`."""
     if chunk.size == 0:
         return True
-    rms = np.sqrt(np.mean(chunk ** 2))
+    rms = np.sqrt(np.mean(chunk**2))
     return rms < threshold
 
 
@@ -125,7 +123,7 @@ def _buf_rms(buf: np.ndarray) -> float:
     """Linear RMS of a buffer (0.0 for empty)."""
     if buf.size == 0:
         return 0.0
-    return float(np.sqrt(np.mean(buf ** 2)))
+    return float(np.sqrt(np.mean(buf**2)))
 
 
 def rms_to_dbfs(rms: float) -> float:
@@ -193,9 +191,7 @@ class AudioCapture:
         # Kept in dBFS for clarity and log-parity; converted once here to the
         # linear RMS the per-chunk silence check actually compares against.
         self.barge_in_threshold_dbfs = (
-            BARGE_IN_THRESHOLD_DBFS
-            if barge_in_threshold_dbfs is None
-            else barge_in_threshold_dbfs
+            BARGE_IN_THRESHOLD_DBFS if barge_in_threshold_dbfs is None else barge_in_threshold_dbfs
         )
         self._barge_in_rms = dbfs_to_rms(self.barge_in_threshold_dbfs)
         self.input_device = resolve_device(input_device, want_input=True)
@@ -215,6 +211,7 @@ class AudioCapture:
                 from silero_vad import get_speech_timestamps, load_silero_vad
 
                 from .vad import VadEndpointer
+
                 self._vad_model = load_silero_vad()
                 self._vad_get_timestamps = get_speech_timestamps
                 soft_ms = (
@@ -243,7 +240,9 @@ class AudioCapture:
                     + (f" (soft endpoint {soft_ms}ms)" if soft_ms else "")
                 )
             except Exception as e:
-                logger.warning(f"Silero VAD requested but failed to load ({e}); running without VAD")
+                logger.warning(
+                    f"Silero VAD requested but failed to load ({e}); running without VAD"
+                )
 
         # Derived values
         self.frames_per_chunk = int(sample_rate * chunk_duration_ms / 1000)
@@ -320,8 +319,9 @@ class AudioCapture:
         """Update the minimum voiced duration sent to ASR."""
         self.vad_min_speech_samples = int(self.sample_rate * int(ms) / 1000)
 
-    def set_vad_params(self, threshold=None, endpoint_silence_ms=None,
-                       soft_endpoint_silence_ms=None) -> None:
+    def set_vad_params(
+        self, threshold=None, endpoint_silence_ms=None, soft_endpoint_silence_ms=None
+    ) -> None:
         """Live-tune the endpointer thresholds/silences (no-op without VAD)."""
         if self._endpointer_built is not None:
             self._endpointer_built.update_params(
@@ -431,8 +431,10 @@ class AudioCapture:
                         # Discard accumulating noise before any speech is
                         # detected so a noisy room neither inflates onset
                         # latency nor hands ASR a long noise clip.
-                        if (not self._endpointer.speech_started
-                                and buffer_samples >= self.vad_idle_reset_samples):
+                        if (
+                            not self._endpointer.speech_started
+                            and buffer_samples >= self.vad_idle_reset_samples
+                        ):
                             self.audio_buffer.clear()
                             self._endpointer.reset()
                             continue
@@ -444,9 +446,11 @@ class AudioCapture:
                         # command, else drops it and waits for the hard endpoint.
                         # Nothing is cleared/reset here, so the buffer keeps
                         # growing toward the real endpoint regardless.
-                        if (self._endpointer.soft_endpointed
-                                and not self._endpointer.endpointed
-                                and self._endpointer.speech_started):
+                        if (
+                            self._endpointer.soft_endpointed
+                            and not self._endpointer.endpointed
+                            and self._endpointer.speech_started
+                        ):
                             if not self._soft_probe_emitted:
                                 min_required = (
                                     self.follow_up_min_utterance_samples
@@ -483,9 +487,11 @@ class AudioCapture:
                         # hallucinated into the wakeword. Exempt while the
                         # follow-up window is open: a cough there is
                         # indistinguishable from a one-word reply.
-                        if (hit_silence and not self._follow_up_open()
-                                and self._endpointer.last_speech_samples
-                                    < self.vad_min_speech_samples):
+                        if (
+                            hit_silence
+                            and not self._follow_up_open()
+                            and self._endpointer.last_speech_samples < self.vad_min_speech_samples
+                        ):
                             secs = self._endpointer.last_speech_samples / self.sample_rate
                             logger.debug(f"VAD: speech span {secs:.2f}s < min — dropped as noise")
                             self.audio_buffer.clear()
@@ -501,8 +507,7 @@ class AudioCapture:
                             else self.min_utterance_samples
                         )
                         buf = np.concatenate(list(self.audio_buffer), axis=0)
-                        if (buf.size >= min_required
-                                and self._endpointer.speech_started):
+                        if buf.size >= min_required and self._endpointer.speech_started:
                             onset = self._endpointer.speech_onset or time.monotonic()
                             # Tag with the voiced-window loudness; fall back to
                             # whole-buffer RMS if no segment finalised (hit_max
@@ -522,11 +527,7 @@ class AudioCapture:
                     # normal threshold, so utterances captured during playback
                     # would never reach silence. Use the barge-in floor while
                     # TTS is active — only a louder interrupt counts as speech.
-                    threshold = (
-                        self._barge_in_rms
-                        if tts_active
-                        else self.silence_threshold
-                    )
+                    threshold = self._barge_in_rms if tts_active else self.silence_threshold
                     last_chunk = self.audio_buffer[-1]
                     if is_silent(last_chunk, threshold):
                         silence_counter += 1
@@ -539,11 +540,11 @@ class AudioCapture:
                     # wakeword surfaces while we're still speaking; outside
                     # TTS we keep the long max for natural utterances.
                     max_samples = (
-                        self.tts_max_utterance_samples if tts_active
-                        else self.max_utterance_samples
+                        self.tts_max_utterance_samples if tts_active else self.max_utterance_samples
                     )
                     min_samples = (
-                        self.tts_min_utterance_samples if tts_active
+                        self.tts_min_utterance_samples
+                        if tts_active
                         else self.follow_up_min_utterance_samples
                         if self._follow_up_open()
                         else self.min_utterance_samples
@@ -568,10 +569,7 @@ class AudioCapture:
                             buf, self._vad_model, self._vad_get_timestamps, self.sample_rate
                         )
                     ):
-                        onset = (
-                            speech_onset_t if speech_onset_t is not None
-                            else time.monotonic()
-                        )
+                        onset = speech_onset_t if speech_onset_t is not None else time.monotonic()
                         # RMS path has no per-window voiced measure; tag
                         # with whole-buffer RMS.
                         loudness_db = rms_to_dbfs(_buf_rms(buf))
@@ -590,8 +588,7 @@ class AudioCapture:
                         total = sum(c.size for c in self.audio_buffer)
                         while (
                             len(self.audio_buffer) > 1
-                            and total - self.audio_buffer[0].size
-                                >= self.tts_overlap_samples
+                            and total - self.audio_buffer[0].size >= self.tts_overlap_samples
                         ):
                             total -= self.audio_buffer.popleft().size
                         continue

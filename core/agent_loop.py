@@ -43,9 +43,7 @@ logger = logging.getLogger(__name__)
 
 # Tool intents that count as "context retrieval" for the stats panel. The
 # chunk count is surfaced by the semantic paths via notes.last_retrieval.
-NOTE_SEARCH_INTENTS = frozenset(
-    {"search_notes", "search_notes_semantic", "read_note"}
-)
+NOTE_SEARCH_INTENTS = frozenset({"search_notes", "search_notes_semantic", "read_note"})
 
 # Leading/trailing punctuation peeled off a user prompt / search query. Includes
 # "!"/"?" so ASR's "Hey Atticus! Stop." yields the bare "stop" without trailing
@@ -66,9 +64,9 @@ def _normalise_search_query(args) -> Optional[str]:
     so indexing `args[0]` blindly would raise `KeyError(0)` on a dict.
     """
     if isinstance(args, dict):
-        q = next(iter(args.values()), None)   # kwargs-style: first value
+        q = next(iter(args.values()), None)  # kwargs-style: first value
     elif isinstance(args, (list, tuple)):
-        q = args[0] if args else None         # positional: first arg
+        q = args[0] if args else None  # positional: first arg
     elif isinstance(args, str):
         q = args
     else:
@@ -103,9 +101,7 @@ class AgentLoop:
         self.source = source
         self.stats = stats
         self.on_slm_start = on_slm_start
-        self.cancel_check = (
-            (lambda: session.cancelled) if session is not None else None
-        )
+        self.cancel_check = (lambda: session.cancelled) if session is not None else None
 
     def run(self, user_prompt: str) -> str:
         """Drive the agent loop for `user_prompt` and return the spoken text.
@@ -207,7 +203,8 @@ class AgentLoop:
                     # trigger it. Recovery wrapper sheds oldest history and retries
                     # on overflow; only re-raises if the recent floor won't fit.
                     with ThinkingWatchdog(
-                        host.replan_stall_cache, host.play_chunks,
+                        host.replan_stall_cache,
+                        host.play_chunks,
                         session or host.tts_session,
                     ):
                         emission_text = host._generate_with_context_recovery(
@@ -250,20 +247,19 @@ class AgentLoop:
                     prose = (emission_text or "").strip()
                     if not prose or prose[:1] in ("{", "["):
                         logger.error(f"Failed to parse agent emission: {emission_text!r} ({e})")
-                        return random.choice([
-                            "Sorry, can you repeat that",
-                            "I don't understand",
-                        ])
-                    logger.warning(
-                        f"Agent emission was prose, not JSON; treating as a reply ({e})"
-                    )
+                        return random.choice(
+                            [
+                                "Sorry, can you repeat that",
+                                "I don't understand",
+                            ]
+                        )
+                    logger.warning(f"Agent emission was prose, not JSON; treating as a reply ({e})")
                     emission = {"reply": prose}
                 # Cap actions to 3 — GBNF enforces this for local llama; do
                 # it structurally here so the remote path (no grammar) can't
                 # emit a 20-room scan. Applies before history, plan event, and
                 # dispatch all see the emission, so they stay consistent.
-                if (isinstance(emission.get("actions"), list)
-                        and len(emission["actions"]) > 3):
+                if isinstance(emission.get("actions"), list) and len(emission["actions"]) > 3:
                     logger.warning(
                         "Agent emitted %d actions; capping to 3",
                         len(emission["actions"]),
@@ -285,9 +281,11 @@ class AgentLoop:
                 kept = []
                 for a in _acts:
                     _intent = a.get("intent") if isinstance(a, dict) else None
-                    if (isinstance(_intent, str)
-                            and _intent.lower() in intents.REPLY_PSEUDO_INTENTS
-                            and not intents.is_registered_tool(_intent)):
+                    if (
+                        isinstance(_intent, str)
+                        and _intent.lower() in intents.REPLY_PSEUDO_INTENTS
+                        and not intents.is_registered_tool(_intent)
+                    ):
                         text = intents.coerce_reply_text(a.get("args"))
                         if text:
                             bundled_reply = text
@@ -309,7 +307,10 @@ class AgentLoop:
             # after it and re-decided from the findings). Flag it as a replan so
             # the trace shows the prior plan was scrapped, not silently failed.
             host._emit_agent_event(
-                "plan", emission, source=source, replan=(iteration > 0),
+                "plan",
+                emission,
+                source=source,
+                replan=(iteration > 0),
             )
 
             # Reply branch — agent's final spoken answer.
@@ -349,17 +350,24 @@ class AgentLoop:
             # isn't loaded, block the turn up front (before dispatching the valid
             # ones, so no partial side effects) and speak a canned "can't do
             # that" instead of letting it replan into a fabrication.
-            unknown = [a.get("intent", "?") for a in actions[:3]
-                       if not intents.is_registered_tool(a.get("intent"))]
+            unknown = [
+                a.get("intent", "?")
+                for a in actions[:3]
+                if not intents.is_registered_tool(a.get("intent"))
+            ]
             if unknown:
                 logger.warning(
                     "Agent called unregistered tool(s) %s; blocking fabrication",
                     unknown,
                 )
-                host._emit_agent_event("observation", {
-                    "intent": unknown[0],
-                    "result": f"Blocked: tool {unknown[0]!r} is not available.",
-                }, source=source)
+                host._emit_agent_event(
+                    "observation",
+                    {
+                        "intent": unknown[0],
+                        "result": f"Blocked: tool {unknown[0]!r} is not available.",
+                    },
+                    source=source,
+                )
                 return host._speak_tool_unavailable_fallback(session, source)
 
             # Dispatch each action in order. Stop on the first replan trigger.
@@ -372,10 +380,14 @@ class AgentLoop:
                     return ""
                 intent_name = action.get("intent", "?")
                 logger.debug(f"Dispatching action: {action}")
-                host._emit_agent_event("step", {
-                    "intent": intent_name,
-                    "args": action.get("args", []),
-                }, source=source)
+                host._emit_agent_event(
+                    "step",
+                    {
+                        "intent": intent_name,
+                        "args": action.get("args", []),
+                    },
+                    source=source,
+                )
 
                 # Per-turn idempotent web search: if this exact query already
                 # ran this turn, reuse the cached summary instead of paying
@@ -383,17 +395,13 @@ class AgentLoop:
                 search_query = None
                 cached_summary = None
                 if intents.is_web_search(intent_name):
-                    search_query = _normalise_search_query(
-                        action.get("args") or []
-                    )
+                    search_query = _normalise_search_query(action.get("args") or [])
                     if search_query is not None:
                         cached_summary = search_cache.get(search_query)
 
                 web_summarised = False
                 if cached_summary is not None:
-                    logger.debug(
-                        "Reusing cached web summary for repeated query"
-                    )
+                    logger.debug("Reusing cached web summary for repeated query")
                     step = StepResult(StepKind.NORMAL, cached_summary, in_output=True)
                     web_summarised = True
                     web_summary_text = cached_summary
@@ -405,16 +413,12 @@ class AgentLoop:
                     # it lands (the summarise step that follows is only ~1s).
                     if intents.is_web_search(intent_name) and host.web_search_stall_cache:
                         chunks, sr = random.choice(host.web_search_stall_cache)
-                        host.play_chunks(
-                            chunks, sr, session=session or host.tts_session
-                        )
+                        host.play_chunks(chunks, sr, session=session or host.tts_session)
                         if session is not None and session.cancelled:
                             return ""
                     elif intents.is_note_write(intent_name) and host.note_write_stall_cache:
                         chunks, sr = random.choice(host.note_write_stall_cache)
-                        host.play_chunks(
-                            chunks, sr, session=session or host.tts_session
-                        )
+                        host.play_chunks(chunks, sr, session=session or host.tts_session)
                         if session is not None and session.cancelled:
                             return ""
                     _t_dispatch = time.monotonic()
@@ -430,9 +434,9 @@ class AgentLoop:
                     if stats is not None:
                         stats.tool_dispatches += 1
                         if action.get("intent") in NOTE_SEARCH_INTENTS:
-                            stats.retrieval_seconds = (
-                                stats.retrieval_seconds or 0.0
-                            ) + (time.monotonic() - _t_dispatch)
+                            stats.retrieval_seconds = (stats.retrieval_seconds or 0.0) + (
+                                time.monotonic() - _t_dispatch
+                            )
                             chunks = notes.last_retrieval.pop("chunks", None)
                             if chunks is not None:
                                 stats.retrieval_chunks = chunks
@@ -473,24 +477,28 @@ class AgentLoop:
                         if search_query is not None:
                             search_cache[search_query] = summary
 
-                host._history.append({
-                    "role": "tool",
-                    "name": action.get("intent", "?"),
-                    "content": step.text,
-                })
-                host._emit_agent_event("observation", {
-                    "intent": action.get("intent", "?"),
-                    "result": step.text,
-                }, source=source)
+                host._history.append(
+                    {
+                        "role": "tool",
+                        "name": action.get("intent", "?"),
+                        "content": step.text,
+                    }
+                )
+                host._emit_agent_event(
+                    "observation",
+                    {
+                        "intent": action.get("intent", "?"),
+                        "result": step.text,
+                    },
+                    source=source,
+                )
                 if step.kind is StepKind.SUMMARY:
                     saw_summary = True
                 elif step.kind is StepKind.THINKING:
                     # deep_think returns "Thinking question:\n<query>";
                     # keep the query for the out-of-loop thinking call.
                     _parts = step.text.split("\n", 1)
-                    thinking_query = (
-                        _parts[1].strip() if len(_parts) > 1 else user_prompt
-                    )
+                    thinking_query = _parts[1].strip() if len(_parts) > 1 else user_prompt
                     saw_thinking = True
                 # A data-lookup tool returns raw records (a state-change dump, a
                 # conversation transcript, note chunks), not a spoken answer.
@@ -548,7 +556,9 @@ class AgentLoop:
                 watchdog_session = session or host.tts_session
                 try:
                     with ThinkingWatchdog(
-                        host.thinking_stall_cache, host.play_chunks, watchdog_session,
+                        host.thinking_stall_cache,
+                        host.play_chunks,
+                        watchdog_session,
                     ):
                         answer = host._generate_with_context_recovery(
                             user_prompt=query,
@@ -571,9 +581,7 @@ class AgentLoop:
                         host._last_thinking_partial = answer
                         host._last_thinking_question = query
                         host._last_thinking_cancelled_at = time.monotonic()
-                        logger.debug(
-                            f"Captured {len(answer)} chars of partial thinking"
-                        )
+                        logger.debug(f"Captured {len(answer)} chars of partial thinking")
                     return ""
                 cleaned = clean_for_tts(answer)
                 if not cleaned:
@@ -616,9 +624,7 @@ class AgentLoop:
             return spoken
 
         # Cap exhausted.
-        logger.warning(
-            f"Hit MAX_AGENT_CALLS_PER_TURN={MAX_AGENT_CALLS_PER_TURN}"
-        )
+        logger.warning(f"Hit MAX_AGENT_CALLS_PER_TURN={MAX_AGENT_CALLS_PER_TURN}")
         # If we researched something, speak the findings instead of a flat
         # apology — the lookup succeeded even though the agent never settled.
         if web_summary_text:
@@ -645,9 +651,7 @@ class AgentLoop:
         if first_emission is None:
             return host._speak_no_ai_fallback(session, source)
 
-        host._history.append(
-            {"role": "assistant", "content": json.dumps(first_emission)}
-        )
+        host._history.append({"role": "assistant", "content": json.dumps(first_emission)})
         host._trim_history()
         host._emit_agent_event("plan", first_emission, source=source)
 
@@ -664,20 +668,30 @@ class AgentLoop:
             if session is not None and session.cancelled:
                 return ""
             intent_name = action.get("intent", "?")
-            host._emit_agent_event("step", {
-                "intent": intent_name,
-                "args": action.get("args", []),
-            }, source=source)
+            host._emit_agent_event(
+                "step",
+                {
+                    "intent": intent_name,
+                    "args": action.get("args", []),
+                },
+                source=source,
+            )
             step = intents.classify_step(intents.handle_action(action))
-            host._history.append({
-                "role": "tool",
-                "name": intent_name,
-                "content": step.text,
-            })
-            host._emit_agent_event("observation", {
-                "intent": intent_name,
-                "result": step.text,
-            }, source=source)
+            host._history.append(
+                {
+                    "role": "tool",
+                    "name": intent_name,
+                    "content": step.text,
+                }
+            )
+            host._emit_agent_event(
+                "observation",
+                {
+                    "intent": intent_name,
+                    "result": step.text,
+                },
+                source=source,
+            )
             # No SLM to replan with. A REACTIVE step still ran the tool and
             # produced a real observation (e.g. HA "couldn't find that entity")
             # — speak that directly rather than the generic "no AI" phrase, since

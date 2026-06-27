@@ -25,12 +25,12 @@ from .tool_registry import tool
 
 logger = logging.getLogger(__name__)
 
-_notes_config = config.get('notes', {}) or {}
-NOTES_DIR = Path(_notes_config.get('path', './data/notes')).expanduser().resolve()
+_notes_config = config.get("notes", {}) or {}
+NOTES_DIR = Path(_notes_config.get("path", "./data/notes")).expanduser().resolve()
 # `append_to_today` writes to <NOTES_DIR>/<DAILY_SUBDIR>/YYYY-MM-DD.md so daily
 # journals don't clutter the top-level notes folder. Defaults to "daily" when the
 # key is absent; set it empty/null in config to keep daily notes at the top level.
-DAILY_SUBDIR: Optional[str] = _notes_config.get('daily_subdir', 'daily')
+DAILY_SUBDIR: Optional[str] = _notes_config.get("daily_subdir", "daily")
 # Voice replies are read aloud — long bodies make for a tedious TTS, so cap
 # the spoken content and tell the user we truncated.
 MAX_READ_CHARS = 2000
@@ -44,8 +44,8 @@ SEMANTIC_TOP_K = 5
 SEMANTIC_MIN_SCORE = 0.25
 # Total hits the hybrid search surfaces after fusing keyword + semantic lists.
 MAX_HYBRID_MATCHES = 5
-FACTS_NOTE = 'facts'
-INDEX_BASENAME = 'notes_index'
+FACTS_NOTE = "facts"
+INDEX_BASENAME = "notes_index"
 
 # Lightweight hand-off for the dashboard stats panel: the semantic-search paths
 # record the number of matched chunks here, and the assistant pops it after a
@@ -56,25 +56,69 @@ NOTES_DIR.mkdir(parents=True, exist_ok=True)
 if DAILY_SUBDIR:
     (NOTES_DIR / DAILY_SUBDIR).mkdir(parents=True, exist_ok=True)
 
-_SAFE_TITLE_RE = re.compile(r'[^a-z0-9]+')
-_HEADER_RE = re.compile(r'^#+\s*', flags=re.MULTILINE)
-_BULLET_RE = re.compile(r'^[-*+]\s+', flags=re.MULTILINE)
-_EMPHASIS_RE = re.compile(r'[*_`]')
+_SAFE_TITLE_RE = re.compile(r"[^a-z0-9]+")
+_HEADER_RE = re.compile(r"^#+\s*", flags=re.MULTILINE)
+_BULLET_RE = re.compile(r"^[-*+]\s+", flags=re.MULTILINE)
+_EMPHASIS_RE = re.compile(r"[*_`]")
 
-_TOKEN_RE = re.compile(r'\w+')
+_TOKEN_RE = re.compile(r"\w+")
 # Dropped from keyword queries so an AND-of-terms match isn't defeated by the
 # filler words a spoken query carries ("what's your note about the X route").
-_QUERY_STOPWORDS = frozenset({
-    'a', 'an', 'the', 'this', 'that', 'these', 'those', 'to', 'of', 'in', 'on',
-    'for', 'and', 'or', 'is', 'are', 'was', 'were', 'my', 'your', 'our',
-    'what', 'whats', 'which', 'who', 'about', 'regarding', 'note', 'notes',
-    'say', 'says', 'said', 'tell', 'me', 'find', 'anything', 'something',
-    'did', 'do', 'does', 'i', 'you', 'it', 'with', 'from', 'have', 'has',
-})
+_QUERY_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "this",
+        "that",
+        "these",
+        "those",
+        "to",
+        "of",
+        "in",
+        "on",
+        "for",
+        "and",
+        "or",
+        "is",
+        "are",
+        "was",
+        "were",
+        "my",
+        "your",
+        "our",
+        "what",
+        "whats",
+        "which",
+        "who",
+        "about",
+        "regarding",
+        "note",
+        "notes",
+        "say",
+        "says",
+        "said",
+        "tell",
+        "me",
+        "find",
+        "anything",
+        "something",
+        "did",
+        "do",
+        "does",
+        "i",
+        "you",
+        "it",
+        "with",
+        "from",
+        "have",
+        "has",
+    }
+)
 
 
 def _match_plural(n: int) -> str:
-    return 'es' if n > 1 else ''
+    return "es" if n > 1 else ""
 
 
 def _query_terms(query: str) -> list[str]:
@@ -99,7 +143,7 @@ def _term_in(term: str, text_lower: str) -> bool:
     """
     if term in text_lower:
         return True
-    if term.endswith('s') and len(term) > 3 and term[:-1] in text_lower:
+    if term.endswith("s") and len(term) > 3 and term[:-1] in text_lower:
         return True
     return False
 
@@ -116,21 +160,21 @@ def _strip_leading_title(md: str, title: str) -> str:
     i = 0
     while i < len(lines) and not lines[i].strip():
         i += 1
-    if i < len(lines) and lines[i].lstrip().startswith('#'):
-        header_text = lines[i].lstrip('#').strip()
+    if i < len(lines) and lines[i].lstrip().startswith("#"):
+        header_text = lines[i].lstrip("#").strip()
         if _slugify(header_text) == _slugify(title):
-            return '\n'.join(lines[i + 1:]).strip()
+            return "\n".join(lines[i + 1 :]).strip()
     return md
 
 
 def _slugify(title: str) -> str:
     """Convert a spoken title into a filename stem ('My boiler note' → 'my-boiler-note')."""
-    slug = _SAFE_TITLE_RE.sub('-', title.strip().lower()).strip('-')
-    return slug or 'note'
+    slug = _SAFE_TITLE_RE.sub("-", title.strip().lower()).strip("-")
+    return slug or "note"
 
 
 def _iter_notes() -> Iterable[Path]:
-    return sorted(NOTES_DIR.rglob('*.md'))
+    return sorted(NOTES_DIR.rglob("*.md"))
 
 
 def _find_note(query: str) -> Optional[Path]:
@@ -156,7 +200,7 @@ def _find_note(query: str) -> Optional[Path]:
     return None
 
 
-_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _is_daily_note(path: Path) -> bool:
@@ -211,7 +255,7 @@ def _find_note_semantic(
             continue
         if exclude_daily and _is_daily_note(path):
             continue
-        last_retrieval['chunks'] = 1
+        last_retrieval["chunks"] = 1
         return path
     return None
 
@@ -225,9 +269,9 @@ def _appendable_titles() -> list[str]:
     """Spoken titles of notes a named append may target (no facts, no daily)."""
     titles: list[str] = []
     for p in _iter_notes():
-        if p.name == f'{FACTS_NOTE}.md' or _is_daily_note(p):
+        if p.name == f"{FACTS_NOTE}.md" or _is_daily_note(p):
             continue
-        titles.append(p.stem.replace('-', ' '))
+        titles.append(p.stem.replace("-", " "))
     return titles
 
 
@@ -243,9 +287,9 @@ def _today_path() -> Path:
 
 def _to_spoken(md: str) -> str:
     """Strip markdown markers TTS would otherwise read literally (`#`, `*`, bullets)."""
-    text = _HEADER_RE.sub('', md)
-    text = _BULLET_RE.sub('', text)
-    text = _EMPHASIS_RE.sub('', text)
+    text = _HEADER_RE.sub("", md)
+    text = _BULLET_RE.sub("", text)
+    text = _EMPHASIS_RE.sub("", text)
     return text.strip()
 
 
@@ -271,6 +315,7 @@ def _get_index():
         if _index is not None:
             return _index
         from .notes_index import NotesIndex
+
         _index = NotesIndex(
             notes_root=NOTES_DIR,
             index_path=NOTES_DIR.parent / INDEX_BASENAME,
@@ -281,11 +326,13 @@ def _get_index():
 
 def _after_write(path: Path) -> None:
     """Re-embed a single note after a successful write. Runs in background."""
+
     def _run():
         try:
             _get_index().index_file(path)
         except Exception as e:
             logger.error(f"Failed to re-index {path}: {e}")
+
     threading.Thread(target=_run, daemon=True).start()
 
 
@@ -316,7 +363,7 @@ def list_notes() -> str:
     notes = list(_iter_notes())
     if not notes:
         return "You don't have any notes saved yet."
-    titles = [p.stem.replace('-', ' ') for p in notes]
+    titles = [p.stem.replace("-", " ") for p in notes]
     return f"You have {len(titles)} notes: {', '.join(titles)}."
 
 
@@ -333,18 +380,18 @@ def read_note(title: str) -> str:
     if note is None:
         return f"I couldn't find a note about {title}."
     try:
-        raw = note.read_text(encoding='utf-8')
+        raw = note.read_text(encoding="utf-8")
     except OSError as e:
         logger.error(f"Failed to read {note}: {e}")
         return f"I couldn't read the {title} note."
-    title_spoken = note.stem.replace('-', ' ')
+    title_spoken = note.stem.replace("-", " ")
     # Don't speak the title twice — the prefix below already announces it, so
     # strip a leading `# <title>` header from the body if present.
     text = _to_spoken(_strip_leading_title(raw, title_spoken))
-    truncated = ''
+    truncated = ""
     if len(text) > MAX_READ_CHARS:
         text = text[:MAX_READ_CHARS]
-        truncated = ' (note continues)'
+        truncated = " (note continues)"
     return f"Note '{title_spoken}': {text}{truncated}"
 
 
@@ -358,7 +405,7 @@ def read_note(title: str) -> str:
 )
 def write_note(title: str, content: str) -> str:
     slug = _slugify(title)
-    path = NOTES_DIR / f'{slug}.md'
+    path = NOTES_DIR / f"{slug}.md"
     body = content.strip()
     # Note already exists — append rather than erroring, so the agent doesn't
     # have to re-dispatch to append_to_note.
@@ -366,7 +413,7 @@ def write_note(title: str, content: str) -> str:
         if not body:
             return f"The {title} note already exists; there was nothing to add."
         try:
-            with path.open('a', encoding='utf-8') as f:
+            with path.open("a", encoding="utf-8") as f:
                 f.write(f"\n{body}\n")
         except OSError as e:
             logger.error(f"Failed to append to {path}: {e}")
@@ -375,7 +422,7 @@ def write_note(title: str, content: str) -> str:
         return f"Added to your existing '{title}' note."
     header = f"# {title.strip()}\n\n"
     try:
-        path.write_text(header + body + '\n', encoding='utf-8')
+        path.write_text(header + body + "\n", encoding="utf-8")
     except OSError as e:
         logger.error(f"Failed to write {path}: {e}")
         return f"I couldn't save the {title} note."
@@ -414,14 +461,14 @@ def append_to_note(title: str, content: str) -> str:
     if note is None:
         # No confident match — bounce back so the agent picks a real title or
         # creates the note, rather than guessing or speaking a dead end.
-        existing = ', '.join(_appendable_titles()) or 'none'
+        existing = ", ".join(_appendable_titles()) or "none"
         return (
             f"Reactive question: I couldn't find an existing note titled "
             f"{title!r} to append to. Existing notes: {existing}. Append to one "
             f"of those by its exact title, or create a new note with write_note."
         )
     try:
-        with note.open('a', encoding='utf-8') as f:
+        with note.open("a", encoding="utf-8") as f:
             f.write(f"\n- {line}\n")
     except OSError as e:
         logger.error(f"Failed to append to {note}: {e}")
@@ -444,12 +491,12 @@ def append_to_today(content: str) -> str:
         return "There was nothing to log."
     path = _today_path()
     now = datetime.now()
-    timestamp = now.strftime('%H:%M')
+    timestamp = now.strftime("%H:%M")
     try:
         if not path.exists():
             header = f"# {now.strftime('%A %d %B %Y')}\n\n"
-            path.write_text(header, encoding='utf-8')
-        with path.open('a', encoding='utf-8') as f:
+            path.write_text(header, encoding="utf-8")
+        with path.open("a", encoding="utf-8") as f:
             f.write(f"- {timestamp} {line}\n")
     except OSError as e:
         logger.error(f"Failed to append to {path}: {e}")
@@ -472,32 +519,32 @@ def read_today(date: Optional[str] = None) -> str:
     # Guard the date arg: it builds a filename, and the SLM may pass a literal
     # word ("today") or a relative phrase. Anything that isn't a YYYY-MM-DD
     # stamp falls back to today (also blocks path-traversal via the date).
-    date_str = (date or '').strip()
+    date_str = (date or "").strip()
     if not _DATE_RE.match(date_str):
-        date_str = datetime.now().strftime('%Y-%m-%d')
-    today_str = datetime.now().strftime('%Y-%m-%d')
+        date_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = datetime.now().strftime("%Y-%m-%d")
     when = "today" if date_str == today_str else f"on {date_str}"
 
-    path = _daily_base() / f'{date_str}.md'
+    path = _daily_base() / f"{date_str}.md"
     if not path.exists():
         return f"You don't have any notes logged {when}."
     try:
-        raw = path.read_text(encoding='utf-8')
+        raw = path.read_text(encoding="utf-8")
     except OSError as e:
         logger.error(f"Failed to read daily note {path}: {e}")
         return f"I couldn't read your note {when}."
     text = _to_spoken(raw)
-    truncated = ''
+    truncated = ""
     if len(text) > MAX_READ_CHARS:
         text = text[:MAX_READ_CHARS]
-        truncated = ' (note continues)'
+        truncated = " (note continues)"
     return f"Your note {when}: {text}{truncated}"
 
 
 def _truncate_snippet(snippet: str, limit: int = 240) -> str:
     snippet = snippet.strip()
     if len(snippet) > limit:
-        return snippet[:limit].rstrip() + '...'
+        return snippet[:limit].rstrip() + "..."
     return snippet
 
 
@@ -516,12 +563,12 @@ def _keyword_search(query: str) -> list[tuple[str, str]]:
     hits: list[tuple[str, str]] = []
     for path in _iter_notes():
         try:
-            content = path.read_text(encoding='utf-8', errors='ignore')
+            content = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
         if not all(_term_in(t, content.lower()) for t in terms):
             continue
-        best_line, best_score = '', 0
+        best_line, best_score = "", 0
         for line in content.splitlines():
             line_lower = line.lower()
             score = sum(1 for t in terms if _term_in(t, line_lower))
@@ -529,7 +576,7 @@ def _keyword_search(query: str) -> list[tuple[str, str]]:
                 best_line, best_score = line, score
         snippet = _to_spoken(best_line).strip()
         if snippet:
-            hits.append((path.stem.replace('-', ' '), snippet))
+            hits.append((path.stem.replace("-", " "), snippet))
         if len(hits) >= MAX_SEARCH_MATCHES:
             break
     return hits
@@ -546,7 +593,7 @@ def _semantic_search(query: str) -> list[tuple[str, str]]:
     for score, chunk in results:
         if score < SEMANTIC_MIN_SCORE:
             continue
-        out.append((Path(chunk.file).stem.replace('-', ' '), chunk.text.strip()))
+        out.append((Path(chunk.file).stem.replace("-", " "), chunk.text.strip()))
     return out
 
 
@@ -559,12 +606,15 @@ def _semantic_search(query: str) -> list[tuple[str, str]]:
         "its text before answering."
     ),
     aliases=[
-        "find_notes", "lookup_notes",
-        "search_notes_semantic", "semantic_notes", "find_notes_about",
+        "find_notes",
+        "lookup_notes",
+        "search_notes_semantic",
+        "semantic_notes",
+        "find_notes_about",
     ],
 )
 def search_notes(query: str) -> str:
-    query = (query or '').strip()
+    query = (query or "").strip()
     if not query:
         return "Please give me something to search for."
 
@@ -582,8 +632,7 @@ def search_notes(query: str) -> str:
         # kept for the same note — keyword lines are often a subset of the
         # semantic paragraph from the same file.
         if any(
-            t == title.lower() and (snippet.lower() in s or s in snippet.lower())
-            for t, s in seen
+            t == title.lower() and (snippet.lower() in s or s in snippet.lower()) for t, s in seen
         ):
             continue
         seen.add(key)
@@ -591,10 +640,10 @@ def search_notes(query: str) -> str:
         if len(fused) >= MAX_HYBRID_MATCHES:
             break
 
-    last_retrieval['chunks'] = len(fused)
+    last_retrieval["chunks"] = len(fused)
     if not fused:
         return f"I didn't find anything about {query} in your notes."
-    parts = '; '.join(f"in '{title}': {snippet}" for title, snippet in fused)
+    parts = "; ".join(f"in '{title}': {snippet}" for title, snippet in fused)
     # `Reactive question:` routes the hits back through the agent loop so the
     # SLM filters / summarises them rather than speaking raw matches. The
     # caveat matters: semantic hits are nearest-by-meaning and may not contain
@@ -616,15 +665,15 @@ def search_notes(query: str) -> str:
     aliases=["save_fact", "remember_this", "remember"],
 )
 def remember_fact(content: str) -> str:
-    fact = (content or '').strip()
+    fact = (content or "").strip()
     if not fact:
         return "There was nothing to remember."
-    path = NOTES_DIR / f'{FACTS_NOTE}.md'
-    timestamp = datetime.now().strftime('%Y-%m-%d')
+    path = NOTES_DIR / f"{FACTS_NOTE}.md"
+    timestamp = datetime.now().strftime("%Y-%m-%d")
     try:
         if not path.exists():
-            path.write_text("# Long-term facts\n\n", encoding='utf-8')
-        with path.open('a', encoding='utf-8') as f:
+            path.write_text("# Long-term facts\n\n", encoding="utf-8")
+        with path.open("a", encoding="utf-8") as f:
             f.write(f"- [{timestamp}] {fact}\n")
     except OSError as e:
         logger.error(f"Failed to append fact: {e}")
@@ -640,23 +689,22 @@ def recall_facts() -> str:
     is rebuilt per turn, so edits via the dashboard or a new `remember_fact`
     are picked up on the next agent call without a restart.
     """
-    path = NOTES_DIR / f'{FACTS_NOTE}.md'
+    path = NOTES_DIR / f"{FACTS_NOTE}.md"
     if not path.exists():
         return ""
     try:
-        content = path.read_text(encoding='utf-8')
+        content = path.read_text(encoding="utf-8")
     except OSError as e:
         logger.error(f"Failed to read facts: {e}")
         return ""
     # Drop the markdown header(s) so the system prompt doesn't double up
     # on the "Long-term facts" framing.
     body_lines = [
-        line for line in content.splitlines()
-        if line.strip() and not line.lstrip().startswith('#')
+        line for line in content.splitlines() if line.strip() and not line.lstrip().startswith("#")
     ]
     if not body_lines:
         return ""
-    body = '\n'.join(body_lines)
+    body = "\n".join(body_lines)
     return f"## Known facts about the user\n{body}"
 
 
@@ -670,11 +718,11 @@ def recall_facts() -> str:
 # ---------------------------------------------------------------------------
 
 _FACTS_LOCK = threading.Lock()
-_FACT_LINE_RE = re.compile(r'^-\s*\[(\d{4}-\d{2}-\d{2})\]\s*(.*)$')
+_FACT_LINE_RE = re.compile(r"^-\s*\[(\d{4}-\d{2}-\d{2})\]\s*(.*)$")
 
 
 def _facts_path() -> Path:
-    return NOTES_DIR / f'{FACTS_NOTE}.md'
+    return NOTES_DIR / f"{FACTS_NOTE}.md"
 
 
 def list_facts() -> list[dict]:
@@ -683,7 +731,7 @@ def list_facts() -> list[dict]:
     if not path.exists():
         return []
     try:
-        content = path.read_text(encoding='utf-8')
+        content = path.read_text(encoding="utf-8")
     except OSError as e:
         logger.error(f"Failed to read facts: {e}")
         return []
@@ -691,23 +739,25 @@ def list_facts() -> list[dict]:
     for line in content.splitlines():
         m = _FACT_LINE_RE.match(line.strip())
         if m:
-            out.append({
-                "index": len(out),
-                "date": m.group(1),
-                "text": m.group(2).strip(),
-            })
+            out.append(
+                {
+                    "index": len(out),
+                    "date": m.group(1),
+                    "text": m.group(2).strip(),
+                }
+            )
     return out
 
 
 def _write_facts_atomic(lines: list[str]) -> None:
     path = _facts_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    body = '\n'.join(lines)
-    if not body.endswith('\n'):
-        body += '\n'
-    fd, tmp = tempfile.mkstemp(prefix='.facts-', suffix='.tmp', dir=str(path.parent))
+    body = "\n".join(lines)
+    if not body.endswith("\n"):
+        body += "\n"
+    fd, tmp = tempfile.mkstemp(prefix=".facts-", suffix=".tmp", dir=str(path.parent))
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(body)
         os.replace(tmp, path)
     except Exception:
@@ -718,7 +768,7 @@ def _write_facts_atomic(lines: list[str]) -> None:
 
 def update_fact(index: int, text: str) -> bool:
     """Replace the text portion of the indexed fact. Date stamp preserved."""
-    text = (text or '').strip()
+    text = (text or "").strip()
     if not text:
         return False
     path = _facts_path()
@@ -726,7 +776,7 @@ def update_fact(index: int, text: str) -> bool:
         if not path.exists():
             return False
         try:
-            content = path.read_text(encoding='utf-8')
+            content = path.read_text(encoding="utf-8")
         except OSError as e:
             logger.error(f"Failed to read facts: {e}")
             return False
@@ -750,7 +800,7 @@ def delete_fact(index: int) -> bool:
         if not path.exists():
             return False
         try:
-            content = path.read_text(encoding='utf-8')
+            content = path.read_text(encoding="utf-8")
         except OSError as e:
             logger.error(f"Failed to read facts: {e}")
             return False
@@ -785,15 +835,15 @@ def _resolve_note_file(name: str) -> Optional[Path]:
     Returns None when the name is empty, points at the facts note, or
     resolves outside NOTES_DIR (path-traversal guard).
     """
-    name = (name or '').strip()
+    name = (name or "").strip()
     if not name:
         return None
-    candidate = (NOTES_DIR / name).with_suffix('.md').resolve()
+    candidate = (NOTES_DIR / name).with_suffix(".md").resolve()
     try:
         candidate.relative_to(NOTES_DIR)
     except ValueError:
         return None
-    if candidate.name == f'{FACTS_NOTE}.md':
+    if candidate.name == f"{FACTS_NOTE}.md":
         return None
     return candidate
 
@@ -802,10 +852,10 @@ def list_note_files() -> list[dict]:
     """Return saved notes as `{name, title}` dicts, excluding the facts note."""
     out: list[dict] = []
     for p in _iter_notes():
-        if p.name == f'{FACTS_NOTE}.md':
+        if p.name == f"{FACTS_NOTE}.md":
             continue
-        name = p.relative_to(NOTES_DIR).with_suffix('').as_posix()
-        out.append({"name": name, "title": p.stem.replace('-', ' ')})
+        name = p.relative_to(NOTES_DIR).with_suffix("").as_posix()
+        out.append({"name": name, "title": p.stem.replace("-", " ")})
     return out
 
 
@@ -815,7 +865,7 @@ def read_note_file(name: str) -> Optional[str]:
     if path is None or not path.exists():
         return None
     try:
-        return path.read_text(encoding='utf-8')
+        return path.read_text(encoding="utf-8")
     except OSError as e:
         logger.error(f"Failed to read note {name}: {e}")
         return None
@@ -827,10 +877,10 @@ def save_note_file(name: str, content: str) -> bool:
     path = _resolve_note_file(name)
     if path is None or not path.exists():
         return False
-    body = content if content.endswith('\n') else content + '\n'
-    fd, tmp = tempfile.mkstemp(prefix='.note-', suffix='.tmp', dir=str(path.parent))
+    body = content if content.endswith("\n") else content + "\n"
+    fd, tmp = tempfile.mkstemp(prefix=".note-", suffix=".tmp", dir=str(path.parent))
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(body)
         os.replace(tmp, path)
     except OSError as e:

@@ -67,10 +67,10 @@ def _windows(n):
 def test_update_params_adjusts_both_iterators():
     # Real VADIterators (built against a mock model) so threshold /
     # min_silence_samples are the actual attributes the live setter mutates.
-    ep = VadEndpointer(MagicMock(), sample_rate=16000,
-                       soft_model=MagicMock(), soft_endpoint_silence_ms=500)
-    ep.update_params(threshold=0.8, endpoint_silence_ms=2000,
-                     soft_endpoint_silence_ms=300)
+    ep = VadEndpointer(
+        MagicMock(), sample_rate=16000, soft_model=MagicMock(), soft_endpoint_silence_ms=500
+    )
+    ep.update_params(threshold=0.8, endpoint_silence_ms=2000, soft_endpoint_silence_ms=300)
     assert ep._iterator.threshold == 0.8
     assert ep._soft_iterator.threshold == 0.8
     assert ep._iterator.min_silence_samples == 16000 * 2000 / 1000
@@ -174,6 +174,7 @@ def test_reset_clears_last_speech_samples():
 
 
 # --- soft endpoint (early-commit signal) ----------------------------------
+
 
 def test_soft_endpoint_disabled_by_default():
     # No soft iterator → flag never sets, even across a full start/end.

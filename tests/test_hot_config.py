@@ -15,8 +15,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.audio import AudioCapture, dbfs_to_rms  # noqa: E402
 
-
 # --- AudioCapture live setters ---------------------------------------------
+
 
 def test_set_use_vad_cannot_enable_without_model():
     # use_vad=False keeps Silero out, so _endpointer_built is None and VAD can't
@@ -50,6 +50,7 @@ def test_set_vad_params_noop_without_endpointer():
 
 # --- Assistant.apply_hot_config --------------------------------------------
 
+
 def _import_assistant_module():
     """Import core.assistant with its heavy submodules stubbed (see
     test_assistant_ack for the same technique)."""
@@ -57,8 +58,14 @@ def _import_assistant_module():
         "core.audio": ["AudioCapture", "dbfs_to_rms"],
         "core.asr": ["load_asr_pipeline"],
         "core.tts": [
-            "set_voice", "warmup_model", "synthesize", "play_chunks",
-            "speak_stream", "set_output_device", "set_tts_active_event", "model",
+            "set_voice",
+            "warmup_model",
+            "synthesize",
+            "play_chunks",
+            "speak_stream",
+            "set_output_device",
+            "set_tts_active_event",
+            "model",
         ],
         "core.slm": ["load_slm", "generate_slm"],
     }
@@ -73,6 +80,7 @@ def _import_assistant_module():
             mod.RemoteUnreachable = type("RemoteUnreachable", (RuntimeError,), {})
         sys.modules[name] = mod
     import core.assistant as assistant  # noqa: E402
+
     return assistant
 
 
@@ -128,10 +136,12 @@ def test_hot_apply_use_vad_declined_needs_restart():
 def test_hot_apply_voice_and_speed_live_on_kokoro():
     obj = _make_assistant(backend="kokoro-onnx")
     obj._tts_module.set_voice.return_value = "new-prompt"
-    applied = obj.apply_hot_config([
-        {"path": "general.voice_clone", "value": "am_onyx"},
-        {"path": "general.tts_speed", "value": 1.25},
-    ])
+    applied = obj.apply_hot_config(
+        [
+            {"path": "general.voice_clone", "value": "am_onyx"},
+            {"path": "general.tts_speed", "value": 1.25},
+        ]
+    )
     assert applied == {"general.voice_clone", "general.tts_speed"}
     obj._tts_module.set_voice.assert_called_once_with("am_onyx")
     assert obj.voice_clone == "am_onyx"
@@ -143,10 +153,12 @@ def test_hot_apply_voice_and_speed_live_on_kokoro():
 
 def test_hot_apply_voice_restart_only_on_qwen():
     obj = _make_assistant(backend="qwen")
-    applied = obj.apply_hot_config([
-        {"path": "general.voice_clone", "value": "atticus"},
-        {"path": "general.tts_speed", "value": 1.25},
-    ])
+    applied = obj.apply_hot_config(
+        [
+            {"path": "general.voice_clone", "value": "atticus"},
+            {"path": "general.tts_speed", "value": 1.25},
+        ]
+    )
     # Qwen voice swap needs a restart (clone warmup + cache re-render).
     assert "general.voice_clone" not in applied
     obj._tts_module.set_voice.assert_not_called()

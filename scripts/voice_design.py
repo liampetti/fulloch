@@ -29,9 +29,7 @@ DEFAULT_PHRASE = (
     "refraction and dispersion of light in water droplets resulting in a "
     "spectrum of light appearing in the sky."
 )
-DEFAULT_INSTRUCT = (
-    "A warm, friendly Australian woman in her 30s, speaking at a relaxed pace."
-)
+DEFAULT_INSTRUCT = "A warm, friendly Australian woman in her 30s, speaking at a relaxed pace."
 
 PHRASE_MIN = 20
 PHRASE_MAX = 400
@@ -95,6 +93,7 @@ def load_model():
     print()
     print(f"⏳ Loading {MODEL_NAME}...")
     from qwen_tts import Qwen3TTSModel
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
         print("⚠️  CUDA not detected — generation will be very slow.")
@@ -107,9 +106,7 @@ def load_model():
 
 
 def generate(model, phrase: str, instruct: str):
-    wavs, sr = model.generate_voice_design(
-        text=phrase, instruct=instruct, language="english"
-    )
+    wavs, sr = model.generate_voice_design(text=phrase, instruct=instruct, language="english")
     audio = wavs[0]
     if not isinstance(audio, np.ndarray):
         audio = np.asarray(audio)
@@ -203,9 +200,7 @@ def review_menu() -> str:
 
 
 def post_save_prompts(name: str) -> None:
-    if _ask_yn(
-        f"Update data/config.yml to use voice_clone=\"{name}\"?", default=True
-    ):
+    if _ask_yn(f'Update data/config.yml to use voice_clone="{name}"?', default=True):
         update_config(voice_clone=name)
     if _ask_yn("Set a new wakeword for this voice?", default=False):
         while True:

@@ -6,7 +6,6 @@ in `_warm_and_announce`; editing a phrase here is the only step needed to
 change what the user hears.
 """
 
-
 # Fallback text returned when the agent emits an empty `reply` or empty
 # `actions` — the caller speaks it live via the normal TTS path, so this
 # is a plain string list (no pre-rendering needed).
@@ -103,7 +102,7 @@ NO_AI_PHRASES = [
 TOOL_UNAVAILABLE_PHRASES = [
     "Sorry, I don't have a tool for that setup yet.",
     "That's not something I have the tool for currently.",
-    "I don't have a tool to do that at the moment."
+    "I don't have a tool to do that at the moment.",
 ]
 
 # Prefix phrases for calendar reminders spoken by the poll thread.
@@ -126,21 +125,18 @@ GREETING_TOPICS = [
     "deep-sea extremophiles and how they survive",
     "the aerodynamics of insect flight",
     "unusual or extinct edible plants",
-
     # History & Culture
     "forgotten ancient technologies",
     "the origins of common everyday idioms",
     "unusual historical currencies",
     "misunderstood events in medieval history",
     "the logistics of ancient trade routes",
-
     # Math, Tech & Engineering
     "counterintuitive mathematical paradoxes",
     "accidental scientific discoveries",
     "early internet and computing history",
     "the engineering of ancient aqueducts and plumbing",
     "bizarre and obsolete units of measurement",
-
     # Arts & Human Experience
     "obscure musical instruments from around the world",
     "the chemistry behind historical art supplies",

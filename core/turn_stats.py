@@ -54,7 +54,7 @@ class TurnStats:
     # LLM generation, aggregated across every agent-loop call this turn.
     llm_calls: int = 0
     tool_dispatches: int = 0
-    llm_ttft: Optional[float] = None          # first token, first call
+    llm_ttft: Optional[float] = None  # first token, first call
     llm_gen_seconds: float = 0.0
     llm_output_tokens: int = 0
     llm_prompt_tokens: int = 0
@@ -156,7 +156,7 @@ def read_vram_gb() -> Optional[tuple[float, float]]:
         if not torch.cuda.is_available():
             return None
         free, total = torch.cuda.mem_get_info()
-        gb = 1024 ** 3
+        gb = 1024**3
         return (total - free) / gb, total / gb
     except Exception as e:
         logger.debug(f"VRAM read failed: {e}")
@@ -167,8 +167,9 @@ def read_ram_gb() -> Optional[tuple[float, float]]:
     """Return (used_gb, total_gb) of system RAM via psutil, or None on error."""
     try:
         import psutil
+
         m = psutil.virtual_memory()
-        gb = 1024 ** 3
+        gb = 1024**3
         return m.used / gb, m.total / gb
     except Exception as e:
         logger.debug(f"RAM read failed: {e}")

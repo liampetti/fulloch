@@ -77,10 +77,16 @@ def test_plan_endpoint_honours_custom_present_path(tmp_path):
     gguf = tmp_path / "have" / "model.gguf"
     gguf.parent.mkdir(parents=True)
     gguf.write_text("x")
-    r = client.post("/setup/plan", json={"models": {
-        "asr": {"backend": "moonshine"}, "tts": {"backend": "kokoro-onnx"},
-        "llm": {"backend": "llama", "model": str(gguf)},
-    }})
+    r = client.post(
+        "/setup/plan",
+        json={
+            "models": {
+                "asr": {"backend": "moonshine"},
+                "tts": {"backend": "kokoro-onnx"},
+                "llm": {"backend": "llama", "model": str(gguf)},
+            }
+        },
+    )
     llm = next(a for a in r.json()["assets"] if a["key"] == "llm:llama")
     assert llm["present"] is True  # found at the custom path -> no download
 
@@ -89,7 +95,9 @@ def test_install_runs_download_and_signals_proceed(tmp_path):
     # Fake manager that succeeds instantly (incl. dir-snapshot assets so the
     # CPU stack's ONNX models never reach the network).
     fake = DownloadManager(
-        snapshot_fn=lambda *a: None, file_fn=lambda *a: None, url_fn=lambda *a: None,
+        snapshot_fn=lambda *a: None,
+        file_fn=lambda *a: None,
+        url_fn=lambda *a: None,
         dir_snapshot_fn=lambda *a: None,
     )
     client, ctx, path = _client(tmp_path, downloader=fake)
@@ -124,20 +132,27 @@ def test_reset_endpoint_arms_wizard_and_backs_up(tmp_path):
 
 def test_test_llm_endpoint(tmp_path, monkeypatch):
     import core.llm_openai as llmo
-    monkeypatch.setattr(llmo, "test_connection",
-                        lambda **kw: {"ok": True, "error": None})
+
+    monkeypatch.setattr(llmo, "test_connection", lambda **kw: {"ok": True, "error": None})
     client, _, _ = _client(tmp_path)
-    r = client.post("/setup/test-llm",
-                    json={"base_url": "http://x/v1", "model": "m", "api_key": ""})
+    r = client.post(
+        "/setup/test-llm", json={"base_url": "http://x/v1", "model": "m", "api_key": ""}
+    )
     assert r.status_code == 200 and r.json()["ok"] is True
 
 
 def test_models_endpoint_writes_openai_block(tmp_path):
     client, _, path = _client(tmp_path)
-    r = client.post("/setup/models", json={"models": {
-        "asr": {"backend": "qwen"}, "tts": {"backend": "qwen"},
-        "llm": {"backend": "openai", "model": "gpt-x", "base_url": "http://x/v1"},
-    }})
+    r = client.post(
+        "/setup/models",
+        json={
+            "models": {
+                "asr": {"backend": "qwen"},
+                "tts": {"backend": "qwen"},
+                "llm": {"backend": "openai", "model": "gpt-x", "base_url": "http://x/v1"},
+            }
+        },
+    )
     assert r.status_code == 200
     text = Path(path).read_text()
     assert "openai" in text and "gpt-x" in text and "http://x/v1" in text
@@ -152,6 +167,7 @@ def test_preflight_endpoint(tmp_path):
 
 def test_voices_endpoint_lists(tmp_path, monkeypatch):
     import core.voice_clone as vc
+
     voices = tmp_path / "voices"
     voices.mkdir()
     (voices / "atticus.wav").write_text("x")
@@ -163,6 +179,7 @@ def test_voices_endpoint_lists(tmp_path, monkeypatch):
 
 def test_voice_save_without_generate_409(tmp_path):
     import core.voice_clone as vc
+
     vc._last = None
     client, _, _ = _client(tmp_path)
     assert client.post("/setup/voice/save", json={"name": "x"}).status_code == 409
@@ -172,6 +189,7 @@ def test_restart_endpoint_reexecs(tmp_path, monkeypatch):
     import os
     import sys
     import time
+
     # CRITICAL: stub the actual restart so the test process isn't replaced/killed.
     calls = []
     monkeypatch.setattr(os, "execv", lambda *a: calls.append(a))
@@ -185,6 +203,7 @@ def test_restart_endpoint_reexecs(tmp_path, monkeypatch):
 
 def test_voice_sample_serves_wav(tmp_path, monkeypatch):
     import server.dashboard as dash
+
     voices = tmp_path / "voices"
     voices.mkdir()
     (voices / "af_heart.wav").write_bytes(b"RIFFfakewav")
@@ -200,7 +219,8 @@ def test_voice_sample_serves_wav(tmp_path, monkeypatch):
 
 def test_list_voices_default_txt_fallback(tmp_path):
     from core.voice_clone import list_voices
-    (tmp_path / "af_heart.wav").write_bytes(b"x")   # no per-voice .txt
+
+    (tmp_path / "af_heart.wav").write_bytes(b"x")  # no per-voice .txt
     (tmp_path / "atticus.wav").write_bytes(b"x")
     (tmp_path / "atticus.txt").write_text("hi")
     # No default.txt → only the .wav+.txt pair is usable.

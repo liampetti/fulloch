@@ -25,12 +25,14 @@ from typing import Iterable
 # Reversible (lights, colour, volume, toggle) and read-only (time, list timers,
 # summaries, skip/resume/pause) intents are absent — they're safe to commit on a
 # regex match. A free-form query (no regex match) is gated by `is_complete`.
-SPECULATION_UNSAFE_INTENTS: frozenset[str] = frozenset({
-    "ha_lock",
-    "ha_unlock",
-    "play_song",
-    "start_countdown",
-})
+SPECULATION_UNSAFE_INTENTS: frozenset[str] = frozenset(
+    {
+        "ha_lock",
+        "ha_unlock",
+        "play_song",
+        "start_countdown",
+    }
+)
 
 # Words that, when they END a partial utterance, signal the speaker is mid-clause
 # and about to say more — so the partial is NOT yet complete. Conjunctions,
@@ -38,23 +40,79 @@ SPECULATION_UNSAFE_INTENTS: frozenset[str] = frozenset({
 # "turn off" is almost always followed by its target; the *complete* reversed
 # form "turn the lights off" matches a `catchAll` regex and bypasses this gate).
 # Fillers ("um", "uh", "so") and a trailing "to"/"and" are the strongest signals.
-_CONTINUATION_WORDS: frozenset[str] = frozenset({
-    # conjunctions / connectives
-    "and", "or", "but", "then", "plus", "also", "with", "without",
-    # prepositions
-    "to", "of", "for", "in", "on", "at", "by", "from", "into", "onto",
-    "over", "under", "about", "as", "like", "than",
-    # articles / determiners / possessives
-    "the", "a", "an", "my", "your", "his", "her", "its", "our", "their",
-    "some", "any", "this", "that", "these", "those",
-    # particles that usually precede a target
-    "up", "down", "off",
-    # copulas / auxiliaries left dangling
-    "is", "are", "was", "were", "be", "been", "will", "would", "could",
-    "should", "can", "do", "does", "did",
-    # fillers
-    "um", "uh", "er", "hmm", "so", "well",
-})
+_CONTINUATION_WORDS: frozenset[str] = frozenset(
+    {
+        # conjunctions / connectives
+        "and",
+        "or",
+        "but",
+        "then",
+        "plus",
+        "also",
+        "with",
+        "without",
+        # prepositions
+        "to",
+        "of",
+        "for",
+        "in",
+        "on",
+        "at",
+        "by",
+        "from",
+        "into",
+        "onto",
+        "over",
+        "under",
+        "about",
+        "as",
+        "like",
+        "than",
+        # articles / determiners / possessives
+        "the",
+        "a",
+        "an",
+        "my",
+        "your",
+        "his",
+        "her",
+        "its",
+        "our",
+        "their",
+        "some",
+        "any",
+        "this",
+        "that",
+        "these",
+        "those",
+        # particles that usually precede a target
+        "up",
+        "down",
+        "off",
+        # copulas / auxiliaries left dangling
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "will",
+        "would",
+        "could",
+        "should",
+        "can",
+        "do",
+        "does",
+        "did",
+        # fillers
+        "um",
+        "uh",
+        "er",
+        "hmm",
+        "so",
+        "well",
+    }
+)
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
 

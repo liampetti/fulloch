@@ -14,11 +14,13 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: FullochCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    async_add_entities([
-        FullochStatusSensor(coordinator, entry),
-        FullochLastUtteranceSensor(coordinator, entry),
-        FullochLastResponseSensor(coordinator, entry),
-    ])
+    async_add_entities(
+        [
+            FullochStatusSensor(coordinator, entry),
+            FullochLastUtteranceSensor(coordinator, entry),
+            FullochLastResponseSensor(coordinator, entry),
+        ]
+    )
 
 
 class _FullochSensorBase(CoordinatorEntity, SensorEntity):

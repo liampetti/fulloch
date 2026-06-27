@@ -17,12 +17,14 @@ from tools import notes  # noqa: E402
 
 class _StubHit:
     """Minimal stand-in for a NotesIndex Chunk in semantic-search results."""
+
     def __init__(self, file):
         self.file = file
 
 
 class _StubIndex:
     """Fake embedding index: returns whatever (score, hit) pairs it's given."""
+
     def __init__(self, results=None):
         self._results = results or []
 
@@ -122,7 +124,8 @@ class TestWriteRead:
             "Tasmania is the top pick for future climate resilience.",
         )
         monkeypatch.setattr(
-            notes, "_get_index",
+            notes,
+            "_get_index",
             lambda: _StubIndex([(0.62, _StubHit("climate-living-advice-australia.md"))]),
         )
         result = notes.read_note("climate change in Australia")
@@ -132,7 +135,8 @@ class TestWriteRead:
         notes.write_note("some-note", "body text here")
         below = notes.SEMANTIC_MIN_SCORE - 0.05
         monkeypatch.setattr(
-            notes, "_get_index",
+            notes,
+            "_get_index",
             lambda: _StubIndex([(below, _StubHit("some-note.md"))]),
         )
         result = notes.read_note("totally unrelated topic")
@@ -160,7 +164,8 @@ class TestAppend:
             "Tasmania is the top pick for future climate resilience.",
         )
         monkeypatch.setattr(
-            notes, "_get_index",
+            notes,
+            "_get_index",
             lambda: _StubIndex([(0.62, _StubHit("climate-living-advice-australia.md"))]),
         )
         result = notes.append_to_note("climate change in Australia", "Darwin is tropical.")
@@ -175,7 +180,8 @@ class TestAppend:
         daily = notes_dir / "daily" / "2026-06-05.md"
         daily.write_text("# Friday\n\n- 09:00 had coffee\n")
         monkeypatch.setattr(
-            notes, "_get_index",
+            notes,
+            "_get_index",
             lambda: _StubIndex([(0.62, _StubHit("daily/2026-06-05.md"))]),
         )
         result = notes.append_to_note("2026 06 16", "F1 standings update.")
@@ -200,7 +206,8 @@ class TestAppend:
         notes.write_note("some-note", "body text here")
         weak = notes.WRITE_SEMANTIC_MIN_SCORE - 0.05
         monkeypatch.setattr(
-            notes, "_get_index",
+            notes,
+            "_get_index",
             lambda: _StubIndex([(weak, _StubHit("some-note.md"))]),
         )
         result = notes.append_to_note("totally unrelated", "should not land")
@@ -331,7 +338,8 @@ class TestRememberFact:
         assert "Vaillant ecoTEC" in facts
         # Date stamp in [YYYY-MM-DD] form
         import re
-        assert re.search(r'\[\d{4}-\d{2}-\d{2}\]', facts)
+
+        assert re.search(r"\[\d{4}-\d{2}-\d{2}\]", facts)
 
     def test_appends_multiple_facts(self, notes_dir):
         notes.remember_fact("fact one")
@@ -373,9 +381,7 @@ class TestRecallFacts:
         assert "# Long-term facts" not in block
 
     def test_skips_blank_lines(self, notes_dir):
-        (notes_dir / "facts.md").write_text(
-            "# Long-term facts\n\n\n- [2026-05-20] fact one\n\n\n"
-        )
+        (notes_dir / "facts.md").write_text("# Long-term facts\n\n\n- [2026-05-20] fact one\n\n\n")
         block = notes.recall_facts()
         assert "fact one" in block
         # No empty lines between the block header and the bullet
@@ -397,7 +403,8 @@ class TestFactsCrud:
         assert facts[1]["text"] == "fact two"
         # Date stamps preserved
         import re
-        assert re.fullmatch(r'\d{4}-\d{2}-\d{2}', facts[0]["date"])
+
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", facts[0]["date"])
 
     def test_list_facts_skips_non_bullet_lines(self, notes_dir):
         (notes_dir / "facts.md").write_text(

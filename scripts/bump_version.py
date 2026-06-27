@@ -62,9 +62,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Bump the Fulloch version.")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("version", nargs="?", help="new version, e.g. 2.1.6")
-    group.add_argument(
-        "--show", action="store_true", help="print the current version and exit"
-    )
+    group.add_argument("--show", action="store_true", help="print the current version and exit")
     args = parser.parse_args()
 
     pyproject_text = PYPROJECT.read_text(encoding="utf-8")
@@ -79,12 +77,8 @@ def main() -> None:
     if not _SEMVER.match(new_version):
         sys.exit(f"error: {new_version!r} is not a MAJOR.MINOR.PATCH version")
 
-    PYPROJECT.write_text(
-        set_pyproject_version(pyproject_text, new_version), encoding="utf-8"
-    )
-    MANIFEST.write_text(
-        set_manifest_version(manifest_text, new_version), encoding="utf-8"
-    )
+    PYPROJECT.write_text(set_pyproject_version(pyproject_text, new_version), encoding="utf-8")
+    MANIFEST.write_text(set_manifest_version(manifest_text, new_version), encoding="utf-8")
 
     print(f"Set version to {new_version} in pyproject.toml and manifest.json.")
     print("Next: commit both files and tag the release (e.g. git tag v" + new_version + ").")

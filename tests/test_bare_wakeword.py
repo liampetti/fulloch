@@ -21,6 +21,7 @@ def assistant():
     with patch("core.assistant.AudioCapture") as mock_ac:
         mock_ac.return_value = MagicMock()
         from core.assistant import Assistant
+
         a = Assistant(
             wakeword="atticus",
             barge_in="wakeword",

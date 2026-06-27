@@ -49,15 +49,16 @@ DEFAULT_TOP_K = 3
 # index with single-bullet "x" entries.
 MIN_CHUNK_CHARS = 12
 
-_PARA_SPLIT_RE = re.compile(r'\n\s*\n+')
+_PARA_SPLIT_RE = re.compile(r"\n\s*\n+")
 
 
 @dataclass
 class Chunk:
     """A single indexable unit: a paragraph from a note, plus its location."""
-    file: str        # path relative to notes_root, posix-style
-    line: int        # 1-indexed line where the paragraph starts (for citation)
-    text: str        # spoken-mode text fed to both the embedder and the SLM
+
+    file: str  # path relative to notes_root, posix-style
+    line: int  # 1-indexed line where the paragraph starts (for citation)
+    text: str  # spoken-mode text fed to both the embedder and the SLM
     embedding: np.ndarray  # (D,) float32, L2-normalized
 
 
@@ -74,10 +75,10 @@ def _split_chunks(content: str) -> List[Tuple[int, str]]:
     # content so we can cite a file location back to the user.
     pos = 0
     for match in _PARA_SPLIT_RE.finditer(content):
-        chunk_text = content[pos:match.start()]
+        chunk_text = content[pos : match.start()]
         if chunk_text.strip():
             chunks.append((cursor_line, chunk_text.strip()))
-        cursor_line += content[pos:match.end()].count('\n')
+        cursor_line += content[pos : match.end()].count("\n")
         pos = match.end()
     tail = content[pos:]
     if tail.strip():
@@ -103,8 +104,8 @@ class NotesIndex:
                 markers don't pollute embeddings or spoken hits.
         """
         self._notes_root = notes_root
-        self._npy_path = index_path.with_suffix('.npy')
-        self._meta_path = index_path.with_suffix('.json')
+        self._npy_path = index_path.with_suffix(".npy")
+        self._meta_path = index_path.with_suffix(".json")
         self._spoken_filter = spoken_filter
 
         self._lock = threading.Lock()
@@ -134,8 +135,7 @@ class NotesIndex:
             try:
                 self._restore()
                 logger.info(
-                    f"Restored notes index: {len(self._chunks)} chunks, "
-                    f"{len(self._mtimes)} files"
+                    f"Restored notes index: {len(self._chunks)} chunks, {len(self._mtimes)} files"
                 )
             except Exception as e:
                 logger.error(f"Failed to restore index ({e}); starting fresh")
@@ -146,30 +146,27 @@ class NotesIndex:
 
     def _restore(self) -> None:
         embeddings = np.load(self._npy_path)
-        meta = json.loads(self._meta_path.read_text(encoding='utf-8'))
-        version = meta.get('version', 1)
+        meta = json.loads(self._meta_path.read_text(encoding="utf-8"))
+        version = meta.get("version", 1)
         if version != INDEX_VERSION:
             # Embedding recipe changed under us — force a full re-embed by
             # refusing the stale index (the caller resets chunks/mtimes).
-            raise ValueError(
-                f"Index version {version} != {INDEX_VERSION}; rebuilding"
-            )
-        chunk_meta = meta.get('chunks', [])
+            raise ValueError(f"Index version {version} != {INDEX_VERSION}; rebuilding")
+        chunk_meta = meta.get("chunks", [])
         if len(chunk_meta) != embeddings.shape[0]:
             raise ValueError(
-                f"Index inconsistent: {embeddings.shape[0]} embeddings vs "
-                f"{len(chunk_meta)} chunks"
+                f"Index inconsistent: {embeddings.shape[0]} embeddings vs {len(chunk_meta)} chunks"
             )
         self._chunks = [
             Chunk(
-                file=m['file'],
-                line=m['line'],
-                text=m['text'],
+                file=m["file"],
+                line=m["line"],
+                text=m["text"],
                 embedding=embeddings[i],
             )
             for i, m in enumerate(chunk_meta)
         ]
-        self._mtimes = meta.get('mtimes', {})
+        self._mtimes = meta.get("mtimes", {})
 
     def _save(self) -> None:
         if not self._chunks:
@@ -179,19 +176,18 @@ class NotesIndex:
                     p.unlink()
             return
         embeddings = np.stack([c.embedding for c in self._chunks]).astype(np.float32)
-        chunk_meta = [
-            {'file': c.file, 'line': c.line, 'text': c.text}
-            for c in self._chunks
-        ]
+        chunk_meta = [{"file": c.file, "line": c.line, "text": c.text} for c in self._chunks]
         self._npy_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(self._npy_path, embeddings)
         self._meta_path.write_text(
-            json.dumps({
-                'version': INDEX_VERSION,
-                'mtimes': self._mtimes,
-                'chunks': chunk_meta,
-            }),
-            encoding='utf-8',
+            json.dumps(
+                {
+                    "version": INDEX_VERSION,
+                    "mtimes": self._mtimes,
+                    "chunks": chunk_meta,
+                }
+            ),
+            encoding="utf-8",
         )
 
     # ------------------------------------------------------------------
@@ -212,7 +208,7 @@ class NotesIndex:
 
     def _build_chunks(self, path: Path) -> List[Chunk]:
         try:
-            content = path.read_text(encoding='utf-8', errors='ignore')
+            content = path.read_text(encoding="utf-8", errors="ignore")
         except OSError as e:
             logger.error(f"Failed to read {path} for indexing: {e}")
             return []
@@ -231,7 +227,7 @@ class NotesIndex:
         # text). A body paragraph that never repeats the note's subject still
         # embeds near a topical query ("Sydney to Perth route") because the
         # title rides along — a big lift for "what does my note about X say".
-        title = path.stem.replace('-', ' ').strip()
+        title = path.stem.replace("-", " ").strip()
         embed_inputs = [f"{title}: {text}" if title else text for _, text in cleaned]
         embeddings = self._embed(embed_inputs)
         rel = self._rel(path)
@@ -267,7 +263,7 @@ class NotesIndex:
             self._ensure_loaded()
             seen = set()
             dirty = False
-            for path in sorted(self._notes_root.rglob('*.md')):
+            for path in sorted(self._notes_root.rglob("*.md")):
                 rel = self._rel(path)
                 seen.add(rel)
                 mtime = path.stat().st_mtime

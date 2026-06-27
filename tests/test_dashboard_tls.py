@@ -40,8 +40,11 @@ def test_tls_enabled_when_both_files_exist(monkeypatch, tmp_path):
     captured = _capture_config(monkeypatch)
 
     dashboard.start_dashboard(
-        _stub_assistant(), host="0.0.0.0", port=8765,
-        ssl_certfile=str(cert), ssl_keyfile=str(key),
+        _stub_assistant(),
+        host="0.0.0.0",
+        port=8765,
+        ssl_certfile=str(cert),
+        ssl_keyfile=str(key),
     )
 
     assert captured.get("ssl_certfile") == str(cert)
@@ -54,8 +57,11 @@ def test_tls_skipped_when_only_one_key_set(monkeypatch, tmp_path):
     captured = _capture_config(monkeypatch)
 
     dashboard.start_dashboard(
-        _stub_assistant(), host="0.0.0.0", port=8765,
-        ssl_certfile=str(cert), ssl_keyfile=None,
+        _stub_assistant(),
+        host="0.0.0.0",
+        port=8765,
+        ssl_certfile=str(cert),
+        ssl_keyfile=None,
     )
 
     assert "ssl_certfile" not in captured
@@ -66,7 +72,9 @@ def test_tls_skipped_when_files_missing(monkeypatch, tmp_path):
     captured = _capture_config(monkeypatch)
 
     dashboard.start_dashboard(
-        _stub_assistant(), host="0.0.0.0", port=8765,
+        _stub_assistant(),
+        host="0.0.0.0",
+        port=8765,
         ssl_certfile=str(tmp_path / "nope.pem"),
         ssl_keyfile=str(tmp_path / "nokey.pem"),
     )

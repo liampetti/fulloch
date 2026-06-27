@@ -11,7 +11,7 @@ from core.bootstrap import _SUBDIRS, ensure_scaffolding  # noqa: E402
 def _make_seed(tmp_path):
     seed = tmp_path / "seed"
     (seed / "grammars").mkdir(parents=True)
-    (seed / "grammars" / "agent.gbnf").write_text("root ::= \"x\"")
+    (seed / "grammars" / "agent.gbnf").write_text('root ::= "x"')
     (seed / "config.example.yml").write_text("general:\n  wakeword: hey atticus\n")
     return seed
 

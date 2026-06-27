@@ -39,9 +39,9 @@ AUDIO_START_ID = 151669
 AUDIO_END_ID = 151670
 AUDIO_PAD_ID = 151676
 IM_START_ID = 151644
-IM_END_ID = 151645      # EOS
-ENDOFTEXT_ID = 151643   # EOS (alt)
-NEWLINE_ID = 198        # '\n'
+IM_END_ID = 151645  # EOS
+ENDOFTEXT_ID = 151643  # EOS (alt)
+NEWLINE_ID = 198  # '\n'
 
 VOCAB_SIZE = 151936
 HIDDEN_SIZE = 1024
@@ -49,19 +49,31 @@ HIDDEN_SIZE = 1024
 
 # --- mel spectrogram (Whisper-compatible, numpy/librosa) --------------------
 
+
 def _get_mel_filters() -> np.ndarray:
     import librosa
+
     return librosa.filters.mel(
-        sr=SAMPLE_RATE, n_fft=N_FFT, n_mels=N_MELS,
-        fmin=0, fmax=SAMPLE_RATE // 2, norm="slaney", htk=False,
+        sr=SAMPLE_RATE,
+        n_fft=N_FFT,
+        n_mels=N_MELS,
+        fmin=0,
+        fmax=SAMPLE_RATE // 2,
+        norm="slaney",
+        htk=False,
     ).astype(np.float32)
 
 
 def _compute_mel(wav: np.ndarray, mel_filters: np.ndarray) -> np.ndarray:
     import librosa
+
     stft = librosa.stft(
-        wav, n_fft=N_FFT, hop_length=HOP_LENGTH,
-        window="hann", center=True, pad_mode="reflect",
+        wav,
+        n_fft=N_FFT,
+        hop_length=HOP_LENGTH,
+        window="hann",
+        center=True,
+        pad_mode="reflect",
     )
     magnitudes = np.abs(stft) ** 2
     mel_spec = mel_filters @ magnitudes
@@ -84,16 +96,21 @@ class _Tokenizer:
     def __init__(self, tokenizer_json: Optional[str]):
         if tokenizer_json and Path(tokenizer_json).is_file():
             from tokenizers import Tokenizer
+
             self._tok = Tokenizer.from_file(tokenizer_json)
             self._hf = False
         else:
             from transformers import AutoTokenizer
+
             self._tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-ASR-0.6B")
             self._hf = True
 
     def encode(self, text: str) -> list:
-        return (self._tok.encode(text, add_special_tokens=False)
-                if self._hf else self._tok.encode(text).ids)
+        return (
+            self._tok.encode(text, add_special_tokens=False)
+            if self._hf
+            else self._tok.encode(text).ids
+        )
 
     def decode(self, ids: list) -> str:
         return self._tok.decode(ids, skip_special_tokens=True)
@@ -113,13 +130,21 @@ class _OnnxAsr:
         opts.log_severity_level = 3
         cpu = ["CPUExecutionProvider"]
 
-        dec = "int8" if (quantize == "int8" and (onnx_dir / "decoder_init.int8.onnx").is_file()) else "fp32"
+        dec = (
+            "int8"
+            if (quantize == "int8" and (onnx_dir / "decoder_init.int8.onnx").is_file())
+            else "fp32"
+        )
         di = "decoder_init.int8.onnx" if dec == "int8" else "decoder_init.onnx"
         ds = "decoder_step.int8.onnx" if dec == "int8" else "decoder_step.onnx"
         logger.info("Loading Qwen3-ASR ONNX (decoder: %s) from %s", dec, onnx_dir)
 
-        self.encoder_conv = ort.InferenceSession(str(onnx_dir / "encoder_conv.onnx"), opts, providers=cpu)
-        self.encoder_transformer = ort.InferenceSession(str(onnx_dir / "encoder_transformer.onnx"), opts, providers=cpu)
+        self.encoder_conv = ort.InferenceSession(
+            str(onnx_dir / "encoder_conv.onnx"), opts, providers=cpu
+        )
+        self.encoder_transformer = ort.InferenceSession(
+            str(onnx_dir / "encoder_transformer.onnx"), opts, providers=cpu
+        )
         self.decoder_init = ort.InferenceSession(str(onnx_dir / di), opts, providers=cpu)
         self.decoder_step = ort.InferenceSession(str(onnx_dir / ds), opts, providers=cpu)
 
@@ -141,7 +166,7 @@ class _OnnxAsr:
         padded = np.zeros((chunk_num, 1, N_MELS, max_cl), dtype=np.float32)
         start = 0
         for i, cl in enumerate(chunk_lengths):
-            padded[i, 0, :, :cl] = mel_valid[:, start:start + cl]
+            padded[i, 0, :, :cl] = mel_valid[:, start : start + cl]
             start += cl
         lens_after_cnn = _feat_out_lengths(np.array(chunk_lengths))
         conv_out = self.encoder_conv.run(None, {"padded_mel_chunks": padded})[0]
@@ -170,8 +195,13 @@ class _OnnxAsr:
             ids += enc(f"language {language}<asr_text>")
         return ids
 
-    def transcribe(self, wav: np.ndarray, context: str = "",
-                   language: Optional[str] = None, max_new_tokens: int = 256) -> str:
+    def transcribe(
+        self,
+        wav: np.ndarray,
+        context: str = "",
+        language: Optional[str] = None,
+        max_new_tokens: int = 256,
+    ) -> str:
         wav = np.asarray(wav, dtype=np.float32).reshape(-1)
         mel = _compute_mel(wav, self.mel_filters)
         audio_features = self._encode_audio(mel, mel.shape[1])
@@ -186,9 +216,13 @@ class _OnnxAsr:
         seq_len = input_embeds.shape[1]
         position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
 
-        logits, keys, values = self.decoder_init.run(None, {
-            "input_embeds": input_embeds, "position_ids": position_ids,
-        })
+        logits, keys, values = self.decoder_init.run(
+            None,
+            {
+                "input_embeds": input_embeds,
+                "position_ids": position_ids,
+            },
+        )
         next_token = int(np.argmax(logits[0, -1, :]))
         generated = [next_token]
         cur = seq_len
@@ -196,11 +230,15 @@ class _OnnxAsr:
             if next_token in (IM_END_ID, ENDOFTEXT_ID):
                 break
             tok_embed = self.embed_tokens[next_token][np.newaxis, np.newaxis, :]
-            logits, keys, values = self.decoder_step.run(None, {
-                "input_embeds": tok_embed,
-                "position_ids": np.array([[cur]], dtype=np.int64),
-                "past_keys": keys, "past_values": values,
-            })
+            logits, keys, values = self.decoder_step.run(
+                None,
+                {
+                    "input_embeds": tok_embed,
+                    "position_ids": np.array([[cur]], dtype=np.int64),
+                    "past_keys": keys,
+                    "past_values": values,
+                },
+            )
             next_token = int(np.argmax(logits[0, -1, :]))
             generated.append(next_token)
             cur += 1
@@ -238,11 +276,12 @@ class QwenOnnxASRPipelineWrapper:
             dummy = np.zeros(SAMPLE_RATE // 2, dtype=np.float32)  # 0.5s of silence
             t0 = time.monotonic()
             self.pipeline.transcribe(
-                dummy, context=self.context, language=self.language,
+                dummy,
+                context=self.context,
+                language=self.language,
                 max_new_tokens=4,
             )
-            logger.info("ASR warmup primed ORT sessions in %.2fs",
-                        time.monotonic() - t0)
+            logger.info("ASR warmup primed ORT sessions in %.2fs", time.monotonic() - t0)
         except Exception as e:  # noqa: BLE001
             logger.warning("ASR warmup skipped: %s", e)
 
@@ -253,7 +292,9 @@ class QwenOnnxASRPipelineWrapper:
             arr = buf.cpu().numpy() if hasattr(buf, "cpu") else np.asarray(buf)
         t0 = time.monotonic()
         text = self.pipeline.transcribe(
-            arr, context=self.context, language=self.language,
+            arr,
+            context=self.context,
+            language=self.language,
             max_new_tokens=max_new_tokens,
         )
         self.last_transcribe_seconds = time.monotonic() - t0
@@ -265,8 +306,13 @@ class QwenOnnxASRPipelineWrapper:
                 continue
             yield {"text": self._transcribe(chunk, max_new_tokens)}
 
-    def __call__(self, audio_input: Union[np.ndarray, Generator],
-                 batch_size: int = 1, generate_kwargs: Optional[dict] = None, **kwargs):
+    def __call__(
+        self,
+        audio_input: Union[np.ndarray, Generator],
+        batch_size: int = 1,
+        generate_kwargs: Optional[dict] = None,
+        **kwargs,
+    ):
         max_new_tokens = (generate_kwargs or {}).get("max_new_tokens", 256)
         if isinstance(audio_input, Generator):
             return self._stream(audio_input, max_new_tokens)

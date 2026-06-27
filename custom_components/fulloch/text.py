@@ -13,10 +13,12 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     data = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([
-        FullochSpeakText(data["session"], data["url"], entry),
-        FullochChatText(data["session"], data["url"], entry),
-    ])
+    async_add_entities(
+        [
+            FullochSpeakText(data["session"], data["url"], entry),
+            FullochChatText(data["session"], data["url"], entry),
+        ]
+    )
 
 
 class _FullochTextBase(TextEntity):

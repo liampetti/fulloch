@@ -63,6 +63,7 @@ def _schedule_restart(delay: float = 0.5) -> None:
     brings it back). Scheduled on a daemon thread so the caller can return its
     HTTP response first.
     """
+
     def _go():
         time.sleep(delay)
         try:
@@ -71,6 +72,8 @@ def _schedule_restart(delay: float = 0.5) -> None:
             os._exit(0)
 
     threading.Thread(target=_go, daemon=True, name="dashboard-restart").start()
+
+
 SUBSCRIBER_IDLE_KEEPALIVE_S = 15
 
 # Optional bearer-token gate. When FULLOCH_DASHBOARD_TOKEN is set, every route
@@ -160,6 +163,7 @@ def create_app(
         context = AppContext(lifecycle=lifecycle, assistant=assistant)
     if context.downloader is None:
         from .downloader import DownloadManager
+
         context.downloader = DownloadManager()
 
     lifecycle = context.lifecycle
@@ -257,10 +261,8 @@ def create_app(
         # the character as the user selects an OpenAI endpoint, before any restart.
         q = request.query_params.get("remote")
         remote = (q == "1") if q is not None else _is_remote_llm()
-        path = (_PARLOCH_PATH if remote and _PARLOCH_PATH.is_file()
-                else _LOGO_PATH)
-        return FileResponse(path, media_type="image/png",
-                            headers={"Cache-Control": "no-cache"})
+        path = _PARLOCH_PATH if remote and _PARLOCH_PATH.is_file() else _LOGO_PATH
+        return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-cache"})
 
     @app.get("/voice/sample")
     def voice_sample(name: str) -> FileResponse:
@@ -314,15 +316,17 @@ def create_app(
         if context.downloader is not None and context.downloader.active:
             payload["download"] = context.downloader.snapshot()
         if context.assistant is None or not lifecycle.is_ready():
-            payload.update({
-                "state": "idle",
-                "mic_enabled": False,
-                "last_utterance": "",
-                "last_response": "",
-                # Tail of first-party logs so the loading screen can render a
-                # live terminal of what's happening instead of a bare spinner.
-                "log": LOG_BUFFER.tail(),
-            })
+            payload.update(
+                {
+                    "state": "idle",
+                    "mic_enabled": False,
+                    "last_utterance": "",
+                    "last_response": "",
+                    # Tail of first-party logs so the loading screen can render a
+                    # live terminal of what's happening instead of a bare spinner.
+                    "log": LOG_BUFFER.tail(),
+                }
+            )
             return JSONResponse(payload)
 
         last_utterance = ""
@@ -336,19 +340,21 @@ def create_app(
                     last_response = event.get("content", "")
                 if last_utterance and last_response:
                     break
-        payload.update({
-            "state": context.assistant.get_state(),
-            "mic_enabled": context.assistant.audio_capture.transcribing,
-            "last_utterance": last_utterance,
-            "last_response": last_response,
-            # Remote-LLM mode: the LLM is off-device; the UI swaps the character
-            # + shows an "not fully local" note in the tagline.
-            "remote_llm": _is_remote_llm(),
-            # True when that off-device LLM is configured but unreachable — the UI
-            # shows a red banner that we're degraded to regex/fast-path only.
-            "llm_unreachable": _is_remote_llm() and bool(
-                getattr(context.assistant, "remote_llm_unreachable", False)),
-        })
+        payload.update(
+            {
+                "state": context.assistant.get_state(),
+                "mic_enabled": context.assistant.audio_capture.transcribing,
+                "last_utterance": last_utterance,
+                "last_response": last_response,
+                # Remote-LLM mode: the LLM is off-device; the UI swaps the character
+                # + shows an "not fully local" note in the tagline.
+                "remote_llm": _is_remote_llm(),
+                # True when that off-device LLM is configured but unreachable — the UI
+                # shows a red banner that we're degraded to regex/fast-path only.
+                "llm_unreachable": _is_remote_llm()
+                and bool(getattr(context.assistant, "remote_llm_unreachable", False)),
+            }
+        )
         return JSONResponse(payload)
 
     @app.post("/speak")
@@ -386,12 +392,14 @@ def create_app(
     def facts_list() -> JSONResponse:
         _require_ready()
         from tools.notes import list_facts
+
         return JSONResponse({"facts": list_facts()})
 
     @app.post("/facts")
     def facts_add(req: FactRequest) -> JSONResponse:
         _require_ready()
         from tools.notes import list_facts, remember_fact
+
         text = (req.text or "").strip()
         if not text:
             raise HTTPException(status_code=400, detail="empty fact")
@@ -402,6 +410,7 @@ def create_app(
     def facts_update(idx: int, req: FactRequest) -> JSONResponse:
         _require_ready()
         from tools.notes import list_facts, update_fact
+
         text = (req.text or "").strip()
         if not text:
             raise HTTPException(status_code=400, detail="empty fact")
@@ -413,6 +422,7 @@ def create_app(
     def facts_delete(idx: int) -> JSONResponse:
         _require_ready()
         from tools.notes import delete_fact, list_facts
+
         if not delete_fact(idx):
             raise HTTPException(status_code=404, detail="fact not found")
         return JSONResponse({"facts": list_facts()})
@@ -421,12 +431,14 @@ def create_app(
     def notes_list() -> JSONResponse:
         _require_ready()
         from tools.notes import list_note_files
+
         return JSONResponse({"notes": list_note_files()})
 
     @app.get("/notes/{name:path}")
     def notes_read(name: str) -> JSONResponse:
         _require_ready()
         from tools.notes import read_note_file
+
         content = read_note_file(name)
         if content is None:
             raise HTTPException(status_code=404, detail="note not found")
@@ -436,6 +448,7 @@ def create_app(
     def notes_save(name: str, req: NoteRequest) -> JSONResponse:
         _require_ready()
         from tools.notes import read_note_file, save_note_file
+
         if not save_note_file(name, req.content):
             raise HTTPException(status_code=404, detail="note not found")
         return JSONResponse({"name": name, "content": read_note_file(name)})
@@ -444,18 +457,22 @@ def create_app(
     def entities_list() -> JSONResponse:
         _require_ready()
         from tools._config import config
+
         if "home_assistant" not in config:
             return JSONResponse({"available": False, "entities": []})
         from tools import home_assistant as ha
+
         return JSONResponse({"available": True, "entities": ha.list_entities()})
 
     @app.post("/entities")
     def entities_set(req: EntityDenyRequest) -> JSONResponse:
         _require_ready()
         from tools._config import config
+
         if "home_assistant" not in config:
             raise HTTPException(status_code=404, detail="Home Assistant not configured")
         from tools import home_assistant as ha
+
         entity_id = (req.entity_id or "").strip()
         if not entity_id:
             raise HTTPException(status_code=400, detail="empty entity_id")
@@ -469,16 +486,19 @@ def create_app(
     @app.get("/setup/schema")
     def setup_schema() -> JSONResponse:
         from .config_store import settings_view
+
         return JSONResponse(settings_view(context.config_path))
 
     @app.get("/setup/preflight")
     def setup_preflight() -> JSONResponse:
         from .preflight import preflight
+
         return JSONResponse(preflight())
 
     @app.put("/config")
     def config_update(req: ConfigUpdateRequest) -> JSONResponse:
         from .config_store import ConfigValidationError, update_config
+
         try:
             applied = update_config(req.updates, context.config_path)
         except ConfigValidationError as e:
@@ -498,14 +518,17 @@ def create_app(
         restart = any(a["path"] not in hot for a in applied)
         # Drop the coerced value from the response (may not be JSON-trivial; the
         # UI only needs path + whether a restart is still required).
-        view = [{"path": a["path"], "apply": a["apply"],
-                 "hot_applied": a["path"] in hot} for a in applied]
+        view = [
+            {"path": a["path"], "apply": a["apply"], "hot_applied": a["path"] in hot}
+            for a in applied
+        ]
         return JSONResponse({"applied": view, "restart_required": restart})
 
     @app.post("/setup/models")
     def setup_models(req: ModelsRequest) -> JSONResponse:
         from .config_schema import TIER_PRESETS
         from .config_store import write_models
+
         models = req.models
         if req.tier:
             tier = next((t for t in TIER_PRESETS if t.id == req.tier), None)
@@ -528,6 +551,7 @@ def create_app(
 
         from .config_schema import TIER_PRESETS
         from .downloader import plan_assets
+
         models = req.models
         if req.tier:
             tier = next((t for t in TIER_PRESETS if t.id == req.tier), None)
@@ -544,6 +568,7 @@ def create_app(
 
         from .config_store import read_config
         from .downloader import plan_assets
+
         cfg = read_config(context.config_path)
         resolved = resolve_models(cfg.get("models"))
         assets = plan_assets(resolved)
@@ -593,11 +618,13 @@ def create_app(
             shutil.copy2(cfg, backup)
         _reset_marker_path().write_text("setup reset requested\n")
         logger.info("Setup reset armed; wizard will run on next restart")
-        return JSONResponse({
-            "ok": True,
-            "restart_required": True,
-            "backup": backup.name if backup else None,
-        })
+        return JSONResponse(
+            {
+                "ok": True,
+                "restart_required": True,
+                "backup": backup.name if backup else None,
+            }
+        )
 
     @app.get("/setup/progress")
     def setup_progress() -> JSONResponse:
@@ -614,23 +641,33 @@ def create_app(
                 if snap["state"] in ("done", "error", "idle"):
                     break
                 await asyncio.sleep(1.0)
+
         return StreamingResponse(gen(), media_type="text/event-stream")
 
     @app.post("/setup/test-llm")
     def setup_test_llm(req: LlmTestRequest) -> JSONResponse:
         from core.llm_openai import test_connection
-        return JSONResponse(test_connection(
-            base_url=req.base_url, model=req.model, api_key=req.api_key or "",
-        ))
+
+        return JSONResponse(
+            test_connection(
+                base_url=req.base_url,
+                model=req.model,
+                api_key=req.api_key or "",
+            )
+        )
 
     @app.post("/setup/list-llm-models")
     def setup_list_llm_models(req: LlmModelsRequest) -> JSONResponse:
         # Offer a model picker after a successful test connection (GET /v1/models)
         # instead of free-text entry. Available in setup mode (no assistant yet).
         from core.llm_openai import list_models
-        return JSONResponse(list_models(
-            base_url=req.base_url, api_key=req.api_key or "",
-        ))
+
+        return JSONResponse(
+            list_models(
+                base_url=req.base_url,
+                api_key=req.api_key or "",
+            )
+        )
 
     @app.post("/llm/model")
     def switch_llm_model(req: LlmSwitchRequest) -> JSONResponse:
@@ -646,6 +683,7 @@ def create_app(
         result = context.assistant.set_llm_model(req.model)
         if result.get("ok"):
             from .config_store import set_llm_model_name
+
             try:
                 set_llm_model_name(req.model, context.config_path)
             except Exception as e:  # noqa: BLE001
@@ -661,6 +699,7 @@ def create_app(
         # Generate, persist to .env, and apply live so the console is gated from
         # now on. Returned once for the user to copy.
         from .env_store import set_env_var
+
         tok = secrets.token_urlsafe(32)
         try:
             # Persist inside the single ./data volume so it survives image
@@ -675,11 +714,13 @@ def create_app(
     @app.get("/setup/voices")
     def setup_voices() -> JSONResponse:
         from core.voice_clone import list_voices
+
         return JSONResponse({"voices": list_voices()})
 
     @app.post("/setup/voice")
     def setup_voice_generate(req: VoiceRequest) -> Response:
         from core.voice_clone import audio_to_wav_bytes, generate
+
         try:
             audio, sr = generate(req.instruct, req.phrase)
         except ValueError as e:
@@ -689,6 +730,7 @@ def create_app(
     @app.post("/setup/voice/save")
     def setup_voice_save(req: VoiceSaveRequest) -> JSONResponse:
         from core.voice_clone import list_voices, save_last
+
         name = (req.name or "").strip()
         if not name:
             raise HTTPException(status_code=422, detail="empty voice name")
@@ -710,9 +752,7 @@ def create_app(
                     if await request.is_disconnected():
                         break
                     try:
-                        event = await asyncio.to_thread(
-                            q.get, True, SUBSCRIBER_IDLE_KEEPALIVE_S
-                        )
+                        event = await asyncio.to_thread(q.get, True, SUBSCRIBER_IDLE_KEEPALIVE_S)
                     except queue.Empty:
                         yield ": keepalive\n\n"
                         continue
@@ -745,8 +785,10 @@ def start_dashboard(
     Prefer a shared ``context`` (so the assistant can attach after setup); a
     bare ``assistant`` (may be None) + ``lifecycle`` still works.
     """
-    if host not in ("127.0.0.1", "localhost", "::1") and not os.environ.get(
-        "FULLOCH_DASHBOARD_TOKEN", "").strip():
+    if (
+        host not in ("127.0.0.1", "localhost", "::1")
+        and not os.environ.get("FULLOCH_DASHBOARD_TOKEN", "").strip()
+    ):
         logger.warning(
             "Dashboard bound to %s with NO auth token — notes, mic, speech, and "
             "Home Assistant control are exposed to your whole network. Set "
@@ -763,15 +805,20 @@ def start_dashboard(
             )
         elif not Path(ssl_certfile).is_file() or not Path(ssl_keyfile).is_file():
             logger.warning(
-                "Dashboard TLS cert/key not found (cert=%s, key=%s); serving "
-                "over HTTP.", ssl_certfile, ssl_keyfile,
+                "Dashboard TLS cert/key not found (cert=%s, key=%s); serving over HTTP.",
+                ssl_certfile,
+                ssl_keyfile,
             )
         else:
             ssl_kwargs = {"ssl_certfile": ssl_certfile, "ssl_keyfile": ssl_keyfile}
 
     app = create_app(assistant, lifecycle=lifecycle, context=context)
     config = uvicorn.Config(
-        app, host=host, port=port, log_level="warning", access_log=False,
+        app,
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
         **ssl_kwargs,
     )
     server = uvicorn.Server(config)

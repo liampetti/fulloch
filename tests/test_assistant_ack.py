@@ -24,8 +24,13 @@ def _import_assistant_module():
         "core.audio": ["AudioCapture"],
         "core.asr": ["load_asr_pipeline"],
         "core.tts": [
-            "set_voice", "warmup_model", "synthesize", "play_chunks",
-            "speak_stream", "set_output_device", "set_tts_active_event",
+            "set_voice",
+            "warmup_model",
+            "synthesize",
+            "play_chunks",
+            "speak_stream",
+            "set_output_device",
+            "set_tts_active_event",
             "model",
         ],
         "core.slm": ["load_slm", "generate_slm"],
@@ -39,17 +44,17 @@ def _import_assistant_module():
         if name == "core.slm":
             # Real exception class — assistant.py does `except
             # ContextExhaustedError`, which a lambda stub can't satisfy.
-            mod.ContextExhaustedError = type(
-                "ContextExhaustedError", (RuntimeError,), {}
-            )
+            mod.ContextExhaustedError = type("ContextExhaustedError", (RuntimeError,), {})
         sys.modules[name] = mod
 
     import core.assistant as assistant  # noqa: E402
+
     return assistant
 
 
 def test_ack_phrases_defined_and_non_empty():
     from utils.phrases import ACK_PHRASES
+
     assert isinstance(ACK_PHRASES, list)
     assert len(ACK_PHRASES) >= 3
     assert all(isinstance(p, str) and p.strip() for p in ACK_PHRASES)

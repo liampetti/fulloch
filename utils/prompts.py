@@ -41,6 +41,7 @@ def _next_sunday_str() -> str:
 def _with_facts(base: str) -> str:
     """Append the long-term-facts block from the notes module."""
     from tools.notes import recall_facts
+
     facts = recall_facts()
     return f"{base}\n{facts}\n" if facts else base
 
@@ -55,7 +56,7 @@ def get_agent_system_prompt(name: str = "Fulloch") -> str:
     prompt prefix matches across turns.
     """
     sunday = _next_sunday_str()
-    examples = (_MODULE_DIR / 'intent_examples.txt').read_text()
+    examples = (_MODULE_DIR / "intent_examples.txt").read_text()
     body = f"""
 You are {name}, a helpful, friendly local voice assistant. {_today_line()}
 Everything runs and is stored locally on this device — only web search uses the internet, so you can assure the user their notes, facts, and conversations stay on-device.

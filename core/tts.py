@@ -41,7 +41,7 @@ from .turn_stats import TurnStats
 
 logger = logging.getLogger(__name__)
 
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision("high")
 
 VOICES_DIR = "./data/voices"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -130,6 +130,7 @@ class _TtsJob:
     `out` carries `(chunk, sample_rate)` tuples; the worker pushes `None`
     when the job is finished (either completed or cancelled mid-stream).
     """
+
     text: str
     voice_clone_prompt: Any
     out: "queue.Queue"
@@ -160,8 +161,7 @@ def _worker_loop() -> None:
                 job.out.put((chunk, sample_rate))
         except Exception as e:
             logger.exception(
-                f"TTS generation error for text '{job.text[:50]}': "
-                f"{type(e).__name__}: {e}"
+                f"TTS generation error for text '{job.text[:50]}': {type(e).__name__}: {e}"
             )
         finally:
             job.out.put(None)
@@ -178,12 +178,14 @@ _worker_thread.start()
 def _submit(text: str, prompt, session: TtsSession, maxsize: int = 0) -> "queue.Queue":
     """Post a generation job and return the output queue to read chunks from."""
     out: "queue.Queue" = queue.Queue(maxsize=maxsize)
-    _job_queue.put(_TtsJob(
-        text=text,
-        voice_clone_prompt=prompt,
-        out=out,
-        session=session,
-    ))
+    _job_queue.put(
+        _TtsJob(
+            text=text,
+            voice_clone_prompt=prompt,
+            out=out,
+            session=session,
+        )
+    )
     return out
 
 
@@ -237,7 +239,8 @@ def set_speed(speed) -> None:
         return
     logger.warning(
         "Qwen TTS has no speed control — tts_speed=%s ignored. Set the pace via "
-        "the voice-clone reference recording instead.", speed
+        "the voice-clone reference recording instead.",
+        speed,
     )
     _speed_warned = True
 

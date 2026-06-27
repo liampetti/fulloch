@@ -125,6 +125,7 @@ def test_list_backends_covers_each_domain():
 
 # --- no-LLM bypass in the agent loop ---------------------------------------
 
+
 def _import_agent_loop():
     """Import core.agent_loop.
 
@@ -134,6 +135,7 @@ def _import_agent_loop():
     other test files that need the real generate_slm/load_slm.
     """
     import core.agent_loop as agent_loop  # noqa: E402
+
     return agent_loop
 
 

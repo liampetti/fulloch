@@ -33,14 +33,18 @@ def test_partial_thinking_summary_caps_output_tokens():
 
     captured, fake = _capture_generate()
     self_ = types.SimpleNamespace(
-        slm_model=object(), greeting_prompt="sys",
-        _last_thinking_partial="some reasoning", _last_thinking_question="q",
+        slm_model=object(),
+        greeting_prompt="sys",
+        _last_thinking_partial="some reasoning",
+        _last_thinking_question="q",
         _last_thinking_cancelled_at=0.0,
     )
     # Within the TTL so the summary actually runs (monotonic ~ small at import).
-    with patch.object(a, "THINKING_PARTIAL_TTL_S", 1e12), \
-         patch("core.assistant.get_partial_thinking_summary_prompt", lambda q, p: "u"), \
-         patch("core.assistant.generate_slm", fake):
+    with (
+        patch.object(a, "THINKING_PARTIAL_TTL_S", 1e12),
+        patch("core.assistant.get_partial_thinking_summary_prompt", lambda q, p: "u"),
+        patch("core.assistant.generate_slm", fake),
+    ):
         out = Assistant._summarise_partial_thinking(self_, cancel_check=None)
     assert out == "a short answer"
     assert captured["max_new_tokens"] == SUMMARY_MAX_NEW_TOKENS

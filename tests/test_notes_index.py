@@ -33,8 +33,9 @@ class _StubEncoder:
     def __init__(self, dim: int = 32):
         self.dim = dim
 
-    def encode(self, texts, normalize_embeddings=True, convert_to_numpy=True,
-               show_progress_bar=False):
+    def encode(
+        self, texts, normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False
+    ):
         out = np.zeros((len(texts), self.dim), dtype=np.float32)
         for i, text in enumerate(texts):
             for token in text.lower().split():
@@ -112,19 +113,14 @@ class TestIndexBuild:
     def test_re_indexing_drops_stale_chunks(self, stub_index, notes_dir):
         path = notes_dir / "shopping.md"
         path.write_text(
-            "# Shopping list reminder\n\n"
-            "remember to buy milk\n\n"
-            "remember to buy bread\n"
+            "# Shopping list reminder\n\nremember to buy milk\n\nremember to buy bread\n"
         )
         stub_index.index_file(path)
         initial_texts = {c.text for c in stub_index._chunks}
         assert any("milk" in t for t in initial_texts)
         assert any("bread" in t for t in initial_texts)
 
-        path.write_text(
-            "# Shopping list reminder\n\n"
-            "only one combined paragraph now please\n"
-        )
+        path.write_text("# Shopping list reminder\n\nonly one combined paragraph now please\n")
         stub_index.index_file(path)
         new_texts = {c.text for c in stub_index._chunks}
         assert not any("milk" in t for t in new_texts)
@@ -196,9 +192,7 @@ class TestSearch:
         (notes_dir / "boiler.md").write_text(
             "# Boiler\n\nVaillant ecoTEC heating unit installed 2019\n"
         )
-        (notes_dir / "shopping.md").write_text(
-            "# Shopping\n\nmilk eggs bread\n"
-        )
+        (notes_dir / "shopping.md").write_text("# Shopping\n\nmilk eggs bread\n")
         stub_index.scan()
         results = stub_index.search("Vaillant ecoTEC heating", k=2)
         assert results

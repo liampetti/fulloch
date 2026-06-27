@@ -36,18 +36,60 @@ def set_beep_device(device) -> None:
 # against the spoken text, and digits in the spoken side don't match
 # their word-form transcription (e.g., "21" vs "twenty-first").
 _ONES = (
-    "", "one", "two", "three", "four", "five", "six", "seven", "eight",
-    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
-    "sixteen", "seventeen", "eighteen", "nineteen",
+    "",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
 )
 _TENS = ("", "", "twenty", "thirty", "forty", "fifty")
 _DAY_ORDINALS = (
-    "", "first", "second", "third", "fourth", "fifth", "sixth", "seventh",
-    "eighth", "ninth", "tenth", "eleventh", "twelfth", "thirteenth",
-    "fourteenth", "fifteenth", "sixteenth", "seventeenth", "eighteenth",
-    "nineteenth", "twentieth", "twenty-first", "twenty-second",
-    "twenty-third", "twenty-fourth", "twenty-fifth", "twenty-sixth",
-    "twenty-seventh", "twenty-eighth", "twenty-ninth", "thirtieth",
+    "",
+    "first",
+    "second",
+    "third",
+    "fourth",
+    "fifth",
+    "sixth",
+    "seventh",
+    "eighth",
+    "ninth",
+    "tenth",
+    "eleventh",
+    "twelfth",
+    "thirteenth",
+    "fourteenth",
+    "fifteenth",
+    "sixteenth",
+    "seventeenth",
+    "eighteenth",
+    "nineteenth",
+    "twentieth",
+    "twenty-first",
+    "twenty-second",
+    "twenty-third",
+    "twenty-fourth",
+    "twenty-fifth",
+    "twenty-sixth",
+    "twenty-seventh",
+    "twenty-eighth",
+    "twenty-ninth",
+    "thirtieth",
     "thirty-first",
 )
 
@@ -77,7 +119,7 @@ def _year_words(y: int) -> str:
 @tool(
     name="get_current_time",
     description="Get the current date and time",
-    aliases=["time", "what_time_is_it", "get_time"]
+    aliases=["time", "what_time_is_it", "get_time"],
 )
 def get_current_time(location: Optional[str] = None) -> str:
     """Current date and time, fully spelled out in words.
@@ -115,7 +157,7 @@ def get_current_time(location: Optional[str] = None) -> str:
         "durations — for specific clock times ('at noon', 'at 3pm') use "
         "create_calendar_event instead."
     ),
-    aliases=["timer", "countdown", "set_timer", "start_timer"]
+    aliases=["timer", "countdown", "set_timer", "start_timer"],
 )
 def start_countdown(duration: str, message: Optional[str] = None) -> str:
     """Start a countdown timer for the specified duration.
@@ -125,6 +167,7 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
                   Bare numbers (e.g. "60") are treated as seconds.
         message:  Optional reminder text spoken after the beeps fire.
     """
+
     def parse_duration(duration_str: str) -> int:
         duration_str = duration_str.lower()
 
@@ -138,7 +181,7 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
                 unit += word + " "
 
         if not number_str:
-            numbers = re.findall(r'\d+', duration_str)
+            numbers = re.findall(r"\d+", duration_str)
             if not numbers:
                 raise ValueError("No valid duration value found")
             number_str = numbers[0]
@@ -165,6 +208,7 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
                 _speak_proactive(reminder)
             except Exception as e:
                 import logging
+
                 logging.getLogger(__name__).warning(f"Timer speak failed: {e}")
 
     try:
@@ -192,9 +236,7 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
 
 
 @tool(
-    name="cancel_timer",
-    description="Cancel an active timer",
-    aliases=["stop_timer", "end_timer"]
+    name="cancel_timer", description="Cancel an active timer", aliases=["stop_timer", "end_timer"]
 )
 def cancel_timer(timer_id: str) -> str:
     """
@@ -213,10 +255,11 @@ def cancel_timer(timer_id: str) -> str:
         return f"Timer {timer_id} cancelled"
     return f"Timer {timer_id} not found"
 
+
 @tool(
     name="get_timer_status",
     description="Get the status of a timer or all timers including time remaining",
-    aliases=["timer_status", "check_timer", "show_timers", "get_timers", "list_timers"]
+    aliases=["timer_status", "check_timer", "show_timers", "get_timers", "list_timers"],
 )
 def get_timer_status(timer_id: Optional[str] = None) -> str:
     """
@@ -228,6 +271,7 @@ def get_timer_status(timer_id: Optional[str] = None) -> str:
     Returns:
         Timer status information
     """
+
     def format_time_remaining(seconds: float) -> str:
         """Format remaining time into hours, minutes and seconds."""
         remaining = int(seconds)

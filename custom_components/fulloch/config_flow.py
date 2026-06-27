@@ -18,9 +18,7 @@ class FullochConfigFlow(ConfigFlow, domain=DOMAIN):
             url = f"http://{host}:{port}/status"
             session = aiohttp_client.async_get_clientsession(self.hass)
             try:
-                async with session.get(
-                    url, timeout=aiohttp.ClientTimeout(total=5)
-                ) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status != 200:
                         errors["base"] = "cannot_connect"
             except Exception:
@@ -36,9 +34,11 @@ class FullochConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({
-                vol.Required(CONF_HOST, default=DEFAULT_HOST): str,
-                vol.Required(CONF_PORT, default=DEFAULT_PORT): int,
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_HOST, default=DEFAULT_HOST): str,
+                    vol.Required(CONF_PORT, default=DEFAULT_PORT): int,
+                }
+            ),
             errors=errors,
         )

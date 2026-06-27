@@ -24,6 +24,7 @@ def _stub_assistant():
 def test_entities_unavailable_without_ha(monkeypatch):
     monkeypatch.delenv("FULLOCH_DASHBOARD_TOKEN", raising=False)
     import tools._config as cfg
+
     monkeypatch.setattr(cfg, "config", {})  # no home_assistant block
     client = TestClient(create_app(_stub_assistant()))
     r = client.get("/entities")
@@ -34,17 +35,17 @@ def test_entities_unavailable_without_ha(monkeypatch):
 def test_entities_list_and_toggle(monkeypatch):
     monkeypatch.delenv("FULLOCH_DASHBOARD_TOKEN", raising=False)
     import tools._config as cfg
+
     monkeypatch.setattr(cfg, "config", {"home_assistant": {}})
 
     import tools.home_assistant as ha
+
     sample = [
-        {"entity_id": "lock.front_door", "name": "Front Door",
-         "domain": "lock", "denied": False},
+        {"entity_id": "lock.front_door", "name": "Front Door", "domain": "lock", "denied": False},
     ]
     monkeypatch.setattr(ha, "list_entities", lambda: sample)
     calls = []
-    monkeypatch.setattr(ha, "set_entity_denied",
-                        lambda eid, denied: calls.append((eid, denied)))
+    monkeypatch.setattr(ha, "set_entity_denied", lambda eid, denied: calls.append((eid, denied)))
 
     client = TestClient(create_app(_stub_assistant()))
 
@@ -54,8 +55,7 @@ def test_entities_list_and_toggle(monkeypatch):
     assert body["available"] is True
     assert body["entities"] == sample
 
-    r = client.post("/entities",
-                    json={"entity_id": "lock.front_door", "denied": True})
+    r = client.post("/entities", json={"entity_id": "lock.front_door", "denied": True})
     assert r.status_code == 200
     assert calls == [("lock.front_door", True)]
 
@@ -63,8 +63,10 @@ def test_entities_list_and_toggle(monkeypatch):
 def test_entities_toggle_rejects_empty_id(monkeypatch):
     monkeypatch.delenv("FULLOCH_DASHBOARD_TOKEN", raising=False)
     import tools._config as cfg
+
     monkeypatch.setattr(cfg, "config", {"home_assistant": {}})
     import tools.home_assistant as ha
+
     monkeypatch.setattr(ha, "list_entities", lambda: [])
     monkeypatch.setattr(ha, "set_entity_denied", lambda eid, denied: None)
 
@@ -76,8 +78,8 @@ def test_entities_toggle_rejects_empty_id(monkeypatch):
 def test_entities_toggle_404_without_ha(monkeypatch):
     monkeypatch.delenv("FULLOCH_DASHBOARD_TOKEN", raising=False)
     import tools._config as cfg
+
     monkeypatch.setattr(cfg, "config", {})
     client = TestClient(create_app(_stub_assistant()))
-    r = client.post("/entities",
-                    json={"entity_id": "lock.front_door", "denied": True})
+    r = client.post("/entities", json={"entity_id": "lock.front_door", "denied": True})
     assert r.status_code == 404

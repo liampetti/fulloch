@@ -45,9 +45,9 @@ class TestGenerateSlmThinkingMode:
         model = MagicMock()
         # load_slm stamps this; the Qwen family uses the /think text directive.
         model._fulloch_think_style = "qwen"
-        model.create_chat_completion.return_value = iter([
-            {"choices": [{"delta": {"content": "ok"}}]}
-        ])
+        model.create_chat_completion.return_value = iter(
+            [{"choices": [{"delta": {"content": "ok"}}]}]
+        )
         return model
 
     def test_appends_think_directive_when_enabled(self, fake_model):
@@ -108,6 +108,7 @@ class TestThinkingPromptStripping:
 
     def test_clean_for_tts_strips_think_blocks(self):
         from core.text_utils import clean_for_tts
+
         raw = (
             "<think>OK so they're asking about cars. "
             "Let me weigh the options...</think>"
@@ -122,12 +123,19 @@ class TestThinkingPromptStripping:
 def _import_assistant_module():
     """Import core.assistant with the heavy audio/ASR/SLM/TTS deps stubbed."""
     import types
+
     fake = {
         "core.audio": ["AudioCapture"],
         "core.asr": ["load_asr_pipeline"],
         "core.tts": [
-            "set_voice", "warmup_model", "synthesize", "play_chunks",
-            "speak_stream", "set_output_device", "set_tts_active_event", "model",
+            "set_voice",
+            "warmup_model",
+            "synthesize",
+            "play_chunks",
+            "speak_stream",
+            "set_output_device",
+            "set_tts_active_event",
+            "model",
         ],
         "core.slm": ["load_slm", "generate_slm"],
     }
@@ -140,11 +148,10 @@ def _import_assistant_module():
         if name == "core.slm":
             # Real exception class — assistant.py does `except
             # ContextExhaustedError`, which a lambda stub can't satisfy.
-            mod.ContextExhaustedError = type(
-                "ContextExhaustedError", (RuntimeError,), {}
-            )
+            mod.ContextExhaustedError = type("ContextExhaustedError", (RuntimeError,), {})
         sys.modules[name] = mod
     import core.assistant as assistant  # noqa: E402
+
     return assistant
 
 
@@ -156,17 +163,19 @@ class TestThinkingLoopFix:
 
     def test_thinking_uses_free_text_prompt(self):
         import inspect
+
         a = _import_assistant_module()
         src = inspect.getsource(a.AgentLoop.run)
         # The thinking branch runs the dedicated free-text prompt...
         assert "get_thinking_system_prompt" in src
         # ...and does NOT pass the agent grammar on that call (free text so
         # Qwen3 can emit a <think> block the grammar would otherwise forbid).
-        snippet = src[src.index("if saw_thinking"):]
+        snippet = src[src.index("if saw_thinking") :]
         assert "grammar=" not in snippet, "thinking call must not be grammar-constrained"
 
     def test_no_thinking_replan_loop(self):
         import inspect
+
         a = _import_assistant_module()
         src = inspect.getsource(a.AgentLoop.run)
         # The old looping flag is gone — thinking terminates the turn.
@@ -174,11 +183,12 @@ class TestThinkingLoopFix:
 
     def test_thinking_branch_returns(self):
         import inspect
+
         a = _import_assistant_module()
         src = inspect.getsource(a.AgentLoop.run)
         # The saw_thinking block ends by returning the cleaned answer rather
         # than `continue`-ing back into the loop.
-        block = src[src.index("if saw_thinking"):]
+        block = src[src.index("if saw_thinking") :]
         block = block[: block.index("if replan")] if "if replan" in block else block
         assert "return cleaned" in block
         assert "continue" not in block

@@ -98,6 +98,7 @@ def _fmt_number(x) -> str:
 # Arithmetic — sandboxed expression evaluation via simpleeval
 # --------------------------------------------------------------------------
 
+
 def _safe_factorial(n):
     # simpleeval caps `**` itself, but factorial is unguarded — cap the input.
     if n > 170:
@@ -106,17 +107,35 @@ def _safe_factorial(n):
 
 
 _FUNCS = dict(simpleeval.DEFAULT_FUNCTIONS)
-_FUNCS.update({
-    "sqrt": math.sqrt,
-    "cbrt": lambda x: math.copysign(abs(x) ** (1 / 3), x),
-    "abs": abs, "round": round, "floor": math.floor, "ceil": math.ceil,
-    "sin": math.sin, "cos": math.cos, "tan": math.tan,
-    "asin": math.asin, "acos": math.acos, "atan": math.atan,
-    "log": math.log, "log10": math.log10, "log2": math.log2, "ln": math.log,
-    "exp": math.exp, "factorial": _safe_factorial,
-    "gcd": math.gcd, "min": min, "max": max, "pow": pow,
-    "degrees": math.degrees, "radians": math.radians, "hypot": math.hypot,
-})
+_FUNCS.update(
+    {
+        "sqrt": math.sqrt,
+        "cbrt": lambda x: math.copysign(abs(x) ** (1 / 3), x),
+        "abs": abs,
+        "round": round,
+        "floor": math.floor,
+        "ceil": math.ceil,
+        "sin": math.sin,
+        "cos": math.cos,
+        "tan": math.tan,
+        "asin": math.asin,
+        "acos": math.acos,
+        "atan": math.atan,
+        "log": math.log,
+        "log10": math.log10,
+        "log2": math.log2,
+        "ln": math.log,
+        "exp": math.exp,
+        "factorial": _safe_factorial,
+        "gcd": math.gcd,
+        "min": min,
+        "max": max,
+        "pow": pow,
+        "degrees": math.degrees,
+        "radians": math.radians,
+        "hypot": math.hypot,
+    }
+)
 _NAMES = dict(simpleeval.DEFAULT_NAMES)
 _NAMES.update({"pi": math.pi, "e": math.e, "tau": math.tau})
 
@@ -130,15 +149,15 @@ def _normalize_expr(text: str) -> str:
     """
     s = (text or "").strip().lower().rstrip("?.")
     s = re.sub(r"^(what(?:'s| is)?|whats|calculate|compute|evaluate|how much is)\s+", "", s)
-    s = re.sub(r"[£$€,]", "", s)                                 # currency + thousands sep
+    s = re.sub(r"[£$€,]", "", s)  # currency + thousands sep
     s = re.sub(r"(\d+(?:\.\d+)?)\s*%\s*of\s+", r"(\1/100)*", s)  # "15% of 340"
-    s = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"(\1/100)", s)           # standalone "n%"
+    s = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"(\1/100)", s)  # standalone "n%"
     s = s.replace("^", "**")
     s = re.sub(r"\bplus\b", "+", s)
     s = re.sub(r"\bminus\b", "-", s)
     s = re.sub(r"\b(?:times|multiplied by)\b", "*", s)
     s = re.sub(r"\bdivided by\b", "/", s)
-    s = re.sub(r"(?<=\d)\s*x\s*(?=[\d(])", "*", s)               # "3 x 8"
+    s = re.sub(r"(?<=\d)\s*x\s*(?=[\d(])", "*", s)  # "3 x 8"
     return s.strip()
 
 
@@ -177,9 +196,23 @@ def calculate(expression: str) -> str:
 # --------------------------------------------------------------------------
 
 _WEEKDAYS = {
-    "monday": MO, "mon": MO, "tuesday": TU, "tue": TU, "tues": TU,
-    "wednesday": WE, "wed": WE, "thursday": TH, "thu": TH, "thur": TH, "thurs": TH,
-    "friday": FR, "fri": FR, "saturday": SA, "sat": SA, "sunday": SU, "sun": SU,
+    "monday": MO,
+    "mon": MO,
+    "tuesday": TU,
+    "tue": TU,
+    "tues": TU,
+    "wednesday": WE,
+    "wed": WE,
+    "thursday": TH,
+    "thu": TH,
+    "thur": TH,
+    "thurs": TH,
+    "friday": FR,
+    "fri": FR,
+    "saturday": SA,
+    "sat": SA,
+    "sunday": SU,
+    "sun": SU,
 }
 
 
@@ -246,8 +279,7 @@ def date_of(weekday: str, which: str = "next") -> str:
     wd = _WEEKDAYS.get((weekday or "").strip().lower())
     if wd is None:
         return (
-            "Reactive question: That doesn't look like a weekday. Ask the user "
-            "which day they mean."
+            "Reactive question: That doesn't look like a weekday. Ask the user which day they mean."
         )
     mod = (which or "next").strip().lower()
     today = date.today()
@@ -274,10 +306,14 @@ _UREG = pint.UnitRegistry()
 # the British spelling used elsewhere; pint's bare `gallon`/`pint`/`quart` are
 # US. Saying "US gallon" routes to pint's US default instead (see _pint_unit).
 _UK_VOLUME = {
-    "gallon": "imperial_gallon", "gallons": "imperial_gallon",
-    "pint": "imperial_pint", "pints": "imperial_pint",
-    "quart": "imperial_quart", "quarts": "imperial_quart",
-    "fluidounce": "imperial_fluid_ounce", "fluidounces": "imperial_fluid_ounce",
+    "gallon": "imperial_gallon",
+    "gallons": "imperial_gallon",
+    "pint": "imperial_pint",
+    "pints": "imperial_pint",
+    "quart": "imperial_quart",
+    "quarts": "imperial_quart",
+    "fluidounce": "imperial_fluid_ounce",
+    "fluidounces": "imperial_fluid_ounce",
     "floz": "imperial_fluid_ounce",
 }
 
@@ -312,10 +348,7 @@ def convert_units(value: float, from_unit: str, to_unit: str) -> str:
     try:
         v = float(value)
     except (TypeError, ValueError):
-        return (
-            "Reactive question: The amount to convert wasn't a number. Ask the "
-            "user to clarify."
-        )
+        return "Reactive question: The amount to convert wasn't a number. Ask the user to clarify."
 
     frm = _pint_unit(from_unit)
     to = _pint_unit(to_unit)

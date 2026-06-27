@@ -30,7 +30,6 @@ Runtime deps: onnxruntime + librosa + tokenizers (no torch).
 """
 
 import logging
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -41,7 +40,6 @@ from .asr import stream_generator  # noqa: F401  (generic queue drainer, re-expo
 from .asr_onnx import (
     HOP_LENGTH,
     N_FFT,
-    SAMPLE_RATE,
     QwenOnnxASRPipelineWrapper,
     _get_mel_filters,
     _Tokenizer,
@@ -56,13 +54,13 @@ HIDDEN_SIZE = 2048  # 1.7B decoder hidden / audio_features dim (vs 1024 for 0.6B
 
 # Qwen3-ASR special token IDs (shared across model sizes; see config.json).
 IM_START_ID = 151644
-IM_END_ID = 151645      # EOS
-ENDOFTEXT_ID = 151643   # EOS (alt)
+IM_END_ID = 151645  # EOS
+ENDOFTEXT_ID = 151643  # EOS (alt)
 AUDIO_START_ID = 151669
 AUDIO_END_ID = 151670
-AUDIO_PAD_ID = 151676   # replaced by encoder output (scattered in-graph)
-ASR_TEXT_ID = 151704    # marks the start of the transcript text
-NEWLINE_ID = 198        # '\n'
+AUDIO_PAD_ID = 151676  # replaced by encoder output (scattered in-graph)
+ASR_TEXT_ID = 151704  # marks the start of the transcript text
+NEWLINE_ID = 198  # '\n'
 EOS_IDS = frozenset((IM_END_ID, ENDOFTEXT_ID))
 
 
@@ -75,8 +73,12 @@ def _compute_mel(wav: np.ndarray, mel_filters: np.ndarray) -> np.ndarray:
     import librosa
 
     stft = librosa.stft(
-        wav, n_fft=N_FFT, hop_length=HOP_LENGTH,
-        window="hann", center=True, pad_mode="reflect",
+        wav,
+        n_fft=N_FFT,
+        hop_length=HOP_LENGTH,
+        window="hann",
+        center=True,
+        pad_mode="reflect",
     )
     magnitudes = np.abs(stft) ** 2
     mel_spec = mel_filters @ magnitudes
@@ -108,17 +110,26 @@ class _OnnxAsr17B:
         enc_name = f"encoder{sfx}.onnx"
         if not (root / enc_name).is_file():  # fp encoder is shared; tolerate either name
             enc_name = "encoder.onnx"
-        logger.info("Loading Qwen3-ASR-1.7B ONNX (decoder: %s) from %s",
-                    "int4" if use_int4 else "fp32", root)
+        logger.info(
+            "Loading Qwen3-ASR-1.7B ONNX (decoder: %s) from %s",
+            "int4" if use_int4 else "fp32",
+            root,
+        )
 
         self.encoder = ort.InferenceSession(str(root / enc_name), opts, providers=cpu)
-        self.decoder_init = ort.InferenceSession(str(root / f"decoder_init{sfx}.onnx"), opts, providers=cpu)
-        self.decoder_step = ort.InferenceSession(str(root / f"decoder_step{sfx}.onnx"), opts, providers=cpu)
+        self.decoder_init = ort.InferenceSession(
+            str(root / f"decoder_init{sfx}.onnx"), opts, providers=cpu
+        )
+        self.decoder_step = ort.InferenceSession(
+            str(root / f"decoder_step{sfx}.onnx"), opts, providers=cpu
+        )
 
         # float16 on disk; cast to float32 for the step-loop input_embeds.
-        self.embed_tokens = np.fromfile(
-            str(root / "embed_tokens.bin"), dtype=np.float16
-        ).reshape(VOCAB_SIZE, HIDDEN_SIZE).astype(np.float32)
+        self.embed_tokens = (
+            np.fromfile(str(root / "embed_tokens.bin"), dtype=np.float16)
+            .reshape(VOCAB_SIZE, HIDDEN_SIZE)
+            .astype(np.float32)
+        )
         self.mel_filters = _get_mel_filters()
 
         tok_json = root / "tokenizer.json"
@@ -143,8 +154,13 @@ class _OnnxAsr17B:
         ids += [IM_START_ID] + enc("assistant") + [NEWLINE_ID]
         return ids
 
-    def transcribe(self, wav: np.ndarray, context: str = "",
-                   language: Optional[str] = None, max_new_tokens: int = 256) -> str:
+    def transcribe(
+        self,
+        wav: np.ndarray,
+        context: str = "",
+        language: Optional[str] = None,
+        max_new_tokens: int = 256,
+    ) -> str:
         wav = np.asarray(wav, dtype=np.float32).reshape(-1)
         mel = _compute_mel(wav, self.mel_filters)[np.newaxis]  # [1, 128, T]
 
@@ -178,7 +194,8 @@ class _OnnxAsr17B:
                 {
                     "input_embeds": tok_embed,
                     "position_ids": np.array([[pos]], dtype=np.int64),
-                    "past_keys": keys, "past_values": values,
+                    "past_keys": keys,
+                    "past_values": values,
                 },
             )
             next_token = int(np.argmax(logits[0, -1, :]))

@@ -22,8 +22,7 @@ def _client(tmp_path):
 
 def test_token_status_and_generation_gates_live(tmp_path, monkeypatch):
     written = {}
-    monkeypatch.setattr(env_store, "set_env_var",
-                        lambda k, v, **kw: written.update({k: v}))
+    monkeypatch.setattr(env_store, "set_env_var", lambda k, v, **kw: written.update({k: v}))
     client, ctx = _client(tmp_path)
 
     # No token yet — open, status reports disabled.
@@ -56,6 +55,7 @@ def test_schema_exposes_backend_options(tmp_path):
 
 
 # --- env_store --------------------------------------------------------------
+
 
 def test_env_store_replaces_existing_key(tmp_path):
     p = tmp_path / ".env"

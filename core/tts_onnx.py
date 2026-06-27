@@ -53,21 +53,120 @@ _CLAUSE_SPLIT = re.compile(r"(?<=[.!?,;:])\s+")
 # Kokoro v1.0 phoneme -> token id map (fixed; from hexgrad/Kokoro-82M config.json).
 # Embedded so the backend needs only the ONNX model + voice files at runtime.
 VOCAB = {
-    ";": 1, ":": 2, ",": 3, ".": 4, "!": 5, "?": 6, "—": 9, "…": 10, '"': 11,
-    "(": 12, ")": 13, "“": 14, "”": 15, " ": 16, "̃": 17, "ʣ": 18, "ʥ": 19,
-    "ʦ": 20, "ʨ": 21, "ᵝ": 22, "ꭧ": 23, "A": 24, "I": 25, "O": 31, "Q": 33,
-    "S": 35, "T": 36, "W": 39, "Y": 41, "ᵊ": 42, "a": 43, "b": 44, "c": 45,
-    "d": 46, "e": 47, "f": 48, "h": 50, "i": 51, "j": 52, "k": 53, "l": 54,
-    "m": 55, "n": 56, "o": 57, "p": 58, "q": 59, "r": 60, "s": 61, "t": 62,
-    "u": 63, "v": 64, "w": 65, "x": 66, "y": 67, "z": 68, "ɑ": 69, "ɐ": 70,
-    "ɒ": 71, "æ": 72, "β": 75, "ɔ": 76, "ɕ": 77, "ç": 78, "ɖ": 80, "ð": 81,
-    "ʤ": 82, "ə": 83, "ɚ": 85, "ɛ": 86, "ɜ": 87, "ɟ": 90, "ɡ": 92, "ɥ": 99,
-    "ɨ": 101, "ɪ": 102, "ʝ": 103, "ɯ": 110, "ɰ": 111, "ŋ": 112, "ɳ": 113,
-    "ɲ": 114, "ɴ": 115, "ø": 116, "ɸ": 118, "θ": 119, "œ": 120, "ɹ": 123,
-    "ɾ": 125, "ɻ": 126, "ʁ": 128, "ɽ": 129, "ʂ": 130, "ʃ": 131, "ʈ": 132,
-    "ʧ": 133, "ʊ": 135, "ʋ": 136, "ʌ": 138, "ɣ": 139, "ɤ": 140, "χ": 142,
-    "ʎ": 143, "ʒ": 147, "ʔ": 148, "ˈ": 156, "ˌ": 157, "ː": 158, "ʰ": 162,
-    "ʲ": 164, "↓": 169, "→": 171, "↗": 172, "↘": 173, "ᵻ": 177,
+    ";": 1,
+    ":": 2,
+    ",": 3,
+    ".": 4,
+    "!": 5,
+    "?": 6,
+    "—": 9,
+    "…": 10,
+    '"': 11,
+    "(": 12,
+    ")": 13,
+    "“": 14,
+    "”": 15,
+    " ": 16,
+    "̃": 17,
+    "ʣ": 18,
+    "ʥ": 19,
+    "ʦ": 20,
+    "ʨ": 21,
+    "ᵝ": 22,
+    "ꭧ": 23,
+    "A": 24,
+    "I": 25,
+    "O": 31,
+    "Q": 33,
+    "S": 35,
+    "T": 36,
+    "W": 39,
+    "Y": 41,
+    "ᵊ": 42,
+    "a": 43,
+    "b": 44,
+    "c": 45,
+    "d": 46,
+    "e": 47,
+    "f": 48,
+    "h": 50,
+    "i": 51,
+    "j": 52,
+    "k": 53,
+    "l": 54,
+    "m": 55,
+    "n": 56,
+    "o": 57,
+    "p": 58,
+    "q": 59,
+    "r": 60,
+    "s": 61,
+    "t": 62,
+    "u": 63,
+    "v": 64,
+    "w": 65,
+    "x": 66,
+    "y": 67,
+    "z": 68,
+    "ɑ": 69,
+    "ɐ": 70,
+    "ɒ": 71,
+    "æ": 72,
+    "β": 75,
+    "ɔ": 76,
+    "ɕ": 77,
+    "ç": 78,
+    "ɖ": 80,
+    "ð": 81,
+    "ʤ": 82,
+    "ə": 83,
+    "ɚ": 85,
+    "ɛ": 86,
+    "ɜ": 87,
+    "ɟ": 90,
+    "ɡ": 92,
+    "ɥ": 99,
+    "ɨ": 101,
+    "ɪ": 102,
+    "ʝ": 103,
+    "ɯ": 110,
+    "ɰ": 111,
+    "ŋ": 112,
+    "ɳ": 113,
+    "ɲ": 114,
+    "ɴ": 115,
+    "ø": 116,
+    "ɸ": 118,
+    "θ": 119,
+    "œ": 120,
+    "ɹ": 123,
+    "ɾ": 125,
+    "ɻ": 126,
+    "ʁ": 128,
+    "ɽ": 129,
+    "ʂ": 130,
+    "ʃ": 131,
+    "ʈ": 132,
+    "ʧ": 133,
+    "ʊ": 135,
+    "ʋ": 136,
+    "ʌ": 138,
+    "ɣ": 139,
+    "ɤ": 140,
+    "χ": 142,
+    "ʎ": 143,
+    "ʒ": 147,
+    "ʔ": 148,
+    "ˈ": 156,
+    "ˌ": 157,
+    "ː": 158,
+    "ʰ": 162,
+    "ʲ": 164,
+    "↓": 169,
+    "→": 171,
+    "↗": 172,
+    "↘": 173,
+    "ᵻ": 177,
 }
 
 # Built-in Kokoro v1.0 English voices (voices/<name>.bin in the repo). The repo
@@ -76,16 +175,40 @@ VOCAB = {
 # All 28 English voices: under the fp32 model every one renders NaN-free and
 # transcribes back at the same ~7% ASR WER (verified — see
 # docs/kokoro-onnx-tts-latency.md). The 11 that emitted NaN under fp16 are back.
-KOKORO_VOICES = frozenset({
-    # American female / male
-    "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore",
-    "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
-    "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael",
-    "am_onyx", "am_puck", "am_santa",
-    # British female / male
-    "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
-    "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
-})
+KOKORO_VOICES = frozenset(
+    {
+        # American female / male
+        "af_heart",
+        "af_alloy",
+        "af_aoede",
+        "af_bella",
+        "af_jessica",
+        "af_kore",
+        "af_nicole",
+        "af_nova",
+        "af_river",
+        "af_sarah",
+        "af_sky",
+        "am_adam",
+        "am_echo",
+        "am_eric",
+        "am_fenrir",
+        "am_liam",
+        "am_michael",
+        "am_onyx",
+        "am_puck",
+        "am_santa",
+        # British female / male
+        "bf_alice",
+        "bf_emma",
+        "bf_isabella",
+        "bf_lily",
+        "bm_daniel",
+        "bm_fable",
+        "bm_george",
+        "bm_lewis",
+    }
+)
 
 # Only long, purely-alphabetic tokens are considered possible run-ons. Ordinary
 # long words ("temperature", "information") are returned unchanged by wordninja,
@@ -97,10 +220,10 @@ _MIN_DESEGMENT_LEN = 9
 _session = None
 _vocab: Optional[dict] = None
 _g2p = None
-_wordninja = None   # module handle if installed; None disables desegmentation
+_wordninja = None  # module handle if installed; None disables desegmentation
 _voices_dir: Optional[Path] = None
 _voice = DEFAULT_VOICE
-_voice_style: Optional[np.ndarray] = None   # (-1, 1, 256) for the active voice
+_voice_style: Optional[np.ndarray] = None  # (-1, 1, 256) for the active voice
 _speed = 1.2
 
 _OUTPUT_DEVICE: Optional[str] = None
@@ -131,11 +254,13 @@ def _build_g2p(en_module):
     fallback = None
     try:
         from misaki.espeak import EspeakFallback
+
         fallback = EspeakFallback(british=False)
         logger.info("misaki espeak fallback enabled (OOV words letter-to-sounded)")
     except Exception as e:  # noqa: BLE001 — any import/runtime gap = no fallback
-        logger.info("misaki espeak fallback unavailable (%s); relying on "
-                    "desegmentation for OOV words", e)
+        logger.info(
+            "misaki espeak fallback unavailable (%s); relying on desegmentation for OOV words", e
+        )
     try:
         return en_module.G2P(british=False, fallback=fallback)
     except TypeError:
@@ -143,8 +268,12 @@ def _build_g2p(en_module):
         return en_module.G2P(british=False)
 
 
-def load_tts(model_id: str = DEFAULT_MODEL_DIR, onnx_file: str = DEFAULT_ONNX_FILE,
-             speed: Optional[float] = None, **opts):
+def load_tts(
+    model_id: str = DEFAULT_MODEL_DIR,
+    onnx_file: str = DEFAULT_ONNX_FILE,
+    speed: Optional[float] = None,
+    **opts,
+):
     """Load the Kokoro ONNX session, vocab, and G2P. Sets module globals.
 
     `opts` (from the models.tts config block) may set ORT threads (num_threads);
@@ -160,6 +289,7 @@ def load_tts(model_id: str = DEFAULT_MODEL_DIR, onnx_file: str = DEFAULT_ONNX_FI
     _voices_dir = root / "voices"
     try:
         import wordninja
+
         _wordninja = wordninja
     except ImportError:
         _wordninja = None
@@ -178,12 +308,12 @@ def load_tts(model_id: str = DEFAULT_MODEL_DIR, onnx_file: str = DEFAULT_ONNX_FI
         alts = sorted((root / "onnx").glob("model*.onnx"))
         if not alts:
             raise FileNotFoundError(
-                f"No Kokoro ONNX model in {root/'onnx'} — re-run setup to fetch it")
+                f"No Kokoro ONNX model in {root / 'onnx'} — re-run setup to fetch it"
+            )
         logger.warning("Kokoro ONNX %r not found; using %s", onnx_file, alts[0].name)
         onnx_path = alts[0]
     logger.info("Loading Kokoro ONNX (%s) from %s", onnx_path.name, root)
-    _session = ort.InferenceSession(
-        str(onnx_path), so, providers=["CPUExecutionProvider"])
+    _session = ort.InferenceSession(str(onnx_path), so, providers=["CPUExecutionProvider"])
     _g2p = _build_g2p(en)
     if speed:
         set_speed(speed)
@@ -226,10 +356,9 @@ def set_voice(voice_name: Optional[str]):
             path, name = available[0], available[0].stem
         else:
             raise FileNotFoundError(
-                f"No Kokoro voice files in {_voices_dir} — re-run setup to "
-                f"download voices/*.bin")
-        logger.warning("Kokoro voice %r not on disk; falling back to %r",
-                       voice_name, name)
+                f"No Kokoro voice files in {_voices_dir} — re-run setup to download voices/*.bin"
+            )
+        logger.warning("Kokoro voice %r not on disk; falling back to %r", voice_name, name)
     _voice_style = np.fromfile(str(path), dtype=np.float32).reshape(-1, 1, 256)
     _voice = name
     logger.info("Kokoro voice: %s", name)
@@ -254,7 +383,7 @@ def _desegment(text: str) -> str:
             pieces = _wordninja.split(core)
             if len(pieces) >= 2 and all(len(p) >= 3 for p in pieces):
                 start = tok.index(core)
-                lead, trail = tok[:start], tok[start + len(core):]
+                lead, trail = tok[:start], tok[start + len(core) :]
                 out.append(lead + " ".join(pieces) + trail)
                 logger.debug("Desegmented run-on %r -> %r", core, " ".join(pieces))
                 continue
@@ -275,11 +404,16 @@ def _phoneme_tokens(text: str) -> list:
     if dropped:
         # A word that loses phonemes here gets mispronounced or silently dropped;
         # surfacing it makes the otherwise-invisible failure debuggable.
-        logger.debug("Kokoro G2P: %d out-of-vocab phoneme(s) dropped (%r) in %r",
-                     len(dropped), "".join(dropped), text)
+        logger.debug(
+            "Kokoro G2P: %d out-of-vocab phoneme(s) dropped (%r) in %r",
+            len(dropped),
+            "".join(dropped),
+            text,
+        )
     if len(toks) > MAX_TOKENS:
-        logger.warning("Kokoro phonemes truncated %d -> %d (clause too long): %r",
-                       len(toks), MAX_TOKENS, text)
+        logger.warning(
+            "Kokoro phonemes truncated %d -> %d (clause too long): %r", len(toks), MAX_TOKENS, text
+        )
     return toks[:MAX_TOKENS]
 
 
@@ -289,18 +423,21 @@ def _synth(text: str) -> np.ndarray:
     if not toks:
         return np.zeros(0, dtype=np.float32)
     idx = min(len(toks), _voice_style.shape[0] - 1)
-    ref_s = _voice_style[idx]                       # (1, 256)
+    ref_s = _voice_style[idx]  # (1, 256)
     input_ids = np.array([[0, *toks, 0]], dtype=np.int64)
-    audio = _session.run(None, {
-        "input_ids": input_ids,
-        "style": ref_s,
-        "speed": np.array([_speed], dtype=np.float32),
-    })[0]
+    audio = _session.run(
+        None,
+        {
+            "input_ids": input_ids,
+            "style": ref_s,
+            "speed": np.array([_speed], dtype=np.float32),
+        },
+    )[0]
     return np.asarray(audio, dtype=np.float32).reshape(-1)
 
 
 def _to_chunks(audio: np.ndarray) -> list:
-    return [audio[i:i + _CHUNK_SAMPLES] for i in range(0, len(audio), _CHUNK_SAMPLES)]
+    return [audio[i : i + _CHUNK_SAMPLES] for i in range(0, len(audio), _CHUNK_SAMPLES)]
 
 
 def _iter_fragments(text: str):
@@ -333,7 +470,7 @@ def _worker_loop() -> None:
     while True:
         job = _job_queue.get()
         try:
-            for fragment in (list(_iter_fragments(job.text)) or [job.text]):
+            for fragment in list(_iter_fragments(job.text)) or [job.text]:
                 if job.session.cancelled:
                     break
                 for chunk in _to_chunks(_synth(fragment)):
@@ -391,8 +528,9 @@ def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
         if _TTS_ACTIVE_EVENT is not None:
             _TTS_ACTIVE_EVENT.set()
         try:
-            with sd.OutputStream(samplerate=sample_rate, channels=1,
-                                 dtype="float32", device=_OUTPUT_DEVICE) as stream:
+            with sd.OutputStream(
+                samplerate=sample_rate, channels=1, dtype="float32", device=_OUTPUT_DEVICE
+            ) as stream:
                 for chunk in chunks:
                     if session.cancelled:
                         stream.abort()
@@ -405,9 +543,13 @@ def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
         session.active = False
 
 
-def speak_stream(text: str, prompt=None, session: Optional[TtsSession] = None,
-                 stats: Optional[TurnStats] = None,
-                 on_first_audio: Optional[Callable[[], None]] = None):
+def speak_stream(
+    text: str,
+    prompt=None,
+    session: Optional[TtsSession] = None,
+    stats: Optional[TurnStats] = None,
+    on_first_audio: Optional[Callable[[], None]] = None,
+):
     """Synthesise on the worker (overlapped) and play back here, cancellable."""
     if session is None:
         session = TtsSession()
@@ -434,8 +576,9 @@ def speak_stream(text: str, prompt=None, session: Optional[TtsSession] = None,
         if _TTS_ACTIVE_EVENT is not None:
             _TTS_ACTIVE_EVENT.set()
         try:
-            with sd.OutputStream(samplerate=sr, channels=1, dtype="float32",
-                                 device=_OUTPUT_DEVICE) as stream:
+            with sd.OutputStream(
+                samplerate=sr, channels=1, dtype="float32", device=_OUTPUT_DEVICE
+            ) as stream:
                 stream.write(first_chunk)
                 while True:
                     item = out.get()

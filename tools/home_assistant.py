@@ -41,10 +41,13 @@ def tool(*dargs, **dkwargs):
         def wrapper(*args, **kwargs):
             _ensure_loaded()
             return fn(*args, **kwargs)
+
         return register(wrapper)
+
     return decorate
 
-HA_CONFIG = config.get('home_assistant', {})
+
+HA_CONFIG = config.get("home_assistant", {})
 
 # Home Assistant connection settings.
 # The long-lived token (effectively root on your smart home) is read from the
@@ -53,9 +56,9 @@ HA_CONFIG = config.get('home_assistant', {})
 # for backward compatibility.
 # Normalise so a missing scheme / trailing slash doesn't break requests, e.g.
 # "host:8123/" -> "http://host:8123" (not "host:8123//api/states").
-HA_URL = normalize_url(HA_CONFIG.get('url', 'http://localhost:8123'))
-HA_TOKEN = os.environ.get('FULLOCH_HA_TOKEN', '').strip() or HA_CONFIG.get('token', '')
-TIMEOUT = HA_CONFIG.get('timeout', 10)
+HA_URL = normalize_url(HA_CONFIG.get("url", "http://localhost:8123"))
+HA_TOKEN = os.environ.get("FULLOCH_HA_TOKEN", "").strip() or HA_CONFIG.get("token", "")
+TIMEOUT = HA_CONFIG.get("timeout", 10)
 
 # Default lookback for get_entity_history when the agent gives no start date —
 # covers a plain "when was X last on" in one call (HA recorder retention, ~10
@@ -70,7 +73,13 @@ HISTORY_DEFAULT_LOOKBACK_DAYS = 7
 
 # Substrings used by AVR auto-detect, matched against friendly_name + entity_id.
 _AVR_KEYWORDS = (
-    "avr", "receiver", "pioneer", "onkyo", "denon", "yamaha", "marantz",
+    "avr",
+    "receiver",
+    "pioneer",
+    "onkyo",
+    "denon",
+    "yamaha",
+    "marantz",
 )
 
 # Spoken color name → RGB. Hoisted out of `set_color` so the dict isn't
@@ -132,7 +141,9 @@ def _fetch_entity_aliases() -> tuple:
     for attempt in range(1, _ALIAS_FETCH_RETRIES + 1):
         try:
             response = requests.get(
-                f"{HA_URL}/api/states", headers=_get_headers(), timeout=TIMEOUT,
+                f"{HA_URL}/api/states",
+                headers=_get_headers(),
+                timeout=TIMEOUT,
             )
             response.raise_for_status()
             states = response.json()
@@ -156,10 +167,10 @@ def _fetch_entity_aliases() -> tuple:
     aliases: dict = {}
     aliases_multi: dict = {}
     for state in states:
-        entity_id = state.get('entity_id')
+        entity_id = state.get("entity_id")
         if not entity_id:
             continue
-        friendly = state.get('attributes', {}).get('friendly_name')
+        friendly = state.get("attributes", {}).get("friendly_name")
         # Entities without a friendly_name still need to appear in the map
         # so the role-entity autodetect (`_autodetect_weather_entity` etc.)
         # can find them by domain prefix. Use the entity_id as the key —
@@ -170,10 +181,7 @@ def _fetch_entity_aliases() -> tuple:
         if entity_id not in bucket:
             bucket.append(entity_id)
         if key in aliases and aliases[key] != entity_id:
-            logger.debug(
-                f"Duplicate key '{key}': keeping "
-                f"{aliases[key]}, ignoring {entity_id}"
-            )
+            logger.debug(f"Duplicate key '{key}': keeping {aliases[key]}, ignoring {entity_id}")
             continue
         aliases[key] = entity_id
 
@@ -202,9 +210,7 @@ _load_lock = threading.Lock()
 # membership test on the turn thread always sees a complete set — no lock needed
 # on the read path; `_denylist_lock` only serialises writers (file + rebind).
 # ---------------------------------------------------------------------------
-_DENYLIST_PATH = os.environ.get(
-    "FULLOCH_DENYLIST_PATH", "data/voice_denylist.json"
-)
+_DENYLIST_PATH = os.environ.get("FULLOCH_DENYLIST_PATH", "data/voice_denylist.json")
 _denylist_lock = threading.Lock()
 
 
@@ -237,10 +243,7 @@ def _persist_denylist(entities) -> None:
 
 _DENIED_ENTITIES = _load_denylist()
 if _DENIED_ENTITIES:
-    logger.info(
-        f"Voice deny-list: {len(_DENIED_ENTITIES)} entity(ies) blocked from "
-        f"voice control"
-    )
+    logger.info(f"Voice deny-list: {len(_DENIED_ENTITIES)} entity(ies) blocked from voice control")
 
 
 def get_denylist() -> set:
@@ -295,11 +298,21 @@ def list_entities() -> list:
     out.sort(key=lambda e: (e["domain"], e["name"].lower()))
     return out
 
+
 # Trailing words a speaker is likely to add or drop when referring to a device
 # (e.g. "downstairs office" vs "downstairs office lights").
 _NAME_SUFFIXES = (
-    "lights", "light", "lamp", "lamps", "bulb", "bulbs",
-    "group", "switch", "switches", "fan", "fans",
+    "lights",
+    "light",
+    "lamp",
+    "lamps",
+    "bulb",
+    "bulbs",
+    "group",
+    "switch",
+    "switches",
+    "fan",
+    "fans",
 )
 
 # Filler words that ASR often picks up at the start of an entity name.
@@ -367,9 +380,7 @@ def _call_service(
         return "Home Assistant didn't respond in time."
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code
-        logger.warning(
-            f"HA {domain}.{service} on {entity_id} failed: {status} {e.response.text}"
-        )
+        logger.warning(f"HA {domain}.{service} on {entity_id} failed: {status} {e.response.text}")
         if status in (400, 404):
             # 400/404 usually means the entity_id didn't resolve. Route through
             # the agent replan loop so the next agent call can try a different
@@ -402,7 +413,9 @@ def _call_service_with_response(
     url = f"{HA_URL}/api/services/{domain}/{service}?return_response=true"
     try:
         response = requests.post(
-            url, headers=_get_headers(), json=payload,
+            url,
+            headers=_get_headers(),
+            json=payload,
             timeout=timeout if timeout is not None else TIMEOUT,
         )
         response.raise_for_status()
@@ -454,7 +467,7 @@ def _resolve_entity(name: str, domain: str = None) -> str:
     key = name.lower().strip()
     for filler in _LEADING_FILLERS:
         if key.startswith(filler):
-            key = key[len(filler):].strip()
+            key = key[len(filler) :].strip()
             break
 
     if key in _ENTITY_ALIASES_MULTI:
@@ -478,22 +491,21 @@ def _resolve_entity(name: str, domain: str = None) -> str:
     input_tokens = set(key.split())
     if input_tokens:
         fuzzy = [
-            (alias, eid) for alias, eid in _ENTITY_ALIASES.items()
+            (alias, eid)
+            for alias, eid in _ENTITY_ALIASES.items()
             if input_tokens.issubset(set(alias.split()))
         ]
         if fuzzy:
             fuzzy.sort(key=lambda kv: len(kv[0]))
             chosen_alias, chosen_eid = fuzzy[0]
-            logger.debug(
-                f"Fuzzy-resolved {name!r} → {chosen_eid} via {chosen_alias!r}"
-            )
+            logger.debug(f"Fuzzy-resolved {name!r} → {chosen_eid} via {chosen_alias!r}")
             return chosen_eid
 
-    if '.' in name:
+    if "." in name:
         return name
 
     if domain:
-        entity_name = key.replace(' ', '_')
+        entity_name = key.replace(" ", "_")
         return f"{domain}.{entity_name}"
 
     return name
@@ -502,7 +514,7 @@ def _resolve_entity(name: str, domain: str = None) -> str:
 @tool(
     name="turn_on",
     description="Turn on a device, light, switch, or other Home Assistant entity",
-    aliases=["ha_turn_on", "switch_on", "turn_on_device"]
+    aliases=["ha_turn_on", "switch_on", "turn_on_device"],
 )
 def turn_on(entity: str, brightness: Optional[int] = None) -> str:
     """Turn on a Home Assistant entity.
@@ -517,8 +529,8 @@ def turn_on(entity: str, brightness: Optional[int] = None) -> str:
 
     data = {}
     success = f"{friendly} on"
-    if brightness is not None and domain == 'light':
-        data['brightness'] = int((brightness / 100) * 255)
+    if brightness is not None and domain == "light":
+        data["brightness"] = int((brightness / 100) * 255)
         success = f"{friendly} on at {brightness} percent"
 
     return _call_service(domain, "turn_on", entity_id, data if data else None, success)
@@ -527,7 +539,7 @@ def turn_on(entity: str, brightness: Optional[int] = None) -> str:
 @tool(
     name="turn_off",
     description="Turn off a device, light, switch, or other Home Assistant entity",
-    aliases=["ha_turn_off", "switch_off", "turn_off_device"]
+    aliases=["ha_turn_off", "switch_off", "turn_off_device"],
 )
 def turn_off(entity: str) -> str:
     """Turn off a Home Assistant entity.
@@ -545,7 +557,7 @@ def turn_off(entity: str) -> str:
 @tool(
     name="toggle",
     description="Toggle a Home Assistant entity on or off",
-    aliases=["ha_toggle", "toggle_device"]
+    aliases=["ha_toggle", "toggle_device"],
 )
 def toggle(entity: str) -> str:
     """Toggle a Home Assistant entity.
@@ -563,7 +575,7 @@ def toggle(entity: str) -> str:
 @tool(
     name="ha_set_brightness",
     description="Set the brightness of a light in Home Assistant",
-    aliases=["ha_brightness", "ha_dim_light"]
+    aliases=["ha_brightness", "ha_dim_light"],
 )
 def set_ha_brightness(entity: str, brightness: int) -> str:
     """Set the brightness of a light.
@@ -579,7 +591,10 @@ def set_ha_brightness(entity: str, brightness: int) -> str:
     brightness_255 = int((brightness / 100) * 255)
 
     return _call_service(
-        "light", "turn_on", entity_id, {"brightness": brightness_255},
+        "light",
+        "turn_on",
+        entity_id,
+        {"brightness": brightness_255},
         success_message=f"{friendly} at {brightness} percent",
     )
 
@@ -587,7 +602,7 @@ def set_ha_brightness(entity: str, brightness: int) -> str:
 @tool(
     name="ha_set_color",
     description="Set the color of a light in Home Assistant using color name or RGB",
-    aliases=["ha_color", "change_light_color"]
+    aliases=["ha_color", "change_light_color"],
 )
 def set_color(entity: str, color: str) -> str:
     """Set the color of a light.
@@ -601,9 +616,9 @@ def set_color(entity: str, color: str) -> str:
 
     if color_lower in _COLOR_MAP:
         rgb = _COLOR_MAP[color_lower]
-    elif ',' in color:
+    elif "," in color:
         try:
-            rgb = [int(c.strip()) for c in color.split(',')]
+            rgb = [int(c.strip()) for c in color.split(",")]
             if len(rgb) != 3:
                 return "I need three numbers for an RGB colour."
         except ValueError:
@@ -613,7 +628,10 @@ def set_color(entity: str, color: str) -> str:
 
     friendly = _friendly_for(entity_id)
     return _call_service(
-        "light", "turn_on", entity_id, {"rgb_color": rgb},
+        "light",
+        "turn_on",
+        entity_id,
+        {"rgb_color": rgb},
         success_message=f"{friendly} set to {color_lower}",
     )
 
@@ -621,6 +639,7 @@ def set_color(entity: str, color: str) -> str:
 # ---------------------------------------------------------------------------
 # media_player wrappers — volume, source, transport.
 # ---------------------------------------------------------------------------
+
 
 @tool(
     name="ha_volume_set",
@@ -639,7 +658,10 @@ def volume_set(entity: str, volume: int) -> str:
 
     pct = max(0, min(100, int(volume)))
     return _call_service(
-        "media_player", "volume_set", entity_id, {"volume_level": pct / 100},
+        "media_player",
+        "volume_set",
+        entity_id,
+        {"volume_level": pct / 100},
         success_message=f"{friendly} volume {pct}",
     )
 
@@ -657,7 +679,9 @@ def volume_up(entity: Optional[str] = None) -> str:
     entity_id = _resolve_entity(target, domain="media_player")
     friendly = _friendly_for(entity_id)
     return _call_service(
-        "media_player", "volume_up", entity_id,
+        "media_player",
+        "volume_up",
+        entity_id,
         success_message=f"{friendly} louder",
     )
 
@@ -675,7 +699,9 @@ def volume_down(entity: Optional[str] = None) -> str:
     entity_id = _resolve_entity(target, domain="media_player")
     friendly = _friendly_for(entity_id)
     return _call_service(
-        "media_player", "volume_down", entity_id,
+        "media_player",
+        "volume_down",
+        entity_id,
         success_message=f"{friendly} quieter",
     )
 
@@ -698,7 +724,10 @@ def select_source(source: str, entity: Optional[str] = None) -> str:
     entity_id = _resolve_entity(target, domain="media_player")
     friendly = _friendly_for(entity_id)
     return _call_service(
-        "media_player", "select_source", entity_id, {"source": source},
+        "media_player",
+        "select_source",
+        entity_id,
+        {"source": source},
         success_message=f"{friendly} switched to {source}",
     )
 
@@ -723,7 +752,9 @@ def pause(entity: Optional[str] = None) -> str:
         return "I don't know which player to pause."
     friendly = _friendly_for(entity_id)
     return _call_service(
-        "media_player", "media_pause", entity_id,
+        "media_player",
+        "media_pause",
+        entity_id,
         success_message=f"{friendly} paused",
     )
 
@@ -740,7 +771,9 @@ def resume(entity: Optional[str] = None) -> str:
         return "I don't know which player to resume."
     friendly = _friendly_for(entity_id)
     return _call_service(
-        "media_player", "media_play", entity_id,
+        "media_player",
+        "media_play",
+        entity_id,
         success_message=f"{friendly} resumed",
     )
 
@@ -757,7 +790,9 @@ def skip(entity: Optional[str] = None) -> str:
         return "I don't know which player to skip on."
     friendly = _friendly_for(entity_id)
     return _call_service(
-        "media_player", "media_next_track", entity_id,
+        "media_player",
+        "media_next_track",
+        entity_id,
         success_message=f"{friendly} skipped",
     )
 
@@ -765,6 +800,7 @@ def skip(entity: Optional[str] = None) -> str:
 # ---------------------------------------------------------------------------
 # Spotify search-and-play via the SpotifyPlus HACS integration.
 # ---------------------------------------------------------------------------
+
 
 def _spotify_search(kind: str, query: str) -> list[dict]:
     """Run a SpotifyPlus search and return the result items list (possibly empty).
@@ -775,7 +811,9 @@ def _spotify_search(kind: str, query: str) -> list[dict]:
     """
     service = "search_playlists" if kind == "playlists" else "search_tracks"
     response = _call_service_with_response(
-        "spotifyplus", service, {"entity_id": SPOTIFY_ENTITY, "criteria": query},
+        "spotifyplus",
+        service,
+        {"entity_id": SPOTIFY_ENTITY, "criteria": query},
     )
     if not response:
         return []
@@ -812,7 +850,9 @@ def play_song(query: str, artist: Optional[str] = None) -> str:
         name = playlists[0].get("name", "playlist")
         if uri:
             return _call_service(
-                "media_player", "play_media", entity_id,
+                "media_player",
+                "play_media",
+                entity_id,
                 {"media_content_id": uri, "media_content_type": "playlist"},
                 success_message=f"Playing {name}",
             )
@@ -823,7 +863,9 @@ def play_song(query: str, artist: Optional[str] = None) -> str:
         name = tracks[0].get("name", "your song")
         if uri:
             return _call_service(
-                "media_player", "play_media", entity_id,
+                "media_player",
+                "play_media",
+                entity_id,
                 {"media_content_id": uri, "media_content_type": "music"},
                 success_message=f"Playing {name}",
             )
@@ -831,11 +873,11 @@ def play_song(query: str, artist: Optional[str] = None) -> str:
     # Generic fallback for the built-in HA Spotify integration (no search service).
     # Passes the search query directly as the media_content_id — some Spotify
     # integrations resolve "spotify:search:<query>" but results are not guaranteed.
-    logger.info(
-        "SpotifyPlus search returned no results; trying generic media_player.play_media"
-    )
+    logger.info("SpotifyPlus search returned no results; trying generic media_player.play_media")
     return _call_service(
-        "media_player", "play_media", entity_id,
+        "media_player",
+        "play_media",
+        entity_id,
         {"media_content_id": f"spotify:search:{search_query}", "media_content_type": "music"},
         success_message=f"Playing {search_query}",
     )
@@ -907,7 +949,7 @@ def get_temperature(entity: str) -> str:
 @tool(
     name="get_entity_state",
     description="Get the current state of a Home Assistant entity (on/off, sensor reading, etc.)",
-    aliases=["ha_state", "check_state", "is_on"]
+    aliases=["ha_state", "check_state", "is_on"],
 )
 def get_entity_state(entity: str) -> str:
     """Get the current state of a Home Assistant entity.
@@ -921,19 +963,19 @@ def get_entity_state(entity: str) -> str:
     if state is None:
         return f"Sorry, I couldn't find {_friendly_for(entity_id)}."
 
-    entity_state = state.get('state', 'unknown')
-    friendly_name = state.get('attributes', {}).get('friendly_name', entity_id)
+    entity_state = state.get("state", "unknown")
+    friendly_name = state.get("attributes", {}).get("friendly_name", entity_id)
 
     # Include relevant attributes
-    attrs = state.get('attributes', {})
+    attrs = state.get("attributes", {})
     details = [f"{friendly_name} is {entity_state}"]
 
-    if 'brightness' in attrs:
-        brightness_pct = int((attrs['brightness'] / 255) * 100)
+    if "brightness" in attrs:
+        brightness_pct = int((attrs["brightness"] / 255) * 100)
         details.append(f"brightness: {brightness_pct}%")
-    if 'temperature' in attrs:
+    if "temperature" in attrs:
         details.append(f"temperature: {attrs['temperature']}°")
-    if 'current_temperature' in attrs:
+    if "current_temperature" in attrs:
         details.append(f"current temperature: {attrs['current_temperature']}°")
 
     return ", ".join(details)
@@ -942,7 +984,7 @@ def get_entity_state(entity: str) -> str:
 @tool(
     name="ha_service",
     description="Call any Home Assistant service with custom data",
-    aliases=["call_service", "ha_call"]
+    aliases=["call_service", "ha_call"],
 )
 def call_ha_service(domain: str, service: str, entity: str, data: Optional[str] = None) -> str:
     """Call any Home Assistant service.
@@ -972,7 +1014,10 @@ def call_ha_service(domain: str, service: str, entity: str, data: Optional[str] 
 
     friendly = _friendly_for(entity_id)
     return _call_service(
-        domain, service, entity_id, extra_data,
+        domain,
+        service,
+        entity_id,
+        extra_data,
         success_message=f"{service.replace('_', ' ').capitalize()} {friendly}",
     )
 
@@ -980,7 +1025,7 @@ def call_ha_service(domain: str, service: str, entity: str, data: Optional[str] 
 @tool(
     name="ha_set_climate",
     description="Set the temperature of a climate/thermostat entity in Home Assistant",
-    aliases=["ha_climate", "ha_thermostat"]
+    aliases=["ha_climate", "ha_thermostat"],
 )
 def set_climate(entity: str, temperature: float, hvac_mode: Optional[str] = None) -> str:
     """Set climate/thermostat temperature.
@@ -998,16 +1043,15 @@ def set_climate(entity: str, temperature: float, hvac_mode: Optional[str] = None
         data["hvac_mode"] = hvac_mode.lower()
 
     return _call_service(
-        "climate", "set_temperature", entity_id, data,
+        "climate",
+        "set_temperature",
+        entity_id,
+        data,
         success_message=f"{friendly} set to {temperature} degrees",
     )
 
 
-@tool(
-    name="ha_lock",
-    description="Lock a lock entity in Home Assistant",
-    aliases=["lock_door"]
-)
+@tool(name="ha_lock", description="Lock a lock entity in Home Assistant", aliases=["lock_door"])
 def lock(entity: str) -> str:
     """Lock a lock entity.
 
@@ -1020,9 +1064,7 @@ def lock(entity: str) -> str:
 
 
 @tool(
-    name="ha_unlock",
-    description="Unlock a lock entity in Home Assistant",
-    aliases=["unlock_door"]
+    name="ha_unlock", description="Unlock a lock entity in Home Assistant", aliases=["unlock_door"]
 )
 def unlock(entity: str) -> str:
     """Unlock a lock entity.
@@ -1038,7 +1080,7 @@ def unlock(entity: str) -> str:
 @tool(
     name="ha_open_cover",
     description="Open a cover/blind/garage in Home Assistant",
-    aliases=["ha_open", "open_blind", "open_garage"]
+    aliases=["ha_open", "open_blind", "open_garage"],
 )
 def open_cover(entity: str) -> str:
     """Open a cover entity (blinds, garage door, etc.).
@@ -1054,7 +1096,7 @@ def open_cover(entity: str) -> str:
 @tool(
     name="ha_close_cover",
     description="Close a cover/blind/garage in Home Assistant",
-    aliases=["ha_close", "close_blind", "close_garage"]
+    aliases=["ha_close", "close_blind", "close_garage"],
 )
 def close_cover(entity: str) -> str:
     """Close a cover entity (blinds, garage door, etc.).
@@ -1070,7 +1112,7 @@ def close_cover(entity: str) -> str:
 @tool(
     name="ha_run_script",
     description="Run a Home Assistant script or automation",
-    aliases=["ha_script", "run_automation"]
+    aliases=["ha_script", "run_automation"],
 )
 def run_script(script_name: str) -> str:
     """Run a Home Assistant script.
@@ -1086,7 +1128,7 @@ def run_script(script_name: str) -> str:
 @tool(
     name="ha_activate_scene",
     description="Activate a Home Assistant scene",
-    aliases=["ha_scene", "set_scene"]
+    aliases=["ha_scene", "set_scene"],
 )
 def activate_scene(scene_name: str) -> str:
     """Activate a Home Assistant scene.
@@ -1096,12 +1138,15 @@ def activate_scene(scene_name: str) -> str:
     """
     entity_id = _resolve_entity(scene_name, domain="scene")
     friendly = _friendly_for(entity_id)
-    return _call_service("scene", "turn_on", entity_id, success_message=f"Scene {friendly} activated")
+    return _call_service(
+        "scene", "turn_on", entity_id, success_message=f"Scene {friendly} activated"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Calendar — wraps the HA `calendar.get_events` service.
 # ---------------------------------------------------------------------------
+
 
 def _calendar_window(day: str, now: Optional[_dt.datetime] = None) -> tuple[str, str]:
     """Return (start_iso, end_iso) for a spoken day phrase or ISO date.
@@ -1173,7 +1218,8 @@ def _ha_get_events(day: str) -> str:
 
     start_iso, end_iso = _calendar_window(day)
     response = _call_service_with_response(
-        "calendar", "get_events",
+        "calendar",
+        "get_events",
         {
             "entity_id": calendars,
             "start_date_time": start_iso,
@@ -1223,6 +1269,7 @@ def whats_on(day: str = "today") -> str:
 # Requires `home_assistant.calendar` in config.yml to name the target calendar.
 # ---------------------------------------------------------------------------
 
+
 def get_upcoming_events(window_seconds: int = 90) -> list[dict]:
     """Return events starting on the reminder calendar within the next `window_seconds`.
 
@@ -1235,10 +1282,12 @@ def get_upcoming_events(window_seconds: int = 90) -> list[dict]:
     if not calendar:
         return []
     import datetime as _dt2
+
     now = _dt2.datetime.now(_dt2.timezone.utc)
     window_end = now + _dt2.timedelta(seconds=window_seconds)
     response = _call_service_with_response(
-        "calendar", "get_events",
+        "calendar",
+        "get_events",
         {
             "entity_id": calendar,
             "start_date_time": now.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
@@ -1286,13 +1335,13 @@ def _reminder_calendar_entity() -> Optional[str]:
     entity_id). Returns None if not configured or not found in the alias map.
     """
     _ensure_loaded()  # reminder-poll path — not a @tool, so load the map explicitly
-    name = HA_CONFIG.get('calendar')
+    name = HA_CONFIG.get("calendar")
     if not name:
         return None
-    if '.' in str(name):
+    if "." in str(name):
         return name
     entity_id = _ENTITY_ALIASES.get(name.lower())
-    if entity_id and entity_id.startswith('calendar.'):
+    if entity_id and entity_id.startswith("calendar."):
         return entity_id
     logger.warning(f"Reminder calendar '{name}' not found in HA entity aliases")
     return None
@@ -1363,10 +1412,7 @@ def create_calendar_event(
 
     recurrence_label = f" ({recurrence})" if recurrence != "none" else ""
     time_label = f" at {time}" if time else ""
-    success = (
-        f"Added '{summary}'{time_label} on "
-        f"{start_dt.strftime('%A %-d %B')}{recurrence_label}"
-    )
+    success = f"Added '{summary}'{time_label} on {start_dt.strftime('%A %-d %B')}{recurrence_label}"
     return _call_service("calendar", "create_event", calendar, extra, success_message=success)
 
 
@@ -1412,11 +1458,7 @@ def _looks_like_tv(entity_id: str, friendly: str) -> bool:
     """Match `tv` as a whole token in entity_id or friendly name."""
     if "tv" in entity_id.split(".", 1)[1].split("_"):
         return True
-    return (
-        " tv" in friendly
-        or friendly.endswith(" tv")
-        or friendly.startswith("tv ")
-    )
+    return " tv" in friendly or friendly.endswith(" tv") or friendly.startswith("tv ")
 
 
 def _autodetect_tv_entity() -> Optional[str]:
@@ -1520,6 +1562,7 @@ def _ensure_loaded() -> None:
 # Todo / task lists — wraps HA `todo.add_item` and `todo.get_items`.
 # ---------------------------------------------------------------------------
 
+
 @tool(
     name="add_todo_item",
     description=(
@@ -1541,7 +1584,9 @@ def add_todo_item(item: str) -> str:
             "Would you like me to add this to a note instead?"
         )
     return _call_service(
-        "todo", "add_item", TODO_ENTITY,
+        "todo",
+        "add_item",
+        TODO_ENTITY,
         {"item": item},
         success_message=f"Added '{item}' to your list",
     )
@@ -1560,7 +1605,8 @@ def get_todo_items() -> str:
             "Would you like me to check your notes instead?"
         )
     response = _call_service_with_response(
-        "todo", "get_items",
+        "todo",
+        "get_items",
         {"entity_id": TODO_ENTITY, "status": "needs_action"},
     )
     if not response:
@@ -2032,7 +2078,9 @@ def get_conversation_history(start: str, end: Optional[str] = None) -> str:
     try:
         start_dt, default_end_dt, _ = _parse_history_start(start)
     except ValueError:
-        return f"Reactive question: Could not parse start '{start}'. Ask the user to clarify the date."
+        return (
+            f"Reactive question: Could not parse start '{start}'. Ask the user to clarify the date."
+        )
 
     end_dt = _parse_history_end(end, default_end_dt)
     now = _dt.datetime.now().astimezone()

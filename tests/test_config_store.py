@@ -19,6 +19,7 @@ def _write(tmp_path, text):
 
 def test_every_field_has_unique_path_and_valid_group():
     from server.config_schema import GROUPS
+
     paths = [f.path for f in SCHEMA]
     assert len(paths) == len(set(paths)), "duplicate field paths"
     for f in SCHEMA:
@@ -39,11 +40,14 @@ def test_update_writes_clean_comment_free_config(tmp_path):
 
 def test_update_coerces_types(tmp_path):
     path = _write(tmp_path, "general:\n  wakeword: hi\n")
-    cs.update_config({
-        "general.use_vad": "false",
-        "general.vad_threshold": "0.7",
-        "general.vad_min_speech_ms": "400",
-    }, path)
+    cs.update_config(
+        {
+            "general.use_vad": "false",
+            "general.vad_threshold": "0.7",
+            "general.vad_min_speech_ms": "400",
+        },
+        path,
+    )
     cfg = cs.read_config(path)
     assert cfg["general"]["use_vad"] is False
     assert cfg["general"]["vad_threshold"] == 0.7
@@ -83,8 +87,11 @@ def test_list_coercion_from_csv(tmp_path):
 def test_write_models_block(tmp_path):
     path = _write(tmp_path, "general:\n  wakeword: hi\n")
     cs.write_models(
-        {"asr": {"backend": "moonshine"}, "tts": {"backend": "kokoro-onnx"},
-         "llm": {"backend": "none"}},
+        {
+            "asr": {"backend": "moonshine"},
+            "tts": {"backend": "kokoro-onnx"},
+            "llm": {"backend": "none"},
+        },
         path,
     )
     cfg = cs.read_config(path)
@@ -100,7 +107,7 @@ def test_set_llm_model_name_preserves_rest_of_block(tmp_path):
     cs.set_llm_model_name("new-model", path)
     cfg = cs.read_config(path)
     assert cfg["models"]["llm"]["model"] == "new-model"
-    assert cfg["models"]["llm"]["backend"] == "openai"      # untouched
+    assert cfg["models"]["llm"]["backend"] == "openai"  # untouched
     assert cfg["models"]["llm"]["base_url"] == "http://x/v1"  # untouched
 
 
@@ -157,7 +164,10 @@ def test_settings_view_marks_offerable_by_variant(tmp_path, monkeypatch):
     gpu = cs.settings_view(path)
     assert gpu["variant"] == "gpu"
     assert {t["id"]: t["offerable"] for t in gpu["tier_presets"]} == {
-        "full": True, "cpu_server": True, "cpu_local": True}
+        "full": True,
+        "cpu_server": True,
+        "cpu_local": True,
+    }
 
     monkeypatch.setenv("FULLOCH_VARIANT", "cpu")
     cpu = cs.settings_view(path)

@@ -17,6 +17,7 @@ def _make_assistant(**kwargs):
     with patch("core.assistant.AudioCapture") as mock_ac:
         mock_ac.return_value = MagicMock()
         from core.assistant import Assistant
+
         a = Assistant(barge_in="wakeword", wakeword="hey atticus", **kwargs)
     # MagicMock tts_active would read truthy; force a real idle reading.
     a.audio_capture.tts_active.is_set.return_value = False
@@ -34,8 +35,8 @@ class TestRequestStop:
 
         a.request_stop()
 
-        assert sess.cancelled is True            # SLM/TTS told to abort
-        assert a._last_turn_end == 0.0           # no follow-up window
+        assert sess.cancelled is True  # SLM/TTS told to abort
+        assert a._last_turn_end == 0.0  # no follow-up window
         a.audio_capture.clear_follow_up.assert_called()
         assert any(e.get("role") == "stopped" for e in events)
 

@@ -10,6 +10,15 @@ from fastapi.testclient import TestClient
 
 from server.dashboard import create_app
 
+# Force tools.home_assistant's first-ever import to happen now, bound to the
+# real on-disk config, before any test below monkeypatches tools._config.config.
+# `from ._config import config` only re-runs on import/reload — if this module's
+# *first* import happened lazily inside a test with config monkeypatched (as
+# test_entities_list_and_toggle used to do), `tools.home_assistant.config`
+# would stay permanently bound to that test's throwaway dict for the rest of
+# the suite, silently diverging from tools._config.config for every later test.
+import tools.home_assistant  # noqa: F401
+
 
 def _stub_assistant():
     assistant = MagicMock()

@@ -24,7 +24,7 @@ from typing import Callable, Optional
 
 import httpx
 
-from .slm import ContextExhaustedError, RemoteUnreachable
+from .slm import GRAMMAR_FILE, ContextExhaustedError, RemoteUnreachable
 from .url_utils import normalize_url
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,32 @@ logger = logging.getLogger(__name__)
 # passes host.grammar (truthy) to request the constrained agent-JSON shape; for
 # the remote path its *presence* (not contents) switches on JSON mode.
 AGENT_JSON_SENTINEL = object()
+
+_gbnf_text: Optional[str] = None
+_gbnf_load_failed = False
+
+
+def _load_gbnf() -> Optional[str]:
+    """Read the local agent grammar once and cache it.
+
+    llama.cpp-family servers (llama-server, Unsloth Studio, LM Studio) accept a
+    raw GBNF string per-request via a `grammar` field on `/v1/chat/completions`
+    — an undocumented llama.cpp extension, not part of the OpenAI spec — which
+    gives the remote path the same hard action/reply-shape enforcement as the
+    local GBNF path instead of the looser json_object + repair fallback.
+    Servers that don't recognise the field ignore it. Returns None if the file
+    can't be read, so the caller degrades to response_format=json_object.
+    """
+    global _gbnf_text, _gbnf_load_failed
+    if _gbnf_text is not None or _gbnf_load_failed:
+        return _gbnf_text
+    try:
+        with open(GRAMMAR_FILE, "r", encoding="utf-8") as f:
+            _gbnf_text = f.read()
+    except OSError as e:
+        logger.warning("Could not read %s for remote grammar passthrough: %s", GRAMMAR_FILE, e)
+        _gbnf_load_failed = True
+    return _gbnf_text
 
 DEFAULT_BASE_URL = "http://localhost:8888/v1"  # 8080 would clash with SearXNG
 # Sent when models.llm.model is unset. Single-model servers (llama-server, a
@@ -84,15 +110,18 @@ class OpenAIClient:
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
     ):
-        from openai import OpenAI
 
         self.model = model
         self.base_url = base_url
-        # Split connect vs read timeout; no retries so a down endpoint fails
-        # fast (one connect attempt → RemoteUnreachable).
-        timeout = httpx.Timeout(read_timeout, connect=connect_timeout)
-        self._client = OpenAI(
-            base_url=base_url,
+        self._connect_timeout = connect_timeout
+        self._read_timeout = read_timeout
+        self._client = self._build_client(api_key)
+
+    def _build_client(self, api_key: str):
+        from openai import OpenAI
+        timeout = httpx.Timeout(self._read_timeout, connect=self._connect_timeout)
+        return OpenAI(
+            base_url=self.base_url,
             api_key=api_key or "not-needed",
             timeout=timeout,
             max_retries=0,
@@ -106,6 +135,10 @@ class OpenAIClient:
         client, no reconnect. Callers serialise it against in-flight turns.
         """
         self.model = model
+
+    def set_api_key(self, api_key: str) -> None:
+        """Swap the API key live — rebuilds the SDK client in-place, no restart needed."""
+        self._client = self._build_client(api_key)
 
     def ping(self) -> tuple[bool, str]:
         """Lightweight reachability probe using this client's own auth + timeout.
@@ -181,7 +214,16 @@ class OpenAIClient:
                 "extra_body": {"chat_template_kwargs": {"enable_thinking": thinking_mode}},
             }
             if json_mode:
-                kwargs["response_format"] = {"type": "json_object"}
+                gbnf = _load_gbnf()
+                if gbnf:
+                    # A real grammar is strictly tighter than json_object mode —
+                    # and llama-server silently drops a custom grammar in favour
+                    # of a trivial schema-derived one whenever response_format
+                    # is also present (see common/chat.cpp), so send grammar
+                    # alone, never both.
+                    kwargs["extra_body"]["grammar"] = gbnf
+                else:
+                    kwargs["response_format"] = {"type": "json_object"}
             stream = self._client.chat.completions.create(**kwargs)
             for chunk in stream:
                 if cancel_check is not None and cancel_check():
@@ -325,10 +367,10 @@ class OpenAIClient:
             return text  # let the agent loop's parse-failure path handle it
 
 
-def _resolve_api_key(opts: dict) -> str:
+def _resolve_api_key(explicit: str = "") -> str:
     return (
-        opts.get("api_key")
-        or os.environ.get("FULLOCH_LLM_API_KEY", "")
+        explicit
+        or os.environ.get("LLM_API_KEY", "")
         or os.environ.get("OPENAI_API_KEY", "")
         or "not-needed"
     )
@@ -337,7 +379,7 @@ def _resolve_api_key(opts: dict) -> str:
 def load_openai(
     model: Optional[str] = None,
     base_url: Optional[str] = None,
-    api_key: Optional[str] = None,
+    api_key: Optional[str] = None,  # accepted but ignored — key comes from credentials.json
     connect_timeout=None,
     read_timeout=None,
     **opts,
@@ -352,11 +394,11 @@ def load_openai(
     model = model or DEFAULT_MODEL
     # Normalise: add a scheme if missing, drop a trailing slash (which would
     # otherwise produce "…//chat/completions").
-    base_url = normalize_url(base_url or os.environ.get("FULLOCH_LLM_BASE_URL") or DEFAULT_BASE_URL)
+    base_url = normalize_url(base_url or DEFAULT_BASE_URL)
     client = OpenAIClient(
         model=model,
         base_url=base_url,
-        api_key=_resolve_api_key({"api_key": api_key, **opts}),
+        api_key=_resolve_api_key(),
         connect_timeout=float(connect_timeout) if connect_timeout else DEFAULT_CONNECT_TIMEOUT,
         read_timeout=float(read_timeout) if read_timeout else DEFAULT_READ_TIMEOUT,
     )
@@ -376,14 +418,14 @@ def test_connection(
     Used by the wizard's 'Test connection' button (a deliberate pre-flight,
     unlike the runtime call-and-catch). A slightly looser connect timeout here
     since the user is actively waiting. A blank api_key falls back to the env
-    key (FULLOCH_LLM_API_KEY / OPENAI_API_KEY) so the test mirrors runtime.
+    key (LLM_API_KEY / OPENAI_API_KEY) so the test mirrors runtime.
     """
     try:
         from openai import OpenAI
 
         client = OpenAI(
             base_url=base_url,
-            api_key=_resolve_api_key({"api_key": api_key}),
+            api_key=_resolve_api_key(api_key),
             timeout=httpx.Timeout(read_timeout, connect=connect_timeout),
             max_retries=0,
         )

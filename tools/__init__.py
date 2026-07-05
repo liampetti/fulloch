@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 _OPTIONAL_TOOLS = {
     "home_assistant": "home_assistant",
     "search": "search_web",
+    "spotify": "spotify",
 }
 
 # Tools that are always loaded — no config dependency.

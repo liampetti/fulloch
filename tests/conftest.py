@@ -20,12 +20,33 @@ import pytest
 # test module imports tools.home_assistant (conftest is loaded first).
 os.environ.setdefault("FULLOCH_HA_ALIAS_RETRIES", "0")
 
-# Force a token-free HA env for the suite: tools.home_assistant now loads its
-# alias map / role entities lazily on first tool use (_ensure_loaded), gated on
-# HA_TOKEN. With no token that load is a no-op, so tests that patch the alias map
-# or role-entity globals aren't clobbered by a real fetch — deterministic even if
-# a dev has FULLOCH_HA_TOKEN exported. Tests that need a token patch HA_TOKEN.
-os.environ.pop("FULLOCH_HA_TOKEN", None)
+# Point tools.notes_root at a scratch override file instead of the real
+# data/notes_root_override.json. The real one is a *sticky* pointer to
+# whatever vault the Obsidian plugin last connected — often a Docker-only
+# mount path (e.g. /vault/...) that doesn't exist on the native machine
+# running pytest, which crashed tools/notes.py's import-time mkdir(). Must
+# be set BEFORE any test module imports tools.notes/notes_root (conftest
+# is loaded first).
+os.environ.setdefault(
+    "FULLOCH_NOTES_ROOT_OVERRIDE_PATH",
+    str(Path(tempfile.gettempdir()) / "fulloch_test_notes_root_override.json"),
+)
+
+# Same reasoning for server.auth's persisted dashboard sessions: point at a
+# scratch file instead of the real data/dashboard_sessions.json so tests that
+# construct an AppContext (which loads sessions at init) don't read/write
+# real login state. Must be set BEFORE any test module imports server.auth or
+# server.lifecycle.
+os.environ.setdefault(
+    "FULLOCH_SESSIONS_PATH",
+    str(Path(tempfile.gettempdir()) / "fulloch_test_dashboard_sessions.json"),
+)
+
+# Force a token-free HA env for the suite: tools.home_assistant loads its
+# alias map lazily on first tool use, gated on HA_TOKEN. With no token that
+# load is a no-op, so tests that patch the alias map aren't clobbered by a
+# real fetch — deterministic even if a dev has HA_TOKEN in credentials.json.
+os.environ.pop("HA_TOKEN", None)
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent

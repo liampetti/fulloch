@@ -13,4 +13,11 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - uses: actions/checkout@v4
+      # hassfest's entrypoint does `find . -name manifest.json` over the whole
+      # checkout and validates every hit as an HA integration manifest.
+      # obsidian-plugin/manifest.json is a real, required file (Obsidian
+      # plugins must ship a manifest.json) but isn't HA-shaped at all, which
+      # crashes hassfest's codeowners plugin with a bare KeyError. Drop it
+      # from this ephemeral job workspace only — doesn't touch the repo.
+      - run: rm -f obsidian-plugin/manifest.json
       - uses: home-assistant/actions/hassfest@master

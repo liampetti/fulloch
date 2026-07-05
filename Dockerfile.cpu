@@ -5,6 +5,18 @@
 # low-power / no-GPU host can run the tiny tier or offload reasoning to a remote
 # endpoint. Much smaller than the GPU image. The wizard hides GPU-only backends
 # (FULLOCH_VARIANT=cpu).
+
+# Stage 0: Build the Obsidian plugin bundle + downloadable zip from source, so
+# the dashboard always serves what's in obsidian-plugin/main.ts rather than a
+# stale hand-built artifact.
+FROM node:20-slim AS obsidian-plugin-builder
+WORKDIR /plugin
+RUN apt-get update && apt-get install -y zip && rm -rf /var/lib/apt/lists/*
+COPY obsidian-plugin/package.json obsidian-plugin/package-lock.json ./
+RUN npm ci
+COPY obsidian-plugin/main.ts obsidian-plugin/manifest.json obsidian-plugin/esbuild.config.mjs obsidian-plugin/tsconfig.json ./
+RUN npm run build && zip fulloch-obsidian.zip manifest.json main.js
+
 FROM python:3.11-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -19,17 +31,14 @@ ENV FULLOCH_VARIANT=cpu
 # Runtime system deps:
 # - espeak-ng: Kokoro TTS grapheme-to-phoneme
 # - libsndfile1: soundfile I/O; ffmpeg: audio decode
-# - libportaudio2: PortAudio (sounddevice); libasound2-plugins + libpulse0:
-#   ALSA->PulseAudio bridge for host audio passthrough
 # - gcc: a couple of wheels JIT/compile at runtime
+# Voice I/O is via the browser satellite WebSocket; no local sounddevice /
+# PulseAudio / ALSA needed.
 RUN apt-get update && apt-get install -y \
     gcc \
     ffmpeg \
     espeak-ng \
     libsndfile1 \
-    libportaudio2 \
-    libasound2-plugins \
-    libpulse0 \
     procps \
     curl \
     && rm -rf /var/lib/apt/lists/*
@@ -56,10 +65,14 @@ COPY --chown=appuser:appuser tools/ tools/
 COPY --chown=appuser:appuser utils/ utils/
 COPY --chown=appuser:appuser audio/ audio/
 COPY --chown=appuser:appuser server/ server/
-COPY --chown=appuser:appuser wav/ wav/
 
 # First-run seeds (copied into the empty ./data volume by core/bootstrap.py).
 COPY --chown=appuser:appuser data/config.example.yml /app/seed/config.example.yml
 COPY --chown=appuser:appuser data/models/grammars/agent.gbnf /app/seed/grammars/agent.gbnf
+COPY --chown=appuser:appuser data/wav/ /app/seed/wav/
+
+# Obsidian plugin zip, built from source in the obsidian-plugin-builder stage
+# above — served by GET /api/obsidian/plugin.zip (server/dashboard.py).
+COPY --from=obsidian-plugin-builder --chown=appuser:appuser /plugin/fulloch-obsidian.zip /app/obsidian-plugin/fulloch-obsidian.zip
 
 CMD ["python", "app.py"]

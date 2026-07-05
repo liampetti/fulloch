@@ -114,6 +114,31 @@ class NotesIndex:
         self._chunks: List[Chunk] = []
         self._mtimes: dict[str, float] = {}
 
+        # Auto-register with notes_root so a vault-path override invalidates us.
+        try:
+            from . import notes_root as _nr
+
+            def _on_root_change(_old, new):
+                with self._lock:
+                    self._chunks = []
+                    self._mtimes = {}
+                    # Drop persisted files so a re-scan doesn't restore stale data.
+                    for p in (self._npy_path, self._meta_path):
+                        if p.exists():
+                            try:
+                                p.unlink()
+                            except OSError:
+                                pass
+                    # Always update _notes_root so scan() walks the right directory,
+                    # even when the override is cleared (new is None → fall back to
+                    # the configured default).
+                    self._notes_root = new if new is not None else _nr.get_notes_root()
+
+            _nr.register_index_listener(_on_root_change)
+        except Exception:
+            # notes_root may not be importable in some test contexts; non-fatal.
+            pass
+
     # ------------------------------------------------------------------
     # Lazy load — model + persisted index
     # ------------------------------------------------------------------
@@ -263,7 +288,17 @@ class NotesIndex:
             self._ensure_loaded()
             seen = set()
             dirty = False
-            for path in sorted(self._notes_root.rglob("*.md")):
+            all_paths = sorted(self._notes_root.rglob("*.md"))
+            pending = [
+                path
+                for path in all_paths
+                if abs(self._mtimes.get(self._rel(path), 0.0) - path.stat().st_mtime) >= 1e-3
+            ]
+            total_pending = len(pending)
+            done = 0
+            if total_pending > 1:
+                logger.info(f"Embedding {total_pending} notes file(s)...")
+            for path in all_paths:
                 rel = self._rel(path)
                 seen.add(rel)
                 mtime = path.stat().st_mtime
@@ -273,6 +308,9 @@ class NotesIndex:
                 self._chunks.extend(self._build_chunks(path))
                 self._mtimes[rel] = mtime
                 dirty = True
+                done += 1
+                if total_pending > 1:
+                    logger.info(f"Embedded {done}/{total_pending} files ({rel})")
             # Drop files that vanished from disk.
             for rel in list(self._mtimes):
                 if rel not in seen:

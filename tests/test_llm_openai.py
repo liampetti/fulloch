@@ -60,11 +60,24 @@ def test_streams_and_records_stats():
     assert stats.llm_ttft is not None
 
 
-def test_json_mode_sets_response_format():
+def test_json_mode_sends_gbnf_grammar():
+    # The real agent.gbnf ships in the repo, so json_mode should send it
+    # verbatim as a llama.cpp-extension `grammar` field rather than
+    # response_format — llama-server silently drops a custom grammar whenever
+    # response_format is also present (see core/llm_openai.py's generate()).
     c, comp = _make_client(lambda k: iter([_chunk('{"reply":"hi"}')]))
     out = c.generate(user_prompt="hi", grammar=llm_openai.AGENT_JSON_SENTINEL)
     assert out == '{"reply":"hi"}'
+    assert "response_format" not in comp.last_kwargs
+    assert "root ::=" in comp.last_kwargs["extra_body"]["grammar"]
+
+
+def test_json_mode_falls_back_to_response_format_without_grammar_file(monkeypatch):
+    monkeypatch.setattr(llm_openai, "_load_gbnf", lambda: None)
+    c, comp = _make_client(lambda k: iter([_chunk('{"reply":"hi"}')]))
+    c.generate(user_prompt="hi", grammar=llm_openai.AGENT_JSON_SENTINEL)
     assert comp.last_kwargs["response_format"] == {"type": "json_object"}
+    assert "grammar" not in comp.last_kwargs["extra_body"]
 
 
 def test_free_text_has_no_response_format():
@@ -252,9 +265,9 @@ def test_connection_failure(monkeypatch):
 
 
 def test_connection_blank_key_falls_back_to_env(monkeypatch):
-    # A blank api_key should pick up FULLOCH_LLM_API_KEY (mirrors runtime), so the
+    # A blank api_key should pick up LLM_API_KEY (mirrors runtime), so the
     # wizard's Test connection works when the key lives only in the environment.
-    monkeypatch.setenv("FULLOCH_LLM_API_KEY", "envkey")
+    monkeypatch.setenv("LLM_API_KEY", "envkey")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     seen = {}
 
@@ -311,7 +324,7 @@ def test_list_models_failure_degrades(monkeypatch):
 def test_agent_loop_degrades_to_regex_on_remote_unreachable():
     import core.agent_loop as al
 
-    calls = {"fallback": 0, "remote_status": []}
+    calls = {"no_ai_fallback": 0, "llm_error_fallback": 0, "remote_status": []}
     host = types.SimpleNamespace(
         llm_enabled=True,
         _history=[],
@@ -331,16 +344,23 @@ def test_agent_loop_degrades_to_regex_on_remote_unreachable():
 
     host._generate_with_context_recovery = _raise
 
-    def _fallback(session, source):
-        calls["fallback"] += 1
+    def _no_ai_fallback(session, source):
+        calls["no_ai_fallback"] += 1
         return "BASIC COMMANDS ONLY"
 
-    host._speak_no_ai_fallback = _fallback
+    def _llm_error_fallback(session, source):
+        calls["llm_error_fallback"] += 1
+        return "LLM SERVER UNREACHABLE"
+
+    host._speak_no_ai_fallback = _no_ai_fallback
+    host._speak_llm_error_fallback = _llm_error_fallback
 
     loop = al.AgentLoop(host, session=None, source="text")
     # A prompt the regex fast-path won't catch -> first agent call hits the SLM.
     out = loop.run("tell me a story about the sea")
-    assert out == "BASIC COMMANDS ONLY"
-    assert calls["fallback"] == 1
+    # RemoteUnreachable with no regex match -> LLM error fallback, not generic no-AI.
+    assert out == "LLM SERVER UNREACHABLE"
+    assert calls["llm_error_fallback"] == 1
+    assert calls["no_ai_fallback"] == 0
     # The unreachable endpoint was recorded as down (drives the dashboard banner).
     assert calls["remote_status"] == [False]

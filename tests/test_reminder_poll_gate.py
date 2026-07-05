@@ -1,7 +1,7 @@
 """The reminder-poll thread must respect the same config gate as the tool loader.
 
 Importing tools.home_assistant has side effects — it registers the HA tools into
-the global registry and connects to HA (default URL + the .env token) — so a
+the global registry and connects to HA (default URL + credentials.json token) — so a
 commented-out `home_assistant:` block must NOT trigger that import via the
 reminder poll. Otherwise HA is silently re-enabled despite being disabled.
 """

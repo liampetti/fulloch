@@ -65,7 +65,7 @@ def test_cpu_image_modules_import_without_gpu_libs():
     """
     import importlib.util as iu
 
-    for dep in ("torch", "transformers", "onnxruntime", "librosa", "sounddevice"):
+    for dep in ("torch", "transformers", "onnxruntime", "librosa"):
         if iu.find_spec(dep) is None:
             import pytest
 

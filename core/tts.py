@@ -32,7 +32,6 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-import sounddevice as sd
 import torch
 from qwen_tts import Qwen3TTSModel
 
@@ -46,17 +45,17 @@ torch.set_float32_matmul_precision("high")
 VOICES_DIR = "./data/voices"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Output device for sd.OutputStream. None = system default. Set via
-# `set_output_device()` once at startup so play_chunks/speak_stream pick it
-# up consistently.
-_OUTPUT_DEVICE: Optional[str] = None
-
-# Event the recorder thread reads to switch to a stricter silence threshold
-# while we're producing audio (AEC residue otherwise prevents silence
-# detection). Registered once at startup by Assistant via
+# Event the satellite recorder reads to switch to a stricter silence
+# threshold while we're producing audio (AEC residue otherwise prevents
+# silence detection). Registered once at startup by Assistant via
 # `set_tts_active_event` — kept module-level so play_chunks/speak_stream
 # can toggle it without needing an AudioCapture reference.
 _TTS_ACTIVE_EVENT: Optional[threading.Event] = None
+# When set, audio chunks go here (WebSocket satellite) instead of being
+# dropped on the floor. Items: ("start", sr) | (np.ndarray, None) |
+# ("end",) | ("stop",). With no browser open, TTS chunks are simply not
+# routed anywhere — voice is a browser-only I/O channel.
+_satellite_sink: Optional[queue.Queue] = None
 
 # Shared kwargs for every `stream_generate_voice_clone` call — warmup,
 # pre-render, and live streaming all use the same generation cadence so the
@@ -76,17 +75,15 @@ _STREAM_KWARGS = {
 }
 
 
-def set_output_device(device: Optional[str]) -> None:
-    """Set the sounddevice output device used by speak_stream/play_chunks."""
-    global _OUTPUT_DEVICE
-    _OUTPUT_DEVICE = device
-    logger.info(f"TTS output device: {device or 'system default'}")
-
-
 def set_tts_active_event(event: Optional[threading.Event]) -> None:
     """Register the event toggled by play_chunks/speak_stream during playback."""
     global _TTS_ACTIVE_EVENT
     _TTS_ACTIVE_EVENT = event
+
+
+def set_satellite_sink(q: Optional[queue.Queue]) -> None:
+    global _satellite_sink
+    _satellite_sink = q
 
 
 # Populated by `load_tts()` once a backend is chosen — `import core.tts`
@@ -207,6 +204,21 @@ def _drain_job(out: "queue.Queue") -> None:
         pass
 
 
+def _drain_queue_nowait(q: "queue.Queue") -> None:
+    """Discard everything currently sitting in `q` without blocking.
+
+    Used on barge-in to drop audio chunks this same producer already queued
+    for the browser but that `_send()` (server/dashboard.py) hasn't sent
+    yet, so a "cancel" message isn't stuck behind stale, about-to-be-cut
+    audio.
+    """
+    while True:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            break
+
+
 def set_voice(voice_name: str):
     """Build a voice-clone prompt from data/voices/<voice_name>.wav + transcript.
 
@@ -290,7 +302,18 @@ def synthesize(text: str, prompt):
 
 
 def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
-    """Play a pre-synthesized chunk list with TtsSession cancellation support."""
+    """Route a pre-synthesized chunk list to the WebSocket satellite.
+
+    TTS is a browser-only I/O channel: chunks are pushed to the satellite
+    sink when a browser is connected (sink is non-None). With no browser
+    open, the chunks are dropped on the floor and the user simply doesn't
+    hear this turn — the generation cost is wasted but the pipeline stays
+    consistent. Callers that need an in-process speech output (e.g. a CLI
+    test harness) can register a custom sink via `set_satellite_sink`.
+
+    The TtsSession.cancelled path is honoured: a barge-in stops enqueuing
+    further chunks and emits the "end" sentinel so the browser flushes.
+    """
     if session is None:
         session = TtsSession()
     session.stop_event.clear()
@@ -298,20 +321,19 @@ def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
     try:
         if not chunks or session.cancelled:
             return
+        sink = _satellite_sink
         if _TTS_ACTIVE_EVENT is not None:
             _TTS_ACTIVE_EVENT.set()
         try:
-            with sd.OutputStream(
-                samplerate=sample_rate,
-                channels=1,
-                dtype="float32",
-                device=_OUTPUT_DEVICE,
-            ) as stream:
+            if sink is not None:
+                sink.put(("start", sample_rate))
                 for chunk in chunks:
                     if session.cancelled:
-                        stream.abort()
-                        return
-                    stream.write(chunk)
+                        break
+                    sink.put((chunk, None))
+                sink.put(("end",))
+            else:
+                logger.debug("No satellite connected; TTS chunks dropped on the floor.")
         finally:
             if _TTS_ACTIVE_EVENT is not None:
                 _TTS_ACTIVE_EVENT.clear()
@@ -338,6 +360,14 @@ def speak_stream(
     `on_first_audio` fires once, right after the first chunk is ready (and
     `stats.tts_seconds` is set) — before playback runs to completion — so the
     dashboard can show the TTS time without waiting for the voice to finish.
+
+    Returns the estimated monotonic-clock time playback will finish on the
+    browser (playback start + total audio duration). Chunks are handed to
+    the satellite sink as fast as they're generated with no flow control, so
+    generation can finish well before the audio has actually played out —
+    callers that need to know "when did the user actually hear the reply
+    end" (e.g. arming the follow-up window) should use this return value
+    instead of the time `speak_stream` itself returns.
     """
     if session is None:
         session = TtsSession()
@@ -351,10 +381,10 @@ def speak_stream(
         if stats is not None:
             stats.tts_seconds = time.monotonic() - t_submit  # time to first audio
         if first_item is None:
-            return
+            return time.monotonic()
         if session.cancelled:
             _drain_job(out)  # let the shared worker finish; don't wedge it
-            return
+            return time.monotonic()
         if on_first_audio is not None:
             try:
                 on_first_audio()
@@ -362,28 +392,47 @@ def speak_stream(
                 logger.warning(f"on_first_audio hook failed: {e}")
         first_chunk, sample_rate = first_item
 
+        sink = _satellite_sink
         if _TTS_ACTIVE_EVENT is not None:
             _TTS_ACTIVE_EVENT.set()
+        t_playback_start = time.monotonic()
+        total_samples = 0
         try:
-            with sd.OutputStream(
-                samplerate=sample_rate,
-                channels=1,
-                dtype="float32",
-                device=_OUTPUT_DEVICE,
-            ) as stream:
-                stream.write(first_chunk)
+            if sink is not None:
+                sink.put(("start", sample_rate))
+                sink.put((first_chunk, None))
+                total_samples += len(first_chunk)
+                cancelled_mid_stream = False
                 while True:
                     item = out.get()
                     if item is None:
                         break
                     if session.cancelled:
-                        stream.abort()  # discard buffered audio
-                        _drain_job(out)  # keep reading so the worker unwedges
+                        _drain_job(out)
+                        cancelled_mid_stream = True
                         break
-                    chunk, _ = item
-                    stream.write(chunk)
+                    sink.put((item[0], None))
+                    total_samples += len(item[0])
+                if cancelled_mid_stream:
+                    # Chunks are sent to the browser as fast as they're
+                    # generated with no flow control, so audio already queued
+                    # here is likely already playing client-side by the time
+                    # a barge-in is detected. "end" is a no-op on the client;
+                    # "cancel" tells it to actually stop already-scheduled
+                    # playback. Drop anything still sitting unsent first so
+                    # the cancel isn't stuck behind stale audio.
+                    _drain_queue_nowait(sink)
+                    sink.put(("cancel",))
+                else:
+                    sink.put(("end",))
+            else:
+                logger.debug("No satellite connected; TTS chunks dropped on the floor.")
+                _drain_job(out)
         finally:
             if _TTS_ACTIVE_EVENT is not None:
                 _TTS_ACTIVE_EVENT.clear()
+        if sink is None or not sample_rate:
+            return time.monotonic()
+        return t_playback_start + total_samples / sample_rate
     finally:
         session.active = False

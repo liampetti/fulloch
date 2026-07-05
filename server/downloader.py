@@ -16,7 +16,8 @@ real implementations) so tests drive the manager with fakes — no network.
 import logging
 import os
 import threading
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -26,6 +27,11 @@ logger = logging.getLogger(__name__)
 
 GRAMMAR_URL = "https://raw.githubusercontent.com/ggml-org/llama.cpp/master/grammars/json.gbnf"
 BGE_REPO = "BAAI/bge-small-en-v1.5"
+
+# Written into a dir_snapshot dest on successful completion. Lets us
+# distinguish a complete download from an interrupted one whose directory
+# already exists but is only partially populated.
+COMPLETE_SENTINEL = ".fulloch_complete"
 
 # Asset states.
 PENDING = "pending"
@@ -38,7 +44,7 @@ ERROR = "error"
 class Asset:
     key: str
     label: str
-    kind: str  # "snapshot" | "file" | "url"
+    kind: str  # "snapshot" | "file" | "url" | "dir_snapshot"
     dest: str  # directory (snapshot/file) or file path (url)
     repo: Optional[str] = None
     filename: Optional[str] = None
@@ -47,8 +53,18 @@ class Asset:
     size_gb: Optional[float] = None
     status: str = PENDING
     error: Optional[str] = None
+    bytes_done: int = field(default=0, compare=False, repr=False)
+    bytes_total: Optional[int] = field(default=None, compare=False, repr=False)
 
     def snapshot(self) -> dict:
+        if self.status == DONE:
+            pct = 100
+        elif self.status == DOWNLOADING and self.bytes_total:
+            pct = min(99, round(self.bytes_done / self.bytes_total * 100))
+        elif self.status == PENDING:
+            pct = 0
+        else:
+            pct = None  # indeterminate — show spinner in UI
         return {
             "key": self.key,
             "label": self.label,
@@ -56,6 +72,9 @@ class Asset:
             "size_gb": self.size_gb,
             "status": self.status,
             "error": self.error,
+            "pct": pct,
+            "bytes_done": self.bytes_done,
+            "bytes_total": self.bytes_total,
             # `domain` (asr/tts/llm) lets the wizard attach a custom-path input to
             # the right model; `present` drives the install pre-scan (on disk vs
             # needs download); `dest` is the path it'll load from / download to.
@@ -183,6 +202,103 @@ def plan_assets(resolved: dict, models_dir: str = "./data/models") -> list:
 # --- default (real) download implementations (lazy heavy imports) -----------
 
 
+def _make_asset_tqdm(asset: Asset, lock: threading.Lock):
+    """Return a silent tqdm-compatible class for the *outer* per-repo bar
+    passed as `snapshot_download`'s `tqdm_class=` kwarg.
+
+    This bar only ever sees a `total` of *files to fetch*, not bytes — HF's own
+    docstring says "the tqdm_class is not passed to each individual download" —
+    so it's just used to suppress console spam; real byte counts come from
+    `_byte_progress` below. Must still actually iterate the wrapped iterable
+    (a `concurrent.futures.Executor.map()` result iterator): swallowing it
+    would silently discard exceptions raised by failed per-file downloads.
+
+    huggingface_hub's parallel snapshot download drives per-file bars through
+    ``tqdm.contrib.concurrent.ensure_lock``, which reads/writes/deletes a real
+    ``_lock`` *class* attribute (not just via get_lock/set_lock calls) — it does
+    `getattr(cls, '_lock', None)` and `del cls._lock`. Mirror real tqdm's
+    get_lock/set_lock (which assign `cls._lock` directly) rather than stashing
+    the lock in a closure var, or `del cls._lock` raises AttributeError.
+    """
+
+    class _T:
+        def __init__(self, iterable=None, *, total=None, **_kw):
+            self._iterable = iterable
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def __iter__(self):
+            for item in self._iterable or ():
+                yield item
+        def update(self, n=1): pass
+        def set_postfix(self, **_): pass
+        def set_description(self, *_a, **_k): pass
+        def close(self): pass
+        def display(self, *_a, **_k): pass
+        def clear(self, *_a, **_k): pass
+        def refresh(self, *_a, **_k): pass
+        def reset(self, total=None): pass
+        def write(self, s="", *_a, **_k): pass
+        @property
+        def n(self): return 0
+        @classmethod
+        def get_lock(cls):
+            if not hasattr(cls, "_lock"):
+                cls._lock = threading.RLock()
+            return cls._lock
+        @classmethod
+        def set_lock(cls, lock): cls._lock = lock
+    return _T
+
+
+@contextmanager
+def _byte_progress(asset: Asset, lock: threading.Lock):
+    """Monkeypatch huggingface_hub's internal per-file progress-bar class so
+    real byte counts reach `asset.bytes_total`/`bytes_done`.
+
+    `_get_progress_bar_context` (huggingface_hub/utils/tqdm.py) instantiates
+    the module-level `tqdm` name directly for each file's byte-level bar —
+    that's the only place actual transfer sizes are known, since
+    `snapshot_download`'s own `tqdm_class=` kwarg is documented as not being
+    passed down to individual file downloads. Patched for the duration of one
+    asset's download call, then restored.
+    """
+    # Neither `from huggingface_hub.utils import tqdm` nor `import
+    # huggingface_hub.utils.tqdm as m` reach the actual submodule here:
+    # `huggingface_hub/utils/__init__.py` does `from .tqdm import tqdm`, which
+    # overwrites the `tqdm` *attribute* on the `utils` package with the class —
+    # and `import a.b.c as x` walks attributes, not `sys.modules`, so it
+    # resolves to that same class. Go through `sys.modules` directly to get the
+    # real submodule whose global `tqdm` name `_get_progress_bar_context` reads.
+    import sys as _sys
+
+    import huggingface_hub.utils.tqdm  # noqa: F401 — ensure it's imported/cached
+    _hf_tqdm_module = _sys.modules["huggingface_hub.utils.tqdm"]
+
+    class _P:
+        def __init__(self, *, total=None, initial=0, **_kw):
+            with lock:
+                if total:
+                    asset.bytes_total = (asset.bytes_total or 0) + total
+                if initial:
+                    asset.bytes_done += initial
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def update(self, n=1):
+            with lock:
+                asset.bytes_done += n
+        def close(self): pass
+        def set_description(self, *_a, **_k): pass
+        def set_postfix(self, **_): pass
+        def refresh(self, *_a, **_k): pass
+
+    original = _hf_tqdm_module.tqdm
+    _hf_tqdm_module.tqdm = _P
+    try:
+        yield
+    finally:
+        _hf_tqdm_module.tqdm = original
+
+
 def _default_snapshot(repo: str, dest: str) -> None:
     from huggingface_hub import snapshot_download
 
@@ -190,11 +306,27 @@ def _default_snapshot(repo: str, dest: str) -> None:
     snapshot_download(repo_id=repo, cache_dir=dest)
 
 
+def _default_snapshot_with_progress(repo: str, dest: str, asset: Asset, lock: threading.Lock) -> None:
+    from huggingface_hub import snapshot_download
+
+    Path(dest).mkdir(parents=True, exist_ok=True)
+    with _byte_progress(asset, lock):
+        snapshot_download(repo_id=repo, cache_dir=dest, tqdm_class=_make_asset_tqdm(asset, lock))
+
+
 def _default_file(repo: str, filename: str, dest: str) -> None:
     from huggingface_hub import hf_hub_download
 
     Path(dest).mkdir(parents=True, exist_ok=True)
     hf_hub_download(repo_id=repo, filename=filename, local_dir=dest)
+
+
+def _default_file_with_progress(repo: str, filename: str, dest: str, asset: Asset, lock: threading.Lock) -> None:
+    from huggingface_hub import hf_hub_download
+
+    Path(dest).mkdir(parents=True, exist_ok=True)
+    with _byte_progress(asset, lock):
+        hf_hub_download(repo_id=repo, filename=filename, local_dir=dest)
 
 
 def _default_dir_snapshot(repo: str, dest: str, allow=None) -> None:
@@ -207,11 +339,72 @@ def _default_dir_snapshot(repo: str, dest: str, allow=None) -> None:
     snapshot_download(repo_id=repo, local_dir=dest, allow_patterns=allow)
 
 
+def _default_dir_snapshot_with_progress(repo: str, dest: str, allow, asset: Asset, lock: threading.Lock) -> None:
+    from huggingface_hub import snapshot_download
+
+    Path(dest).mkdir(parents=True, exist_ok=True)
+    with _byte_progress(asset, lock):
+        snapshot_download(
+            repo_id=repo,
+            local_dir=dest,
+            allow_patterns=allow,
+            tqdm_class=_make_asset_tqdm(asset, lock),
+        )
+
+
 def _default_url(url: str, dest: str) -> None:
     import urllib.request
 
     Path(dest).parent.mkdir(parents=True, exist_ok=True)
     urllib.request.urlretrieve(url, dest)
+
+
+def _default_url_with_progress(url: str, dest: str, asset: Asset, lock: threading.Lock) -> None:
+    import urllib.request
+
+    Path(dest).parent.mkdir(parents=True, exist_ok=True)
+
+    def _hook(block_num: int, block_size: int, total_size: int) -> None:
+        with lock:
+            if total_size > 0 and asset.bytes_total is None:
+                asset.bytes_total = total_size
+            asset.bytes_done = min(
+                block_num * block_size,
+                total_size if total_size > 0 else block_num * block_size,
+            )
+
+    urllib.request.urlretrieve(url, dest, reporthook=_hook)
+
+
+@contextmanager
+def _hf_online():
+    """Force huggingface_hub online for the duration of a download.
+
+    `HF_HUB_OFFLINE` is cached by `huggingface_hub.constants` as a plain
+    module-level bool at *import* time (see `constants.py`), so once that
+    module has been imported anywhere in this process — e.g. an earlier
+    download, or a model load — flipping `os.environ["HF_HUB_OFFLINE"]`
+    afterward has no effect on it. Every offline check in the library reads
+    `constants.HF_HUB_OFFLINE` back off that same module object though (not a
+    `from constants import HF_HUB_OFFLINE` copy), so patching the attribute
+    directly does take effect immediately, import order notwithstanding.
+    Restores both the attribute and the env var on exit so the runtime goes
+    back to offline once the download finishes.
+    """
+    import huggingface_hub.constants as hf_constants
+
+    prev_env = os.environ.get("HF_HUB_OFFLINE")
+    prev_attr = hf_constants.HF_HUB_OFFLINE
+    os.environ["HF_HUB_OFFLINE"] = "0"
+    hf_constants.HF_HUB_OFFLINE = False
+    try:
+        yield
+    finally:
+        hf_constants.HF_HUB_OFFLINE = prev_attr
+        if prev_env is None:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+        else:
+            os.environ["HF_HUB_OFFLINE"] = prev_env
 
 
 def _already_present(asset: Asset) -> bool:
@@ -222,7 +415,14 @@ def _already_present(asset: Asset) -> bool:
         return (Path(asset.dest) / asset.filename).is_file()
     if asset.kind == "dir_snapshot":
         d = Path(asset.dest)
-        return d.is_dir() and any(d.iterdir())
+        if not d.is_dir():
+            return False
+        # Sentinel is written on successful completion, but a killed/interrupted
+        # run can still leave it behind with no actual model files underneath
+        # (e.g. the process died between mkdir+touch and the transfer). Require
+        # at least one non-sentinel file too, so a sentinel-only dir is treated
+        # as missing and re-downloaded rather than silently loaded as complete.
+        return any(f for f in d.iterdir() if f.name != COMPLETE_SENTINEL)
     # snapshot: hub dir for the repo
     hub_dir = Path(asset.dest) / f"models--{asset.repo.replace('/', '--')}"
     return hub_dir.is_dir()
@@ -252,6 +452,10 @@ class DownloadManager:
             if self._state == "downloading":
                 return False
             self._assets = assets
+            for a in assets:
+                a.status = PENDING
+                a.bytes_done = 0
+                a.bytes_total = None
             self._state = "downloading"
             self._error = None
         self._thread = threading.Thread(
@@ -267,29 +471,8 @@ class DownloadManager:
 
     def _run(self, on_complete) -> None:
         ok = True
-        for asset in self._assets:
-            try:
-                if _already_present(asset):
-                    self._set(asset, DONE)
-                    continue
-                self._set(asset, DOWNLOADING)
-                logger.info("Downloading %s (%s)", asset.label, asset.key)
-                if asset.kind == "snapshot":
-                    self._snapshot_fn(asset.repo, asset.dest)
-                elif asset.kind == "dir_snapshot":
-                    self._dir_snapshot_fn(asset.repo, asset.dest, asset.allow)
-                elif asset.kind == "file":
-                    self._file_fn(asset.repo, asset.filename, asset.dest)
-                elif asset.kind == "url":
-                    self._url_fn(asset.url, asset.dest)
-                else:
-                    raise ValueError(f"unknown asset kind {asset.kind!r}")
-                self._set(asset, DONE)
-            except Exception as e:  # noqa: BLE001 — surface, don't crash the thread
-                logger.exception("Download failed: %s", asset.key)
-                self._set(asset, ERROR, f"{type(e).__name__}: {e}")
-                ok = False
-                break
+        with _hf_online():
+            ok = self._download_all()
         with self._lock:
             self._state = DONE if ok else ERROR
             if not ok:
@@ -301,6 +484,53 @@ class DownloadManager:
                 on_complete(ok)
             except Exception:
                 logger.exception("download on_complete hook raised")
+
+    def _download_all(self) -> bool:
+        ok = True
+        for asset in self._assets:
+            try:
+                if _already_present(asset):
+                    self._set(asset, DONE)
+                    continue
+                self._set(asset, DOWNLOADING)
+                logger.info("Downloading %s (%s)", asset.label, asset.key)
+                if asset.kind == "snapshot":
+                    if self._snapshot_fn is _default_snapshot:
+                        _default_snapshot_with_progress(asset.repo, asset.dest, asset, self._lock)
+                    else:
+                        self._snapshot_fn(asset.repo, asset.dest)
+                elif asset.kind == "dir_snapshot":
+                    if self._dir_snapshot_fn is _default_dir_snapshot:
+                        _default_dir_snapshot_with_progress(
+                            asset.repo, asset.dest, asset.allow, asset, self._lock
+                        )
+                    else:
+                        self._dir_snapshot_fn(asset.repo, asset.dest, asset.allow)
+                    # Write completion sentinel so interrupted downloads are detected
+                    dest = Path(asset.dest)
+                    dest.mkdir(parents=True, exist_ok=True)
+                    (dest / COMPLETE_SENTINEL).touch()
+                elif asset.kind == "file":
+                    if self._file_fn is _default_file:
+                        _default_file_with_progress(
+                            asset.repo, asset.filename, asset.dest, asset, self._lock
+                        )
+                    else:
+                        self._file_fn(asset.repo, asset.filename, asset.dest)
+                elif asset.kind == "url":
+                    if self._url_fn is _default_url:
+                        _default_url_with_progress(asset.url, asset.dest, asset, self._lock)
+                    else:
+                        self._url_fn(asset.url, asset.dest)
+                else:
+                    raise ValueError(f"unknown asset kind {asset.kind!r}")
+                self._set(asset, DONE)
+            except Exception as e:  # noqa: BLE001 — surface, don't crash the thread
+                logger.exception("Download failed: %s", asset.key)
+                self._set(asset, ERROR, f"{type(e).__name__}: {e}")
+                ok = False
+                break
+        return ok
 
     def snapshot(self) -> dict:
         """Current overall + per-asset state, for `/status` and the SSE stream."""

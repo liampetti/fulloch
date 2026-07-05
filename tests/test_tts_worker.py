@@ -7,11 +7,14 @@ from its bounded output queue, the worker would wedge on its next
 `finally`) and — since that one worker serves all future speech — the
 assistant would go permanently mute after the first barge-in.
 
-These tests stub torch / sounddevice / qwen_tts so the module imports
-without a GPU or the real model, then drive the real `_worker_loop`,
-`speak_stream`, and `synthesize` against a fake generator.
+These tests stub torch / qwen_tts so the module imports without a GPU or the
+real model, then drive the real `_worker_loop`, `speak_stream`, and
+`synthesize` against a fake generator. TTS is WebSocket-only (no satellite
+sink registered here), so playback goes through the "no satellite connected"
+drain path in `core/tts.py`.
 """
 
+import queue
 import sys
 import threading
 import time
@@ -19,27 +22,6 @@ import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-
-class _FakeStream:
-    """OutputStream stand-in whose write() paces consumption slowly so the
-    bounded queue fills and the worker blocks on put — the exact condition
-    that wedged the old code on cancel."""
-
-    def __init__(self, *a, **k):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def write(self, chunk):
-        time.sleep(0.02)
-
-    def abort(self):
-        pass
 
 
 def _fake_torch():
@@ -77,9 +59,7 @@ def _import_tts():
 
     torch and qwen_tts are faked only for the duration of the import, then
     the originals are restored so the rest of the suite keeps the real
-    modules. `sounddevice` is real and cheap to import, so we leave it and
-    just swap the module-level `sd` on the imported module for a fake whose
-    OutputStream doesn't touch a sound card.
+    modules.
     """
     # Other tests (e.g. test_assistant_ack) install a lightweight `core.tts`
     # stub into sys.modules that lacks the worker. Drop it so we load the
@@ -100,9 +80,6 @@ def _import_tts():
             else:
                 sys.modules[name] = mod
 
-    fake_sd = types.ModuleType("sounddevice")
-    fake_sd.OutputStream = _FakeStream
-    tts.sd = fake_sd
     # The model load is deferred behind load_tts() now — call it so the
     # module-global `model` is populated with the fake before the worker runs.
     tts.load_tts()
@@ -202,3 +179,79 @@ def test_repeated_barge_ins_keep_worker_alive():
         s.join(timeout=5.0)
         assert not s.is_alive(), f"worker wedged after barge-in #{attempt}"
         assert result and len(result[0][0]) == 3
+
+
+def test_speak_stream_returns_estimated_playback_end():
+    """speak_stream must return playback-start + audio-duration, not just
+    "now" — chunks are handed to the satellite sink as fast as they're
+    generated with no flow control, so generation finishing doesn't mean the
+    audio has actually finished playing on the browser. Regression coverage
+    for the follow-up-window bug: arming the window at generation-finish
+    time let it silently expire while a long reply was still playing."""
+    tts = _import_tts()
+    sample_rate = 16000
+
+    def fake_gen(text, voice_clone_prompt=None, **kw):
+        # 3 chunks of 1 second each of audio at 16kHz.
+        for _ in range(3):
+            yield ([0.0] * sample_rate, sample_rate)
+
+    tts.model.stream_generate_voice_clone = fake_gen
+    sink: "queue.Queue" = queue.Queue()
+    tts.set_satellite_sink(sink)
+    try:
+        t_before = time.monotonic()
+        playback_end = tts.speak_stream("hello", object(), session=tts.TtsSession())
+        t_after = time.monotonic()
+    finally:
+        tts.set_satellite_sink(None)
+
+    # 3 seconds of audio; generation itself (a python loop over lists) takes
+    # a negligible fraction of that, so the estimate must land close to 3s
+    # in the future — nowhere near "now" (which is what generation-finish
+    # time would give).
+    assert playback_end >= t_before + 2.9
+    assert playback_end <= t_after + 3.1
+
+
+def test_speak_stream_sends_cancel_not_end_on_barge_in():
+    """Regression coverage for the "Always Listen doesn't stop playback" bug
+    (docs/TODO.md #6): a barge-in used to leave "end" as the final message,
+    which the client treats as a no-op — already-scheduled audio just kept
+    playing. Mid-stream cancellation must now emit "cancel" instead, so the
+    client actually stops it."""
+    tts = _import_tts()
+
+    def fake_gen(text, voice_clone_prompt=None, **kw):
+        for _ in range(50):
+            yield ([0.0] * 100, 16000)
+
+    tts.model.stream_generate_voice_clone = fake_gen
+    sink: "queue.Queue" = queue.Queue()
+    tts.set_satellite_sink(sink)
+    session = tts.TtsSession()
+    try:
+        # Cancel from on_first_audio, which fires synchronously on
+        # speak_stream's own thread right after "start" and the first chunk
+        # are queued — deterministic, unlike racing a barge-in against a
+        # background generation thread from the test.
+        t = threading.Thread(
+            target=tts.speak_stream,
+            args=("hello", object()),
+            kwargs={"session": session, "on_first_audio": session.stop},
+            daemon=True,
+        )
+        t.start()
+        t.join(timeout=5.0)
+        assert not t.is_alive(), "speak_stream did not wind down after cancel"
+
+        kinds = []
+        while True:
+            try:
+                kinds.append(sink.get_nowait()[0])
+            except queue.Empty:
+                break
+        assert "cancel" in kinds
+        assert "end" not in kinds
+    finally:
+        tts.set_satellite_sink(None)

@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tools import notes  # noqa: E402
+from tools import notes, notes_root  # noqa: E402
 
 
 class _StubHit:
@@ -40,10 +40,19 @@ def notes_dir(tmp_path, monkeypatch):
     the real sentence-transformers model load — the indexing hook is exercised
     by test_notes_index.py. The default stub index returns no hits; tests that
     exercise the semantic fallback re-patch `_get_index` with seeded results.
+
+    `monkeypatch.chdir(tmp_path)` keeps the `persist=False` write (and any
+    later `set_notes_root` call) out of the project's real `data/` dir;
+    resetting `_override`/`_migrated` first means a leaked state from a prior
+    test can't survive into this one.
     """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(notes_root, "_override", None)
+    monkeypatch.setattr(notes_root, "_migrated", False)
     base = tmp_path / "notes"
     base.mkdir()
-    monkeypatch.setattr(notes, "NOTES_DIR", base)
+    notes_root.set_notes_root(base, persist=False)
     monkeypatch.setattr(notes, "DAILY_SUBDIR", "daily")
     monkeypatch.setattr(notes, "_after_write", lambda _path: None)
     monkeypatch.setattr(notes, "_get_index", lambda: _StubIndex())
@@ -570,3 +579,31 @@ class TestNoteFilesCrud:
         assert "logged something" in raw
         assert notes.save_note_file(daily["name"], raw + "- another line\n") is True
         assert "another line" in notes.read_note_file(daily["name"])
+
+
+def test_dynamic_root_picks_up_override(tmp_path, monkeypatch):
+    """notes_root.set_notes_root() flips the active notes folder at runtime;
+    subsequent tools.notes operations land in the new root."""
+    base_a = tmp_path / "vault-a"
+    base_a.mkdir()
+    base_b = tmp_path / "vault-b"
+    base_b.mkdir()
+    monkeypatch.setattr(notes_root, "_override", None)
+    monkeypatch.setattr(notes_root, "_migrated", False)
+    monkeypatch.setattr(notes, "_after_write", lambda _path: None)
+    monkeypatch.setattr(notes, "_get_index", lambda: _StubIndex())
+
+    notes_root.set_notes_root(base_a, persist=False)
+    notes.write_note("in a", "alpha content")
+    assert (base_a / "in-a.md").exists()
+    assert not (base_b / "in-a.md").exists()
+
+    notes_root.set_notes_root(base_b, persist=False)
+    notes.write_note("in b", "beta content")
+    assert (base_b / "in-b.md").exists()
+    assert not (base_a / "in-b.md").exists()
+
+    # list_notes should now reflect only base_b's contents.
+    listing = notes.list_notes()
+    assert "in b" in listing
+    assert "in a" not in listing

@@ -22,8 +22,8 @@ If you discover a security vulnerability, please report it responsibly:
 
 ### Configuration and User Data
 
-- `data/config.yml` contains service credentials and should never be committed
-- `.env` files contain sensitive environment variables
+- `data/config.yml` contains configuration choices (no secrets) — safe but still excluded from git
+- `data/credentials.json` contains all secrets (tokens, passwords) — never committed
 - `data/notes/` holds user-volunteered notes — including `facts.md` (long-term personal facts auto-injected into the chat prompt) and any daily journal entries
 - All of the above are excluded from git via `.gitignore`
 
@@ -48,12 +48,13 @@ Home Assistant is the sole smart-home backend; all third-party device protocols 
 
 ### Credentials
 
-Fulloch may hold a few secrets — keep them in `.env` (or `data/.env`), not in `config.yml`, and treat them as sensitive:
-- **Home Assistant** long-lived token (`FULLOCH_HA_TOKEN`).
-- **Dashboard access token** (`FULLOCH_DASHBOARD_TOKEN`) — required when binding the dashboard to a non-loopback address. The setup wizard can generate one (shown once, persisted to `data/.env`), after which the settings console is token-gated.
-- **Remote LLM API key** (`FULLOCH_LLM_API_KEY`) if using an OpenAI-compatible endpoint.
+Fulloch stores secrets in `data/credentials.json` (written by the setup wizard, never committed). Treat it as sensitive:
+- **Home Assistant** long-lived token (`ha_token`).
+- **Dashboard password** (`dashboard_password`) — PBKDF2-SHA256 hash. Required when binding to a non-loopback address; set via the wizard's finish step.
+- **Remote LLM API key** (`llm_api_key`) if using an OpenAI-compatible endpoint.
+- **Obsidian plugin token** (`obsidian_token`) if using the Obsidian bridge.
 
-> First-run setup serves the wizard with no token yet, so during initial setup keep the dashboard on a trusted/loopback network until you've generated a token.
+> During initial first-run setup no password is set yet, so keep the dashboard on a trusted/loopback network until the wizard completes.
 
 ## Supported Versions
 

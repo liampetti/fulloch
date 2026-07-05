@@ -2,7 +2,7 @@
 
 `speak_stream` accepts an optional `TtsSession`. Other threads call `.stop()`
 to abort playback; `speak_stream` checks `.cancelled` in its producer and
-consumer loops and calls `sd.OutputStream.abort()` to drop the audio buffer.
+consumer loops to stop enqueuing further chunks to the satellite sink.
 """
 
 import logging

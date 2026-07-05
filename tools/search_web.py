@@ -2,11 +2,11 @@
 
 import logging
 import re
-from datetime import datetime
 
 import requests
 from bs4 import BeautifulSoup
 
+import utils.local_time as _local_time
 from core.url_utils import normalize_url
 
 from ._config import config
@@ -220,7 +220,7 @@ def external_information(query: str = "get me the latest news stories") -> str:
     # compresses it into a short spoken answer — otherwise the raw snippet
     # blob is joined into the spoken result and read out verbatim.
     lines = [f"User question: {query}", ""]
-    lines.append(f"Today is {datetime.now().strftime('%B %d, %Y')}.")
+    lines.append(f"Today is {_local_time.now().strftime('%B %d, %Y')}.")
     if website_snippets:
         lines.append("")
         lines.append("A web search has retrieved the following information:")

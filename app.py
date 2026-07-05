@@ -18,17 +18,16 @@ from pathlib import Path
 
 import yaml
 
-# Load .env before anything reads os.environ (e.g. tools/home_assistant.py reads
-# FULLOCH_HA_TOKEN, server/dashboard.py reads FULLOCH_DASHBOARD_TOKEN). In Docker
-# these are already injected via compose `env_file`, so load_dotenv is a no-op
-# there (it never overrides existing vars); this covers native `python app.py`.
+# Load env before anything reads os.environ. Root .env covers compose-level
+# vars (FULLOCH_VERSION, DASHBOARD_PORT, etc.); credentials.json covers runtime
+# secrets (ha_token, llm_api_key, dashboard_password, …) persisted in the Docker
+# volume so a data-folder copy transfers everything to a new machine.
 from dotenv import load_dotenv
 
-load_dotenv()
-# Also load a token/secrets file persisted inside the single ./data volume
-# (e.g. FULLOCH_DASHBOARD_TOKEN written by the wizard's token step), so it
-# survives image updates. Does not override vars already set above / by compose.
-load_dotenv("./data/.env")
+from server.credentials_store import inject_env
+
+load_dotenv()              # root .env — compose / shell vars; never overrides
+inject_env()               # ./data/credentials.json → os.environ (setdefault)
 
 # torch must be imported before llama_cpp (load-order side effect, not used here)
 import torch  # noqa: F401
@@ -232,7 +231,10 @@ def main():
     cfg = _read_config()
     general = cfg.get("general") or {}
     dash_port = general.get("dashboard_port")
-    dash_host = general.get("dashboard_host", "127.0.0.1")
+    dash_host = os.environ.get("DASHBOARD_HOST", general.get("dashboard_host", "127.0.0.1"))
+    if tz := general.get("timezone"):
+        from utils.local_time import set_tz
+        set_tz(tz)
     dash_cert = general.get("dashboard_ssl_certfile")
     dash_key = general.get("dashboard_ssl_keyfile")
 
@@ -275,7 +277,17 @@ def main():
             except KeyboardInterrupt:
                 pass
             return
-        logger.info("Waiting in setup mode — open the dashboard to configure.")
+        if decision.config_present and decision.reason == "missing model assets":
+            # An already-configured install (e.g. the user picked a new model in
+            # Settings and restarted) is just missing the assets on disk — the
+            # wizard has nothing left to ask, so skip straight to downloading
+            # instead of re-showing it.
+            from server.dashboard import start_auto_download
+
+            logger.info("Config is up to date but missing model assets — downloading now.")
+            start_auto_download(context)
+        else:
+            logger.info("Waiting in setup mode — open the dashboard to configure.")
         try:
             lifecycle.proceed.wait()
         except KeyboardInterrupt:

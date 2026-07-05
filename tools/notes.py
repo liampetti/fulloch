@@ -13,20 +13,28 @@ daily notes in the top-level folder).
 
 import logging
 import os
+import queue
 import re
 import tempfile
 import threading
-from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
+import utils.local_time as _local_time
+
+from . import notes_root
 from ._config import config
 from .tool_registry import tool
 
 logger = logging.getLogger(__name__)
 
 _notes_config = config.get("notes", {}) or {}
-NOTES_DIR = Path(_notes_config.get("path", "./data/notes")).expanduser().resolve()
+# Legacy default — what `notes.path` in config.yml pointed at before any
+# plugin adoption. The migration endpoint reads from here when copying into
+# the new vault. Kept around as a constant so the migration remains
+# deterministic even if the override is updated.
+NOTES_DIR_LEGACY = Path(_notes_config.get("path", "./data/notes")).expanduser().resolve()
+
 # `append_to_today` writes to <NOTES_DIR>/<DAILY_SUBDIR>/YYYY-MM-DD.md so daily
 # journals don't clutter the top-level notes folder. Defaults to "daily" when the
 # key is absent; set it empty/null in config to keep daily notes at the top level.
@@ -52,9 +60,10 @@ INDEX_BASENAME = "notes_index"
 # note-search dispatch. Avoids parsing the spoken result string.
 last_retrieval: dict = {}
 
-NOTES_DIR.mkdir(parents=True, exist_ok=True)
+_notes_root_path = notes_root.get_notes_root()
+_notes_root_path.mkdir(parents=True, exist_ok=True)
 if DAILY_SUBDIR:
-    (NOTES_DIR / DAILY_SUBDIR).mkdir(parents=True, exist_ok=True)
+    (_notes_root_path / DAILY_SUBDIR).mkdir(parents=True, exist_ok=True)
 
 _SAFE_TITLE_RE = re.compile(r"[^a-z0-9]+")
 _HEADER_RE = re.compile(r"^#+\s*", flags=re.MULTILINE)
@@ -174,7 +183,7 @@ def _slugify(title: str) -> str:
 
 
 def _iter_notes() -> Iterable[Path]:
-    return sorted(NOTES_DIR.rglob("*.md"))
+    return sorted(notes_root.get_notes_root().rglob("*.md"))
 
 
 def _find_note(query: str) -> Optional[Path]:
@@ -212,7 +221,7 @@ def _is_daily_note(path: Path) -> bool:
     semantic *write* must never resolve onto one (see `append_to_note`).
     """
     if DAILY_SUBDIR:
-        rel = path.relative_to(NOTES_DIR)
+        rel = path.relative_to(notes_root.get_notes_root())
         return bool(rel.parts) and rel.parts[0] == DAILY_SUBDIR
     return bool(_DATE_RE.match(path.stem))
 
@@ -250,7 +259,7 @@ def _find_note_semantic(
     for score, chunk in results:
         if score < min_score:
             break  # index results are score-sorted; nothing further qualifies
-        path = NOTES_DIR / chunk.file
+        path = notes_root.get_notes_root() / chunk.file
         if not path.exists():
             continue
         if exclude_daily and _is_daily_note(path):
@@ -276,13 +285,13 @@ def _appendable_titles() -> list[str]:
 
 
 def _daily_base() -> Path:
-    base = NOTES_DIR / DAILY_SUBDIR if DAILY_SUBDIR else NOTES_DIR
+    base = notes_root.get_notes_root() / DAILY_SUBDIR if DAILY_SUBDIR else notes_root.get_notes_root()
     base.mkdir(parents=True, exist_ok=True)
     return base
 
 
 def _today_path() -> Path:
-    return _daily_base() / f"{datetime.now().strftime('%Y-%m-%d')}.md"
+    return _daily_base() / f"{_local_time.now().strftime('%Y-%m-%d')}.md"
 
 
 def _to_spoken(md: str) -> str:
@@ -305,6 +314,16 @@ def _to_spoken(md: str) -> str:
 _index = None  # type: ignore[var-annotated]
 _index_init_lock = threading.Lock()
 
+# When the Obsidian plugin is connected, the dashboard sets this queue so
+# _after_write can tell the plugin to navigate to newly-written files.
+# Items: {"type": "open_file", "path": "<absolute-path>"}
+_obsidian_cmd_q: Optional[queue.Queue] = None
+
+
+def set_obsidian_cmd_q(q: "Optional[queue.Queue]") -> None:
+    global _obsidian_cmd_q
+    _obsidian_cmd_q = q
+
 
 def _get_index():
     """Return a singleton `NotesIndex`, constructing it on first call."""
@@ -317,8 +336,8 @@ def _get_index():
         from .notes_index import NotesIndex
 
         _index = NotesIndex(
-            notes_root=NOTES_DIR,
-            index_path=NOTES_DIR.parent / INDEX_BASENAME,
+            notes_root=notes_root.get_notes_root(),
+            index_path=notes_root.get_notes_root().parent / INDEX_BASENAME,
             spoken_filter=_to_spoken,
         )
         return _index
@@ -334,6 +353,13 @@ def _after_write(path: Path) -> None:
             logger.error(f"Failed to re-index {path}: {e}")
 
     threading.Thread(target=_run, daemon=True).start()
+
+    q = _obsidian_cmd_q
+    if q is not None:
+        try:
+            q.put_nowait({"type": "open_file", "path": str(path)})
+        except Exception:
+            pass
 
 
 def warm_index() -> bool:
@@ -405,7 +431,7 @@ def read_note(title: str) -> str:
 )
 def write_note(title: str, content: str) -> str:
     slug = _slugify(title)
-    path = NOTES_DIR / f"{slug}.md"
+    path = notes_root.get_notes_root() / f"{slug}.md"
     body = content.strip()
     # Note already exists — append rather than erroring, so the agent doesn't
     # have to re-dispatch to append_to_note.
@@ -490,7 +516,7 @@ def append_to_today(content: str) -> str:
     if not line:
         return "There was nothing to log."
     path = _today_path()
-    now = datetime.now()
+    now = _local_time.now()
     timestamp = now.strftime("%H:%M")
     try:
         if not path.exists():
@@ -521,8 +547,8 @@ def read_today(date: Optional[str] = None) -> str:
     # stamp falls back to today (also blocks path-traversal via the date).
     date_str = (date or "").strip()
     if not _DATE_RE.match(date_str):
-        date_str = datetime.now().strftime("%Y-%m-%d")
-    today_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = _local_time.now().strftime("%Y-%m-%d")
+    today_str = _local_time.now().strftime("%Y-%m-%d")
     when = "today" if date_str == today_str else f"on {date_str}"
 
     path = _daily_base() / f"{date_str}.md"
@@ -668,8 +694,8 @@ def remember_fact(content: str) -> str:
     fact = (content or "").strip()
     if not fact:
         return "There was nothing to remember."
-    path = NOTES_DIR / f"{FACTS_NOTE}.md"
-    timestamp = datetime.now().strftime("%Y-%m-%d")
+    path = notes_root.get_notes_root() / f"{FACTS_NOTE}.md"
+    timestamp = _local_time.now().strftime("%Y-%m-%d")
     try:
         if not path.exists():
             path.write_text("# Long-term facts\n\n", encoding="utf-8")
@@ -689,7 +715,7 @@ def recall_facts() -> str:
     is rebuilt per turn, so edits via the dashboard or a new `remember_fact`
     are picked up on the next agent call without a restart.
     """
-    path = NOTES_DIR / f"{FACTS_NOTE}.md"
+    path = notes_root.get_notes_root() / f"{FACTS_NOTE}.md"
     if not path.exists():
         return ""
     try:
@@ -722,7 +748,7 @@ _FACT_LINE_RE = re.compile(r"^-\s*\[(\d{4}-\d{2}-\d{2})\]\s*(.*)$")
 
 
 def _facts_path() -> Path:
-    return NOTES_DIR / f"{FACTS_NOTE}.md"
+    return notes_root.get_notes_root() / f"{FACTS_NOTE}.md"
 
 
 def list_facts() -> list[dict]:
@@ -838,9 +864,9 @@ def _resolve_note_file(name: str) -> Optional[Path]:
     name = (name or "").strip()
     if not name:
         return None
-    candidate = (NOTES_DIR / name).with_suffix(".md").resolve()
+    candidate = (notes_root.get_notes_root() / name).with_suffix(".md").resolve()
     try:
-        candidate.relative_to(NOTES_DIR)
+        candidate.relative_to(notes_root.get_notes_root())
     except ValueError:
         return None
     if candidate.name == f"{FACTS_NOTE}.md":
@@ -854,7 +880,7 @@ def list_note_files() -> list[dict]:
     for p in _iter_notes():
         if p.name == f"{FACTS_NOTE}.md":
             continue
-        name = p.relative_to(NOTES_DIR).with_suffix("").as_posix()
+        name = p.relative_to(notes_root.get_notes_root()).with_suffix("").as_posix()
         out.append({"name": name, "title": p.stem.replace("-", " ")})
     return out
 

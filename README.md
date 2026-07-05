@@ -6,58 +6,75 @@
   <img src="fulloch.png" alt="Fulloch Logo" width="200">
 </p>
 
-_The **Ful**ly **Loc**al **H**ome Voice Assistant - private, conversational, 100% on-device._
+_The **Ful**ly **Loc**al **H**ome Voice Assistant, a private voice layer for your notes, your home, and the web._
 
-A voice assistant with agentic memory, web research, and smart-home control running entirely on your own home computer or server. Speech recognition, the language model, and the spoken voice never needs to leave your machine.
-
-Fulloch is the conversational brain on top of your existing setup: it drives **[Home Assistant](https://github.com/home-assistant)** for smart-home control and reads/writes plain **Markdown notes**, so it plugs straight into an **[Obsidian](https://github.com/obsidianmd/obsidian-releases)** vault or any Markdown workflow, it can also search the web and return information summaries using **[SearXNG](https://github.com/searxng/searxng)**.
-
-**Hardware:** the **GPU Tier** all-in-one stack needs a GPU (tested on an NVIDIA RTX 5060 Ti, 16GB VRAM); the **CPU Tier** stacks run on a standard CPU-only PC (tested on an AMD Ryzen 9 7900, 32GB RAM), for simple regex commands fully locally, or with an OpenAI-compatible LLM on another server (e.g. your GPU box) for full conversation.
+Fulloch lets you talk to your setup while your hands stay on the keyboard. Ask questions, capture thoughts, and search your **[Obsidian](https://github.com/obsidianmd/obsidian-releases)** vault by voice. Control your home via **[Home Assistant](https://github.com/home-assistant)**. Pull live answers from the web with **[SearXNG](https://github.com/searxng/searxng)**. All without your voice, your notes, or your home state leaving your machine.
 
 ## Features
 
+- **Obsidian notes** - read, write, append, and search your vault by voice; capture a conversation as a note without leaving what you're doing
+- **Semantic search** - *"what did I write about the car service?"* finds the right note by meaning, not just keywords
+- **Web search** - ask a question, get a spoken summary pulled live from a self-hosted search engine, optionally saved to your vault
 - **Conversational** - holds context across a turn; follow-ups like *"and tomorrow?"* just work
-- **Barge-in** - interrupt mid-sentence with the wakeword
-- **Agentic memory** - facts persist across restarts and build up over time
-- **Markdown notes** - read, write, append, and search `.md` files by voice; point it at your Obsidian vault
-- **Semantic search** - *"what did I write about the car service?"* via a local embedding model
-- **Conversation recall** - *"what did we talk about yesterday afternoon?"*, summarised from Home Assistant history
-- **Web research** - live answers from a self-hosted search engine, summarised into a short spoken reply
+- **Memory** - facts persist across restarts and build up over time
 - **Smart-home control** - lights, climate, media, calendar, weather, scenes, and entity history via Home Assistant; any entity can be switched off for voice control from the dashboard
+- **Long-term recall** - *"what did we talk about yesterday afternoon?"*, summarised from Home Assistant history
 - **Music search & play** - *"play the Beatles"* via [SpotifyPlus](https://github.com/thlucas1/homeassistantcomponent_spotifyplus)
 - **Calendar reminders** - creates events on a dedicated HA calendar and speaks them at the right time
-- **Thinking mode** - *"think about X"* for a slower, deeper answer; interrupt to get a partial summary
-- **Cloned voice** *(Full GPU stack)* - speaks in a voice cloned from a few seconds of reference audio; the CPU stacks use fast built-in named voices instead
-- **Web dashboard** - setup wizard, settings console, and a phone-friendly chat UI in one place; voice and text share the same brain and history
+- **Barge-in** - interrupt mid-sentence with the wakeword
+- **Cloned voice** *(GPU override)* - speaks in a voice cloned from a few seconds of reference audio; the default CPU stack uses fast built-in named voices (Kokoro) instead
 
 ## Quick installation
 
-### Docker Compose
-- **GPU (no SearXNG)**
+The default stack runs on **CPU (mac/linux/windows)**. Audio runs through the browser dashboard. The LLM is either regex-only (simple commands) or off-box via an OpenAI-compatible endpoint you configure in the wizard (e.g. Ollama / LM Studio / another machine on your LAN). The dashboard avatar swaps to Parloch, the **Par**tially-**loc**al **h**ome voice assistant, when the LLM is running off-device.
+
+### CPU (mac/linux/windows)
+
 ```bash
-docker compose up -d
-```
-- **GPU + SearXNG**
-```bash
-docker compose -f compose.yml -f compose.searxng.yml up -d
-```
-- **CPU (no SearXNG)**
-```bash
-docker compose -f compose.yml -f compose.cpu.yml up -d
-```
-- **CPU + SearXNG**
-```bash
-docker compose -f compose.yml -f compose.cpu.yml -f compose.searxng.yml up -d
+docker run -d \
+  --name fulloch-ai \
+  --restart unless-stopped \
+  -p 8765:8765 \
+  -e DASHBOARD_HOST=0.0.0.0 \
+  -v ./data:/app/data:rw \
+  # -v /path/to/your/ObsidianVault:/vault:rw \
+  ghcr.io/liampetti/fulloch:cpu
 ```
 
-### Windows
-- **Directsound access for Windows users**
-```bat
-git clone https://github.com/liampetti/fulloch.git
-cd fulloch
-pip install -r requirements.txt
-launch.bat
+### GPU (Linux/Windows + NVIDIA)
+
+Swap `:cpu` for `:latest` (the CUDA image with Qwen3-TTS voice cloning and the on-GPU 9B SLM) and add `--gpus all`:
+
+```bash
+docker run -d \
+  --name fulloch-ai \
+  --restart unless-stopped \
+  --gpus all \
+  -p 8765:8765 \
+  -e DASHBOARD_HOST=0.0.0.0 \
+  -v ./data:/app/data:rw \
+  # -v /path/to/your/ObsidianVault:/vault:rw \
+  ghcr.io/liampetti/fulloch:latest
 ```
+
+> The commented-out `-v` line exposes your Obsidian vault to Fulloch so voice notes can read/write it. Uncomment it, edit the host path, and add a matching `obsidian.path_translation` entry in `data/config.yml`, see the Obsidian section below.
+
+### SearXNG sidecar (optional, for live web answers)
+
+Create a shared network, then run SearXNG on it and point Fulloch at it via `search.searxng_url`:
+
+```bash
+docker network create fulloch
+docker run -d \
+  --name searxng \
+  --network fulloch \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -e SEARXNG_SECRET=change-me \
+  searxng/searxng
+```
+
+Then in the Fulloch setup wizard, set **Web search URL** to `http://searxng:8080/search`. (Skip the `-p 8080:8080` if you don't need to reach SearXNG from the host, the Fulloch container only needs the in-network name.)
 
 ### Once launched
 - Open `http://localhost:8765` and follow the wizard.
@@ -66,11 +83,11 @@ launch.bat
 
 The **setup wizard** configures Fulloch on first boot, and the **settings console** (gear icon, the same web UI) edits every option afterwards. Everything is reachable from the UI: wakeword, barge-in, voice, the Home Assistant connection, notes path, and web search. But if you'd rather hand-edit, the full annotated reference is [`data/config.example.yml`](data/config.example.yml).
 
-Secrets live in `.env`, all optional. See [`.env.example`](.env.example).
+Secrets (HA token, LLM API key, dashboard password) are stored in `data/credentials.json`, written by the setup wizard. Copying `data/` to a new machine transfers everything. To configure headlessly, copy [`data/credentials.example.json`](data/credentials.example.json) to `data/credentials.json` and fill in the values, or set the equivalent env vars (`HA_TOKEN`, `LLM_API_KEY`, `DASHBOARD_PASSWORD`, `OBSIDIAN_TOKEN`) in `.env`.
 
 ## Web Dashboard
 
-The web dashboard is **unauthenticated and bound to `127.0.0.1` by default**. To reach it from another device you need to set dashboard host to 0.0.0.0 and set a `FULLOCH_DASHBOARD_TOKEN` in `.env`. 
+The web dashboard is **unauthenticated and bound to `127.0.0.1` by default**. To reach it from another device, set `dashboard_host: "0.0.0.0"` in config and set a password in the setup wizard's finish step.
 
 ### OpenAI Endpoint
 
@@ -82,53 +99,66 @@ The moment you point the language model at an OpenAI-compatible endpoint, the av
 
 ## Home Assistant Integration
 
-A HACS-installable integration that connects Home Assistant to a running Fulloch dashboard, for status sensors, mic control, proactive speech, and automation triggers.
-
-### Installation
+A HACS-installable integration for status sensors, mic control, proactive speech, and automation triggers.
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=liampetti&repository=fulloch&category=Integration)
 
-Or manually: HACS → three-dot menu → **Custom repositories** → paste `https://github.com/liampetti/fulloch`, category **Integration**, **Add** → **Download** the Fulloch entry → restart HA. Then **Settings → Integrations → Add → Fulloch** and enter your Fulloch host and dashboard port.
-
-### Entities, Actions & Events
+Or manually: HACS → **Custom repositories** → paste `https://github.com/liampetti/fulloch`, category **Integration** → **Download** → restart HA → **Settings → Integrations → Add → Fulloch**.
 
 | Entity | Description |
 | -- | -- |
 | `sensor.fulloch_status` | `idle` / `thinking` / `speaking` |
 | `sensor.fulloch_last_utterance` | Last thing the user said |
-| `sensor.fulloch_last_response` | Last thing Fulloch said (full string in the `full_text` attribute) |
+| `sensor.fulloch_last_response` | Last thing Fulloch said (`full_text` attribute has the full string) |
 | `switch.fulloch_mic` | Mute / unmute the microphone |
 | `text.fulloch_speak` | Submit text → Fulloch speaks it |
-| `text.fulloch_chat` | Submit a query → full agent loop, speaks the result |
+| `text.fulloch_chat` | Submit a query → full agent loop |
 
 | Action | Field | Description |
 | -- | -- | -- |
-| `fulloch.speak` | `text` | Speak a message through the cloned voice |
-| `fulloch.chat` | `text` | Run a full agent-loop query and speak the result |
+| `fulloch.speak` | `text` | Speak a message |
+| `fulloch.chat` | `text` | Run a full agent query and speak the result |
 | `fulloch.mic` | `enabled` | Turn the mic on or off |
 
 | Event | When |
 | -- | -- |
-| `fulloch_wakeword_detected` | Wakeword heard or voice turn starts |
-| `fulloch_turn_ended` | Fulloch finishes speaking a response |
+| `fulloch_wakeword_detected` | Voice turn starts |
+| `fulloch_turn_ended` | Fulloch finishes speaking |
 
-Use the events in automations, e.g. dim lights on `fulloch_wakeword_detected`, restore on `fulloch_turn_ended`. Use the actions for proactive speech:
+Use events in automations, e.g. dim lights on `fulloch_wakeword_detected`, restore on `fulloch_turn_ended`. Use `fulloch.speak` for proactive notifications from your home.
 
-```yaml
-action: fulloch.speak
-data:
-  text: "The front door just opened."
-```
+The dashboard's **Entities** tab blocks specific entities (locks, alarms) from voice control without affecting dashboard or automation access. Changes apply immediately.
 
-### Optional: SpotifyPlus
+> [SpotifyPlus](https://github.com/thlucas1/homeassistantcomponent_spotifyplus) is required for search-by-name music queries (*"play the Beatles"*). Basic playback control works without it.
+>
+> Alternatively, add a `spotify:` block to `config.yml` to search-and-play directly via the Spotify Web API instead of SpotifyPlus, more reliable search, at the cost of a one-time manual OAuth step to get a refresh token. See the `spotify:` section in `data/config.example.yml` for the config keys and `data/credentials.json` fields. Pause/resume/skip still go through Home Assistant either way (so they keep working for AVR/TV too).
 
-[SpotifyPlus](https://github.com/thlucas1/homeassistantcomponent_spotifyplus) is required for *"play the Beatles"* style search-by-name queries. Basic Spotify playback control (pause, skip, volume) works without it.
+## Obsidian Integration
 
-### Restricting voice control
+Connect your Obsidian vault so Fulloch reads, writes, appends, and searches your notes by voice, and knows which note you have open. The first time you connect, Fulloch offers to copy your existing notes into the vault as `Inbox/fulloch-import/`. Cloud sync (Remotely Save, etc.) is unchanged, Fulloch only sees the local vault.
 
-Some entities, door locks, alarms, you may want usable from the dashboard but **not by voice**. The dashboard's **Entities** tab toggles any entity off voice control: Fulloch then refuses to act on it by voice (it says *"that isn't available for voice control"*) while it stays fully usable from the dashboard and in your own HA automations. Changes apply immediately, no restart, and persist in `data/voice_denylist.json`.
+**Setup (about 2 minutes):**
 
-> This is **separate from Home Assistant's "Expose to Assist"** setting, which only governs HA's built-in Assist and isn't readable by Fulloch.
+1. **In the Fulloch setup wizard**, the "Connect Obsidian" step lets you auto-detect your vault or paste its path. Click **Save and continue**, or **Skip** to do it later.
+2. **Open the dashboard's Obsidian tab** and click **Show install instructions** to get a download link and your auth token.
+3. **In Obsidian**, extract the downloaded `plugin.zip` into `<your-vault>/.obsidian/plugins/fulloch/`, then enable the Fulloch plugin in **Settings → Community plugins** and paste the token.
+
+That's it. Once the plugin connects, the dashboard flips to **Connected** and voice notes go straight to your vault. Closing Obsidian doesn't break anything, Fulloch remembers the vault and voice keeps working.
+
+To point Fulloch at a different vault later, use the **Switch vault** section on the Obsidian tab.
+
+**Running Fulloch in Docker?** The plugin runs on the host, so it reports host paths (e.g. `/Users/you/Documents/MyVault`). Fulloch inside the container can't see those. Two edits to wire it up:
+
+1. Uncomment the volume mount in `compose.yml` and point it at your vault. Pick a clean container path (e.g. `/vault`).
+2. Add the same mapping under `obsidian.path_translation` in `data/config.yml`:
+
+   ```yaml
+   obsidian:
+     path_translation:
+       "/Users/you/Documents/MyVault": "/vault"
+   ```
+
+Restart Fulloch. The Obsidian wizard's "Auto-detect" scans the container filesystem for a vault, so it'll find `/vault` (or wherever you mounted it) without further config, path translation above is still needed so the plugin's *host* paths resolve correctly once connected.
 
 ## Instant Commands
 

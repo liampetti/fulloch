@@ -57,11 +57,14 @@ data/credentials.json
 data/token.json
 *.pem
 *.key
+*.crt
 .python_hue
 data/notes
 data/notes_index.json
 data/notes_index.npy
+data/notes_root_override.json
 data/voice_denylist.json
+data/dashboard_sessions.json
 
 # =============================================================================
 # Local Data and Models

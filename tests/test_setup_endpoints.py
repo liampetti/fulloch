@@ -51,7 +51,7 @@ def test_models_endpoint_writes_tier(tmp_path):
     client, _, path = _client(tmp_path)
     r = client.post("/setup/models", json={"tier": "cpu_local"})
     assert r.status_code == 200
-    assert "qwen-onnx" in Path(path).read_text()
+    assert "qwen-onnx-small" in Path(path).read_text()
 
 
 def test_models_endpoint_rejects_unknown_tier(tmp_path):
@@ -126,8 +126,99 @@ def test_reset_endpoint_arms_wizard_and_backs_up(tmp_path):
     assert body["ok"] and body["restart_required"]
     # Marker dropped next to config so the next restart re-enters setup.
     assert (Path(path).parent / ".setup_pending").is_file()
-    # Current config preserved as a timestamped backup.
-    assert body["backup"] and (Path(path).parent / body["backup"]).is_file()
+    # Current config preserved as a timestamped backup directory under data/backups/.
+    assert body["backup"] and (Path(path).parent / "backups" / body["backup"]).is_dir()
+
+
+def test_reset_backup_includes_credentials(tmp_path):
+    """A reset must snapshot credentials.json too, not just config.yml."""
+    client, _, path = _client(tmp_path)
+    data_dir = Path(path).parent
+    (data_dir / "credentials.json").write_text('{"ha_token": "secret"}', encoding="utf-8")
+    r = client.post("/setup/reset")
+    assert r.status_code == 200
+    backup_dir = data_dir / "backups" / r.json()["backup"]
+    assert (backup_dir / "config.yml").is_file()
+    assert (backup_dir / "credentials.json").is_file()
+    assert (backup_dir / "meta.json").is_file()
+    assert "credentials.json" in (backup_dir / "meta.json").read_text()
+
+
+def test_list_backups_returns_empty_then_entries(tmp_path):
+    client, _, path = _client(tmp_path)
+    r = client.get("/setup/backups")
+    assert r.status_code == 200
+    assert r.json() == {"backups": []}
+    client.post("/setup/reset")
+    r = client.get("/setup/backups")
+    assert r.status_code == 200
+    backups = r.json()["backups"]
+    assert len(backups) == 1
+    assert "config.yml" in backups[0]["files"]
+
+
+def test_restore_backup_replaces_files(tmp_path):
+    client, _, path = _client(tmp_path)
+    data_dir = Path(path).parent
+    (data_dir / "credentials.json").write_text('{"ha_token": "first"}', encoding="utf-8")
+    client.post("/setup/reset")
+    # Mutate after the backup
+    (data_dir / "config.yml").write_text("general:\n  wakeword: changed\n", encoding="utf-8")
+    (data_dir / "credentials.json").write_text('{"ha_token": "mutated"}', encoding="utf-8")
+    # Find the backup
+    backups = client.get("/setup/backups").json()["backups"]
+    name = backups[0]["name"]
+    r = client.post("/setup/backups/restore", json={"name": name})
+    assert r.status_code == 200
+    assert "config.yml" in r.json()["restored"]
+    assert (data_dir / "credentials.json").read_text() == '{"ha_token": "first"}'
+    assert "wakeword: hey atticus" in (data_dir / "config.yml").read_text()
+
+
+def test_restore_backup_rejects_unsafe_name(tmp_path):
+    client, _, _ = _client(tmp_path)
+    for bad in ("", "../etc", "2026-07-02", "name with space"):
+        r = client.post("/setup/backups/restore", json={"name": bad})
+        assert r.status_code == 400, bad
+    r = client.post("/setup/backups/restore", json={"name": "2099-01-01T000000"})
+    assert r.status_code == 404
+
+
+def test_regen_cert_endpoint_enables_https_from_scratch(tmp_path):
+    client, _, path = _client(tmp_path)
+    r = client.post("/setup/regen-cert")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] and body["restart_required"]
+    text = Path(path).read_text()
+    assert "dashboard_ssl_certfile" in text and "dashboard_ssl_keyfile" in text
+    certs_dir = Path(path).parent / "certs"
+    assert (certs_dir / "dashboard.crt").is_file()
+    assert (certs_dir / "dashboard.key").is_file()
+
+
+def test_regen_cert_endpoint_overwrites_existing_pair(tmp_path):
+    from core.tls_certs import ensure_self_signed_cert
+
+    certs_dir = tmp_path / "certs"
+    cert_path, key_path = ensure_self_signed_cert(str(certs_dir))
+    original = Path(cert_path).read_bytes()
+
+    cfg = tmp_path / "config.yml"
+    cfg.write_text(
+        f"general:\n  wakeword: hey atticus\n"
+        f"  dashboard_ssl_certfile: {cert_path}\n"
+        f"  dashboard_ssl_keyfile: {key_path}\n"
+    )
+    life = Lifecycle(phase=lc.NEEDS_SETUP, detail="first run")
+    ctx = AppContext(lifecycle=life, config_path=str(cfg), downloader=None)
+    client = TestClient(create_app(context=ctx))
+
+    r = client.post("/setup/regen-cert")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] and body["restart_required"]
+    assert Path(cert_path).read_bytes() != original
 
 
 def test_test_llm_endpoint(tmp_path, monkeypatch):

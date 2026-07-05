@@ -19,8 +19,11 @@ Anything sent to `generate_slm` as `system_prompt=` or `user_prompt=` should
 live here so prompt edits don't require crawling the codebase.
 """
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
+from typing import Optional
+
+import utils.local_time as _local_time
 
 from .intents import describe_tools
 
@@ -28,12 +31,12 @@ _MODULE_DIR = Path(__file__).parent
 
 
 def _today_line() -> str:
-    now = datetime.now()
+    now = _local_time.now()
     return f"Today is {now.strftime('%A, %d %B %Y')} ({now.strftime('%Y-%m-%d')})."
 
 
 def _next_sunday_str() -> str:
-    today = datetime.now()
+    today = _local_time.now()
     days_ahead = (6 - today.weekday()) % 7 or 7
     return (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
 
@@ -46,7 +49,10 @@ def _with_facts(base: str) -> str:
     return f"{base}\n{facts}\n" if facts else base
 
 
-def get_agent_system_prompt(name: str = "Fulloch") -> str:
+def get_agent_system_prompt(
+    name: str = "Fulloch",
+    vault_context: "Optional[dict]" = None,
+) -> str:
     """Unified agent prompt — emits either `actions` dispatch or `reply` text.
 
     Built fresh each turn so today's date stays accurate for relative-date
@@ -54,6 +60,10 @@ def get_agent_system_prompt(name: str = "Fulloch") -> str:
     "Atticus"), so it knows what to call itself if the user asks — pass the
     SAME value at every call site (incl. the KV-cache prime) so the cached
     prompt prefix matches across turns.
+
+    `vault_context` is the metadata dict for the note currently open in
+    Obsidian (supplied by the plugin when connected). Injected into the prompt
+    so "this note", "here", "what I'm looking at" resolve correctly.
     """
     sunday = _next_sunday_str()
     examples = (_MODULE_DIR / "intent_examples.txt").read_text()
@@ -110,6 +120,7 @@ Home & live readings:
 - To check whether a device is on or off, or to read a live device state — a light/lock/door/cover status, what's playing, a temperature, humidity, or other sensor reading — dispatch `get_entity_state`. For example, "are the living room lights on?" becomes:
 {{"actions": [{{"intent": "get_entity_state", "args": ["living room lights"]}}]}}
   Don't reply that you can't check a device's state when this tool can — reach for it, then answer from what it returns.
+- A relative or incremental change to something you already set — "brighten them now", "turn it up more", "make it warmer" — always needs a fresh tool dispatch, even if history shows you set a specific value moments ago. Never compute or assert a new number yourself from a value you remember saying; that value may only ever have been spoken, not actually applied. Check history for the last tool result for that device (a `role: tool` entry, not just your own spoken reply) to see the real current value, then dispatch the action.
 - Report a smart-home device state or a live local reading — a temperature or other sensor value, a light/lock/door status, what's playing, the local weather forecast — ONLY after a tool has actually returned it. If you genuinely have no tool for it in your available tools, you cannot access it: say so plainly (for example, "I don't have a way to check that one") and NEVER invent or guess a number, status, or forecast — and never claim a specific failure you can't verify, such as that Home Assistant is offline or disconnected. This does not restrict general knowledge you can answer directly.
 
 Available tools:
@@ -121,6 +132,27 @@ Examples:
 
 Respond with exactly one JSON object matching the grammar.
 """
+    if vault_context:
+        name_str = vault_context.get("name", "")
+        path_str = vault_context.get("path", "")
+        tags = vault_context.get("tags") or []
+        links = vault_context.get("links") or []
+        backlinks = vault_context.get("backlinks") or []
+        parts = [f'"{name_str}"']
+        if path_str:
+            parts.append(f"path: {path_str}")
+        if tags:
+            parts.append("tags: " + " ".join(tags))
+        if links:
+            parts.append("links to: " + ", ".join(f"[[{lnk}]]" for lnk in links[:8]))
+        if backlinks:
+            parts.append("backlinked from: " + ", ".join(f"[[{b}]]" for b in backlinks[:8]))
+        vault_line = (
+            f"\nObsidian vault connected. Currently open note: {', '.join(parts)}. "
+            "When the user says 'this note', 'here', or refers to what they're looking at, they mean this note. "
+            "Use search_notes with the note name to retrieve its content before quoting or summarising it."
+        )
+        body = body + vault_line
     return _with_facts(body)
 
 

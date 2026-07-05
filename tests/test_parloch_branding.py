@@ -24,7 +24,6 @@ def _assistant():
 
 
 def _client(a, monkeypatch):
-    monkeypatch.delenv("FULLOCH_DASHBOARD_TOKEN", raising=False)  # /logo.png is exempt anyway
     return TestClient(create_app(a))
 
 

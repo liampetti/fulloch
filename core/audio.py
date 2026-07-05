@@ -5,42 +5,12 @@ import math
 import queue
 import threading
 import time
-from collections import deque
 from typing import Optional
 
 import numpy as np
-import sounddevice as sd
 import torch
 
 logger = logging.getLogger(__name__)
-
-
-def resolve_device(name: Optional[str], want_input: bool) -> Optional[object]:
-    """Resolve a device-name substring to a PortAudio index, falling back to
-    the system default (None) when nothing matches.
-
-    sounddevice raises if a `device=` substring matches no device, so passing
-    a configured device name straight through crashes the stream whenever that
-    device is absent. Pre-resolving here lets a configured mic/speaker fall
-    back to the system default instead of taking down startup — the named
-    device is used when present, the default when it isn't.
-    """
-    if not name:
-        return None
-    key = "max_input_channels" if want_input else "max_output_channels"
-    kind = "input" if want_input else "output"
-    try:
-        devices = sd.query_devices()
-    except Exception as exc:  # pragma: no cover - host audio quirks
-        logger.warning(f"Could not query audio devices ({exc}); using system default {kind}")
-        return None
-    lowered = name.lower()
-    for idx, dev in enumerate(devices):
-        if lowered in dev["name"].lower() and dev[key] > 0:
-            logger.info(f"Resolved {kind} device {name!r} -> [{idx}] {dev['name']}")
-            return idx
-    logger.warning(f"No {kind} device matching {name!r}; falling back to system default")
-    return None
 
 
 # Audio configuration
@@ -155,13 +125,17 @@ def _contains_speech(buf: np.ndarray, vad_model, get_timestamps, sample_rate: in
 
 
 class AudioCapture:
-    """Mic capture with RMS silence detection.
+    """Audio ingest + silence/VAD endpointing for the WebSocket satellite path.
 
-    Recorder thread fills `audio_buffer`; once an utterance is silence- or
-    max-length-bounded it's pushed to `audio_queue` for the transcriber to
-    consume. `transcribing` gates processing; `tts_active` flips the silence
-    threshold while the assistant is speaking; `_flush_pending` is the
-    cross-thread signal `flush()` uses to drop the in-progress buffer.
+    The browser satellite (see `Assistant.connect_satellite`) feeds float32
+    16 kHz mono chunks from the dashboard's AudioWorklet; this class
+    endpointings them with RMS + (optional) Silero VAD and pushes complete
+    utterances onto `audio_queue` for the transcriber. There is no local
+    sounddevice path — voice in is always via WebSocket, voice out via the
+    same socket (TTS chunks are streamed back, the browser plays them).
+
+    `transcribing` gates processing; `tts_active` flips the silence threshold
+    while the assistant is speaking; `flush()` drains the queue on barge-in.
     """
 
     def __init__(
@@ -177,7 +151,6 @@ class AudioCapture:
         tts_overlap_ms: int = TTS_OVERLAP_MS,
         tts_min_utterance_ms: int = TTS_MIN_UTTERANCE_MS,
         follow_up_min_utterance_ms: int = FOLLOW_UP_MIN_UTTERANCE_MS,
-        input_device: Optional[str] = None,
         use_vad: bool = True,
         vad_threshold: Optional[float] = None,
         vad_endpoint_silence_ms: Optional[int] = None,
@@ -194,7 +167,6 @@ class AudioCapture:
             BARGE_IN_THRESHOLD_DBFS if barge_in_threshold_dbfs is None else barge_in_threshold_dbfs
         )
         self._barge_in_rms = dbfs_to_rms(self.barge_in_threshold_dbfs)
-        self.input_device = resolve_device(input_device, want_input=True)
 
         self._vad_model = None
         self._vad_get_timestamps = None
@@ -266,7 +238,6 @@ class AudioCapture:
         self._follow_up_slack_s = silence_duration_ms / 1000.0 + 1.5
 
         # State
-        self.audio_buffer: deque = deque()
         # Each item is `(buf, speech_onset_monotonic, loudness_dbfs)` — the
         # onset lets the transcriber measure the follow-up window from when the
         # speaker began, and the loudness tags the utterance with its dBFS
@@ -275,9 +246,10 @@ class AudioCapture:
         self.audio_queue: "queue.Queue[Optional[tuple[np.ndarray, float, float]]]" = queue.Queue()
         self.running = True
         self.transcribing = True
-        # Set by Assistant while any TTS audio is playing. The recorder
-        # switches to the barge-in floor (`_barge_in_rms`) so the assistant's
-        # own residue is treated as silence and utterances end on time.
+        # Set by Assistant while any TTS audio is playing. The satellite
+        # recorder switches to the barge-in floor (`_barge_in_rms`) so the
+        # assistant's own residue is treated as silence and utterances end on
+        # time.
         self.tts_active = threading.Event()
         # Set by Assistant while the wakeword-free follow-up window is open.
         # The recorder then accepts shorter utterances (a brief reply to the
@@ -354,19 +326,19 @@ class AudioCapture:
         return True
 
     def _audio_callback(self, indata, frames, time_info, status):
-        """Callback for sounddevice InputStream. Must be fast — no resampling here."""
-        if status:
-            logger.info(status)
-        self.audio_buffer.append(indata[:, 0].copy())
+        # Local-mic callback removed — voice input is exclusively via the
+        # browser satellite (WebSocket → satellite_recorder_thread). The
+        # method is kept as a stub so old test stubs that monkey-patch it
+        # don't crash; new code should not call it.
+        return None
 
     def flush(self) -> None:
-        """Discard the in-progress utterance and any queued utterances.
+        """Drain the audio queue after a barge-in cancel.
 
-        Drains `audio_queue` directly (Queue is thread-safe) and signals the
-        recorder thread to clear `audio_buffer` on its next iteration —
-        keeping all mutations of `audio_buffer` on a single thread. Called
-        after a barge-in cancel so contaminated TTS-bleed audio captured
-        during the cancelled turn doesn't pollute the next user utterance.
+        No in-progress buffer to clear (the satellite recorder owns its
+        own `sat_buf`); we just drop anything already enqueued so the
+        contaminated TTS-bleed audio from the cancelled turn doesn't
+        reach the transcriber.
         """
         drained = 0
         while True:
@@ -375,227 +347,84 @@ class AudioCapture:
                 drained += 1
             except queue.Empty:
                 break
-        self._flush_pending = True
         if drained:
-            logger.debug(f"Flushed {drained} queued utterances; buffer flush pending")
+            logger.debug(f"Flushed {drained} queued utterances after barge-in")
 
-    def recorder_thread(self):
-        """Capture audio chunks; enqueue each utterance once silence-bounded."""
-        if self.input_device:
-            logger.info(f"Starting microphone stream on device: {self.input_device}")
-        else:
-            logger.info("Starting microphone stream on system default device")
+    def satellite_recorder_thread(self, chunk_q: "queue.Queue") -> None:
+        """WebSocket satellite audio source: reads float32 16 kHz mono chunks from
+        chunk_q, applies RMS silence-endpointing + post-hoc VAD, and pushes
+        complete utterances to audio_queue for the transcriber.  Stops on a
+        None sentinel (sent by Assistant.disconnect_satellite).
+        """
+        from collections import deque
+
+        sat_buf: deque = deque()
         silence_counter = 0
-        # Monotonic time the current utterance's speech began — the first
-        # non-silent chunk since the last buffer clear. Enqueued with the
-        # audio so the follow-up window measures from speech onset.
         speech_onset_t: Optional[float] = None
 
-        with sd.InputStream(
-            channels=1,
-            samplerate=self.sample_rate,
-            dtype="float32",
-            blocksize=self.frames_per_chunk,
-            latency="low",
-            callback=self._audio_callback,
-            device=self.input_device,
-        ):
-            while self.running:
-                time.sleep(self.chunk_duration_ms / 1000.0)
+        logger.info("Satellite recorder started")
+        while True:
+            try:
+                chunk = chunk_q.get(timeout=0.5)
+            except queue.Empty:
+                if not self.running:
+                    break
+                continue
 
-                if self._flush_pending:
-                    self.audio_buffer.clear()
-                    silence_counter = 0
-                    speech_onset_t = None
-                    self._soft_probe_emitted = False
-                    if self._endpointer is not None:
-                        self._endpointer.reset()
-                    self._flush_pending = False
-                    continue
+            if chunk is None:
+                break
 
-                if self.transcribing:
-                    if not self.audio_buffer:
-                        continue
+            sat_buf.append(chunk)
 
-                    tts_active = self.tts_active.is_set()
-
-                    # VAD-driven endpointing (outside TTS): speech probability,
-                    # not RMS energy, decides when the speaker has finished —
-                    # robust in a noisy room where energy never drops to a
-                    # silence floor. RMS still governs the TTS/barge-in path
-                    # below (a latency mechanism, not a noise problem).
-                    if self._endpointer is not None and not tts_active:
-                        self._endpointer.process(self.audio_buffer[-1])
-                        buffer_samples = sum(c.size for c in self.audio_buffer)
-
-                        # Discard accumulating noise before any speech is
-                        # detected so a noisy room neither inflates onset
-                        # latency nor hands ASR a long noise clip.
-                        if (
-                            not self._endpointer.speech_started
-                            and buffer_samples >= self.vad_idle_reset_samples
-                        ):
-                            self.audio_buffer.clear()
-                            self._endpointer.reset()
-                            continue
-
-                        # Soft (early) endpoint: the speaker has briefly paused
-                        # but the hard endpoint hasn't fired. Emit one provisional
-                        # snapshot per pause for the transcriber to probe — it
-                        # commits the turn early if the partial is a complete/safe
-                        # command, else drops it and waits for the hard endpoint.
-                        # Nothing is cleared/reset here, so the buffer keeps
-                        # growing toward the real endpoint regardless.
-                        if (
-                            self._endpointer.soft_endpointed
-                            and not self._endpointer.endpointed
-                            and self._endpointer.speech_started
-                        ):
-                            if not self._soft_probe_emitted:
-                                min_required = (
-                                    self.follow_up_min_utterance_samples
-                                    if self._follow_up_open()
-                                    else self.min_utterance_samples
-                                )
-                                if buffer_samples >= min_required:
-                                    buf = np.concatenate(list(self.audio_buffer), axis=0)
-                                    onset = self._endpointer.speech_onset or time.monotonic()
-                                    rms = self._endpointer.voiced_rms
-                                    if rms is None:
-                                        rms = _buf_rms(buf)
-                                    loudness_db = rms_to_dbfs(rms)
-                                    # 4-tuple: the trailing True marks it provisional.
-                                    self.audio_queue.put((buf, onset, loudness_db, True))
-                                    self._soft_probe_emitted = True
-                                    secs = buf.size / self.sample_rate
-                                    logger.debug(
-                                        f"VAD soft endpoint: provisional {secs:.2f}s enqueued"
-                                    )
-                        elif not self._endpointer.soft_endpointed:
-                            # Speech resumed (or never paused) — re-arm the probe.
-                            self._soft_probe_emitted = False
-
-                        hit_silence = self._endpointer.endpointed
-                        hit_max = buffer_samples >= self.max_utterance_samples
-                        if not (hit_silence or hit_max):
-                            continue
-
-                        # Speech-duration floor (silence-endpointed segments
-                        # only — a hit_max segment is long genuine speech).
-                        # Drop a too-brief voiced burst — a cough Silero scored
-                        # as speech — before it reaches ASR and gets
-                        # hallucinated into the wakeword. Exempt while the
-                        # follow-up window is open: a cough there is
-                        # indistinguishable from a one-word reply.
-                        if (
-                            hit_silence
-                            and not self._follow_up_open()
-                            and self._endpointer.last_speech_samples < self.vad_min_speech_samples
-                        ):
-                            secs = self._endpointer.last_speech_samples / self.sample_rate
-                            logger.debug(f"VAD: speech span {secs:.2f}s < min — dropped as noise")
-                            self.audio_buffer.clear()
-                            self._endpointer.reset()
-                            continue
-
-                        # A short reply during the follow-up window ("yes",
-                        # "stop") would fall under the normal min; accept the
-                        # shorter floor while it's open.
-                        min_required = (
-                            self.follow_up_min_utterance_samples
-                            if self._follow_up_open()
-                            else self.min_utterance_samples
-                        )
-                        buf = np.concatenate(list(self.audio_buffer), axis=0)
-                        if buf.size >= min_required and self._endpointer.speech_started:
-                            onset = self._endpointer.speech_onset or time.monotonic()
-                            # Tag with the voiced-window loudness; fall back to
-                            # whole-buffer RMS if no segment finalised (hit_max
-                            # before an endpoint).
-                            rms = self._endpointer.voiced_rms
-                            if rms is None:
-                                rms = _buf_rms(buf)
-                            loudness_db = rms_to_dbfs(rms)
-                            self.audio_queue.put((buf, onset, loudness_db))
-                            secs = buf.size / self.sample_rate
-                            logger.debug(f"VAD endpoint: enqueued {secs:.2f}s for transcription")
-                        self.audio_buffer.clear()
-                        self._endpointer.reset()
-                        continue
-
-                    # The assistant's own residue during TTS sits above the
-                    # normal threshold, so utterances captured during playback
-                    # would never reach silence. Use the barge-in floor while
-                    # TTS is active — only a louder interrupt counts as speech.
-                    threshold = self._barge_in_rms if tts_active else self.silence_threshold
-                    last_chunk = self.audio_buffer[-1]
-                    if is_silent(last_chunk, threshold):
-                        silence_counter += 1
-                    else:
-                        silence_counter = 0
-                        if speech_onset_t is None:
-                            speech_onset_t = time.monotonic()
-
-                    # During TTS we cap the buffer much shorter so the
-                    # wakeword surfaces while we're still speaking; outside
-                    # TTS we keep the long max for natural utterances.
-                    max_samples = (
-                        self.tts_max_utterance_samples if tts_active else self.max_utterance_samples
-                    )
-                    min_samples = (
-                        self.tts_min_utterance_samples
-                        if tts_active
-                        else self.follow_up_min_utterance_samples
-                        if self._follow_up_open()
-                        else self.min_utterance_samples
-                    )
-
-                    buffer_samples = sum(c.size for c in self.audio_buffer)
-                    hit_silence = silence_counter >= self.silence_chunks_needed
-                    hit_max = buffer_samples >= max_samples
-                    if not (hit_silence or hit_max):
-                        continue
-
-                    buf = np.concatenate(list(self.audio_buffer), axis=0)
-
-                    # Post-hoc VAD gate: enqueue only a long-enough buffer that
-                    # contains speech. A no-speech buffer is dropped silently —
-                    # on the TTS/RMS path this fires constantly on AEC residue.
-                    # `and` short-circuits, so VAD only runs once the size gate
-                    # passes.
-                    if buf.size >= min_samples and (
-                        self._vad_model is None
-                        or _contains_speech(
-                            buf, self._vad_model, self._vad_get_timestamps, self.sample_rate
-                        )
-                    ):
-                        onset = speech_onset_t if speech_onset_t is not None else time.monotonic()
-                        # RMS path has no per-window voiced measure; tag
-                        # with whole-buffer RMS.
-                        loudness_db = rms_to_dbfs(_buf_rms(buf))
-                        self.audio_queue.put((buf, onset, loudness_db))
-                        secs = buf.size / self.sample_rate
-                        logger.debug(f"Enqueued {secs:.2f}s for transcription")
-
-                    if tts_active and hit_max and not hit_silence:
-                        # Force-flush mid-stream — retain the last ~1s as the
-                        # seed of the next chunk so the wakeword can't fall
-                        # across a boundary and get split between two ASR
-                        # results. Pop from the left in-place (rather than
-                        # reassigning self.audio_buffer) so a concurrent
-                        # callback append can't be lost to the orphaned
-                        # deque. silence_counter intentionally preserved.
-                        total = sum(c.size for c in self.audio_buffer)
-                        while (
-                            len(self.audio_buffer) > 1
-                            and total - self.audio_buffer[0].size >= self.tts_overlap_samples
-                        ):
-                            total -= self.audio_buffer.popleft().size
-                        continue
-
-                self.audio_buffer.clear()
+            if not self.transcribing:
+                sat_buf.clear()
                 silence_counter = 0
                 speech_onset_t = None
+                continue
+
+            tts_active = self.tts_active.is_set()
+            threshold = self._barge_in_rms if tts_active else self.silence_threshold
+
+            if is_silent(sat_buf[-1], threshold):
+                silence_counter += 1
+            else:
+                silence_counter = 0
+                if speech_onset_t is None:
+                    speech_onset_t = time.monotonic()
+
+            buffer_samples = sum(c.size for c in sat_buf)
+            max_s = self.tts_max_utterance_samples if tts_active else self.max_utterance_samples
+            min_s = (
+                self.tts_min_utterance_samples
+                if tts_active
+                else self.follow_up_min_utterance_samples
+                if self._follow_up_open()
+                else self.min_utterance_samples
+            )
+            hit_silence = silence_counter >= self.silence_chunks_needed
+            hit_max = buffer_samples >= max_s
+            if not (hit_silence or hit_max):
+                continue
+
+            buf = np.concatenate(list(sat_buf), axis=0)
+            if buf.size >= min_s and (
+                self._vad_model is None
+                or _contains_speech(buf, self._vad_model, self._vad_get_timestamps, self.sample_rate)
+            ):
+                onset = speech_onset_t if speech_onset_t is not None else time.monotonic()
+                self.audio_queue.put((buf, onset, rms_to_dbfs(_buf_rms(buf))))
+                logger.debug("Satellite: enqueued %.2fs for transcription", buf.size / self.sample_rate)
+
+            if tts_active and hit_max and not hit_silence:
+                total = sum(c.size for c in sat_buf)
+                while len(sat_buf) > 1 and total - sat_buf[0].size >= self.tts_overlap_samples:
+                    total -= sat_buf.popleft().size
+                continue
+
+            sat_buf.clear()
+            silence_counter = 0
+            speech_onset_t = None
+        logger.info("Satellite recorder stopped")
 
     def stop(self):
         """Signal the recorder to stop and inject poison pill."""

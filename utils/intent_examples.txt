@@ -73,6 +73,14 @@
     {"intent": "turn_off", "args": ["bedroom AC"]}
   ]}
 
+- Conversation context:
+    User: "Can you dim the downstairs office lights"
+    Tool — ha_set_brightness: "downstairs office at 30 percent"
+    Assistant: "{\"reply\": \"downstairs office at 30 percent\"}"
+  User: "Alright, brighten them now"
+  Output:
+  {"actions": [{"intent": "ha_set_brightness", "args": ["downstairs office lights", 70]}]}
+
 - User: "Keep in mind that I take my coffee black"
   Output:
   {"actions": [{"intent": "remember_fact", "args": ["Prefers black coffee"]}]}

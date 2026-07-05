@@ -20,7 +20,6 @@ os.environ.setdefault("HF_HOME", str(_REPO_ROOT / "data" / "models"))
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 import numpy as np
-import sounddevice as sd
 import soundfile as sf
 import torch
 
@@ -36,6 +35,7 @@ PHRASE_MAX = 400
 
 VOICES_DIR = _REPO_ROOT / "data" / "voices"
 CONFIG_PATH = _REPO_ROOT / "data" / "config.yml"
+PREVIEW_PATH = VOICES_DIR / "_preview.wav"
 
 MODEL_NAME = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 
@@ -115,14 +115,14 @@ def generate(model, phrase: str, instruct: str):
     return audio, int(sr)
 
 
-def play(audio: np.ndarray, sr: int) -> None:
+def write_preview(audio: np.ndarray, sr: int) -> None:
+    """No local audio output (WebSocket satellite is the only I/O in the
+    running app) — write a preview wav to disk and tell the user to play it
+    themselves rather than trying to speak through this host."""
     duration = len(audio) / sr if sr else 0
-    print(f"🔊 Playing back ({duration:.1f}s)... (Ctrl-C to stop)")
-    try:
-        sd.play(audio, samplerate=sr, blocking=True)
-    except KeyboardInterrupt:
-        sd.stop()
-        print("  Playback stopped.")
+    VOICES_DIR.mkdir(parents=True, exist_ok=True)
+    sf.write(str(PREVIEW_PATH), np.clip(audio, -1.0, 1.0), sr, subtype="PCM_16")
+    print(f"🔊 Preview ({duration:.1f}s) written to {PREVIEW_PATH.relative_to(_REPO_ROOT)} — play it to listen.")
 
 
 def save_voice(audio: np.ndarray, sr: int, phrase: str, name: str):
@@ -242,7 +242,7 @@ def main() -> int:
             phrase = instruct = None
             continue
 
-        play(audio, sr)
+        write_preview(audio, sr)
 
         choice = review_menu()
         if choice == "s":

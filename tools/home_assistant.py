@@ -7,10 +7,12 @@ first-wins collision rule applies.
 """
 
 import datetime as _dt
+import difflib
 import functools
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections import Counter
@@ -18,6 +20,7 @@ from typing import Optional
 
 import requests
 
+import utils.local_time as _local_tz
 from core.datetime_utils import tts_friendly_event_summary
 from core.url_utils import normalize_url
 
@@ -49,15 +52,8 @@ def tool(*dargs, **dkwargs):
 
 HA_CONFIG = config.get("home_assistant", {})
 
-# Home Assistant connection settings.
-# The long-lived token (effectively root on your smart home) is read from the
-# FULLOCH_HA_TOKEN environment variable first — set it in `.env` to keep it out
-# of plaintext config.yml — and falls back to home_assistant.token in config.yml
-# for backward compatibility.
-# Normalise so a missing scheme / trailing slash doesn't break requests, e.g.
-# "host:8123/" -> "http://host:8123" (not "host:8123//api/states").
 HA_URL = normalize_url(HA_CONFIG.get("url", "http://localhost:8123"))
-HA_TOKEN = os.environ.get("FULLOCH_HA_TOKEN", "").strip() or HA_CONFIG.get("token", "")
+HA_TOKEN = os.environ.get("HA_TOKEN", "").strip()
 TIMEOUT = HA_CONFIG.get("timeout", 10)
 
 # Default lookback for get_entity_history when the agent gives no start date —
@@ -799,6 +795,11 @@ def skip(entity: Optional[str] = None) -> str:
 
 # ---------------------------------------------------------------------------
 # Spotify search-and-play via the SpotifyPlus HACS integration.
+#
+# Superseded by tools/spotify.py (direct Spotify Web API via spotipy) when a
+# `spotify:` block is present in config.yml — SpotifyPlus's search is
+# unreliable, and the tool registry only allows one `play_song`. Guarded so
+# this stays the fallback for anyone without direct Spotify API credentials.
 # ---------------------------------------------------------------------------
 
 
@@ -820,67 +821,69 @@ def _spotify_search(kind: str, query: str) -> list[dict]:
     return (response.get("result") or {}).get("items") or []
 
 
-@tool(
-    name="play_song",
-    description="Search Spotify and play a song or playlist by name",
-    aliases=["play", "play_music", "start_music"],
-)
-def play_song(query: str, artist: Optional[str] = None) -> str:
-    """Search Spotify for a playlist (by name) then fall back to track search.
+if "spotify" not in config:
 
-    Args:
-        query: The spoken phrase, e.g. 'wagon wheel' or 'calm evening playlist'.
-        artist: Optional artist refinement. Combined into the query when given.
-    """
-    if not SPOTIFY_ENTITY:
-        return (
-            "Reactive question: No Spotify media player was found in Home Assistant. "
-            "Check that a Spotify or SpotifyPlus integration is set up, or add "
-            "`spotify_entity:` to the home_assistant block in config.yml."
-        )
-
-    search_query = f"{query} {artist}".strip() if artist else query
-    entity_id = _resolve_entity(SPOTIFY_ENTITY, domain="media_player")
-
-    # SpotifyPlus path: search_playlists → search_tracks → play URI.
-    # Falls back to the generic path if SpotifyPlus isn't installed (empty results).
-    playlists = _spotify_search("playlists", search_query)
-    if playlists:
-        uri = playlists[0].get("uri")
-        name = playlists[0].get("name", "playlist")
-        if uri:
-            return _call_service(
-                "media_player",
-                "play_media",
-                entity_id,
-                {"media_content_id": uri, "media_content_type": "playlist"},
-                success_message=f"Playing {name}",
-            )
-
-    tracks = _spotify_search("tracks", search_query)
-    if tracks:
-        uri = tracks[0].get("uri")
-        name = tracks[0].get("name", "your song")
-        if uri:
-            return _call_service(
-                "media_player",
-                "play_media",
-                entity_id,
-                {"media_content_id": uri, "media_content_type": "music"},
-                success_message=f"Playing {name}",
-            )
-
-    # Generic fallback for the built-in HA Spotify integration (no search service).
-    # Passes the search query directly as the media_content_id — some Spotify
-    # integrations resolve "spotify:search:<query>" but results are not guaranteed.
-    logger.info("SpotifyPlus search returned no results; trying generic media_player.play_media")
-    return _call_service(
-        "media_player",
-        "play_media",
-        entity_id,
-        {"media_content_id": f"spotify:search:{search_query}", "media_content_type": "music"},
-        success_message=f"Playing {search_query}",
+    @tool(
+        name="play_song",
+        description="Search Spotify and play a song or playlist by name",
+        aliases=["play", "play_music", "start_music"],
     )
+    def play_song(query: str, artist: Optional[str] = None) -> str:
+        """Search Spotify for a playlist (by name) then fall back to track search.
+
+        Args:
+            query: The spoken phrase, e.g. 'wagon wheel' or 'calm evening playlist'.
+            artist: Optional artist refinement. Combined into the query when given.
+        """
+        if not SPOTIFY_ENTITY:
+            return (
+                "Reactive question: No Spotify media player was found in Home Assistant. "
+                "Check that a Spotify or SpotifyPlus integration is set up, or add "
+                "`spotify_entity:` to the home_assistant block in config.yml."
+            )
+
+        search_query = f"{query} {artist}".strip() if artist else query
+        entity_id = _resolve_entity(SPOTIFY_ENTITY, domain="media_player")
+
+        # SpotifyPlus path: search_playlists → search_tracks → play URI.
+        # Falls back to the generic path if SpotifyPlus isn't installed (empty results).
+        playlists = _spotify_search("playlists", search_query)
+        if playlists:
+            uri = playlists[0].get("uri")
+            name = playlists[0].get("name", "playlist")
+            if uri:
+                return _call_service(
+                    "media_player",
+                    "play_media",
+                    entity_id,
+                    {"media_content_id": uri, "media_content_type": "playlist"},
+                    success_message=f"Playing {name}",
+                )
+
+        tracks = _spotify_search("tracks", search_query)
+        if tracks:
+            uri = tracks[0].get("uri")
+            name = tracks[0].get("name", "your song")
+            if uri:
+                return _call_service(
+                    "media_player",
+                    "play_media",
+                    entity_id,
+                    {"media_content_id": uri, "media_content_type": "music"},
+                    success_message=f"Playing {name}",
+                )
+
+        # Generic fallback for the built-in HA Spotify integration (no search service).
+        # Passes the search query directly as the media_content_id — some Spotify
+        # integrations resolve "spotify:search:<query>" but results are not guaranteed.
+        logger.info("SpotifyPlus search returned no results; trying generic media_player.play_media")
+        return _call_service(
+            "media_player",
+            "play_media",
+            entity_id,
+            {"media_content_id": f"spotify:search:{search_query}", "media_content_type": "music"},
+            success_message=f"Playing {search_query}",
+        )
 
 
 def _resolve_with_variants(entity: str, suffixes: tuple, domains: tuple) -> Optional[str]:
@@ -1263,6 +1266,121 @@ def whats_on(day: str = "today") -> str:
     """
     return _ha_get_events(day)
 
+
+def _parse_lookback_days(limit: str, default: int = 30) -> int:
+    """Parse a compact duration like '30d' / '2w' / '6m' / '1y' into days.
+
+    Bare numbers are treated as days. Falls back to `default` for anything
+    unparseable so a malformed arg degrades gracefully instead of raising.
+    """
+    m = re.match(r"\s*(\d+)\s*([dwmy]?)", str(limit).lower())
+    if not m:
+        return default
+    value = int(m.group(1))
+    unit = m.group(2) or "d"
+    return value * {"d": 1, "w": 7, "m": 30, "y": 365}[unit]
+
+
+def _relative_day_phrase(start_dt: _dt.datetime, now: _dt.datetime) -> str:
+    """Render a date as 'today' / 'tomorrow' / 'next Wednesday' / 'Wednesday,
+    March 4' etc. — a bare weekday name is ambiguous across a multi-week
+    search window (was it last Wednesday or three weeks ago?), so near dates
+    get relative phrasing and far ones get a full calendar date."""
+    delta_days = (start_dt.date() - now.date()).days
+    if delta_days == 0:
+        return "today"
+    if delta_days == 1:
+        return "tomorrow"
+    if delta_days == -1:
+        return "yesterday"
+    weekday = start_dt.strftime("%A")
+    if 2 <= delta_days <= 6:
+        return f"this {weekday}"
+    if 7 <= delta_days <= 13:
+        return f"next {weekday}"
+    if -6 <= delta_days <= -2:
+        return f"last {weekday}"
+    return start_dt.strftime("%A, %B %-d")
+
+
+def _speak_matched_events(matches: list[dict], now: _dt.datetime) -> str:
+    spoken = []
+    for event in matches:
+        start_dt = _dt.datetime.fromisoformat(event["start"])
+        day = _relative_day_phrase(start_dt, now)
+        summary = event.get("summary") or "an event"
+        if event.get("all_day"):
+            spoken.append(f"{summary} is all day {day}.")
+        else:
+            time_str = start_dt.strftime("%-I:%M %p")
+            spoken.append(f"{summary} is at {time_str} {day}.")
+    return " ".join(spoken)
+
+
+def _ha_get_events_name(event_description: str, limit: str = "30d") -> str:
+    """Search calendars for events whose summary matches `event_description`,
+    within `limit` days either side of now (both past and future)."""
+    calendars = _read_calendars()
+    if not calendars:
+        return "No calendar is configured in Home Assistant."
+
+    days = _parse_lookback_days(limit)
+    now = _dt.datetime.now()
+    start_iso = (now - _dt.timedelta(days=days)).isoformat()
+    end_iso = (now + _dt.timedelta(days=days)).isoformat()
+
+    response = _call_service_with_response(
+        "calendar",
+        "get_events",
+        {
+            "entity_id": calendars,
+            "start_date_time": start_iso,
+            "end_date_time": end_iso,
+        },
+    )
+    if not response:
+        return "I couldn't reach your calendar."
+
+    raw_events: list[dict] = []
+    for cal in calendars:
+        raw_events.extend((response.get(cal) or {}).get("events") or [])
+    events = [_normalise_ha_event(e) for e in raw_events]
+
+    query = event_description.lower().strip()
+    matches = [e for e in events if query in (e.get("summary") or "").lower()]
+    if not matches:
+        names = [e.get("summary") or "" for e in events]
+        close = difflib.get_close_matches(event_description, names, n=5, cutoff=0.5)
+        matches = [e for e in events if (e.get("summary") or "") in close]
+
+    if not matches:
+        return (
+            f"I couldn't find any events matching '{event_description}' in the "
+            f"{days} days before or after today."
+        )
+
+    matches.sort(key=lambda e: e["start"])
+    summary = _speak_matched_events(matches, now)
+    if len(matches) >= 2:
+        return f"Reactive question: {summary}"
+    return summary
+
+
+@tool(
+    name="when_is_it_on",
+    description=(
+        "Search for when a specific calendar event is upcoming or was in the past"
+    ),
+    aliases=["find_event", "search_calendar", "when_was"],
+)
+def when_is_it_on(event_description: str, limit: str = "30d") -> str:
+    """Search for a specific calendar event by name, in the future or the past.
+
+    Args:
+        event_description: What to search for, e.g. "dentist", "birthday", "sporting event".
+        limit: How far to look either side of today, e.g. "30d", "2w", "6m". Default '30d'.
+    """
+    return _ha_get_events_name(event_description, limit)
 
 # ---------------------------------------------------------------------------
 # Calendar write — wraps the HA `calendar.create_event` service.
@@ -1681,10 +1799,10 @@ def _format_day(label: str, day: dict, unit: str) -> str:
 
 def _weather_history_summary(entity_id: str, start: _dt.date, days: int, unit: str) -> str:
     """Query HA state history for a weather entity and summarise past conditions."""
-    start_dt = _dt.datetime(start.year, start.month, start.day, 0, 0, 0).astimezone()
+    start_dt = _dt.datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=_local_tz.get_tz())
     end_date = start + _dt.timedelta(days=days)
-    end_dt = _dt.datetime(end_date.year, end_date.month, end_date.day, 0, 0, 0).astimezone()
-    now_dt = _dt.datetime.now().astimezone()
+    end_dt = _dt.datetime(end_date.year, end_date.month, end_date.day, 0, 0, 0, tzinfo=_local_tz.get_tz())
+    now_dt = _local_tz.now()
     if end_dt > now_dt:
         end_dt = now_dt
     try:
@@ -1703,13 +1821,13 @@ def _weather_history_summary(entity_id: str, start: _dt.date, days: int, unit: s
     if not hist:
         return f"No weather history recorded for {_friendly_for(entity_id)} on {start}."
 
-    today = _dt.date.today()
+    today = _local_tz.today()
     yesterday = today - _dt.timedelta(days=1)
     daily: dict = {}
     for s in hist:
         ts_str = s.get("last_changed") or s.get("last_updated") or ""
         try:
-            ts = _dt.datetime.fromisoformat(ts_str).astimezone()
+            ts = _dt.datetime.fromisoformat(ts_str).astimezone(_local_tz.get_tz())
             day = ts.date()
         except Exception:
             continue
@@ -1850,10 +1968,10 @@ def _parse_history_start(start: str):
     if "T" in start or " " in start:
         start_dt = _dt.datetime.fromisoformat(start)
         if start_dt.tzinfo is None:
-            start_dt = start_dt.astimezone()
+            start_dt = start_dt.astimezone(_local_tz.get_tz())
         return start_dt, start_dt + _dt.timedelta(hours=2), False
     d = _dt.date.fromisoformat(start)
-    start_dt = _dt.datetime(d.year, d.month, d.day, 0, 0, 0).astimezone()
+    start_dt = _dt.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=_local_tz.get_tz())
     return start_dt, start_dt + _dt.timedelta(days=1) - _dt.timedelta(seconds=1), True
 
 
@@ -1869,10 +1987,10 @@ def _parse_history_end(end: Optional[str], default_end_dt):
         if "T" in end or " " in end:
             end_dt = _dt.datetime.fromisoformat(end)
             if end_dt.tzinfo is None:
-                end_dt = end_dt.astimezone()
+                end_dt = end_dt.astimezone(_local_tz.get_tz())
         else:
             d = _dt.date.fromisoformat(end)
-            end_dt = _dt.datetime(d.year, d.month, d.day, 23, 59, 59).astimezone()
+            end_dt = _dt.datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=_local_tz.get_tz())
     except ValueError:
         return default_end_dt
     return end_dt
@@ -1956,20 +2074,18 @@ def get_entity_history(
     if not start or not start.strip():
         # No date given — default to a recent window so "when was X last on"
         # answers in one agent call instead of a replan just to pick a start.
-        start_dt = (
-            _dt.datetime.now() - _dt.timedelta(days=HISTORY_DEFAULT_LOOKBACK_DAYS)
-        ).astimezone()
-        default_end_dt = _dt.datetime.now().astimezone()
+        start_dt = _local_tz.now() - _dt.timedelta(days=HISTORY_DEFAULT_LOOKBACK_DAYS)
+        default_end_dt = _local_tz.now()
     else:
         try:
             if "T" in start or " " in start:
                 start_dt = _dt.datetime.fromisoformat(start)
                 if start_dt.tzinfo is None:
-                    start_dt = start_dt.astimezone()
+                    start_dt = start_dt.astimezone(_local_tz.get_tz())
                 default_end_dt = start_dt + _dt.timedelta(hours=2)
             else:
                 d = _dt.date.fromisoformat(start)
-                start_dt = _dt.datetime(d.year, d.month, d.day, 0, 0, 0).astimezone()
+                start_dt = _dt.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=_local_tz.get_tz())
                 default_end_dt = start_dt + _dt.timedelta(days=1) - _dt.timedelta(seconds=1)
         except ValueError:
             return f"Reactive question: Could not parse start '{start}'. Ask the user to clarify the date."
@@ -1979,16 +2095,16 @@ def get_entity_history(
             if "T" in end or " " in end:
                 end_dt = _dt.datetime.fromisoformat(end)
                 if end_dt.tzinfo is None:
-                    end_dt = end_dt.astimezone()
+                    end_dt = end_dt.astimezone(_local_tz.get_tz())
             else:
                 d = _dt.date.fromisoformat(end)
-                end_dt = _dt.datetime(d.year, d.month, d.day, 23, 59, 59).astimezone()
+                end_dt = _dt.datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=_local_tz.get_tz())
         except ValueError:
             end_dt = default_end_dt
     else:
         end_dt = default_end_dt
 
-    now = _dt.datetime.now().astimezone()
+    now = _local_tz.now()
     if end_dt > now:
         end_dt = now
 
@@ -2027,7 +2143,7 @@ def get_entity_history(
         """A spoken 'today/yesterday/<weekday> at <time>' label for one state."""
         ts_str = s.get("last_changed") or s.get("last_updated") or ""
         try:
-            ts = _dt.datetime.fromisoformat(ts_str).astimezone()
+            ts = _dt.datetime.fromisoformat(ts_str).astimezone(_local_tz.get_tz())
             ts_date = ts.date()
             if ts_date == today:
                 day_label = "today"
@@ -2083,7 +2199,7 @@ def get_conversation_history(start: str, end: Optional[str] = None) -> str:
         )
 
     end_dt = _parse_history_end(end, default_end_dt)
-    now = _dt.datetime.now().astimezone()
+    now = _local_tz.now()
     if end_dt > now:
         end_dt = now
 
@@ -2100,7 +2216,7 @@ def get_conversation_history(start: str, end: Optional[str] = None) -> str:
     events.sort(key=lambda it: it[0].get("last_changed") or it[0].get("last_updated") or "")
 
     _SKIP = {"unknown", "unavailable", ""}
-    today = _dt.date.today()
+    today = _local_tz.today()
     yesterday = today - _dt.timedelta(days=1)
     lines: list = []
     for s, speaker in events:
@@ -2109,7 +2225,7 @@ def get_conversation_history(start: str, end: Optional[str] = None) -> str:
             continue
         ts_str = s.get("last_changed") or s.get("last_updated") or ""
         try:
-            ts = _dt.datetime.fromisoformat(ts_str).astimezone()
+            ts = _dt.datetime.fromisoformat(ts_str).astimezone(_local_tz.get_tz())
             ts_date = ts.date()
             if ts_date == today:
                 day_label = "today"

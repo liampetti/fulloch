@@ -1,3 +1,14 @@
+# Stage 0: Build the Obsidian plugin bundle + downloadable zip from source, so
+# the dashboard always serves what's in obsidian-plugin/main.ts rather than a
+# stale hand-built artifact.
+FROM node:20-slim AS obsidian-plugin-builder
+WORKDIR /plugin
+RUN apt-get update && apt-get install -y zip && rm -rf /var/lib/apt/lists/*
+COPY obsidian-plugin/package.json obsidian-plugin/package-lock.json ./
+RUN npm ci
+COPY obsidian-plugin/main.ts obsidian-plugin/manifest.json obsidian-plugin/esbuild.config.mjs obsidian-plugin/tsconfig.json ./
+RUN npm run build && zip fulloch-obsidian.zip manifest.json main.js
+
 # Stage 1: Build compiled CUDA extensions
 FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel AS builder
 
@@ -67,14 +78,18 @@ COPY --chown=appuser:appuser tools/ tools/
 COPY --chown=appuser:appuser utils/ utils/
 COPY --chown=appuser:appuser audio/ audio/
 COPY --chown=appuser:appuser server/ server/
-COPY --chown=appuser:appuser wav/ wav/
 
 # First-run seeds (copied into the empty ./data volume by core/bootstrap.py):
-# the config template the wizard fills in, and the app's own GBNF grammar (which
-# the wizard's downloader can't fetch). Weights stay OUT of the image — the
-# wizard pulls them on first run.
+# the config template the wizard fills in, the app's own GBNF grammar (which
+# the wizard's downloader can't fetch), and the timer alert tone. Weights stay
+# OUT of the image — the wizard pulls them on first run.
 COPY --chown=appuser:appuser data/config.example.yml /app/seed/config.example.yml
 COPY --chown=appuser:appuser data/models/grammars/agent.gbnf /app/seed/grammars/agent.gbnf
+COPY --chown=appuser:appuser data/wav/ /app/seed/wav/
+
+# Obsidian plugin zip, built from source in the obsidian-plugin-builder stage
+# above — served by GET /api/obsidian/plugin.zip (server/dashboard.py).
+COPY --from=obsidian-plugin-builder --chown=appuser:appuser /plugin/fulloch-obsidian.zip /app/obsidian-plugin/fulloch-obsidian.zip
 
 # Bootstrap + setup-or-run is handled in app.main() (core/bootstrap.py): an empty
 # ./data boots into the setup wizard, a populated one straight to the assistant.

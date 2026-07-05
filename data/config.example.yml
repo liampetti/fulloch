@@ -1,4 +1,9 @@
 # Fulloch Configuration Example — copy to config.yml and fill in your values.
+#
+# Secrets (HA token, API keys, dashboard password) live in data/credentials.json
+# — copy credentials.example.json to credentials.json and fill it in, or set
+# them via the setup wizard. Env vars (HA_TOKEN, LLM_API_KEY, DASHBOARD_PASSWORD,
+# OBSIDIAN_TOKEN) take precedence over credentials.json if both are set.
 
 # =============================================================================
 # General Settings
@@ -7,6 +12,7 @@ general:
   wakeword: "hey atticus"       # Activation phrase (case-insensitive, multi-word ok); also the fallback if wakeword_pattern fails to compile
   wakeword_pattern: '\b(?:hey|hay|hi)\W+[ao][dtl]{1,2}i?c\W*u[sz]\b' # Optional case-insensitive regex override to tolerate ASR variants
   voice_clone: "atticus"
+  # tts_speed: 1.0                # Speech rate multiplier (~0.5-2.0, >1 faster). Kokoro only — Qwen TTS has no speed control; set its pace via the voice-clone reference recording.
   barge_in: "wakeword"          # "off" (half-duplex) | "wakeword" (interrupt mid-response)
   follow_up_time: "5s"          # "0s" | "<N>s" — wakeword-free reply window after TTS, for back-and-forth in quiet rooms
   asr_language: "English"       # Force transcription to one language (English only for now)
@@ -27,18 +33,25 @@ general:
   dashboard_host: "127.0.0.1"  # local-only (default)
   #
   # To reach it from another device on your network:
-  #   1. dashboard_host: "0.0.0.0"            (bind to all interfaces)
-  #   2. set FULLOCH_DASHBOARD_TOKEN in .env  (REQUIRED — the dashboard reads/
-  #      writes notes, toggles the mic, speaks, and drives Home Assistant)
+  #   1. dashboard_host: "0.0.0.0"      (bind to all interfaces)
+  #   2. Set a password in the setup wizard (protects notes, mic, HA control)
   #   3. (optional) HTTPS via the cert/key pair below
-  # Then open http(s)://<host-ip>:8765/?token=<your-token> once; the browser
-  # stores the token, so you can bookmark the bare URL afterwards.
   #
-  # Optional HTTPS — both keys required, or TLS is skipped. Use mkcert for a
-  # warning-free local cert. In Docker the files must live under ./data
-  # (mounted into the container):
-  # dashboard_ssl_certfile: "./data/certs/fulloch.pem"
-  # dashboard_ssl_keyfile:  "./data/certs/fulloch-key.pem"
+  # HTTPS — a self-signed cert is generated automatically on a new install
+  # (./data/certs/dashboard.{crt,key}) and wired in here, because browsers
+  # block microphone access (getUserMedia) on plain HTTP once the origin isn't
+  # localhost — needed for the browser satellite from a phone/other device on
+  # the LAN. Expect a one-time "not private" browser warning per device; click
+  # through it — there's no CA that can sign a cert for a private LAN IP. For a
+  # warning-free cert instead, generate one with mkcert and point these at it
+  # (both keys required, or TLS is skipped; in Docker the files must live
+  # under ./data):
+  # dashboard_ssl_certfile: "./data/certs/dashboard.crt"
+  # dashboard_ssl_keyfile:  "./data/certs/dashboard.key"
+
+  # Timezone — auto-detected from your browser on first load and written here.
+  # Override manually with any IANA name if needed (e.g. "America/New_York").
+  # timezone: "Australia/Sydney"
 
   # ---------------------------------------------------------------------------
   # Advanced tuning — all still under `general:`. Defaults (shown) suit most
@@ -63,11 +76,11 @@ general:
 #
 # models:
 #   asr:
-#     backend: qwen          # qwen (Qwen3-ASR 1.7B, GPU default) | qwen-small (Qwen3-ASR 0.6B, GPU experimental) | qwen-onnx (Qwen3-ASR 1.7B ONNX, CPU default) | qwen-onnx-small (Qwen3-ASR 0.6B, CPU experimental) | moonshine (CPU experimental) | moonshine-tiny (CPU experimental)
+#     backend: qwen          # qwen (Qwen3-ASR 1.7B, GPU default) | qwen-small (Qwen3-ASR 0.6B, GPU) | qwen-onnx-small (Qwen3-ASR 0.6B ONNX, CPU default) | qwen-onnx (Qwen3-ASR 1.7B ONNX, CPU) | moonshine (CPU) | moonshine-tiny (CPU)
 #   tts:
-#     backend: qwen          # qwen (Qwen3-TTS-Base 1.7B, GPU default) | qwen-small (Qwen3-TTS-Base 0.6B, GPU experimental) | kokoro-onnx (Kokoro-82m ONNX, CPU default)
+#     backend: qwen          # qwen (Qwen3-TTS-Base 1.7B, GPU default) | qwen-small (Qwen3-TTS-Base 0.6B, GPU) | kokoro-onnx (Kokoro-82m ONNX, CPU default) | crispasr-qwen3-tts (Qwen3-TTS-Base 1.7B GGUF, CPU) | crispasr-qwen3-tts-0.6b (Qwen3-TTS-Base 0.6B GGUF CPU)
 #   llm:
-#     backend: llama         # llama (Qwen3.5 9B, default) | gemma (Gemma 4 12B QAT, experimental) | none (regex-only) | openai (remote)
+#     backend: llama         # llama (Qwen3.5 9B, default) | gemma (Gemma 4 12B QAT) | none (regex-only) | openai (remote)
 #     model: "./data/models/Qwen3.5-9B-UD-Q4_K_XL.gguf" # Custom model file location
 #     n_context: 12288
 #
@@ -77,7 +90,6 @@ general:
 #     backend: openai
 #     model: "qwen2.5"              # optional; blank = the server's default (single-model servers ignore it)
 #     base_url: "http://localhost:8888/v1"
-#     api_key: ""                   # prefer FULLOCH_LLM_API_KEY in .env
 #     connect_timeout: 0.4          # seconds; fail fast when the endpoint is down
 #     read_timeout: 60              # seconds; raise if first-token latency is high
 #
@@ -88,13 +100,11 @@ general:
 # =============================================================================
 # Home Assistant — smart-home backend
 # =============================================================================
-# Create a long-lived token at http://<your-ha>:8123/profile.
+# Long-lived access token: set ha_token in Settings → Security (saved to data/credentials.json).
 # Rename entities in the HA UI to change the spoken name, then restart Fulloch.
 
 # home_assistant:
 #   url: "http://192.168.1.50:8123"
-#   token: "your_long_lived_access_token"  # prefer FULLOCH_HA_TOKEN in .env — it takes
-#                                            # priority and keeps the token out of config
 #   timeout: 10
 #   spotify_entity: "SpotifyPlus Atticus"  # Spotify media_player (friendly name or entity_id).
 #                                            # Auto-detected (first media_player.spotify*); set
@@ -108,6 +118,24 @@ general:
 #                          # fulloch.speak on calendar events, or you want no reminder audio.
 
 # =============================================================================
+# Spotify — direct Web API playback (tools/spotify.py)
+# =============================================================================
+# Optional, and supersedes HA's play_song (which goes through the SpotifyPlus
+# HACS integration and has unreliable search) — HA still handles pause/resume/
+# skip since those also route to AVR/TV. Requires a Spotify app
+# (https://developer.spotify.com/dashboard) and a one-time manual OAuth step
+# to obtain a refresh token (no in-app browser flow — this app is headless);
+# run scripts/spotify_auth.py once to do it. Put spotify_client_id /
+# spotify_client_secret / spotify_refresh_token in data/credentials.json.
+
+# spotify:
+#   redirect_uri: "http://127.0.0.1:8080/callback"  # must match the Spotify app's redirect URI —
+#                              # Spotify's dashboard flags "localhost" (as opposed to the literal
+#                              # loopback IP 127.0.0.1) as an insecure http redirect URI
+#   device_id: "Living Room"  # Spotify Connect device name to target. Uses the first
+#                              # available device if unset.
+
+# =============================================================================
 # Always-Available Tools
 # =============================================================================
 
@@ -117,6 +145,14 @@ general:
 # notes:
 #   path: "./data/notes"      # where notes are stored
 #   daily_subdir: "daily"     # optional: daily-journal notes go here as YYYY-MM-DD.md
+
+# Obsidian plugin bridge — only relevant when the Fulloch Obsidian plugin
+# is installed and connected. Under Docker, the plugin runs on the host and
+# reports host paths that the container can't see unless they're bind-mounted
+# in. Map host-prefix → container-prefix here.
+# obsidian:
+#   path_translation:
+#     "/Users/you/Documents/MyVault": "/vault"  # see the Obsidian section of the README
 
 search:
   searxng_url: "http://localhost:8080/search"

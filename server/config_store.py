@@ -221,7 +221,7 @@ def set_llm_model_name(name: str, path: str = DEFAULT_CONFIG_PATH) -> None:
     """Persist only `models.llm.model`, preserving the rest of the block.
 
     Used by the live model switch (POST /llm/model) so the chosen model survives
-    a restart without rewriting backend / base_url / api_key. Raises KeyError if
+    a restart without rewriting backend / base_url. Raises KeyError if
     there's no structured `models.llm` block to patch.
     """
     doc = _load_doc(path)
@@ -292,11 +292,4 @@ def settings_view(path: str = DEFAULT_CONFIG_PATH) -> dict:
         "backends": _backends_view(),
         "wakeword_presets": wakeword_presets_as_dicts(),
         "tier_presets": _tiers_view(),
-        # Whether a remote-LLM API key is already in the environment, so the UI
-        # can say "found in env" and skip prompting for one. Mirrors the
-        # precedence in core/llm_openai.py:_resolve_api_key.
-        "llm_api_key_in_env": bool(
-            os.environ.get("FULLOCH_LLM_API_KEY", "").strip()
-            or os.environ.get("OPENAI_API_KEY", "").strip()
-        ),
     }

@@ -8,15 +8,19 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tools import notes  # noqa: E402
+from tools import notes, notes_root  # noqa: E402
 from utils import prompts  # noqa: E402
 
 
 @pytest.fixture
 def notes_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(notes_root, "_override", None)
+    monkeypatch.setattr(notes_root, "_migrated", False)
     base = tmp_path / "notes"
     base.mkdir()
-    monkeypatch.setattr(notes, "NOTES_DIR", base)
+    notes_root.set_notes_root(base, persist=False)
     # Skip the real embedder load on remember_fact() writes.
     monkeypatch.setattr(notes, "_after_write", lambda _path: None)
     return base

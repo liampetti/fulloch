@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from tools import (
     notes,  # noqa: E402
     notes_index,  # noqa: E402
+    notes_root,  # noqa: E402
 )
 
 
@@ -50,9 +51,13 @@ class _StubEncoder:
 
 @pytest.fixture
 def notes_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(notes_root, "_override", None)
+    monkeypatch.setattr(notes_root, "_migrated", False)
     base = tmp_path / "notes"
     base.mkdir()
-    monkeypatch.setattr(notes, "NOTES_DIR", base)
+    notes_root.set_notes_root(base, persist=False)
     monkeypatch.setattr(notes, "DAILY_SUBDIR", None)
     # Wipe the lazy singleton between tests so each gets a fresh index.
     monkeypatch.setattr(notes, "_index", None)

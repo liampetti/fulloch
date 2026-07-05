@@ -72,8 +72,8 @@ class BackendSpec:
     deps: tuple = ()
     notes: str = ""
     # Not a recommended default — works but isn't part of a recommended stack
-    # (e.g. the 0.6B/Moonshine ASRs, the GPU torch ASR, the 12B LLM). The wizard
-    # tags these so users know `qwen-onnx` / the tier presets are the picks.
+    # (e.g. Moonshine, the GPU torch ASR, the 12B LLM). The wizard tags these
+    # so users know the tier presets are the picks.
     experimental: bool = False
     # How this model's reasoning/thinking turn is toggled on the *local*
     # llama.cpp path. "qwen" appends Qwen3's `/think` text directive; "" (or any
@@ -139,11 +139,15 @@ _register(
     )
 )
 # CPU-friendly Qwen3-ASR (1.7B int4 ONNX) — the validated, wakeword-reliable CPU
-# ASR (recommended in every stack; runs on CPU even on the GPU box, freeing VRAM).
-# 0% vs 3.3% WER vs the 0.6B on the synthetic voice set, ~0.2x RTF on CPU. Same
-# wakeword/context biasing seam. Fetch only the int4 files (hf_allow) to skip the
-# ~8GB fp32 decoder weights and the packaged tars. Model dir holds the onnx files
-# + tokenizer; not a standard HF snapshot, so loaded from a path.
+# ASR used by the Full (GPU) stack, which runs it on CPU to free VRAM for the 9B
+# SLM + TTS. 0% vs 3.3% WER vs the 0.6B on the synthetic voice set, ~0.2x RTF on
+# CPU. Same wakeword/context biasing seam. Fetch only the int4 files (hf_allow)
+# to skip the ~8GB fp32 decoder weights and the packaged tars. Model dir holds
+# the onnx files + tokenizer; not a standard HF snapshot, so loaded from a path.
+# The CPU-only tiers (cpu_local / cpu_server) default to the smaller
+# `qwen-onnx-small` instead — same Qwen3-ASR family (wakeword biasing, 30
+# languages) but ~3x fewer parameters, so much faster per utterance on CPU;
+# `qwen-onnx` remains available there manually for the extra accuracy.
 _register(
     BackendSpec(
         domain=ASR,
@@ -167,32 +171,39 @@ _register(
         vram_gb=0.0,
         ram_gb=4.5,  # all model data resident in system RAM (onnxruntime CPU provider)
         deps=("onnxruntime", "librosa", "tokenizers"),
-        notes="CPU Qwen3-ASR 1.7B int4: the recommended ASR. Accurate, multilingual, "
-        "supports wakeword/context biasing (asr_context_hint). No torch.",
+        notes="CPU Qwen3-ASR 1.7B int4: the Full stack's ASR. Accurate, multilingual, "
+        "supports wakeword/context biasing (asr_context_hint). No torch. RTF figure "
+        "measured on AMD Ryzen 9 7900 + 32GB RAM; much slower on weaker CPUs (e.g. "
+        "Mac M2 Air) — prefer qwen-onnx-small there.",
     )
 )
-# Smaller CPU Qwen3-ASR (0.6B int8 ONNX) — faster than the 1.7B but the
-# misspelling/hallucination source on hardware. Experimental fallback. Model dir
-# holds onnx_models/ + tokenizer.json; loaded from a path.
+# Smaller CPU Qwen3-ASR (0.6B int8 ONNX) — the CPU-tier default. ~3x fewer
+# params than the 1.7B (autoregressive decoder cost scales with size), so much
+# faster per utterance; same Qwen3-ASR chat-template contract, so context/
+# wakeword biasing still works (unlike Moonshine). Tradeoff: more prone to
+# misspelling/hallucination than the 1.7B on hard audio. Model dir holds
+# onnx_models/ + tokenizer.json; loaded from a path.
 _register(
     BackendSpec(
         domain=ASR,
         backend="qwen-onnx-small",
         cpu_ok=True,
         display_name="Qwen3-ASR 0.6B (ONNX, CPU)",
-        experimental=True,  # superseded by qwen-onnx (1.7B; more accurate, fixes wakeword)
         loader="core.asr_onnx:load_asr_model",
         default_model="./data/models/qwen3-asr-0.6b-onnx",
         hf_repo="Daumee/Qwen3-ASR-0.6B-ONNX-CPU",  # snapshotted flat into default_model (a dir)
         download_size_gb=0.6,
         vram_gb=0.0,
+        ram_gb=0.8,
         deps=("onnxruntime", "librosa", "tokenizers"),
-        notes="CPU Qwen3-ASR 0.6B: faster than the 1.7B but less accurate "
-        "(misspelling/hallucination source). onnxruntime-only, no torch.",
+        notes="CPU Qwen3-ASR 0.6B: the CPU-tier default. Faster than the 1.7B "
+        "but less accurate (misspelling/hallucination source). Still supports "
+        "wakeword/context biasing. onnxruntime-only, no torch.",
     )
 )
-# Ultra-light CPU ASR for constrained edge devices (much smaller/faster than the
-# 0.6B ONNX, but English-only and no wakeword biasing).
+# Ultra-light CPU ASR for constrained edge devices — English-only, no wakeword
+# biasing (unlike the Qwen3-ASR ONNX backends above), so an experimental
+# fallback rather than a tier default.
 _register(
     BackendSpec(
         domain=ASR,
@@ -205,11 +216,13 @@ _register(
         hf_repo="UsefulSensors/moonshine-base",
         download_size_gb=0.2,
         vram_gb=0.5,
+        ram_gb=1.0,  # small weights, but torch/transformers runtime overhead dominates
         deps=("transformers",),
         notes="Light CPU ASR (~62M). English-only, no wakeword biasing. More "
         "accurate than tiny; smaller/faster than the 0.6B ONNX.",
     )
 )
+# Smallest/fastest CPU ASR, for devices too constrained even for Moonshine Base.
 _register(
     BackendSpec(
         domain=ASR,
@@ -222,6 +235,7 @@ _register(
         hf_repo="UsefulSensors/moonshine-tiny",
         download_size_gb=0.1,
         vram_gb=0.5,
+        ram_gb=0.8,
         deps=("transformers",),
         notes="Smallest/fastest CPU ASR (~27M) for very constrained devices. "
         "English-only, no wakeword biasing.",
@@ -280,6 +294,61 @@ _register(
         ram_gb=0.4,
         deps=("onnxruntime", "misaki", "wordninja"),
         notes="CPU TTS (fp32 ONNX) + misaki G2P. Built-in named voices, no torch.",
+    )
+)
+
+# CrispASR-hosted Qwen3-TTS-1.7B-Base GGUF (q8_0 talker + f16 codec), CPU, via
+# CrispASR's Python ctypes binding (not the CLI binary the bench scripts use —
+# see core/tts_crispasr.py's module docstring for why that distinction
+# matters for a live assistant). Selectable, not yet a tier default: fetch is
+# manual (scripts/fetch_crispasr_tts.py), not wired into the setup wizard.
+_register(
+    BackendSpec(
+        domain=TTS,
+        backend="crispasr-qwen3-tts",
+        cpu_ok=True,
+        experimental=True,
+        display_name="Qwen3-TTS 1.7B q8_0 (CrispASR GGUF, CPU)",
+        loader="core.tts_crispasr:load_tts",
+        default_model="./data/models/qwen3-tts-crispasr-gguf",
+        hf_repo="cstr/qwen3-tts-1.7b-base-GGUF",
+        hf_file="qwen3-tts-12hz-1.7b-base-q8_0.gguf",
+        download_size_gb=2.3,  # ~1.9GB talker + ~0.35GB codec; runtime lib is a few MB more
+        vram_gb=0.0,
+        ram_gb=3.0,
+        deps=("crispasr",),
+        notes="Voice cloning via data/voices/<name>.wav, same convention as core/tts.py. "
+        "Needs a one-time `scripts/fetch_crispasr_tts.py` run first (runtime lib + "
+        "talker GGUF + companion codec GGUF) — not yet in the download wizard. "
+        "`models.tts.gpu: true` is currently DISABLED — see core/tts_crispasr.py's "
+        "module docstring: works in isolation but crashes in the real assistant "
+        "process (ggml symbol collision with llama-cpp-python's bundled ggml).",
+    )
+)
+
+# Same runtime, smaller talker (Qwen3-TTS-0.6B-Base) — ~2x faster (RTF ~1.0x
+# vs the 1.7B's ~1.5-2.5x measured on this box), lower quality ceiling. Same
+# loader (core/tts_crispasr.py auto-detects the talker size from whichever
+# known GGUF is in default_model) and shared codec GGUF.
+_register(
+    BackendSpec(
+        domain=TTS,
+        backend="crispasr-qwen3-tts-0.6b",
+        cpu_ok=True,
+        experimental=True,
+        display_name="Qwen3-TTS 0.6B q8_0 (CrispASR GGUF, CPU)",
+        loader="core.tts_crispasr:load_tts",
+        default_model="./data/models/qwen3-tts-crispasr-0.6b-gguf",
+        hf_repo="cstr/qwen3-tts-0.6b-base-GGUF",
+        hf_file="qwen3-tts-12hz-0.6b-base-q8_0.gguf",
+        download_size_gb=1.3,  # ~1.0GB talker + ~0.35GB codec; runtime lib is a few MB more
+        vram_gb=0.0,
+        ram_gb=2.0,
+        deps=("crispasr",),
+        notes="Same as crispasr-qwen3-tts but the 0.6B talker — faster, lower quality "
+        "ceiling. Needs a one-time `scripts/fetch_crispasr_tts.py --model 0.6b` run "
+        "first — not yet in the download wizard. `models.tts.gpu: true` is currently "
+        "DISABLED, same reason as crispasr-qwen3-tts (see its notes / core/tts_crispasr.py).",
     )
 )
 

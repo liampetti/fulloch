@@ -216,7 +216,10 @@ def test_setup_mode_serves_setup_page():
     for path in ("/", "/setup"):
         r = client.get(path)
         assert r.status_code == 200
-        assert "First-run setup" in r.text
+        # The wizard subtitle flips to "First-run setup" at runtime in setup.js;
+        # here we verify the static page (title + wizard shell) is what we serve.
+        assert "<title>Fulloch — Setup</title>" in r.text
+        assert 'id="screen"' in r.text
 
 
 def test_setup_mode_assistant_routes_return_503():

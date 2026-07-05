@@ -16,6 +16,7 @@ Runtime deps: onnxruntime + librosa + tokenizers (no torch). The model directory
 """
 
 import logging
+import platform
 import time
 from pathlib import Path
 from typing import Generator, Optional, Union
@@ -26,6 +27,23 @@ import onnxruntime as ort
 from .asr import stream_generator  # noqa: F401  (generic queue drainer, re-exported)
 
 logger = logging.getLogger(__name__)
+
+
+def _onnx_providers() -> list:
+    """CoreML on Apple Silicon (GPU/ANE offload) with CPU fallback for
+    unsupported ops (e.g. int4/int8 MatMulNBits), CPU-only everywhere else.
+
+    Gated on `get_available_providers()` rather than just the platform check,
+    since a non-macOS onnxruntime wheel simply won't list CoreMLExecutionProvider
+    — so this can't accidentally request a missing provider on Linux/Windows.
+    """
+    is_apple_silicon = platform.system() == "Darwin" and platform.machine() in (
+        "arm64",
+        "aarch64",
+    )
+    if is_apple_silicon and "CoreMLExecutionProvider" in ort.get_available_providers():
+        return ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
 
 DEFAULT_MODEL_DIR = "./data/models/qwen3-asr-0.6b-onnx"
 SAMPLE_RATE = 16000
@@ -128,7 +146,7 @@ class _OnnxAsr:
         if num_threads > 0:
             opts.intra_op_num_threads = num_threads
         opts.log_severity_level = 3
-        cpu = ["CPUExecutionProvider"]
+        cpu = _onnx_providers()
 
         dec = (
             "int8"

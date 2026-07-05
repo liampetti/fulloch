@@ -210,7 +210,10 @@ class AgentLoop:
                         emission_text = host._generate_with_context_recovery(
                             user_prompt=None,
                             grammar=host.grammar,
-                            system_prompt=get_agent_system_prompt(host.wakeword_name),
+                            system_prompt=get_agent_system_prompt(
+                                host.wakeword_name,
+                                vault_context=getattr(host, "_vault_current_file", None),
+                            ),
                             cancel_check=cancel_check,
                             history=host._history,
                             stats=stats,
@@ -218,10 +221,10 @@ class AgentLoop:
                 except ContextExhaustedError:
                     return host._context_exhausted_reply()
                 except RemoteUnreachable as e:
-                    # Remote LLM down — degrade this turn to regex-only so the
-                    # user still gets basic commands + the no-AI fallback.
                     logger.warning("Remote LLM unreachable; regex-only this turn")
                     host._note_llm_remote_status(False, str(e))
+                    if first_emission is None:
+                        return host._speak_llm_error_fallback(self.session, self.source)
                     return self._run_without_llm(user_prompt, first_emission)
                 host._note_llm_remote_status(True)
                 logger.debug(f"Agent emission: {emission_text}")
@@ -466,6 +469,8 @@ class AgentLoop:
                         except RemoteUnreachable as e:
                             logger.warning("Remote LLM unreachable mid-turn; regex-only")
                             host._note_llm_remote_status(False, str(e))
+                            if first_emission is None:
+                                return host._speak_llm_error_fallback(self.session, self.source)
                             return self._run_without_llm(user_prompt, first_emission)
                         if session is not None and session.cancelled:
                             return ""
@@ -573,6 +578,8 @@ class AgentLoop:
                 except RemoteUnreachable as e:
                     logger.warning("Remote LLM unreachable mid-think; regex-only")
                     host._note_llm_remote_status(False, str(e))
+                    if first_emission is None:
+                        return host._speak_llm_error_fallback(self.session, self.source)
                     return self._run_without_llm(user_prompt, first_emission)
                 if session is not None and session.cancelled:
                     # Stash the partial reasoning for a follow-up

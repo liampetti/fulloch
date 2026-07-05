@@ -1,6 +1,6 @@
 # Lightweight dependency set for CI (ruff + pytest), no GPU stack.
 #
-# The full pipeline (torch / llama_cpp / qwen_asr / qwen_tts / sounddevice /
+# The full pipeline (torch / llama_cpp / qwen_asr / qwen_tts /
 # silero_vad / sentence_transformers ...) is GPU-resident and only meaningfully
 # testable on real hardware — those are stubbed in tests/conftest.py when absent.
 # This file lists only the pure-Python / light packages the test suite actually

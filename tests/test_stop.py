@@ -67,7 +67,6 @@ class TestGetStateBusy:
 
 class TestStopEndpoint:
     def test_post_stop_calls_request_stop(self, monkeypatch):
-        monkeypatch.delenv("FULLOCH_DASHBOARD_TOKEN", raising=False)
         a = MagicMock()
         a.register_turn_listener = MagicMock()
         client = TestClient(create_app(a))

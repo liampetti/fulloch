@@ -2,8 +2,8 @@ name: Release images
 
 # Tag-triggered build: the slow CUDA + flash-attn compile happens once here and
 # is pushed to GHCR, so users `docker pull` instead of building. Two variants:
-#   - GPU (default): ghcr.io/<owner>/fulloch:<version> + :latest
-#   - CPU (slim):    ghcr.io/<owner>/fulloch:<version>-cpu + :latest-cpu + :cpu
+#   - CPU (default): ghcr.io/<owner>/fulloch:<version>-cpu + :latest-cpu + :cpu
+#   - GPU (override): ghcr.io/<owner>/fulloch:<version> + :latest
 # Weights stay out of the images (the first-run wizard downloads them).
 on:
   push:
@@ -74,3 +74,27 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+
+  build-obsidian-plugin:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build plugin
+        working-directory: obsidian-plugin
+        run: |
+          npm ci
+          npm run build
+          zip -j fulloch-obsidian-${{ github.ref_name }}.zip manifest.json main.js
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: obsidian-plugin/fulloch-obsidian-${{ github.ref_name }}.zip
+          fail_on_unmatched_files: true

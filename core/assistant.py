@@ -6,11 +6,14 @@ Handles wakeword detection, intent processing, and response generation.
 
 import json
 import logging
+import queue
 import random
 import re
 import threading
 import time
 from typing import Callable, Optional
+
+import numpy as np
 
 # Sentinels returned by the thinking tools — kept as module-level
 # constants so renames only happen in one place.
@@ -29,7 +32,7 @@ from .agent_loop import (
     _PROMPT_STRIP_CHARS,
     AgentLoop,
 )
-from .audio import AudioCapture, resolve_device
+from .audio import AudioCapture
 from .backends import ASR, LLM, TTS, get_module, resolve_models
 from .noise_baseline import BackgroundNoiseBaseline
 from .slm import ContextExhaustedError, RemoteUnreachable, generate_slm, load_slm
@@ -47,6 +50,10 @@ _LOG_LEVELS = {
     "warning": logging.WARNING,
     "error": logging.ERROR,
 }
+
+# Pre-rendered alert tone played over the satellite before a timer's spoken
+# reminder (see Assistant._play_alarm_tone). Regenerate with dev/gen_sound.py.
+ALARM_WAV_PATH = "./data/wav/alarm.wav"
 
 # Strips every non-word character. The self-echo check uses this so ASR's
 # "1254" / "am" still match the assistant's spoken "12 54" / "a m" — the
@@ -177,6 +184,7 @@ def _build_barge_pattern(wakeword: str, base_pattern: str) -> str:
 from utils.phrases import (  # noqa: E402
     ACK_PHRASES,
     GREETING_TOPICS,
+    LLM_ERROR_PHRASES,
     NO_AI_PHRASES,
     NOTE_WRITE_STALL_PHRASES,
     PRE_THINKING_STALL_PHRASES,
@@ -214,6 +222,11 @@ CONTEXT_TRIM_KEEP_MIN = 4
 # Silence timeout — past this gap with no new turn, history is cleared so a
 # stale "you said earlier..." context can't bleed into a fresh conversation.
 CHAT_SESSION_TIMEOUT_S = 600.0
+# Cap on a compacted tool-result entry's length (chars). Raw tool payloads
+# (a web summary, a note dump, a state list) can be many KB; once a turn is
+# complete, only a short trace survives compaction — see
+# _compact_completed_turns.
+COMPACTED_TOOL_TRACE_MAX_CHARS = 160
 
 # Spoken only when a turn overflows the context window AND even the recent
 # history floor won't fit (a single oversized message) — the rare case where we
@@ -253,8 +266,6 @@ class Assistant:
         barge_in: str = "off",
         barge_in_threshold_dbfs: Optional[float] = None,
         follow_up_time: str = "0s",
-        input_device: Optional[str] = None,
-        output_device: Optional[str] = None,
         asr_language: Optional[str] = None,
         asr_context_hint: bool = True,
         asr_context_terms: list = None,
@@ -290,10 +301,6 @@ class Assistant:
                 self-interrupts.
             follow_up_time: "0s" or "<N>s" — window after TTS ends during
                 which a wakeword-free utterance counts as a follow-up turn.
-            input_device: PortAudio/PulseAudio source name for the mic (None =
-                system default).
-            output_device: PortAudio/PulseAudio sink name for TTS playback
-                (None = system default).
         """
         self.wakeword = wakeword.lower()
         # Spoken name for self-introduction: the bare wakeword with any
@@ -346,9 +353,7 @@ class Assistant:
         self.use_vad = use_vad
         # Built in `_load_models()` once the TTS model is in memory.
         self.voice_clone_prompt = None
-        self.output_device = output_device
         self.audio_capture = AudioCapture(
-            input_device=input_device,
             barge_in_threshold_dbfs=barge_in_threshold_dbfs,
             use_vad=use_vad,
             vad_threshold=vad_threshold,
@@ -486,9 +491,22 @@ class Assistant:
         # Pre-rendered "no AI model" fallback clips (see NO_AI_PHRASES).
         # Populated in `_warm_and_announce`; played on a no-LLM miss.
         self.no_ai_cache: list = []
+        # Pre-rendered "AI server unreachable" clips (see LLM_ERROR_PHRASES).
+        # Played when the configured remote LLM times out or errors.
+        self.llm_error_cache: list = []
         # Pre-rendered "tool not available" clips (see TOOL_UNAVAILABLE_PHRASES).
         # Played by the hallucinated-tool guard instead of a fabricated answer.
         self.tool_unavailable_cache: list = []
+        # Pre-rendered opening-greeting clips. `_warm_and_announce` synthesises
+        # and attempts to play these during startup — before any browser could
+        # possibly be connected (the WebSocket satellite only exists once the
+        # dashboard is already serving, which is after warmup) — so that first
+        # attempt silently drops the audio (no sink yet). Cached here and
+        # replayed once by `replay_greeting()` on the first satellite
+        # connection instead. `_greeting_delivered` guards against replaying
+        # on every reconnect (tab refresh, follow-up browser tab, etc).
+        self.greeting_cache: list = []
+        self._greeting_delivered = False
 
         # Serializes SLM access. Voice turns run on the transcriber or barge-in
         # worker; text turns from the dashboard run on the FastAPI thread —
@@ -502,6 +520,21 @@ class Assistant:
         # run on the calling thread) and exceptions are swallowed.
         self._turn_listeners: list = []
         self._turn_listeners_lock = threading.Lock()
+
+        # Satellite (browser WebSocket) audio session.
+        # _satellite_chunk_q: fed by the WebSocket handler; consumed by satellite_recorder_thread.
+        # _satellite_always_listen: when True, the wakeword check is bypassed entirely.
+        self._satellite_chunk_q: Optional[queue.Queue] = None
+        self._satellite_always_listen: bool = False
+        # Mirrors the sink handed to the TTS module in set_satellite_sink, so
+        # _play_alarm_tone can push straight to it without reaching into the
+        # active TTS backend module's private state.
+        self._satellite_sink: Optional[queue.Queue] = None
+
+        # Obsidian plugin state — set by the dashboard when the plugin connects.
+        # vault_current_file: metadata about the note currently open in Obsidian.
+        self._vault_current_file: Optional[dict] = None
+        self._vault_path: Optional[str] = None
 
         # Set once `_load_models()` finishes — text turns from the dashboard
         # wait on this before calling into the pipeline.
@@ -550,6 +583,23 @@ class Assistant:
         name = getattr(spec, "display_name", None) or "the model"
         msg = (str(exc) or exc.__class__.__name__).strip()
         low = msg.lower()
+
+        # A missing or incomplete model file — download was interrupted or the
+        # model directory is only partially populated. Allow re-download by
+        # clearing the offline flag before bouncing back to the wizard.
+        is_missing = (
+            exc.__class__.__name__ == "LocalEntryNotFoundError"
+            or "localentrynotfounderror" in low
+            or ("hf_hub_offline" in low and "set" in low)
+            or (isinstance(exc, (FileNotFoundError, OSError)) and "No such file" in msg)
+        )
+        if is_missing:
+            import os as _os
+            _os.environ["HF_HUB_OFFLINE"] = "0"
+            return True, (
+                f"{name} model file is missing or incomplete — the download may have been "
+                "interrupted. Click 'Re-run setup wizard' to re-download."
+            )
         fatal = any(m in low for m in markers)
         looks_oom = any(m in low for m in ("out of memory", "llama_context", "cudamalloc"))
 
@@ -675,10 +725,9 @@ class Assistant:
         # re-render, so it stays restart-only (see apply_hot_config).
         self._tts_module = tts_mod
         self._tts_backend = tts_cfg["backend"]
-        output_device = resolve_device(self.output_device, want_input=False)
-        tts_mod.set_output_device(output_device)
-        # The recorder uses this to switch to a stricter silence threshold
-        # while we're talking, so AEC residue doesn't keep utterances alive.
+        # The satellite recorder uses this to switch to a stricter silence
+        # threshold while we're talking, so AEC residue doesn't keep
+        # utterances alive.
         tts_mod.set_tts_active_event(self.audio_capture.tts_active)
         logger.info(f"Using {tts_cfg['spec'].display_name} with voice clone: {self.voice_clone}")
         tts_mod.load_tts(model_id=tts_cfg["model"], **tts_cfg["opts"])
@@ -734,10 +783,9 @@ class Assistant:
             self.lifecycle.set("READY")
         self._start_reminder_poll()
         try:
-            from tools.time_tools import set_beep_device, set_speak_callback
+            from tools.time_tools import set_speak_callback
 
             set_speak_callback(self.speak_proactive)
-            set_beep_device(output_device)
         except ImportError:
             pass
 
@@ -796,6 +844,10 @@ class Assistant:
             logger.info("Caching no-AI fallback phrases...")
             self.no_ai_cache = [
                 self.synthesize(phrase, self.voice_clone_prompt) for phrase in NO_AI_PHRASES
+            ]
+            logger.info("Caching LLM-error fallback phrases...")
+            self.llm_error_cache = [
+                self.synthesize(phrase, self.voice_clone_prompt) for phrase in LLM_ERROR_PHRASES
             ]
             logger.info("Caching ack phrases...")
             self.ack_cache = [
@@ -897,9 +949,23 @@ class Assistant:
             sentences = split_sentences(cleaned) or [cleaned]
             logger.info(f"Synthesising greeting ({len(sentences)} sentence(s))...")
             greeting_parts = [self.synthesize(s, self.voice_clone_prompt) for s in sentences]
-            for chunks, sr in greeting_parts:
-                if chunks:
-                    self.play_chunks(chunks, sr, session=self.tts_session)
+            # Cached for replay_greeting() — see greeting_cache's docstring
+            # above for why the live attempt below almost never actually
+            # reaches a listener.
+            self.greeting_cache = greeting_parts
+            # Synthesis above already did the real warmup work (CUDA-graph /
+            # ORT session priming); playback is just for the user to hear it,
+            # so a missing local output device (headless/no-PulseAudio Docker
+            # host) shouldn't abort startup — same fallback as the recorder.
+            try:
+                for chunks, sr in greeting_parts:
+                    if chunks:
+                        self.play_chunks(chunks, sr, session=self.tts_session)
+            except Exception as e:
+                logger.warning(
+                    "Local audio playback unavailable (%s) — greeting not played, "
+                    "use the browser satellite or dashboard for voice.", e
+                )
 
             logger.info("Warmup complete")
         finally:
@@ -951,7 +1017,7 @@ class Assistant:
         # with `home_assistant:` absent from config.yml, never import
         # tools.home_assistant. Importing it has side effects — it registers the
         # HA tools into the global registry and connects to HA (default URL + the
-        # .env token) — so importing it here would silently re-enable HA for the
+        # credentials.json token) — so importing it here would silently re-enable HA for the
         # agent despite it being disabled in config.
         from tools._config import config as _cfg
 
@@ -991,24 +1057,35 @@ class Assistant:
             self._history = self._history[-HISTORY_MAX_MESSAGES:]
 
     def _compact_completed_turns(self) -> None:
-        """Strip tool results and bare planning emissions from `_history`.
+        """Shrink tool results and drop bare planning emissions from `_history`.
 
         Called at the start of each turn, when every tool / `{"actions": ...}`
-        entry belongs to an already-completed turn. Those are in-turn scaffolding
-        — the agent needs a tool result only while composing that turn's reply,
-        and the reply itself is recorded as a `{"reply": ...}` assistant entry.
-        Keeping the raw dumps afterwards just bloats the context (a single note
-        read or search payload can be many KB) and evicts the real conversation;
-        a follow-up re-fetches what it needs (e.g. web searches re-research)
-        rather than relying on a stale copy. The result is history that's just
-        the user's turns and Fulloch's replies.
+        entry belongs to an already-completed turn. The agent needs a tool
+        result in full only while composing that turn's reply; keeping the raw
+        dumps afterwards just bloats the context (a single note read or search
+        payload can be many KB) and evicts the real conversation.
+
+        Tool entries are NOT dropped entirely, though — only truncated to
+        `COMPACTED_TOOL_TRACE_MAX_CHARS`. A dropped-entirely tool entry left
+        history with only `{"reply": ...}` assistant turns, which is
+        indistinguishable from a fact the model merely asserted out loud: a
+        relative follow-up ("brighten them now") had no way to tell "I really
+        set this to 30%" from "I once said 30% out loud", so the model would
+        sometimes invent a new number instead of dispatching a fresh tool call
+        (docs/TODO.md #7). Keeping a short trace of which tool ran gives it
+        that signal back without re-bloating history with full payloads.
         """
         kept = []
         for msg in self._history:
             role = msg.get("role")
             if role == "tool":
-                continue
-            if role == "assistant":
+                content = msg.get("content") or ""
+                if len(content) > COMPACTED_TOOL_TRACE_MAX_CHARS:
+                    msg = {
+                        **msg,
+                        "content": content[:COMPACTED_TOOL_TRACE_MAX_CHARS].rstrip() + "…",
+                    }
+            elif role == "assistant":
                 try:
                     emission = json.loads(msg.get("content") or "")
                 except Exception:
@@ -1020,10 +1097,10 @@ class Assistant:
             kept.append(msg)
         if len(kept) != len(self._history):
             logger.debug(
-                "Compacted history: dropped %d tool/scaffolding entries",
+                "Compacted history: dropped %d scaffolding entries",
                 len(self._history) - len(kept),
             )
-            self._history = kept
+        self._history = kept
 
     def _shed_oldest_history(self) -> bool:
         """Drop the oldest history entries to recover from a context overflow.
@@ -1176,6 +1253,108 @@ class Assistant:
         logger.info("Live LLM model switched to %s", model)
         return {"ok": True, "model": model}
 
+    def connect_satellite(self, wakeword_bypass: bool = False) -> "queue.Queue":
+        """Start a browser satellite session.  Returns the audio chunk queue.
+
+        The WebSocket handler feeds float32 16 kHz mono chunks into the queue;
+        the satellite_recorder_thread drains it and pushes utterances to the
+        ASR pipeline. `wakeword_bypass=True` enables always-listen mode (no
+        wakeword required); False keeps normal wakeword-after-follow-up behaviour
+        but opens a 60 s grace window so the first utterance needs no wakeword.
+        """
+        self._satellite_always_listen = wakeword_bypass
+        chunk_q: "queue.Queue" = queue.Queue(maxsize=100)
+        self._satellite_chunk_q = chunk_q
+        threading.Thread(
+            target=self.audio_capture.satellite_recorder_thread,
+            args=(chunk_q,),
+            daemon=True,
+            name="satellite-recorder",
+        ).start()
+        # Open a generous initial window so the user can speak immediately
+        # without having to say the wakeword after clicking the button.
+        if not wakeword_bypass:
+            self._last_turn_end = time.monotonic()
+            self.audio_capture.arm_follow_up(60)
+        logger.info("Satellite connected (always_listen=%s)", wakeword_bypass)
+        return chunk_q
+
+    def disconnect_satellite(self) -> None:
+        """Tear down the satellite session; stop the satellite recorder thread."""
+        q = self._satellite_chunk_q
+        if q is not None:
+            q.put(None)  # sentinel → satellite_recorder_thread exits
+        self._satellite_chunk_q = None
+        self._satellite_always_listen = False
+        self.audio_capture.clear_follow_up()
+        logger.info("Satellite disconnected")
+
+    def set_satellite_wakeword(self, bypass: bool) -> None:
+        """Toggle always-listen mode on a live satellite session."""
+        self._satellite_always_listen = bypass
+        if bypass:
+            self.audio_capture.arm_follow_up(3600)
+        logger.info("Satellite always_listen=%s", bypass)
+
+    def set_satellite_sink(self, q: Optional["queue.Queue"]) -> None:
+        """Route TTS output to the WebSocket satellite queue (or None to restore speakers)."""
+        self._satellite_sink = q
+        tts_mod = getattr(self, "_tts_module", None)
+        if tts_mod is not None and hasattr(tts_mod, "set_satellite_sink"):
+            tts_mod.set_satellite_sink(q)
+
+    def replay_greeting(self) -> None:
+        """Play the cached opening greeting once, on the first satellite connect.
+
+        See greeting_cache's docstring in __init__ for why _warm_and_announce's
+        own playback attempt during startup almost never reaches a listener.
+        No-op on any later reconnect, or if there's no cached greeting (e.g.
+        startup hit an error before _warm_and_announce populated it).
+        """
+        if self._greeting_delivered or not self.greeting_cache:
+            return
+        self._greeting_delivered = True
+        for chunks, sr in self.greeting_cache:
+            if chunks:
+                self.play_chunks(chunks, sr, session=self.tts_session)
+
+    def _play_alarm_tone(self, session: Optional[TtsSession] = None) -> float:
+        """Push the pre-rendered alarm tone straight to the satellite sink.
+
+        Uses the same ("start", sr) / (chunk, None) / ("end",) sink protocol
+        as speak_stream, so it queues seamlessly ahead of a spoken reminder on
+        the browser (satPlayAt in index.js chains consecutive tts_start/end
+        pairs back-to-back rather than resetting). Returns the tone's
+        duration in seconds (0.0 if it couldn't be played) so the caller can
+        add it to the reminder's own playback-end estimate.
+        """
+        sink = self._satellite_sink
+        if sink is None or (session is not None and session.cancelled):
+            return 0.0
+        try:
+            import soundfile as sf
+
+            data, sr = sf.read(ALARM_WAV_PATH, dtype="float32", always_2d=False)
+        except Exception as e:
+            logger.warning(f"Alarm tone failed to load from {ALARM_WAV_PATH}: {e}")
+            return 0.0
+        if data.ndim > 1:
+            data = data.mean(axis=1).astype(np.float32)
+        sink.put(("start", sr))
+        sink.put((data, None))
+        sink.put(("end",))
+        return len(data) / sr
+
+    def set_vault_context(
+        self,
+        current_file: Optional[dict],
+        vault_path: Optional[str] = None,
+    ) -> None:
+        """Update the currently-open Obsidian note context injected into the agent prompt."""
+        self._vault_current_file = current_file
+        if vault_path is not None:
+            self._vault_path = vault_path
+
     # Config paths the running assistant can apply without a restart. Two are
     # conditional on the TTS backend (Kokoro only) — see apply_hot_config.
     _HOT_CONFIG_PATHS = frozenset(
@@ -1199,6 +1378,7 @@ class Assistant:
     # playing in the old voice. LLM-only pools are skipped without an SLM.
     _PHRASE_CACHE_SPECS = (
         ("no_ai_cache", NO_AI_PHRASES, False),
+        ("llm_error_cache", LLM_ERROR_PHRASES, False),
         ("tool_unavailable_cache", TOOL_UNAVAILABLE_PHRASES, False),
         ("ack_cache", ACK_PHRASES, False),
         ("web_search_stall_cache", WEB_SEARCH_STALL_PHRASES, True),
@@ -1391,6 +1571,27 @@ class Assistant:
             return ""
         return phrase
 
+    def _speak_llm_error_fallback(self, session: Optional[TtsSession], source: str) -> str:
+        """Remote LLM failure handler: surface an 'AI server unreachable' phrase.
+
+        Used when `RemoteUnreachable` fires during an agent turn and the regex
+        fast-path didn't catch the request. Same contract as
+        `_speak_no_ai_fallback`: records phrase in `_history`; voice path plays
+        the pre-rendered clip and returns "" so the caller doesn't double-speak.
+        """
+        i = random.randrange(len(LLM_ERROR_PHRASES))
+        phrase = LLM_ERROR_PHRASES[i]
+        self._record_spoken(phrase)
+        if source == "voice" and self.llm_error_cache:
+            self._emit_turn_event("assistant", phrase, "voice")
+            chunks, sr = self.llm_error_cache[i]
+            try:
+                self.play_chunks(chunks, sr, session=session or self.tts_session)
+            except Exception:
+                logger.exception("LLM-error fallback playback failed")
+            return ""
+        return phrase
+
     def _speak_tool_unavailable_fallback(self, session: Optional[TtsSession], source: str) -> str:
         """Hallucinated-tool guard handler: the agent named a tool that isn't
         loaded. Speak a canned 'can't do that' instead of letting the model
@@ -1560,13 +1761,14 @@ class Assistant:
                     return
                 # Empty answer = the no-LLM bypass already played a pre-rendered
                 # fallback clip (and emitted its bubble), so don't speak again.
+                playback_end = None
                 if cleaned:
                     # Emit before speaking so the dashboard can reveal the text while
                     # TTS plays, not only after playback finishes.
                     ts = self._emit_turn_event("assistant", cleaned, "voice", stats=stats)
                     # Emit the TTS stat as soon as the first audio chunk is ready, so the
                     # panel doesn't wait for the whole reply to finish playing.
-                    self.speak_stream(
+                    playback_end = self.speak_stream(
                         cleaned,
                         self.voice_clone_prompt,
                         session=session,
@@ -1583,7 +1785,7 @@ class Assistant:
             self._active_session = None
         # A stop stands down without a follow-up window.
         if not session.cancelled:
-            self._mark_turn_end()
+            self._mark_turn_end(playback_end)
 
     def _start_turn(self, user_prompt: str, stt_seconds=None) -> None:
         """Kick off a barge-in turn (handle + speak) on a worker thread."""
@@ -1643,6 +1845,7 @@ class Assistant:
             cleaned = clean_for_tts(answer)
             # Empty answer = the no-LLM bypass already played a pre-rendered
             # fallback clip (and emitted its bubble), so don't speak again.
+            playback_end = None
             if cleaned:
                 # Recorded for self-echo suppression in `_check_barge_in`.
                 self._last_spoken_text = cleaned.lower()
@@ -1653,7 +1856,7 @@ class Assistant:
                 ts = self._emit_turn_event("assistant", cleaned, "voice", stats=stats)
                 # Emit the TTS stat as soon as the first audio chunk is ready, so the
                 # panel doesn't wait for the whole reply to finish playing.
-                self.speak_stream(
+                playback_end = self.speak_stream(
                     cleaned,
                     self.voice_clone_prompt,
                     session=session,
@@ -1674,7 +1877,7 @@ class Assistant:
                 # inside the follow-up window as a spurious new turn.
                 self.audio_capture.flush()
                 self._drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
-                self._mark_turn_end()
+                self._mark_turn_end(playback_end)
         except Exception as e:
             logger.error(f"Turn error: {e}")
             self._note_runtime_error(e)
@@ -1713,16 +1916,30 @@ class Assistant:
         self._dispatch_event({"role": "stopped", "ts": time.time()})
         logger.info("Stop requested — standing down")
 
-    def _mark_turn_end(self) -> None:
+    def _mark_turn_end(self, playback_end: Optional[float] = None) -> None:
         """Record the turn-end time and open the wakeword-free follow-up window.
+
+        `playback_end` is the estimated monotonic-clock time the TTS audio
+        actually finishes playing on the browser (`speak_stream`'s return
+        value) — chunks are handed to the satellite sink as fast as they're
+        generated with no flow control, so generation can finish well before
+        playback does. Without this, the follow-up window was armed (and
+        could silently expire) while the reply was still audibly playing, so
+        a user who replied the instant the voice stopped could still land
+        outside the window. Falls back to now() when no estimate is available
+        (e.g. no satellite connected).
 
         The recorder reads the armed window to accept short replies (which the
         full min-utterance length would otherwise drop); the transcriber gauges
         the window itself from `_last_turn_end` against each utterance's onset.
+        In satellite always-listen mode the recorder window is kept open
+        indefinitely so short utterances are never dropped.
         """
-        self._last_turn_end = time.monotonic()
-        if self.follow_up_seconds > 0:
-            self.audio_capture.arm_follow_up(self.follow_up_seconds)
+        now = time.monotonic()
+        self._last_turn_end = max(now, playback_end) if playback_end is not None else now
+        window = 3600.0 if self._satellite_always_listen else self.follow_up_seconds
+        if window > 0:
+            self.audio_capture.arm_follow_up(window)
 
     def _is_context_echo(self, command: str) -> bool:
         """True if `command` is built solely from ASR context-bias tokens.
@@ -2016,7 +2233,7 @@ class Assistant:
                         self.follow_up_seconds > 0
                         and self._last_turn_end > 0
                         and 0 <= onset_gap < self.follow_up_seconds
-                    )
+                    ) or self._satellite_always_listen
                     if not in_follow_up:
                         # Genuine background: non-wakeword, not an accepted
                         # follow-up, and not mid-turn (that path is handled by
@@ -2172,7 +2389,7 @@ class Assistant:
             return "thinking"
         return "idle"
 
-    def speak_proactive(self, text: str) -> None:
+    def speak_proactive(self, text: str, alarm: bool = False) -> None:
         """Speak `text` through the cloned voice without a user turn.
 
         Waits for any in-progress voice turn (SLM + TTS) to fully complete
@@ -2180,6 +2397,9 @@ class Assistant:
         without it, so we also spin on `_turn_active` (barge-in worker) and
         `tts_active` (half-duplex TTS) to avoid two audio streams overlapping.
         Mutes the mic for the duration. Blocks until playback finishes.
+
+        `alarm=True` (timer completions) plays the pre-rendered alert tone
+        immediately before the spoken text.
         """
         if not self.models_ready.wait(timeout=30):
             logger.warning("speak_proactive: models not ready")
@@ -2197,18 +2417,23 @@ class Assistant:
                 cleaned = clean_for_tts(text)
                 if not cleaned:
                     return
+                alarm_seconds = self._play_alarm_tone(session) if alarm else 0.0
                 self._emit_turn_event("assistant", cleaned, "proactive")
-                self.speak_stream(cleaned, self.voice_clone_prompt, session=session)
+                playback_end = self.speak_stream(cleaned, self.voice_clone_prompt, session=session)
+                playback_end += alarm_seconds
             finally:
                 self.audio_capture.transcribing = True
-            self._mark_turn_end()
+            self._mark_turn_end(playback_end)
 
     def run(self):
-        """Start the recorder + transcriber threads and block until Ctrl+C."""
-        rec_thread = threading.Thread(target=self.audio_capture.recorder_thread, daemon=True)
-        trans_thread = threading.Thread(target=self._transcriber_thread, daemon=True)
+        """Start the transcriber thread and block until Ctrl+C.
 
-        rec_thread.start()
+        Voice I/O is exclusively through the WebSocket satellite
+        (`/ws/satellite`); the satellite recorder thread is started per
+        session inside `connect_satellite`, so there's no per-process
+        recorder thread here.
+        """
+        trans_thread = threading.Thread(target=self._transcriber_thread, daemon=True)
         trans_thread.start()
 
         logger.info("Press Ctrl+C to stop.")
@@ -2218,5 +2443,4 @@ class Assistant:
         except KeyboardInterrupt:
             logger.info("Stopping...")
             self.audio_capture.stop()
-            rec_thread.join(timeout=2)
             trans_thread.join(timeout=2)

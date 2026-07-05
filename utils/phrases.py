@@ -94,6 +94,16 @@ NO_AI_PHRASES = [
     "Can't reach an AI model for that one.",
 ]
 
+# Spoken when the configured remote LLM endpoint times out or errors mid-turn.
+# Different from NO_AI_PHRASES (those are for llm.backend: none); these fire
+# only when the backend is openai but RemoteUnreachable was raised. Pre-rendered
+# to `llm_error_cache` in `_warm_and_announce`; played via `_speak_llm_error_fallback`.
+LLM_ERROR_PHRASES = [
+    "Couldn't reach the AI server, please try again.",
+    "The AI server didn't respond — give it another go.",
+    "AI server timed out, try again in a moment.",
+]
+
 # Spoken when the agent invokes a tool that isn't loaded (a hallucinated tool
 # name). The hallucinated-tool guard (core/agent_loop.py) blocks the turn here
 # instead of letting the model fabricate an answer from priors. Pre-rendered to

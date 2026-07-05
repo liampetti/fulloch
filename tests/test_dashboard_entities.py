@@ -22,7 +22,7 @@ def _stub_assistant():
 
 
 def test_entities_unavailable_without_ha(monkeypatch):
-    monkeypatch.delenv("FULLOCH_DASHBOARD_TOKEN", raising=False)
+
     import tools._config as cfg
 
     monkeypatch.setattr(cfg, "config", {})  # no home_assistant block
@@ -33,7 +33,7 @@ def test_entities_unavailable_without_ha(monkeypatch):
 
 
 def test_entities_list_and_toggle(monkeypatch):
-    monkeypatch.delenv("FULLOCH_DASHBOARD_TOKEN", raising=False)
+
     import tools._config as cfg
 
     monkeypatch.setattr(cfg, "config", {"home_assistant": {}})
@@ -61,7 +61,7 @@ def test_entities_list_and_toggle(monkeypatch):
 
 
 def test_entities_toggle_rejects_empty_id(monkeypatch):
-    monkeypatch.delenv("FULLOCH_DASHBOARD_TOKEN", raising=False)
+
     import tools._config as cfg
 
     monkeypatch.setattr(cfg, "config", {"home_assistant": {}})
@@ -76,7 +76,7 @@ def test_entities_toggle_rejects_empty_id(monkeypatch):
 
 
 def test_entities_toggle_404_without_ha(monkeypatch):
-    monkeypatch.delenv("FULLOCH_DASHBOARD_TOKEN", raising=False)
+
     import tools._config as cfg
 
     monkeypatch.setattr(cfg, "config", {})

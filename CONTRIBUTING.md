@@ -21,9 +21,28 @@ Thank you for your interest in contributing to Fulloch! This document provides g
 4. Copy configuration files:
    ```bash
    cp data/config.example.yml data/config.yml
-   cp .env.example .env
    ```
 5. Edit `data/config.yml` with your settings
+
+## Building the Docker image locally
+
+The README's Quick Installation pulls the prebuilt `ghcr.io/liampetti/fulloch`
+image. To test changes to `Dockerfile.cpu`/`Dockerfile` themselves, build and
+run a local image instead:
+
+```bash
+docker build -f Dockerfile.cpu -t fulloch:cpu .
+docker run -d \
+  --name fulloch-ai \
+  --restart unless-stopped \
+  -p 8765:8765 \
+  -e DASHBOARD_HOST=0.0.0.0 \
+  -v ./data:/app/data:rw \
+  fulloch:cpu
+```
+
+For the GPU image, swap in `Dockerfile`/`-t fulloch:latest` and add `--gpus all`
+to the `docker run` (see the README's GPU section for the full flags).
 
 ## Adding New Tools
 

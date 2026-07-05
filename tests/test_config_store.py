@@ -129,16 +129,9 @@ def test_settings_view_merges_values(tmp_path):
     # Backend options carry the experimental flag for the wizard tag.
     asr = {x["backend"]: x for x in view["backends"]["asr"]}
     assert asr["qwen-onnx"]["experimental"] is False
-    assert asr["qwen-onnx-small"]["experimental"] is True
+    assert asr["qwen-onnx-small"]["experimental"] is False
+    assert asr["moonshine"]["experimental"] is True
 
-
-def test_settings_view_reports_llm_key_in_env(tmp_path, monkeypatch):
-    path = _write(tmp_path, "general:\n  wakeword: hi\n")
-    monkeypatch.delenv("FULLOCH_LLM_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    assert cs.settings_view(path)["llm_api_key_in_env"] is False
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-xxx")
-    assert cs.settings_view(path)["llm_api_key_in_env"] is True
 
 
 def test_seeds_from_example_when_absent(tmp_path):

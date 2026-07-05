@@ -31,6 +31,19 @@ def test_seeds_config_and_grammar_on_first_run(tmp_path):
     assert (data / "models" / "grammars" / "agent.gbnf").is_file()
 
 
+def test_generates_https_cert_and_wires_it_on_first_run(tmp_path):
+    seed = _make_seed(tmp_path)
+    data = tmp_path / "data"
+    ensure_scaffolding(str(data), seed_dir=str(seed))
+    assert (data / "certs" / "dashboard.crt").is_file()
+    assert (data / "certs" / "dashboard.key").is_file()
+    text = (data / "config.yml").read_text()
+    assert "dashboard_ssl_certfile" in text
+    assert "dashboard_ssl_keyfile" in text
+    # The seed's other keys (e.g. wakeword) must survive the ruamel round-trip.
+    assert "wakeword: hey atticus" in text
+
+
 def test_does_not_overwrite_existing(tmp_path):
     seed = _make_seed(tmp_path)
     data = tmp_path / "data"
@@ -40,6 +53,8 @@ def test_does_not_overwrite_existing(tmp_path):
     ensure_scaffolding(str(data), seed_dir=str(seed))
     assert "custom" in (data / "config.yml").read_text()
     assert (data / "models" / "grammars" / "agent.gbnf").read_text() == "MINE"
+    # An already-existing install must never be silently flipped to HTTPS.
+    assert not (data / "certs" / "dashboard.crt").exists()
 
 
 def test_noop_when_no_seed_dir(tmp_path):

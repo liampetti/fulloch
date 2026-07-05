@@ -42,6 +42,7 @@ from .asr_onnx import (
     N_FFT,
     QwenOnnxASRPipelineWrapper,
     _get_mel_filters,
+    _onnx_providers,
     _Tokenizer,
 )
 
@@ -100,7 +101,7 @@ class _OnnxAsr17B:
         if num_threads > 0:
             opts.intra_op_num_threads = num_threads
         opts.log_severity_level = 3
-        cpu = ["CPUExecutionProvider"]
+        cpu = _onnx_providers()
 
         # int4 (MatMulNBits) is the CPU default; fall back to fp32 if the int4
         # files aren't present. The encoder is fp weights either way (the .int4

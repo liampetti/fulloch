@@ -12,7 +12,9 @@ Also defines the wakeword presets and tier presets the wizard offers.
 Import-light (stdlib only) so it loads in setup mode before anything heavy.
 """
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 # Apply modes.
@@ -28,6 +30,7 @@ GROUPS = (
     "Home Assistant",
     "Notes",
     "Search",
+    "Obsidian",
 )
 
 
@@ -41,7 +44,6 @@ class Field:
     help: str = ""
     choices: tuple = ()  # for type == "enum"
     apply: str = RESTART
-    secret: bool = False  # mask in the UI / prefer .env (e.g. HA token)
 
     @property
     def path(self) -> str:
@@ -58,7 +60,6 @@ class Field:
             "help": self.help,
             "choices": list(self.choices),
             "apply": self.apply,
-            "secret": self.secret,
         }
 
 
@@ -254,7 +255,7 @@ SCHEMA: tuple = (
         "Dashboard",
         "127.0.0.1",
         "Bind address. '127.0.0.1' = local only; '0.0.0.0' exposes it to "
-        "your network (set FULLOCH_DASHBOARD_TOKEN in .env first).",
+        "your network (set a dashboard password via the setup wizard first).",
     ),
     Field(
         "general",
@@ -273,6 +274,16 @@ SCHEMA: tuple = (
         None,
         "Optional HTTPS key path (pairs with dashboard_ssl_certfile).",
     ),
+    Field(
+        "general",
+        "timezone",
+        "str",
+        "General",
+        None,
+        "IANA timezone name (e.g. 'Australia/Sydney'). Auto-detected from your "
+        "browser on first load — only set this manually if the auto-detection is wrong.",
+        apply=HOT,
+    ),
     # --- Home Assistant ----------------------------------------------------
     Field(
         "home_assistant",
@@ -281,16 +292,6 @@ SCHEMA: tuple = (
         "Home Assistant",
         None,
         "Home Assistant base URL, e.g. http://192.168.1.50:8123.",
-    ),
-    Field(
-        "home_assistant",
-        "token",
-        "str",
-        "Home Assistant",
-        None,
-        "Long-lived access token. Prefer FULLOCH_HA_TOKEN in .env, which "
-        "takes priority and keeps the token out of config.",
-        secret=True,
     ),
     Field(
         "home_assistant", "timeout", "int", "Home Assistant", 10, "HTTP request timeout in seconds."
@@ -344,6 +345,22 @@ SCHEMA: tuple = (
         "Notes",
         "daily",
         "Subfolder for daily-journal notes (YYYY-MM-DD.md).",
+    ),
+    # --- Obsidian plugin bridge --------------------------------------------
+    Field(
+        "obsidian",
+        "path_translation",
+        "dict",
+        "Obsidian",
+        {},
+        "Map of host-prefix → container-prefix for vault paths reported by "
+        "the Obsidian plugin. The plugin runs on the host, so it sends paths "
+        "like '/Users/jane/Documents/MyVault' — under Docker that path is "
+        "invisible to Fulloch unless the same folder is bind-mounted into "
+        "the container. Set this when running Fulloch in Docker: e.g. "
+        "{'/Users/jane': '/vault'} maps the host path to '/vault/...' "
+        "inside the container. README has a docker run template that "
+        "includes the matching -v mount.",
     ),
     # --- Search ------------------------------------------------------------
     Field(
@@ -431,10 +448,17 @@ class TierPreset:
     recommended: bool = False
 
 
-# Three ready-made stacks. ASR is `qwen-onnx` everywhere — the validated,
-# wakeword-reliable CPU ASR (runs on CPU even on the GPU box, freeing VRAM; the
-# 0.6B/Moonshine ASRs are experimental fallbacks). The Full stack adds the GPU
-# 9B LLM + Qwen voice-clone TTS; the two CPU stacks differ only in the LLM — a
+# Three ready-made stacks. The Full stack is GPU end-to-end — ASR, TTS, and
+# the 9B LLM all GPU-resident — so "GPU tier" means what it sounds like. That's
+# a tight fit on a 16GB card (ASR 4.5 + TTS 4.5 + LLM 7.5 = 16.5GB before
+# context/KV-cache overhead) — a deliberate tradeoff accepted for a
+# consistent, unsurprising "everything on GPU" default rather than the
+# previous CPU-resident-ASR compromise. The two CPU-only stacks (no GPU at
+# all) default to the smaller `qwen-onnx-small` (0.6B ONNX) for ASR instead —
+# same Qwen3-ASR family (still wakeword/context biasing), but ~3x fewer
+# params so much faster per utterance on CPU, at some cost to accuracy;
+# `qwen-onnx` (1.7B ONNX) remains available there as a manual, more-accurate
+# alternative. The two CPU stacks otherwise differ only in the LLM — a
 # separate OpenAI-compatible server on your network, or regex-only/no LLM.
 # (A 4B "balanced" tier was dropped — at the quant needed to be reliable it
 # costs roughly the same VRAM as the 9B, so the 9B is the local minimum.)
@@ -442,9 +466,9 @@ TIER_PRESETS: tuple = (
     TierPreset(
         "full",
         "Full (GPU)",
-        "Qwen voice clone + the 9B language model, GPU-accelerated. Speech "
-        "recognition runs on CPU so the 9B + TTS fit a 16GB card. Needs a 16GB GPU.",
-        {"asr": {"backend": "qwen-onnx"}, "tts": {"backend": "qwen"}, "llm": {"backend": "llama"}},
+        "Everything GPU-accelerated — speech recognition, voice-clone TTS, and "
+        "the 9B language model. Tight fit on a 16GB card; needs a 16GB GPU.",
+        {"asr": {"backend": "qwen"}, "tts": {"backend": "qwen"}, "llm": {"backend": "llama"}},
     ),
     TierPreset(
         "cpu_server",
@@ -453,7 +477,7 @@ TIER_PRESETS: tuple = (
         "OpenAI-compatible server you point it at (e.g. another box on your "
         "network). No GPU needed on this device.",
         {
-            "asr": {"backend": "qwen-onnx"},
+            "asr": {"backend": "qwen-onnx-small"},
             "tts": {"backend": "kokoro-onnx"},
             "llm": {"backend": "openai"},
         },
@@ -464,7 +488,7 @@ TIER_PRESETS: tuple = (
         "Everything runs locally on CPU — no GPU, no network. Regex command "
         "matching only (no free-form language model).",
         {
-            "asr": {"backend": "qwen-onnx"},
+            "asr": {"backend": "qwen-onnx-small"},
             "tts": {"backend": "kokoro-onnx"},
             "llm": {"backend": "none"},
         },
@@ -484,3 +508,49 @@ def tier_presets_as_dicts() -> list:
         }
         for t in TIER_PRESETS
     ]
+
+
+def discover_obsidian_vaults() -> list[dict]:
+    """Return up to 5 Obsidian vault candidates on the local filesystem.
+
+    Scans standard locations (`~/Documents`, `~/Obsidian`, `~/.config/obsidian`)
+    and returns directories containing a `.obsidian/` subfolder. Best-effort —
+    a fresh machine may return an empty list, in which case the user types
+    the path manually.
+
+    Under Docker, the in-container home is usually empty — but the user
+    typically bind-mounts a vault at some container path of their choosing
+    (there's no fixed convention), so besides the usual host locations we
+    also scan every top-level directory, skipping standard system paths
+    that never hold a vault.
+    """
+    home = Path(os.path.expanduser("~"))
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    roots = [home / "Documents", home / "Obsidian", home / ".config" / "obsidian"]
+
+    _SKIP_TOP_LEVEL = {
+        "proc", "sys", "dev", "run", "boot", "lib", "lib64", "bin", "sbin",
+        "usr", "etc", "tmp", "root", "var",
+    }
+    try:
+        for entry in sorted(Path("/").iterdir()):
+            if entry.name not in _SKIP_TOP_LEVEL and entry.is_dir() and not entry.is_symlink():
+                roots.append(entry)
+    except OSError:
+        pass
+
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob(".obsidian"):
+            if path.is_dir():
+                vault = path.parent
+                key = str(vault)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append({"path": key, "name": vault.name})
+                if len(candidates) >= 5:
+                    return candidates
+    return candidates

@@ -1,6 +1,7 @@
 """Download manager + pre-flight (v2.2 Step 4)."""
 
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -17,6 +18,67 @@ def _wait_done(mgr, timeout=5.0):
     deadline = time.time() + timeout
     while mgr.active and time.time() < deadline:
         time.sleep(0.01)
+
+
+def test_asset_tqdm_stub_survives_ensure_lock_cycle():
+    """Reproduces huggingface_hub's tqdm.contrib.concurrent.ensure_lock sequence
+    (used during parallel multi-file snapshot downloads), which does
+    `getattr(cls, "_lock", None)`, `set_lock(...)`, then `del cls._lock` when no
+    prior lock existed. A stub that only tracks the lock in a closure — instead
+    of a real `_lock` class attribute — breaks on that final `del`.
+    """
+    asset = dl.Asset(key="asr:qwen-onnx", label="x", kind="dir_snapshot", dest="/tmp/x")
+    tqdm_class = dl._make_asset_tqdm(asset, threading.Lock())
+
+    old_lock = getattr(tqdm_class, "_lock", None)
+    assert old_lock is None
+    lock = old_lock or tqdm_class.get_lock()
+    tqdm_class.set_lock(lock)
+    del tqdm_class._lock  # must not raise AttributeError
+
+
+def test_asset_tqdm_stub_propagates_iterable_errors():
+    """The outer bar wraps a `concurrent.futures.Executor.map()` result
+    iterator; a failed per-file download surfaces as an exception when that
+    iterator is consumed. A stub whose `__iter__` doesn't actually iterate the
+    wrapped iterable (e.g. `return iter([])`) would silently swallow it.
+    """
+    asset = dl.Asset(key="asr:qwen-onnx", label="x", kind="dir_snapshot", dest="/tmp/x")
+    tqdm_class = dl._make_asset_tqdm(asset, threading.Lock())
+
+    def gen():
+        yield 1
+        raise ValueError("boom")
+
+    seen = []
+    with pytest.raises(ValueError):
+        for item in tqdm_class(gen(), total=2):
+            seen.append(item)
+    assert seen == [1]
+
+
+def test_byte_progress_patches_hf_tqdm_and_restores():
+    """`_byte_progress` must patch huggingface_hub's internal per-file tqdm
+    class (the only place real byte totals are known — `snapshot_download`'s
+    own `tqdm_class=` kwarg only sees file *counts*), accumulate concurrent
+    bars' totals/updates onto the asset, and restore the original class after.
+    """
+    hf_utils_tqdm = pytest.importorskip("huggingface_hub.utils.tqdm")
+    original = hf_utils_tqdm.tqdm
+
+    asset = dl.Asset(key="asr:qwen-onnx", label="x", kind="dir_snapshot", dest="/tmp/x")
+    lock = threading.Lock()
+
+    with dl._byte_progress(asset, lock):
+        assert hf_utils_tqdm.tqdm is not original
+        bar1 = hf_utils_tqdm.tqdm(total=1000)
+        bar2 = hf_utils_tqdm.tqdm(total=2000)
+        bar1.update(500)
+        bar2.update(1000)
+        assert asset.bytes_total == 3000
+        assert asset.bytes_done == 1500
+
+    assert hf_utils_tqdm.tqdm is original
 
 
 def test_plan_assets_covers_backends_and_always_required():
@@ -108,6 +170,27 @@ def test_already_present_assets_skip(tmp_path):
     assert "url" not in ran  # grammar was skipped
 
 
+def test_sentinel_only_dir_is_not_present(tmp_path):
+    # A dir_snapshot dest holding only the completion sentinel (no actual model
+    # files) simulates a run killed between mkdir+touch and the real transfer —
+    # must be treated as missing so it re-downloads, not silently loaded as done.
+    asset = dl.Asset(
+        key="asr:qwen-onnx-small",
+        label="Qwen3-ASR 0.6B",
+        kind="dir_snapshot",
+        dest=str(tmp_path / "qwen3-asr-0.6b-onnx"),
+        repo="Daumee/Qwen3-ASR-0.6B-ONNX-CPU",
+    )
+    d = Path(asset.dest)
+    d.mkdir(parents=True)
+    (d / dl.COMPLETE_SENTINEL).touch()
+    assert dl._already_present(asset) is False
+
+    (d / "onnx_models").mkdir()
+    (d / "onnx_models" / "encoder_conv.onnx").write_text("x")
+    assert dl._already_present(asset) is True
+
+
 def test_snapshot_exposes_domain_and_present(tmp_path):
     resolved = resolve_models(
         {
@@ -188,8 +271,8 @@ def test_tier_fit_warns_on_low_disk():
 
 def test_tier_fit_warns_on_low_ram():
     gpu = {"available": False, "name": None, "vram_gb": None}
-    # CPU tiers need ~4.9 GB RAM (4.5 ASR + 0.4 TTS); 2 GB available should warn.
-    ram = {"total_gb": 4.0, "available_gb": 2.0}
+    # CPU tiers need ~1.2 GB RAM (0.8 qwen-onnx-small ASR + 0.4 TTS); 1 GB available should warn.
+    ram = {"total_gb": 4.0, "available_gb": 1.0}
     fits = pf.tier_fit(gpu, disk_gb=999, ram=ram)
     by_id = {f["id"]: f for f in fits}
     assert by_id["cpu_local"]["badge"] == "warn"
@@ -220,10 +303,10 @@ def test_tier_fit_exposes_ram_gb():
     gpu = {"available": False, "name": None, "vram_gb": None}
     fits = pf.tier_fit(gpu, disk_gb=999)
     by_id = {f["id"]: f for f in fits}
-    # cpu_local: qwen-onnx (4.5) + kokoro-onnx (0.4) = 4.9
-    assert by_id["cpu_local"]["ram_gb"] == pytest.approx(4.9)
-    # full: only qwen-onnx ASR runs on CPU (4.5); GPU TTS/LLM have no ram_gb
-    assert by_id["full"]["ram_gb"] == pytest.approx(4.5)
+    # cpu_local: qwen-onnx-small (0.8) + kokoro-onnx (0.4) = 1.2
+    assert by_id["cpu_local"]["ram_gb"] == pytest.approx(1.2)
+    # full: ASR/TTS/LLM are all GPU-resident now, none set ram_gb
+    assert by_id["full"]["ram_gb"] == pytest.approx(0.0)
 
 
 def test_ram_info_returns_dict():

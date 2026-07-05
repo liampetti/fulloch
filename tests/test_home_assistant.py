@@ -8,14 +8,41 @@ max_temp attributes enforce safe bounds.
 """
 
 import datetime
+import importlib
 from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+@pytest.fixture
+def ha_with_play_song():
+    """`tools.home_assistant.play_song` only exists when no `spotify:` block is
+    configured (HA's own play_song is suppressed in favor of tools/spotify.py
+    when one is present — see test_spotify.py's collision test). These tests
+    exercise HA's play_song fallback chain directly, so they must not depend
+    on whether the machine running the suite happens to have Spotify
+    configured in data/config.yml; force the no-spotify branch for the
+    duration of the test and restore the module's real state after."""
+    import tools.home_assistant as ha
+
+    had_spotify = "spotify" in ha.config
+    spotify_cfg = ha.config.get("spotify")
+    if had_spotify:
+        del ha.config["spotify"]
+        importlib.reload(ha)
+    try:
+        yield ha
+    finally:
+        if had_spotify:
+            ha.config["spotify"] = spotify_cfg
+            importlib.reload(ha)
 
 
 def test_import_does_no_network_load_lazily(monkeypatch):
     """Importing the module must not fetch from HA; the load is lazy + one-shot.
 
     Guards the regression where importing tools.home_assistant connected to HA
-    (default URL + .env token) at import time, re-enabling HA via a stray import.
+    (default URL + credentials.json token) at import time, re-enabling HA via a stray import.
     """
     import tools.home_assistant as ha
 
@@ -82,7 +109,7 @@ def test_set_climate_passes_temperature_through():
         assert sent["temperature"] == 21
 
 
-def test_play_song_picks_playlist_when_playlists_match():
+def test_play_song_picks_playlist_when_playlists_match(ha_with_play_song):
     """First call: search_playlists returns a result → playlist context plays."""
     with (
         patch("tools.home_assistant.SPOTIFY_ENTITY", "media_player.spotify"),
@@ -107,7 +134,7 @@ def test_play_song_picks_playlist_when_playlists_match():
         assert args[3]["media_content_type"] == "playlist"
 
 
-def test_play_song_falls_through_to_track_when_no_playlists():
+def test_play_song_falls_through_to_track_when_no_playlists(ha_with_play_song):
     """Playlists empty → tracks searched → track URI played."""
     with (
         patch("tools.home_assistant.SPOTIFY_ENTITY", "media_player.spotify"),
@@ -129,7 +156,7 @@ def test_play_song_falls_through_to_track_when_no_playlists():
         assert play.call_args.args[3]["media_content_type"] == "music"
 
 
-def test_play_song_generic_fallback_when_no_results():
+def test_play_song_generic_fallback_when_no_results(ha_with_play_song):
     """No SpotifyPlus results → generic media_player.play_media fallback."""
     with (
         patch("tools.home_assistant.SPOTIFY_ENTITY", "media_player.spotify"),
@@ -148,7 +175,7 @@ def test_play_song_generic_fallback_when_no_results():
         assert play.call_args.args[3]["media_content_id"] == "spotify:search:nothing matches this"
 
 
-def test_play_song_returns_friendly_error_when_spotify_entity_unset():
+def test_play_song_returns_friendly_error_when_spotify_entity_unset(ha_with_play_song):
     with patch("tools.home_assistant.SPOTIFY_ENTITY", None):
         from tools.home_assistant import play_song
 
@@ -255,6 +282,82 @@ def test_whats_on_dedupes_when_read_and_reminder_calendars_match():
     ):
         ha._ha_get_events("today")
     assert call.call_args.args[2]["entity_id"] == ["calendar.primary"]
+
+
+def test_parse_lookback_days_units():
+    from tools.home_assistant import _parse_lookback_days
+
+    assert _parse_lookback_days("30d") == 30
+    assert _parse_lookback_days("2w") == 14
+    assert _parse_lookback_days("6m") == 180
+    assert _parse_lookback_days("1y") == 365
+    assert _parse_lookback_days("10") == 10  # bare number -> days
+    assert _parse_lookback_days("garbage") == 30  # falls back to default
+
+
+def test_relative_day_phrase():
+    from tools.home_assistant import _relative_day_phrase
+
+    now = datetime.datetime(2026, 6, 18, 9, 0)  # Thursday
+    assert _relative_day_phrase(now, now) == "today"
+    assert _relative_day_phrase(now + datetime.timedelta(days=1), now) == "tomorrow"
+    assert _relative_day_phrase(now - datetime.timedelta(days=1), now) == "yesterday"
+    assert _relative_day_phrase(now + datetime.timedelta(days=3), now) == "this Sunday"
+    assert _relative_day_phrase(now + datetime.timedelta(days=10), now) == "next Sunday"
+    assert _relative_day_phrase(now - datetime.timedelta(days=3), now) == "last Monday"
+    # Far outside the near-date window: full calendar date, not a bare weekday
+    # (a bare weekday is ambiguous across a multi-week search window).
+    far = _relative_day_phrase(now - datetime.timedelta(days=25), now)
+    assert far == "Sunday, May 24"
+
+
+def test_when_is_it_on_matches_by_substring():
+    import tools.home_assistant as ha
+
+    response = {
+        "calendar.primary": {
+            "events": [
+                {"start": "2026-05-20T09:00:00", "summary": "Dentist appointment"},
+                {"start": "2026-06-26T09:00:00", "summary": "Standup"},
+            ]
+        },
+    }
+    with (
+        patch.object(ha, "CALENDAR_ENTITY", "calendar.primary"),
+        patch.object(ha, "_reminder_calendar_entity", return_value=None),
+        patch.object(ha, "_call_service_with_response", return_value=response),
+    ):
+        out = ha._ha_get_events_name("dentist", "30d")
+
+    assert "Dentist appointment" in out
+    assert "Standup" not in out
+
+
+def test_when_is_it_on_no_match_is_spoken_directly():
+    import tools.home_assistant as ha
+
+    response = {"calendar.primary": {"events": []}}
+    with (
+        patch.object(ha, "CALENDAR_ENTITY", "calendar.primary"),
+        patch.object(ha, "_reminder_calendar_entity", return_value=None),
+        patch.object(ha, "_call_service_with_response", return_value=response),
+    ):
+        out = ha._ha_get_events_name("dentist", "30d")
+
+    assert "couldn't find" in out
+    assert not out.startswith("Reactive question:")
+
+
+def test_when_is_it_on_no_calendar_configured():
+    import tools.home_assistant as ha
+
+    with (
+        patch.object(ha, "CALENDAR_ENTITY", None),
+        patch.object(ha, "_reminder_calendar_entity", return_value=None),
+    ):
+        out = ha._ha_get_events_name("dentist", "30d")
+
+    assert out == "No calendar is configured in Home Assistant."
 
 
 def test_calendar_normalises_timed_event():

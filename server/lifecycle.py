@@ -19,7 +19,7 @@ import collections
 import itertools
 import logging
 import threading
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -157,11 +157,30 @@ class AppContext:
         self.assistant = assistant
         self.downloader = downloader
         self.config_path = config_path
-        # Live dashboard bearer token. None until create_app seeds it from the
-        # env; the post-setup token step sets it so the console is gated without
-        # a restart. Empty/None = no auth (zero-config local-only).
-        self.dashboard_token: Optional[str] = None
+        # PBKDF2 hash loaded from credentials.json at startup. None = no auth
+        # (zero-config local-only). Set by /setup/password without restart.
+        self.dashboard_password_hash: Optional[str] = None
+        # Session store: {session_id: created_timestamp}. Persisted to
+        # auth.SESSIONS_PATH (server/auth.py) so a restart doesn't force a
+        # re-login within COOKIE_MAX_AGE (1 year) — dashboard.py's login/
+        # logout handlers save on every change.
+        from .auth import load_sessions
+        self.sessions: dict = load_sessions()
         self._on_attach: list = []
+        # Obsidian plugin command queue — set when plugin connects, cleared on disconnect.
+        # Notes tool pushes {"type": "open_file", "path": "..."} here after writes.
+        self.obsidian_cmd_q: Optional[Any] = None
+        # Obsidian plugin + vault state — set when the plugin WebSocket connects,
+        # cleared on disconnect. `indexing_progress` is 0.0–1.0 during a rebuild
+        # triggered by a vault-path change; None when idle.
+        self.obsidian_vault_state: dict = {
+            "connected": False,
+            "vault_path": None,
+            "vault_resolved_path": None,
+            "last_connected_at": None,
+            "last_error": None,
+            "indexing_progress": None,
+        }
 
     def on_attach(self, callback) -> None:
         self._on_attach.append(callback)

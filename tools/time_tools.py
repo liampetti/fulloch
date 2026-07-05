@@ -3,31 +3,27 @@
 import re
 import threading
 import time
-from datetime import datetime
 from typing import Dict, Optional
 
 from word2number import w2n
 
-from audio.beep_manager import BeepManager
+import utils.local_time as _local_time
 
 from .tool_registry import tool
 
 active_timers: Dict[str, threading.Timer] = {}
-beep_manager = BeepManager()
 
-# Injected by Assistant._load_models so timers with a message can speak
-# via speak_proactive instead of beeping.
+# Injected by Assistant._load_models so a completed timer can speak its
+# reminder through the WebSocket satellite. The local-soundcard beep path is
+# gone with sounddevice; Assistant.speak_proactive(alarm=True) plays a
+# pre-rendered alert tone (data/wav/alarm.wav) over the same satellite sink
+# before the spoken reminder.
 _speak_proactive = None
 
 
 def set_speak_callback(fn) -> None:
     global _speak_proactive
     _speak_proactive = fn
-
-
-def set_beep_device(device) -> None:
-    """Route timer/alarm beeps to the same output device as TTS."""
-    beep_manager.set_output_device(device)
 
 
 # Word forms used by `get_current_time` below. The output emits dates and
@@ -131,7 +127,7 @@ def get_current_time(location: Optional[str] = None) -> str:
     the time response can't loop back as a fake follow-up turn.
     """
     # TODO: get location time
-    now = datetime.now()
+    now = _local_time.now()
     day_name = now.strftime("%A")
     month_name = now.strftime("%B")
     day_word = _DAY_ORDINALS[now.day]
@@ -200,12 +196,10 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
 
     def on_timer_complete(timer_id: str, reminder: Optional[str]):
         active_timers.pop(timer_id, None)
-        for _ in range(3):
-            beep_manager.play_beep(filename="alarm.wav")
-            time.sleep(1)
-        if reminder and _speak_proactive:
+        text = reminder or "Your timer is up."
+        if _speak_proactive:
             try:
-                _speak_proactive(reminder)
+                _speak_proactive(text, alarm=True)
             except Exception as e:
                 import logging
 

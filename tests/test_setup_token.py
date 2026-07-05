@@ -1,84 +1,78 @@
-"""Post-setup access token: generation, live gating, .env persistence (Step 5)."""
+"""Credentials store — atomic JSON read/write."""
 
-import sys
+import json
+import os
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from server import env_store  # noqa: E402
-from server import lifecycle as lc  # noqa: E402
-from server.dashboard import create_app  # noqa: E402
-from server.lifecycle import AppContext, Lifecycle  # noqa: E402
+from server import credentials_store
 
 
-def _client(tmp_path):
-    cfg = tmp_path / "config.yml"
-    cfg.write_text("general:\n  wakeword: hey atticus\n")
-    ctx = AppContext(lifecycle=Lifecycle(phase=lc.NEEDS_SETUP), config_path=str(cfg))
-    return TestClient(create_app(context=ctx)), ctx
+def test_load_returns_empty_dict_when_file_absent(tmp_path):
+    assert credentials_store.load(str(tmp_path / "credentials.json")) == {}
 
 
-def test_token_status_and_generation_gates_live(tmp_path, monkeypatch):
-    written = {}
-    monkeypatch.setattr(env_store, "set_env_var", lambda k, v, **kw: written.update({k: v}))
-    client, ctx = _client(tmp_path)
+def test_set_credential_creates_file(tmp_path):
+    path = str(tmp_path / "credentials.json")
+    credentials_store.set_credential("ha_token", "mytoken", path=path)
+    assert json.loads(Path(path).read_text())["ha_token"] == "mytoken"
 
-    # No token yet — open, status reports disabled.
-    assert client.get("/setup/token").json() == {"enabled": False}
-    assert client.get("/status").status_code == 200
 
-    # Generate — returns once, applied live, persisted to .env.
-    r = client.post("/setup/token")
-    assert r.status_code == 200
-    token = r.json()["token"]
-    assert token and ctx.dashboard_token == token
-    assert written.get("FULLOCH_DASHBOARD_TOKEN") == token
+def test_set_credential_updates_existing_key(tmp_path):
+    path = str(tmp_path / "credentials.json")
+    credentials_store.set_credential("ha_token", "old", path=path)
+    credentials_store.set_credential("ha_token", "new", path=path)
+    assert json.loads(Path(path).read_text())["ha_token"] == "new"
 
-    # Now the console is gated: no creds -> 401, correct token -> 200.
-    assert client.get("/status").status_code == 401
-    assert client.get("/status", headers={"Authorization": f"Bearer {token}"}).status_code == 200
-    # The unauthenticated shell + setup page stay reachable so the SPA can load.
-    assert client.get("/").status_code == 200
-    assert client.get("/setup").status_code == 200
+
+def test_set_credential_preserves_other_keys(tmp_path):
+    path = str(tmp_path / "credentials.json")
+    credentials_store.set_credential("ha_token", "tok", path=path)
+    credentials_store.set_credential("llm_api_key", "key", path=path)
+    data = json.loads(Path(path).read_text())
+    assert data["ha_token"] == "tok"
+    assert data["llm_api_key"] == "key"
+
+
+def test_inject_env_sets_env_var(tmp_path, monkeypatch):
+    path = str(tmp_path / "credentials.json")
+    credentials_store.set_credential("ha_token", "ha-test-token", path=path)
+    monkeypatch.delenv("HA_TOKEN", raising=False)
+    credentials_store.inject_env(path=path)
+    assert os.environ.get("HA_TOKEN") == "ha-test-token"
+
+
+def test_inject_env_does_not_override_existing(tmp_path, monkeypatch):
+    path = str(tmp_path / "credentials.json")
+    credentials_store.set_credential("ha_token", "from-file", path=path)
+    monkeypatch.setenv("HA_TOKEN", "from-env")
+    credentials_store.inject_env(path=path)
+    assert os.environ.get("HA_TOKEN") == "from-env"
+
+
+def test_get_credential_returns_empty_when_absent(tmp_path):
+    assert credentials_store.get_credential("ha_token", str(tmp_path / "credentials.json")) == ""
+
+
+def test_get_credential_returns_stored_value(tmp_path):
+    path = str(tmp_path / "credentials.json")
+    credentials_store.set_credential("obsidian_token", "obs-tok", path=path)
+    assert credentials_store.get_credential("obsidian_token", path=path) == "obs-tok"
 
 
 def test_schema_exposes_backend_options(tmp_path):
-    client, _ = _client(tmp_path)
+    from fastapi.testclient import TestClient
+
+    from server import lifecycle as lc
+    from server.dashboard import create_app
+    from server.lifecycle import AppContext, Lifecycle
+
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("general:\n  wakeword: hey atticus\n")
+    ctx = AppContext(lifecycle=Lifecycle(phase=lc.NEEDS_SETUP), config_path=str(cfg))
+    client = TestClient(create_app(context=ctx))
     body = client.get("/setup/schema").json()
     assert set(body["backends"]) == {"asr", "tts", "llm"}
     llm = {b["backend"]: b for b in body["backends"]["llm"]}
     assert llm["none"]["implemented"] is True
-    assert llm["openai"]["implemented"] is True  # remote backend (Step 6)
+    assert llm["openai"]["implemented"] is True
     assert llm["llama"]["cpu_ok"] is False
-
-
-# --- env_store --------------------------------------------------------------
-
-
-def test_env_store_replaces_existing_key(tmp_path):
-    p = tmp_path / ".env"
-    p.write_text("OTHER=keep\nFULLOCH_DASHBOARD_TOKEN=old\n# a comment\n")
-    env_store.set_env_var("FULLOCH_DASHBOARD_TOKEN", "new", path=str(p))
-    text = p.read_text()
-    assert "FULLOCH_DASHBOARD_TOKEN=new" in text
-    assert "FULLOCH_DASHBOARD_TOKEN=old" not in text
-    assert "OTHER=keep" in text and "# a comment" in text
-
-
-def test_env_store_appends_when_absent(tmp_path):
-    p = tmp_path / ".env"
-    p.write_text("OTHER=keep\n")
-    env_store.set_env_var("NEWKEY", "v", path=str(p))
-    assert "NEWKEY=v" in p.read_text()
-    assert "OTHER=keep" in p.read_text()
-
-
-def test_env_store_seeds_from_example(tmp_path):
-    (tmp_path / ".env.example").write_text("# template\nSEARXNG_SECRET=\n")
-    p = tmp_path / ".env"
-    env_store.set_env_var("FULLOCH_DASHBOARD_TOKEN", "abc", path=str(p))
-    text = p.read_text()
-    assert "# template" in text
-    assert "FULLOCH_DASHBOARD_TOKEN=abc" in text

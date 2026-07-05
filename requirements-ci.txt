@@ -28,3 +28,6 @@ pint>=0.24
 python-dateutil>=2.9
 ruamel.yaml>=0.18           # config_store round-trip (test_config_store, /setup/schema)
 openai>=1.40                # remote LLM client (test_llm_openai; importorskip'd if absent)
+huggingface_hub==0.36.2      # download manager (server/downloader.py, unstubbed in tests)
+cryptography==46.0.3          # self-signed dashboard HTTPS cert (core/tls_certs.py)
+spotipy==2.25.1                # direct Spotify Web API (tools/spotify.py, test_spotify.py)

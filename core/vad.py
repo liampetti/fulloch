@@ -61,7 +61,7 @@ class VadEndpointer:
         )
         # Optional *soft* endpoint: a second VADIterator with a shorter silence
         # requirement, giving an early "speaker has briefly paused" signal for
-        # the speculative early-commit path (see docs/speculative-early-action).
+        # the speculative early-commit path.
         # It needs its OWN Silero handle — VADIterator advances the model's LSTM
         # state on every window, so sharing the hard iterator's model would
         # corrupt the proven endpoint. Disabled (None) unless both a soft model

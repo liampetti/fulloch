@@ -41,6 +41,22 @@
     sendBtn.innerHTML = stop ? STOP_SVG : SEND_SVG;
   };
 
+  // Busy-status banner: another satellite (or the dashboard's own text chat)
+  // is mid-turn. Only shown when it's genuinely *another* satellite — this
+  // tab's own turn already has its own "thinking/speaking" indicator via
+  // voiceBusy, and showing both would be redundant and confusing.
+  const busyBanner = document.getElementById('busy-banner');
+  const busyBannerText = document.getElementById('busy-banner-text');
+  const setSatelliteBusy = (ownerId, ownerLabel) => {
+    const showBusy = !!ownerId && ownerId !== mySatelliteId;
+    if (busyBanner) busyBanner.hidden = !showBusy;
+    if (showBusy && busyBannerText) {
+      busyBannerText.textContent = ownerLabel
+        ? `Busy — talking to ${ownerLabel}`
+        : 'Busy — talking to another room';
+    }
+  };
+
   const doStop = async () => {
     try { await fetch('/stop', { method: 'POST' }); }
     catch (e) { console.warn('stop failed', e); }
@@ -413,9 +429,22 @@
     const tag = document.createElement('span');
     tag.className = `tag ${ev.source}`;
     tag.textContent = ev.source;
+    meta.append(tag);
+    // Which satellite/room this turn came from — only worth a second pill
+    // when there's something more specific to say than the source tag above
+    // already does. A labelled satellite ("kitchen") or a chosen HA room
+    // (server-side fallback to SatelliteSession.ha_area_name) is new
+    // information; an unlabelled, no-room satellite isn't (voice/text
+    // already says as much).
+    if (ev.satellite_label) {
+      const loc = document.createElement('span');
+      loc.className = 'tag location';
+      loc.textContent = ev.satellite_label;
+      meta.append(loc);
+    }
     const time = document.createElement('span');
     time.textContent = fmtTime(ev.ts);
-    meta.append(tag, time);
+    meta.append(time);
 
     wrap.append(bubble, meta);
     chat.appendChild(wrap);
@@ -1316,6 +1345,7 @@
       applyBranding(!!s.remote_llm);
       setLlmUnreachable(!!s.llm_unreachable);
       if (logoutBtn) logoutBtn.hidden = !s.auth_enabled;
+      setSatelliteBusy(s.active_owner_id, s.active_owner_label);
     } catch (e) { /* transient; next tick retries */ }
   };
 
@@ -1382,6 +1412,10 @@
   // Protocol (binary = Float32 PCM; text = JSON control):
   //   browser → server:  Float32 chunks at 16 kHz mono
   //   browser → server:  {"type":"wakeword_toggle","bypass":<bool>}
+  //   server  → browser: {"type":"session","satellite_id":<str>} — sent once,
+  //                      right after connect; lets this tab tell (via
+  //                      /status's active_owner_id) whether a busy turn is
+  //                      its own or another satellite's
   //   server  → browser: {"type":"tts_start","sr":<int>}
   //                      <binary Float32 chunks>
   //                      {"type":"tts_end"}
@@ -1401,6 +1435,17 @@
   let satTtsSr = 24000;     // sample rate announced by server in tts_start
   let satScheduledSources = [];  // AudioBufferSourceNodes pending/playing, so tts_cancel can stop them
   let satAlwaysListen = localStorage.getItem('sat_always_listen') === '1';
+  let mySatelliteId = null; // this tab's own id, from the "session" frame
+
+  // Browser-satellite area picker (6b) — a one-time chat bubble asking which
+  // HA zone this device sits in, so bare "turn off the lights" can default
+  // to the right room. Thin/native satellite clients configure this via
+  // YAML instead; this picker only exists for the browser path.
+  const SAT_AREA_KEY = 'sat_ha_area';           // chosen area id, '' = none/skipped
+  const SAT_AREA_DECIDED_KEY = 'sat_ha_area_decided'; // '1' once the user has picked or skipped
+  let satHaArea = localStorage.getItem(SAT_AREA_KEY) || '';
+  let satAreaName = '';   // display name for the pill, resolved once areas load
+  const satAreaPill = document.getElementById('sat-area-pill');
 
   const SAT_WORKLET = `
 class ResampleTo16k extends AudioWorkletProcessor {
@@ -1482,6 +1527,7 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     if (satAudioCtx) { try { satAudioCtx.close(); } catch(_) {} satAudioCtx = null; }
     satPlayAt = 0;
     satScheduledSources = [];
+    mySatelliteId = null;
     syncSatBtn();
   };
 
@@ -1512,7 +1558,13 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     // Open WebSocket
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const bypass = satAlwaysListen ? '1' : '0';
-    const url = `${proto}://${location.host}/ws/satellite?bypass=${bypass}`;
+    const area = satHaArea ? `&area=${encodeURIComponent(satHaArea)}` : '';
+    // area_name carries the human-readable room name (already resolved client-side
+    // from /ha/areas) so the server can show it as a location pill on this
+    // satellite's turns — the server only knows the HA area_id otherwise, and
+    // resolving it back to a display name isn't worth a second HA round-trip.
+    const areaName = satHaArea && satAreaName ? `&area_name=${encodeURIComponent(satAreaName)}` : '';
+    const url = `${proto}://${location.host}/ws/satellite?bypass=${bypass}${area}${areaName}`;
     satWs = new WebSocket(url);
     satWs.binaryType = 'arraybuffer';
 
@@ -1530,7 +1582,9 @@ registerProcessor('fulloch-resample', ResampleTo16k);
       if (typeof e.data === 'string') {
         try {
           const msg = JSON.parse(e.data);
-          if (msg.type === 'tts_start') {
+          if (msg.type === 'session') {
+            mySatelliteId = msg.satellite_id || null;
+          } else if (msg.type === 'tts_start') {
             satTtsSr = msg.sr || 24000;
             satPlayAt = satAudioCtx ? Math.max(satPlayAt, satAudioCtx.currentTime) : 0;
           } else if (msg.type === 'tts_cancel') {
@@ -1558,6 +1612,92 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     syncSatBtn();
   };
 
+  const syncSatAreaPill = () => {
+    if (satHaArea && satAreaName) {
+      satAreaPill.textContent = `📍 ${satAreaName}`;
+      satAreaPill.classList.add('shown');
+    } else if (satHaArea) {
+      // Area chosen but its display name hasn't resolved yet (e.g. page just
+      // loaded, /ha/areas hasn't been fetched) — fall back to the raw id
+      // rather than showing nothing.
+      satAreaPill.textContent = `📍 ${satHaArea}`;
+      satAreaPill.classList.add('shown');
+    } else {
+      satAreaPill.classList.remove('shown');
+    }
+  };
+
+  const chooseArea = (id, name, wrapEl) => {
+    satHaArea = id;
+    satAreaName = name;
+    localStorage.setItem(SAT_AREA_KEY, id);
+    localStorage.setItem(SAT_AREA_DECIDED_KEY, '1');
+    if (wrapEl) wrapEl.remove();
+    syncSatAreaPill();
+    // A live connection was opened under the old (or no) area — reconnect so
+    // the new choice takes effect immediately instead of on next connect.
+    if (satWs) { satDisconnect(); satConnect(); }
+  };
+
+  const renderAreaPicker = (areas) => {
+    clearEmpty();
+    const wrap = document.createElement('div');
+    wrap.className = 'msg assistant';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = "Which room is this device in? That way a bare "
+      + '"turn off the lights" knows which room you mean.';
+    const row = document.createElement('div');
+    row.className = 'area-picker-buttons';
+    for (const a of areas) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'area-picker-btn';
+      btn.textContent = a.name;
+      btn.addEventListener('click', () => chooseArea(a.id, a.name, wrap));
+      row.appendChild(btn);
+    }
+    const skip = document.createElement('button');
+    skip.type = 'button';
+    skip.className = 'area-picker-btn skip';
+    skip.textContent = 'Skip';
+    skip.addEventListener('click', () => chooseArea('', '', wrap));
+    row.appendChild(skip);
+    wrap.append(bubble, row);
+    chat.appendChild(wrap);
+    scrollEnd();
+  };
+
+  let satAreasCache = null;
+  const fetchHaAreas = async () => {
+    if (satAreasCache) return satAreasCache;
+    try {
+      const r = await fetch('/ha/areas');
+      const body = await r.json();
+      satAreasCache = body.available ? (body.areas || []) : [];
+    } catch (_) {
+      satAreasCache = [];
+    }
+    // Resolve the pill's display name now that areas are known, in case a
+    // choice was already persisted from a previous visit.
+    if (satHaArea) {
+      const match = satAreasCache.find((a) => a.id === satHaArea);
+      if (match) { satAreaName = match.name; syncSatAreaPill(); }
+    }
+    return satAreasCache;
+  };
+
+  const maybeShowAreaPicker = async () => {
+    if (localStorage.getItem(SAT_AREA_DECIDED_KEY) === '1') { await fetchHaAreas(); return; }
+    const areas = await fetchHaAreas();
+    if (areas.length) renderAreaPicker(areas);
+  };
+
+  satAreaPill.addEventListener('click', async () => {
+    const areas = await fetchHaAreas();
+    if (areas.length) renderAreaPicker(areas);
+  });
+
   satBtn.addEventListener('click', satConnect);
   satAlwaysBtn.addEventListener('click', satToggleAlwaysListen);
 
@@ -1565,6 +1705,15 @@ registerProcessor('fulloch-resample', ResampleTo16k);
 
   syncButton();
   loadWakeHint();
-  loadHistory().then(startStream);
+  syncSatAreaPill();
+  // Load history first so the area-picker bubble (if shown) always lands
+  // after existing conversation history rather than racing /history's fetch
+  // — otherwise on a second device with prior turns, the picker could render
+  // before history finishes loading and end up above scrollback the user has
+  // to scroll up past to find it.
+  loadHistory().then(() => {
+    startStream();
+    maybeShowAreaPicker();
+  });
   pollStatus();
 })();

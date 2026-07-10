@@ -24,17 +24,9 @@ from typing import List, Tuple
 
 import numpy as np
 
+from core.embeddings import QUERY_INSTRUCTION
+
 logger = logging.getLogger(__name__)
-
-# Picked in the planning step: 384-dim, retrieval-tuned, English-focused.
-# Outperforms MiniLM on most retrieval benchmarks for ~40MB extra download.
-EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
-
-# BGE-v1.5 is trained to prepend this instruction to the *query* only (never
-# the documents). It measurably lifts recall for short topical queries — the
-# common case here ("Sydney to Perth route") — so `search()` adds it at encode
-# time. Index-time chunk embeddings are left bare.
-QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
 
 # Bumped whenever the *embedding input* recipe changes (e.g. prepending the
 # note title to each chunk). A persisted index built under an older recipe is
@@ -147,14 +139,13 @@ class NotesIndex:
         """Load the embedding model and any persisted index (idempotent)."""
         if self._loaded:
             return
-        # Imports are deferred so users without the `notes:` block never
-        # pay the sentence-transformers startup cost.
-        import torch
-        from sentence_transformers import SentenceTransformer
+        # Shared singleton (core/embeddings.py) — users without the
+        # `notes:` block never pay the sentence-transformers startup cost
+        # unless some other feature (e.g. Spotify mood-search) loaded it
+        # first, in which case this reuses that same resident model.
+        from core.embeddings import get_model
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Loading embedding model {EMBED_MODEL_NAME} on {device}...")
-        self._model = SentenceTransformer(EMBED_MODEL_NAME, device=device)
+        self._model = get_model()
 
         if self._npy_path.exists() and self._meta_path.exists():
             try:

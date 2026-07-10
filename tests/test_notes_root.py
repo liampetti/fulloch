@@ -28,6 +28,12 @@ def sandbox(monkeypatch, tmp_path):
     # FULLOCH_NOTES_ROOT_OVERRIDE_PATH) so pytest never touches the real
     # sticky override; redirect it into this test's sandboxed tmp_path too.
     monkeypatch.setattr(notes_root, "_OVERRIDE_PATH", tmp_path / "data" / "notes_root_override.json")
+    # Likewise conftest.py points _CONFIG_PATH at the checked-in
+    # data/config.example.yml (via FULLOCH_CONFIG_PATH) so pytest never
+    # touches a real config.yml — that's now an absolute path fixed at import
+    # time, so `chdir(tmp_path)` alone no longer redirects it. Tests that
+    # write their own tmp_path/data/config.yml need this to actually be read.
+    monkeypatch.setattr(notes_root, "_CONFIG_PATH", tmp_path / "data" / "config.yml")
 
 
 def _write_config(path: Path, notes_path: str = "./data/notes") -> None:

@@ -22,6 +22,7 @@ import requests
 
 import utils.local_time as _local_tz
 from core.datetime_utils import tts_friendly_event_summary
+from core.satellite_context import current_satellite_id, get_current_assistant
 from core.url_utils import normalize_url
 
 from ._config import config
@@ -36,6 +37,18 @@ def tool(*dargs, **dkwargs):
 
     Importing this module no longer connects to HA — the load is deferred to
     first use — so a stray import can never reach out to Home Assistant.
+
+    Registration itself is gated on `"home_assistant" in config`. This
+    module can get imported as a side effect even when HA isn't configured
+    at all — `tools/spotify.py` imports it at module level to reuse its
+    area-resolution/service-call helpers — so without this guard, every HA
+    tool (turn_on, locks, climate, ...) would leak into the SLM's tool
+    registry for a Spotify-only user, advertising dozens of tools that can
+    only ever fail. The underlying function is still fully defined and
+    directly callable either way (e.g. `tools/spotify.py`'s
+    `_spotify_transport_fallback` calls `tools.spotify`'s own helpers, and
+    HA's own tools call each other, as plain functions — never through the
+    registry) — only the SLM-facing registration is skipped.
     """
     register = _register_tool(*dargs, **dkwargs)
 
@@ -45,6 +58,8 @@ def tool(*dargs, **dkwargs):
             _ensure_loaded()
             return fn(*args, **kwargs)
 
+        if "home_assistant" not in config:
+            return wrapper
         return register(wrapper)
 
     return decorate
@@ -190,8 +205,60 @@ def _fetch_entity_aliases() -> tuple:
 # I/O. They start empty/None and are populated once a tool actually runs.
 _ENTITY_ALIASES: dict = {}
 _ENTITY_ALIASES_MULTI: dict = {}
+# area_id -> display name, populated by `_fetch_area_map` in `_ensure_loaded`.
+# HA's REST API has no area/entity/device registry endpoints, so this goes
+# through `/api/template` (Jinja `areas()` / `area_name()` / `area_entities()`
+# built-ins) rather than a dedicated registry fetch.
+_AREA_MAP: dict = {}
 _loaded = False
 _load_lock = threading.Lock()
+
+
+def _render_template(template: str) -> Optional[str]:
+    """Render a Jinja template server-side via HA's `/api/template` endpoint.
+
+    Returns the rendered text, or None if HA is unreachable/unconfigured.
+    """
+    if not HA_TOKEN:
+        return None
+    url = f"{HA_URL}/api/template"
+    try:
+        response = requests.post(
+            url,
+            headers=_get_headers(),
+            json={"template": template},
+            timeout=TIMEOUT,
+        )
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        logger.warning(f"HA template render failed: {e}")
+        return None
+
+
+def _fetch_area_map() -> dict:
+    """Fetch `{area_id: display_name}` for every HA area via templates.
+
+    Empty if HA is unreachable/unconfigured or has no areas defined — callers
+    degrade to "I don't have area information" rather than failing.
+    """
+    ids_raw = _render_template("{{ areas() | list | tojson }}")
+    if ids_raw is None:
+        return {}
+    try:
+        area_ids = json.loads(ids_raw)
+    except (ValueError, TypeError):
+        logger.warning(f"Could not parse HA areas() template response: {ids_raw!r}")
+        return {}
+    names_raw = _render_template("{{ areas() | map('area_name') | list | tojson }}")
+    try:
+        names = json.loads(names_raw) if names_raw else []
+    except (ValueError, TypeError):
+        names = []
+    if len(names) != len(area_ids):
+        names = area_ids
+    logger.info(f"Fetched {len(area_ids)} areas from Home Assistant")
+    return {area_id: (name or area_id) for area_id, name in zip(area_ids, names, strict=True)}
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +362,15 @@ def list_entities() -> list:
     return out
 
 
+def list_areas() -> list:
+    """Every known HA area as `{"id": area_id, "name": display_name}`, for the
+    dashboard's browser-satellite area picker (6b). Sorted by name."""
+    _ensure_loaded()  # dashboard path — not a @tool, so load the map explicitly
+    out = [{"id": area_id, "name": name} for area_id, name in _AREA_MAP.items()]
+    out.sort(key=lambda a: a["name"].lower())
+    return out
+
+
 # Trailing words a speaker is likely to add or drop when referring to a device
 # (e.g. "downstairs office" vs "downstairs office lights").
 _NAME_SUFFIXES = (
@@ -342,11 +418,20 @@ def _domain_of(entity_id: str) -> str:
 def _call_service(
     domain: str,
     service: str,
-    entity_id: str,
+    entity_id,
     data: Optional[dict] = None,
     success_message: Optional[str] = None,
 ) -> str:
-    """Call a Home Assistant service and return a TTS-friendly response."""
+    """Call a Home Assistant service and return a TTS-friendly response.
+
+    `entity_id` is normally a single entity_id string, but may be a list —
+    used by the per-satellite lights area-default (#14 6b) to target every
+    light entity in a room with one service call. Callers passing a list
+    must have already filtered out denylisted entities themselves (e.g. via
+    `_bare_light_area_entities`) — the single-entity denylist backstop below
+    only applies to the string case, and always passing `success_message`
+    for the list case avoids needing a `_friendly_for` that understands lists.
+    """
     if not HA_TOKEN:
         return "Home Assistant isn't set up."
 
@@ -354,7 +439,7 @@ def _call_service(
     # the SLM emitted it verbatim, bypassing the filtered alias map), refuse it
     # outright rather than replanning — we don't want the agent retrying under a
     # different name to slip the control through.
-    if entity_id in _DENIED_ENTITIES:
+    if isinstance(entity_id, str) and entity_id in _DENIED_ENTITIES:
         friendly = _friendly_for(entity_id)
         logger.info(f"Refused voice control of deny-listed entity {entity_id}")
         return f"Sorry, {friendly} isn't available for voice control."
@@ -364,7 +449,7 @@ def _call_service(
     if data:
         payload.update(data)
 
-    friendly = _friendly_for(entity_id)
+    friendly = _friendly_for(entity_id) if isinstance(entity_id, str) else "those"
     action = service.replace("_", " ")
     try:
         response = requests.post(url, headers=_get_headers(), json=payload, timeout=TIMEOUT)
@@ -400,9 +485,8 @@ def _call_service_with_response(
 ) -> Optional[dict]:
     """Call a HA service that returns data, parse the service_response.
 
-    Use for services like `calendar.get_events` and `spotifyplus.search_*`
-    that need ?return_response=true. Returns the `service_response` block
-    of the JSON, or None on any error.
+    Use for services like `calendar.get_events` that need ?return_response=true.
+    Returns the `service_response` block of the JSON, or None on any error.
     """
     if not HA_TOKEN:
         return None
@@ -507,6 +591,120 @@ def _resolve_entity(name: str, domain: str = None) -> str:
     return name
 
 
+def _resolve_area(name: str) -> Optional[str]:
+    """Resolve a spoken room/zone name to an HA area_id via `_AREA_MAP`.
+
+    Tries an exact match on area_id or display name first, then a
+    token-superset fuzzy match on the display name (mirrors `_resolve_entity`).
+    Returns None if nothing matches (no "assume it's an id" fallback — a bad
+    area name has no service call to silently mis-target).
+    """
+    key = name.lower().strip()
+    for filler in _LEADING_FILLERS:
+        if key.startswith(filler):
+            key = key[len(filler) :].strip()
+            break
+
+    for area_id, area_name in _AREA_MAP.items():
+        if key == area_id.lower() or key == area_name.lower():
+            return area_id
+
+    input_tokens = set(key.split())
+    if input_tokens:
+        fuzzy = [
+            (area_id, area_name)
+            for area_id, area_name in _AREA_MAP.items()
+            if input_tokens.issubset(set(area_name.lower().split()))
+        ]
+        if fuzzy:
+            fuzzy.sort(key=lambda kv: len(kv[1]))
+            return fuzzy[0][0]
+
+    return None
+
+
+# Per-satellite default HA area for lights (#14 6b). Deliberately scoped to
+# lights only — locks/covers/fans/climate could theoretically want the same
+# treatment later, but each needs its own bare-word recognition and, for
+# locks especially, "the door" is often genuinely ambiguous even within one
+# room. Extend one domain at a time if a real need shows up.
+_LIGHT_WORDS = frozenset({"light", "lights", "lamp", "lamps"})
+# A command naming "all"/"every" must never be scoped down to the satellite's
+# own room — it's an explicit request for the whole house, and the existing
+# alias/group resolution (e.g. a configured "all lights" group entity)
+# already knows how to handle that; the area default must not intercept it.
+_ALL_QUALIFIER_WORDS = frozenset({"all", "every", "everything"})
+
+
+def _is_bare_light_phrase(key: str) -> bool:
+    """True if `key` (already lowercased/filler-stripped) refers to lights in
+    general with no specific room named and no "all"/"every" qualifier —
+    e.g. "lights"/"lamps", but not "kitchen lights" or "all the lights". Only
+    phrases like this are eligible for the satellite's default-area
+    fallback; anything else (an explicit room, or an explicit "all") always
+    goes through the pre-existing resolution unchanged.
+    """
+    tokens = key.split()
+    if not tokens:
+        return False
+    if any(t in _ALL_QUALIFIER_WORDS for t in tokens):
+        return False
+    return all(t in _LIGHT_WORDS for t in tokens)
+
+
+def _current_satellite_ha_area() -> Optional[str]:
+    """The calling satellite's configured `ha_area`, or None if there isn't
+    a live assistant, the satellite has disconnected, or no area is set."""
+    assistant = get_current_assistant()
+    if assistant is None:
+        return None
+    sid = current_satellite_id.get()
+    if not sid:
+        return None
+    session = assistant.satellites.get(sid)
+    if session is None:
+        return None
+    return session.ha_area
+
+
+def _bare_light_area_entities(entity: str) -> Optional[tuple[list, str]]:
+    """If `entity` is a bare lights phrase and the calling satellite has a
+    configured `ha_area` containing at least one (non-denylisted) light
+    entity, return `(light_entity_ids, area_display_name)`. Returns None
+    when the fallback doesn't apply — no satellite area configured, HA
+    unreachable, or the area has no lights — so the caller falls through to
+    the pre-existing single-entity resolution instead.
+    """
+    key = entity.lower().strip()
+    for filler in _LEADING_FILLERS:
+        if key.startswith(filler):
+            key = key[len(filler) :].strip()
+            break
+    if not _is_bare_light_phrase(key):
+        return None
+
+    ha_area = _current_satellite_ha_area()
+    if not ha_area:
+        return None
+    area_id = _resolve_area(ha_area)
+    if area_id is None:
+        return None
+
+    raw = _render_template(f"{{{{ area_entities({area_id!r}) | list | tojson }}}}")
+    if raw is None:
+        return None
+    try:
+        entity_ids = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+
+    lights = [eid for eid in entity_ids if _domain_of(eid) == "light" and eid not in _DENIED_ENTITIES]
+    if not lights:
+        return None
+    area_name = _AREA_MAP.get(area_id, ha_area)
+    return lights, area_name
+
+
 @tool(
     name="turn_on",
     description="Turn on a device, light, switch, or other Home Assistant entity",
@@ -519,6 +717,16 @@ def turn_on(entity: str, brightness: Optional[int] = None) -> str:
         entity: Entity name or ID (e.g., 'living room lights', 'light.living_room')
         brightness: Optional brightness percentage (0-100) for lights
     """
+    area_lights = _bare_light_area_entities(entity)
+    if area_lights is not None:
+        light_ids, area_name = area_lights
+        data = {}
+        success = f"Lights on in {area_name}"
+        if brightness is not None:
+            data["brightness"] = int((brightness / 100) * 255)
+            success = f"Lights on in {area_name} at {brightness} percent"
+        return _call_service("light", "turn_on", light_ids, data if data else None, success)
+
     entity_id = _resolve_entity(entity, domain="light")
     domain = _domain_of(entity_id)
     friendly = _friendly_for(entity_id)
@@ -543,6 +751,13 @@ def turn_off(entity: str) -> str:
     Args:
         entity: Entity name or ID (e.g., 'living room lights', 'light.living_room')
     """
+    area_lights = _bare_light_area_entities(entity)
+    if area_lights is not None:
+        light_ids, area_name = area_lights
+        return _call_service(
+            "light", "turn_off", light_ids, success_message=f"Lights off in {area_name}"
+        )
+
     entity_id = _resolve_entity(entity)
     domain = _domain_of(entity_id)
     friendly = _friendly_for(entity_id)
@@ -561,6 +776,13 @@ def toggle(entity: str) -> str:
     Args:
         entity: Entity name or ID (e.g., 'living room lights', 'light.living_room')
     """
+    area_lights = _bare_light_area_entities(entity)
+    if area_lights is not None:
+        light_ids, area_name = area_lights
+        return _call_service(
+            "light", "toggle", light_ids, success_message=f"Toggled the lights in {area_name}"
+        )
+
     entity_id = _resolve_entity(entity)
     domain = _domain_of(entity_id)
     friendly = _friendly_for(entity_id)
@@ -580,11 +802,22 @@ def set_ha_brightness(entity: str, brightness: int) -> str:
         entity: Light entity name or ID
         brightness: Brightness percentage (0-100)
     """
-    entity_id = _resolve_entity(entity, domain="light")
-    friendly = _friendly_for(entity_id)
-
     brightness = max(0, min(100, brightness))
     brightness_255 = int((brightness / 100) * 255)
+
+    area_lights = _bare_light_area_entities(entity)
+    if area_lights is not None:
+        light_ids, area_name = area_lights
+        return _call_service(
+            "light",
+            "turn_on",
+            light_ids,
+            {"brightness": brightness_255},
+            success_message=f"Lights in {area_name} at {brightness} percent",
+        )
+
+    entity_id = _resolve_entity(entity, domain="light")
+    friendly = _friendly_for(entity_id)
 
     return _call_service(
         "light",
@@ -736,6 +969,64 @@ def _media_target(entity: Optional[str]) -> Optional[str]:
     return _resolve_entity(target, domain="media_player")
 
 
+def _spotify_transport_fallback(action: str) -> Optional[str]:
+    """Fall back to direct Spotify Connect for a transport control when no
+    HA media_player entity resolved — e.g. a Spotify-only setup with no
+    `home_assistant:` block configured at all. Controls whatever device
+    Spotify Connect currently considers active, since there's no HA
+    area/entity to target without HA.
+
+    Only attempted if `spotify:` is actually configured — checked before
+    importing `tools.spotify` at all, so a user with neither integration
+    configured never pays for (or leaks into the tool registry) a module
+    they didn't ask for.
+
+    The import itself is deferred and local to this function rather than a
+    module-level import: `tools/spotify.py` already imports this module at
+    its top level (a documented exception to the no-cross-tool-import
+    rule, see CLAUDE.md) to reuse its area-resolution/service-call
+    machinery, so a module-level import back here would form a cycle. By
+    the time this function actually runs, both modules have long since
+    finished loading, so the local import is just a cheap `sys.modules`
+    lookup.
+
+    Returns None only if Spotify itself isn't usable either (not
+    configured, or no valid credentials) — callers should fall through to
+    their own HA-specific "I don't know which player" message in that
+    case. Otherwise always returns a string (success or a Spotify-specific
+    failure message), which is strictly more informative than that.
+    """
+    if "spotify" not in config:
+        return None
+    try:
+        import tools.spotify as spotify_tool
+    except Exception:
+        return None
+
+    sp = spotify_tool._get_client()
+    if sp is None:
+        return None
+
+    try:
+        device_id = spotify_tool._get_active_device(sp)
+        if action == "pause":
+            sp.pause_playback(device_id=device_id)
+            return "Spotify paused"
+        if action == "resume":
+            sp.start_playback(device_id=device_id)
+            return "Spotify resumed"
+        if action == "skip":
+            sp.next_track(device_id=device_id)
+            return "Skipped to the next track on Spotify"
+        if action == "previous":
+            sp.previous_track(device_id=device_id)
+            return "Back a track on Spotify"
+    except Exception:
+        logger.exception(f"Spotify Connect transport fallback failed ({action})")
+        return "Couldn't control Spotify — no active device found."
+    return None
+
+
 @tool(
     name="pause",
     description="Pause playback on the active media player",
@@ -745,7 +1036,7 @@ def pause(entity: Optional[str] = None) -> str:
     """Pause a media_player entity. Defaults to Spotify, then AVR, then TV."""
     entity_id = _media_target(entity)
     if entity_id is None:
-        return "I don't know which player to pause."
+        return _spotify_transport_fallback("pause") or "I don't know which player to pause."
     friendly = _friendly_for(entity_id)
     return _call_service(
         "media_player",
@@ -764,7 +1055,7 @@ def resume(entity: Optional[str] = None) -> str:
     """Resume a media_player entity. Defaults to Spotify, then AVR, then TV."""
     entity_id = _media_target(entity)
     if entity_id is None:
-        return "I don't know which player to resume."
+        return _spotify_transport_fallback("resume") or "I don't know which player to resume."
     friendly = _friendly_for(entity_id)
     return _call_service(
         "media_player",
@@ -783,7 +1074,7 @@ def skip(entity: Optional[str] = None) -> str:
     """Skip a media_player entity. Defaults to Spotify, then AVR, then TV."""
     entity_id = _media_target(entity)
     if entity_id is None:
-        return "I don't know which player to skip on."
+        return _spotify_transport_fallback("skip") or "I don't know which player to skip on."
     friendly = _friendly_for(entity_id)
     return _call_service(
         "media_player",
@@ -793,97 +1084,49 @@ def skip(entity: Optional[str] = None) -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# Spotify search-and-play via the SpotifyPlus HACS integration.
-#
-# Superseded by tools/spotify.py (direct Spotify Web API via spotipy) when a
-# `spotify:` block is present in config.yml — SpotifyPlus's search is
-# unreliable, and the tool registry only allows one `play_song`. Guarded so
-# this stays the fallback for anyone without direct Spotify API credentials.
-# ---------------------------------------------------------------------------
+@tool(
+    name="previous",
+    description="Go back to the previous track on the active media player",
+    aliases=["previous_track", "skip_back", "last_track"],
+)
+def previous(entity: Optional[str] = None) -> str:
+    """Go back a track on a media_player entity. Defaults to Spotify, then AVR, then TV."""
+    entity_id = _media_target(entity)
+    if entity_id is None:
+        return _spotify_transport_fallback("previous") or "I don't know which player to skip back on."
+    friendly = _friendly_for(entity_id)
+    return _call_service(
+        "media_player",
+        "media_previous_track",
+        entity_id,
+        success_message=f"{friendly} back a track",
+    )
 
 
-def _spotify_search(kind: str, query: str) -> list[dict]:
-    """Run a SpotifyPlus search and return the result items list (possibly empty).
+@tool(
+    name="ha_mute",
+    description="Mute or unmute a media player (TV, AVR, speakers)",
+    aliases=["mute", "unmute", "mute_tv", "silence_tv"],
+)
+def ha_mute(entity: Optional[str] = None, muted: bool = True) -> str:
+    """Mute or unmute a media_player entity. Defaults to AVR if configured, else TV.
 
-    `kind` is "playlists" or "tracks". SpotifyPlus returns:
-      {"user_profile": {...}, "result": {"items": [...], "total": N, ...}}
-    The service parameter is `criteria` (not `query`).
+    Args:
+        entity: Media player entity name or ID. Omit to use the default AVR/TV.
+        muted: True to mute (default), False to unmute.
     """
-    service = "search_playlists" if kind == "playlists" else "search_tracks"
-    response = _call_service_with_response(
-        "spotifyplus",
-        service,
-        {"entity_id": SPOTIFY_ENTITY, "criteria": query},
+    target = entity or AVR_ENTITY or TV_ENTITY
+    if not target:
+        return "I don't know which speakers to mute."
+    entity_id = _resolve_entity(target, domain="media_player")
+    friendly = _friendly_for(entity_id)
+    return _call_service(
+        "media_player",
+        "volume_mute",
+        entity_id,
+        {"is_volume_muted": bool(muted)},
+        success_message=f"{friendly} {'muted' if muted else 'unmuted'}",
     )
-    if not response:
-        return []
-    return (response.get("result") or {}).get("items") or []
-
-
-if "spotify" not in config:
-
-    @tool(
-        name="play_song",
-        description="Search Spotify and play a song or playlist by name",
-        aliases=["play", "play_music", "start_music"],
-    )
-    def play_song(query: str, artist: Optional[str] = None) -> str:
-        """Search Spotify for a playlist (by name) then fall back to track search.
-
-        Args:
-            query: The spoken phrase, e.g. 'wagon wheel' or 'calm evening playlist'.
-            artist: Optional artist refinement. Combined into the query when given.
-        """
-        if not SPOTIFY_ENTITY:
-            return (
-                "Reactive question: No Spotify media player was found in Home Assistant. "
-                "Check that a Spotify or SpotifyPlus integration is set up, or add "
-                "`spotify_entity:` to the home_assistant block in config.yml."
-            )
-
-        search_query = f"{query} {artist}".strip() if artist else query
-        entity_id = _resolve_entity(SPOTIFY_ENTITY, domain="media_player")
-
-        # SpotifyPlus path: search_playlists → search_tracks → play URI.
-        # Falls back to the generic path if SpotifyPlus isn't installed (empty results).
-        playlists = _spotify_search("playlists", search_query)
-        if playlists:
-            uri = playlists[0].get("uri")
-            name = playlists[0].get("name", "playlist")
-            if uri:
-                return _call_service(
-                    "media_player",
-                    "play_media",
-                    entity_id,
-                    {"media_content_id": uri, "media_content_type": "playlist"},
-                    success_message=f"Playing {name}",
-                )
-
-        tracks = _spotify_search("tracks", search_query)
-        if tracks:
-            uri = tracks[0].get("uri")
-            name = tracks[0].get("name", "your song")
-            if uri:
-                return _call_service(
-                    "media_player",
-                    "play_media",
-                    entity_id,
-                    {"media_content_id": uri, "media_content_type": "music"},
-                    success_message=f"Playing {name}",
-                )
-
-        # Generic fallback for the built-in HA Spotify integration (no search service).
-        # Passes the search query directly as the media_content_id — some Spotify
-        # integrations resolve "spotify:search:<query>" but results are not guaranteed.
-        logger.info("SpotifyPlus search returned no results; trying generic media_player.play_media")
-        return _call_service(
-            "media_player",
-            "play_media",
-            entity_id,
-            {"media_content_id": f"spotify:search:{search_query}", "media_content_type": "music"},
-            success_message=f"Playing {search_query}",
-        )
 
 
 def _resolve_with_variants(entity: str, suffixes: tuple, domains: tuple) -> Optional[str]:
@@ -907,11 +1150,16 @@ def _resolve_with_variants(entity: str, suffixes: tuple, domains: tuple) -> Opti
 
 @tool(
     name="get_temperature",
-    description="Get the current temperature from a Home Assistant thermostat, climate zone, or temperature sensor",
+    description=(
+        "Get the current temperature from a Home Assistant thermostat, climate "
+        "zone, or temperature sensor. For a thermostat/climate zone, also "
+        "reports the target temperature it's set to, if different from the "
+        "current reading."
+    ),
     aliases=["temperature", "check_temperature", "what_temperature", "how_warm", "how_cold"],
 )
 def get_temperature(entity: str) -> str:
-    """Return the current temperature reading for a room or sensor.
+    """Return the current (and, for a climate zone, target) temperature for a room or sensor.
 
     Args:
         entity: Room or sensor name (e.g., 'upstairs', 'living room',
@@ -929,9 +1177,12 @@ def get_temperature(entity: str) -> str:
         return f"Sorry, I couldn't find a temperature reading for {entity}."
 
     attrs = state.get("attributes", {})
-    temp = attrs.get("current_temperature")
-    if temp is None:
-        temp = attrs.get("temperature")
+    current = attrs.get("current_temperature")
+    # `temperature` is the thermostat's target/setpoint on a climate.* entity —
+    # not meaningful as a "target" on a plain sensor, so only read it as one
+    # for climate zones.
+    target = attrs.get("temperature") if entity_id.startswith("climate.") else None
+    temp = current if current is not None else target
     if temp is None:
         # Temperature sensors put the reading in `state`
         raw = state.get("state")
@@ -946,6 +1197,8 @@ def get_temperature(entity: str) -> str:
         return f"I couldn't read a temperature for {friendly}."
 
     unit = _temperature_unit(attrs)
+    if current is not None and target is not None and round(current) != round(target):
+        return f"{friendly} is {round(current)} {unit}, set to {round(target)} {unit}"
     return f"{friendly} is {round(temp)} {unit}"
 
 
@@ -964,7 +1217,14 @@ def get_entity_state(entity: str) -> str:
     state = _get_state(entity_id)
 
     if state is None:
-        return f"Sorry, I couldn't find {_friendly_for(entity_id)}."
+        # Reactive sentinel (not a plain string) so a multi-guess batch —
+        # the SLM hedging with several candidate names for the same entity
+        # in one turn — replans instead of having every failed guess joined
+        # verbatim into the spoken reply alongside a successful one.
+        return (
+            f"Reactive question: Couldn't find an entity matching "
+            f"{_friendly_for(entity_id)!r}. Try a different name or be more specific."
+        )
 
     entity_state = state.get("state", "unknown")
     friendly_name = state.get("attributes", {}).get("friendly_name", entity_id)
@@ -980,8 +1240,79 @@ def get_entity_state(entity: str) -> str:
         details.append(f"temperature: {attrs['temperature']}°")
     if "current_temperature" in attrs:
         details.append(f"current temperature: {attrs['current_temperature']}°")
+    if "hvac_action" in attrs:
+        details.append(f"hvac action: {attrs['hvac_action']}")
+    if "humidity" in attrs:
+        details.append(f"humidity: {attrs['humidity']}%")
+    if "current_position" in attrs:
+        details.append(f"position: {attrs['current_position']}% open")
+    if "current_valve_position" in attrs:
+        details.append(f"position: {attrs['current_valve_position']}% open")
+    if "battery_level" in attrs:
+        details.append(f"battery: {attrs['battery_level']}%")
 
     return ", ".join(details)
+
+
+def _area_entities(area_id: str, domain: Optional[str] = None) -> list[str]:
+    """Return entity_ids HA has registered in an area, optionally domain-filtered.
+
+    Empty list if HA is unreachable or the template response can't be parsed —
+    callers degrade accordingly rather than raising. Shared by
+    `list_entities_in_area` and `tools/spotify.py`'s room-targeted `play_song`
+    dispatch (imported directly — see that module's docstring for why).
+    """
+    raw = _render_template(f"{{{{ area_entities({area_id!r}) | list | tojson }}}}")
+    if raw is None:
+        return []
+    try:
+        entity_ids = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if domain:
+        domain_key = domain.lower().strip()
+        entity_ids = [eid for eid in entity_ids if _domain_of(eid) == domain_key]
+    return entity_ids
+
+
+@tool(
+    name="list_entities_in_area",
+    description=(
+        "List the Home Assistant entities in a room/area/zone (e.g. 'downstairs', "
+        "'office', 'kitchen'), optionally filtered to a domain like 'light', "
+        "'switch', 'sensor', or 'climate'. Use this for questions like 'what "
+        "lights do we have downstairs' or 'what else is in the office' instead "
+        "of guessing individual entity names."
+    ),
+    aliases=["list_area_entities", "ha_list_entities", "area_entities", "what_is_in"],
+)
+def list_entities_in_area(area: str, domain: Optional[str] = None) -> str:
+    """List the entities Home Assistant has registered in an area.
+
+    Args:
+        area: Room/area/zone name, e.g. 'downstairs', 'office', 'kitchen'.
+        domain: Optional domain filter, e.g. 'light', 'switch', 'sensor', 'climate'.
+    """
+    if not HA_TOKEN:
+        return "Home Assistant isn't set up."
+
+    area_id = _resolve_area(area)
+    if area_id is None:
+        return (
+            f"Reactive question: Couldn't find an area matching {area!r}. "
+            f"Try a different room name or be more specific."
+        )
+
+    entity_ids = _area_entities(area_id, domain)
+    entity_ids = [eid for eid in entity_ids if eid not in _DENIED_ENTITIES]
+
+    area_name = _AREA_MAP.get(area_id, area)
+    if not entity_ids:
+        scoped = f"{domain} " if domain else ""
+        return f"I don't see any {scoped}entities in {area_name}."
+
+    names = sorted({_friendly_for(eid) for eid in entity_ids}, key=str.lower)
+    return f"{area_name} has: " + ", ".join(names)
 
 
 @tool(
@@ -1080,36 +1411,166 @@ def unlock(entity: str) -> str:
     return _call_service("lock", "unlock", entity_id, success_message=f"Unlocked {friendly}")
 
 
+# `valve.*` entities (smart water/gas shutoffs) use their own domain and
+# service names but the same open/close/stop/position shape as `cover.*`
+# (blinds, garages) — one set of tools handles both rather than duplicating
+# every verb under a second "valve" name.
+_COVER_LIKE_SERVICES = {
+    "cover": {"open": "open_cover", "close": "close_cover", "stop": "stop_cover", "set_position": "set_cover_position"},
+    "valve": {"open": "open_valve", "close": "close_valve", "stop": "stop_valve", "set_position": "set_valve_position"},
+}
+
+
+def _cover_like_domain(entity_id: str) -> str:
+    return "valve" if entity_id.startswith("valve.") else "cover"
+
+
 @tool(
     name="ha_open_cover",
-    description="Open a cover/blind/garage in Home Assistant",
-    aliases=["ha_open", "open_blind", "open_garage"],
+    description="Open a cover, blind, garage door, or valve in Home Assistant",
+    aliases=["ha_open", "open_blind", "open_garage", "open_valve"],
 )
 def open_cover(entity: str) -> str:
-    """Open a cover entity (blinds, garage door, etc.).
+    """Open a cover or valve entity (blinds, garage door, water/gas valve, etc.).
 
     Args:
-        entity: Cover entity name or ID
+        entity: Cover or valve entity name or ID
     """
     entity_id = _resolve_entity(entity, domain="cover")
+    domain = _cover_like_domain(entity_id)
     friendly = _friendly_for(entity_id)
-    return _call_service("cover", "open_cover", entity_id, success_message=f"Opened {friendly}")
+    return _call_service(
+        domain, _COVER_LIKE_SERVICES[domain]["open"], entity_id, success_message=f"Opened {friendly}"
+    )
 
 
 @tool(
     name="ha_close_cover",
-    description="Close a cover/blind/garage in Home Assistant",
-    aliases=["ha_close", "close_blind", "close_garage"],
+    description="Close a cover, blind, garage door, or valve in Home Assistant",
+    aliases=["ha_close", "close_blind", "close_garage", "close_valve"],
 )
 def close_cover(entity: str) -> str:
-    """Close a cover entity (blinds, garage door, etc.).
+    """Close a cover or valve entity (blinds, garage door, water/gas valve, etc.).
 
     Args:
-        entity: Cover entity name or ID
+        entity: Cover or valve entity name or ID
     """
     entity_id = _resolve_entity(entity, domain="cover")
+    domain = _cover_like_domain(entity_id)
     friendly = _friendly_for(entity_id)
-    return _call_service("cover", "close_cover", entity_id, success_message=f"Closed {friendly}")
+    return _call_service(
+        domain, _COVER_LIKE_SERVICES[domain]["close"], entity_id, success_message=f"Closed {friendly}"
+    )
+
+
+@tool(
+    name="ha_stop_cover",
+    description="Stop a moving cover, blind, garage door, or valve in Home Assistant",
+    aliases=["stop_cover", "halt_cover", "stop_blind", "stop_garage", "stop_valve"],
+)
+def stop_cover(entity: str) -> str:
+    """Halt a cover or valve entity mid-travel.
+
+    Args:
+        entity: Cover or valve entity name or ID
+    """
+    entity_id = _resolve_entity(entity, domain="cover")
+    domain = _cover_like_domain(entity_id)
+    friendly = _friendly_for(entity_id)
+    return _call_service(
+        domain, _COVER_LIKE_SERVICES[domain]["stop"], entity_id, success_message=f"Stopped {friendly}"
+    )
+
+
+@tool(
+    name="ha_set_cover_position",
+    description=(
+        "Set a cover, blind, or valve to a specific position in Home Assistant "
+        "(0 = fully closed, 100 = fully open) — for a partial position like "
+        "'halfway'; use ha_open_cover/ha_close_cover for a full open or close."
+    ),
+    aliases=["set_cover_position", "set_blind_position", "cover_position"],
+)
+def set_cover_position(entity: str, position: int) -> str:
+    """Set a cover or valve entity to an exact position.
+
+    Args:
+        entity: Cover or valve entity name or ID
+        position: Target position 0-100 (0 closed, 100 fully open)
+    """
+    entity_id = _resolve_entity(entity, domain="cover")
+    domain = _cover_like_domain(entity_id)
+    friendly = _friendly_for(entity_id)
+    pct = max(0, min(100, int(position)))
+    return _call_service(
+        domain,
+        _COVER_LIKE_SERVICES[domain]["set_position"],
+        entity_id,
+        {"position": pct},
+        success_message=f"{friendly} set to {pct} percent open",
+    )
+
+
+@tool(
+    name="ha_set_fan_speed",
+    description="Set a fan's speed as a percentage (0-100) in Home Assistant",
+    aliases=["set_fan_speed", "fan_speed"],
+)
+def set_fan_speed(entity: str, speed: int) -> str:
+    """Set a fan entity's speed.
+
+    Args:
+        entity: Fan entity name or ID
+        speed: Speed percentage 0-100 (0 turns the fan off)
+    """
+    entity_id = _resolve_entity(entity, domain="fan")
+    friendly = _friendly_for(entity_id)
+    pct = max(0, min(100, int(speed)))
+    return _call_service(
+        "fan",
+        "set_percentage",
+        entity_id,
+        {"percentage": pct},
+        success_message=f"{friendly} speed set to {pct} percent",
+    )
+
+
+# vacuum.* actions that share one entity/target — a single parameterised tool
+# instead of five near-identical start/pause/stop/dock/locate tools.
+_VACUUM_ACTIONS = {
+    "start": ("start", "Started {friendly}"),
+    "resume": ("start", "Resumed {friendly}"),
+    "pause": ("pause", "Paused {friendly}"),
+    "stop": ("stop", "Stopped {friendly}"),
+    "dock": ("return_to_base", "Sending {friendly} to dock"),
+    "return_to_base": ("return_to_base", "Sending {friendly} to dock"),
+    "locate": ("locate", "Locating {friendly}"),
+}
+
+
+@tool(
+    name="ha_vacuum",
+    description=(
+        "Control a robot vacuum in Home Assistant. action: 'start', 'pause', "
+        "'stop', 'dock' (return to base/charging), or 'locate' (make it beep "
+        "so it can be found)."
+    ),
+    aliases=["vacuum", "start_vacuum", "stop_vacuum", "dock_vacuum", "run_vacuum"],
+)
+def ha_vacuum(entity: str, action: str = "start") -> str:
+    """Control a robot vacuum.
+
+    Args:
+        entity: Vacuum entity name or ID
+        action: "start" (default), "pause", "stop", "dock", or "locate"
+    """
+    entity_id = _resolve_entity(entity, domain="vacuum")
+    friendly = _friendly_for(entity_id)
+    key = action.lower().strip().replace(" ", "_")
+    if key not in _VACUUM_ACTIONS:
+        return f"I don't know how to '{action}' a vacuum — try start, pause, stop, dock, or locate."
+    service, template = _VACUUM_ACTIONS[key]
+    return _call_service("vacuum", service, entity_id, success_message=template.format(friendly=friendly))
 
 
 @tool(
@@ -1252,18 +1713,37 @@ def _ha_get_events(day: str) -> str:
 @tool(
     name="whats_on",
     description=(
-        "Get calendar events for a time period. Pass 'today', 'tomorrow', "
-        "'this_week', or a specific date as 'YYYY-MM-DD'."
+        "Get calendar events. Without event_name: everything in a fixed window — "
+        "pass 'today' (default), 'tomorrow', 'this_week', or a specific date as "
+        "'YYYY-MM-DD'. With event_name: search for a specific named event across "
+        "a wide date range (default 30 days both before and after today, widen "
+        "with limit), forward or backward — use this whenever the user names an "
+        "event and asks if/when it's coming up or was on, e.g. 'any concerts "
+        "coming up?', 'when's the dentist?'."
     ),
-    aliases=["calendar", "events", "schedule"],
+    aliases=[
+        "calendar",
+        "events",
+        "schedule",
+        "find_event",
+        "search_calendar",
+        "when_was",
+        "when_is_it_on",
+    ],
 )
-def whats_on(day: str = "today") -> str:
-    """Calendar events for today, tomorrow, this week, or a specific date.
+def whats_on(day: str = "today", event_name: Optional[str] = None, limit: str = "30d") -> str:
+    """Calendar events — a fixed-window listing, or a named-event search.
 
     Args:
         day: "today" (default), "tomorrow", "this_week", or an ISO date
-            "YYYY-MM-DD" for a single day.
+            "YYYY-MM-DD" for a single day. Ignored when event_name is set.
+        event_name: If set, search for this event by name instead of listing a
+            fixed window, e.g. "dentist", "school play".
+        limit: How far to search either side of today when event_name is set,
+            e.g. "30d", "2w", "6m". Default "30d".
     """
+    if event_name:
+        return _ha_get_events_name(event_name, limit)
     return _ha_get_events(day)
 
 
@@ -1365,22 +1845,6 @@ def _ha_get_events_name(event_description: str, limit: str = "30d") -> str:
         return f"Reactive question: {summary}"
     return summary
 
-
-@tool(
-    name="when_is_it_on",
-    description=(
-        "Search for when a specific calendar event is upcoming or was in the past"
-    ),
-    aliases=["find_event", "search_calendar", "when_was"],
-)
-def when_is_it_on(event_description: str, limit: str = "30d") -> str:
-    """Search for a specific calendar event by name, in the future or the past.
-
-    Args:
-        event_description: What to search for, e.g. "dentist", "birthday", "sporting event".
-        limit: How far to look either side of today, e.g. "30d", "2w", "6m". Default '30d'.
-    """
-    return _ha_get_events_name(event_description, limit)
 
 # ---------------------------------------------------------------------------
 # Calendar write — wraps the HA `calendar.create_event` service.
@@ -1548,28 +2012,25 @@ def _autodetect_weather_entity() -> str:
 
 
 def _autodetect_spotify_entity() -> Optional[str]:
-    """Pick a Spotify media_player entity.
+    """Pick the media_player entity used as the default music player.
 
-    Priority:
-      1. `home_assistant.spotify_entity` in config (friendly name or direct entity_id)
-      2. First `media_player.spotify*` in the alias map (covers both the
-         built-in Spotify integration and SpotifyPlus whose entity IDs are
-         `media_player.spotifyplus_<username>`)
+    No autodetection — must be set explicitly via `home_assistant.spotify_entity`
+    in config.yml (friendly name or direct entity_id). This is also the entity
+    `tools/spotify.py`'s `play_song` dispatches to by default (see its
+    `_resolve_media_targets`), so play dispatch and pause/resume/skip agree on
+    the same speaker unless a voice command names somewhere else.
     """
     configured = HA_CONFIG.get("spotify_entity")
-    if configured:
-        eid = _ENTITY_ALIASES.get(str(configured).lower()) or str(configured)
-        logger.info(f"Using configured Spotify entity: {eid}")
-        return eid
-    for eid in _ENTITY_ALIASES.values():
-        if eid.startswith("media_player.spotify"):
-            logger.info(f"Auto-selected Spotify entity: {eid}")
-            return eid
-    logger.warning(
-        "No Spotify media_player found in HA alias map. "
-        "Add `spotify_entity: <friendly name or entity_id>` under home_assistant: in config.yml."
-    )
-    return None
+    if not configured:
+        logger.warning(
+            "No home_assistant.spotify_entity configured — pause/resume/skip/play_song "
+            "have no default media player. Add `spotify_entity: <friendly name or "
+            "entity_id>` under home_assistant: in config.yml."
+        )
+        return None
+    eid = _ENTITY_ALIASES.get(str(configured).lower()) or str(configured)
+    logger.info(f"Using configured Spotify entity: {eid}")
+    return eid
 
 
 def _looks_like_tv(entity_id: str, friendly: str) -> bool:
@@ -1658,7 +2119,7 @@ def _ensure_loaded() -> None:
     With no token configured there's nothing to fetch, so it's a cheap no-op
     that stays re-checkable in case a token is set later.
     """
-    global _loaded, _ENTITY_ALIASES, _ENTITY_ALIASES_MULTI
+    global _loaded, _ENTITY_ALIASES, _ENTITY_ALIASES_MULTI, _AREA_MAP
     global _DEFAULT_WEATHER_ENTITY, SPOTIFY_ENTITY, TV_ENTITY, AVR_ENTITY
     global CALENDAR_ENTITY, TODO_ENTITY
     if _loaded or not HA_TOKEN:
@@ -1667,6 +2128,7 @@ def _ensure_loaded() -> None:
         if _loaded:
             return
         _ENTITY_ALIASES, _ENTITY_ALIASES_MULTI = _fetch_entity_aliases()
+        _AREA_MAP = _fetch_area_map()
         _DEFAULT_WEATHER_ENTITY = _autodetect_weather_entity()
         SPOTIFY_ENTITY = _autodetect_spotify_entity()
         TV_ENTITY = _autodetect_tv_entity()
@@ -1722,22 +2184,66 @@ def get_todo_items() -> str:
             "User question: No todo list is configured in Home Assistant. "
             "Would you like me to check your notes instead?"
         )
-    response = _call_service_with_response(
-        "todo",
-        "get_items",
-        {"entity_id": TODO_ENTITY, "status": "needs_action"},
-    )
-    if not response:
+    items = _fetch_pending_todo_items()
+    if items is None:
         return "I couldn't reach your todo list."
-    items = (response.get(TODO_ENTITY) or {}).get("items") or []
-    if not items:
-        return "Your list is empty."
     names = [i.get("summary", "") for i in items if i.get("summary")]
     if not names:
         return "Your list is empty."
     if len(names) == 1:
         return f"You have one item: {names[0]}."
     return f"You have {len(names)} items: {', '.join(names[:-1])}, and {names[-1]}."
+
+
+def _fetch_pending_todo_items() -> Optional[list]:
+    """Fetch not-yet-completed items from the configured HA todo list, or None on error."""
+    response = _call_service_with_response(
+        "todo",
+        "get_items",
+        {"entity_id": TODO_ENTITY, "status": "needs_action"},
+    )
+    if not response:
+        return None
+    return (response.get(TODO_ENTITY) or {}).get("items") or []
+
+
+@tool(
+    name="complete_todo_item",
+    description="Mark an item as done on the Home Assistant todo or shopping list.",
+    aliases=["check_off_todo", "mark_todo_done", "todo_complete", "complete_shopping_item"],
+)
+def complete_todo_item(item: str) -> str:
+    """Check off a pending todo/shopping-list item by name.
+
+    Args:
+        item: The item text to mark done (fuzzy-matched against pending items).
+    """
+    if not TODO_ENTITY:
+        return "User question: No todo list is configured in Home Assistant."
+    items = _fetch_pending_todo_items()
+    if items is None:
+        return "I couldn't reach your todo list."
+    if not items:
+        return f"There's nothing pending on your list matching '{item}'."
+
+    query = item.lower().strip()
+    match = next((i for i in items if query in (i.get("summary") or "").lower()), None)
+    if match is None:
+        names = [i.get("summary") or "" for i in items]
+        close = difflib.get_close_matches(item, names, n=1, cutoff=0.5)
+        if close:
+            match = next((i for i in items if (i.get("summary") or "") == close[0]), None)
+    if match is None:
+        return f"I couldn't find '{item}' on your list."
+
+    summary = match.get("summary", item)
+    return _call_service(
+        "todo",
+        "update_item",
+        TODO_ENTITY,
+        {"item": summary, "status": "completed"},
+        success_message=f"Checked off '{summary}'",
+    )
 
 
 def _temperature_unit(attrs: dict) -> str:

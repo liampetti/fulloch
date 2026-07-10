@@ -10,7 +10,18 @@ from typing import Optional
 import numpy as np
 import torch
 
+from .satellite import SatelliteSession
+
 logger = logging.getLogger(__name__)
+
+# Pushed onto a `server_vad=False` session's `chunk_q` (by the
+# `/ws/satellite-v2` handler, on an `audio.flush` client message) to mark
+# "everything received since the last flush/connect is one complete
+# utterance." Distinct from `None` (disconnect) and a real audio chunk — a
+# server_vad=False client has already endpointed locally and may stream
+# several chunks before flushing, so a chunk boundary alone can't mean
+# "utterance complete" the way it does for the server-VAD path.
+FLUSH = object()
 
 
 # Audio configuration
@@ -60,9 +71,13 @@ VAD_ENDPOINT_SILENCE_MS = SILENCE_DURATION_MS
 # Soft (early) endpoint: a second, shorter silence after which the recorder
 # emits a *provisional* snapshot of the utterance-so-far for the transcriber to
 # probe (ASR + completeness/safe-intent), letting a clearly-finished command
-# commit before the full 1.5s hard endpoint elapses. See
-# docs/speculative-early-action.md. 0 disables the early-commit path entirely.
-VAD_SOFT_ENDPOINT_SILENCE_MS = 500
+# commit before the full 1.5s hard endpoint elapses. 0 disables the early-commit
+# path entirely. 200ms is safe here specifically because this path is
+# speculation-gated (should_commit_provisional) — only regex-catchable,
+# non-destructive commands (lights/timers/etc.) can commit early;
+# notes/locks/media/thinking-mode turns always fall through to the hard
+# endpoint below regardless of this value.
+VAD_SOFT_ENDPOINT_SILENCE_MS = 200
 # While VAD has not yet detected any speech, discard the buffer once it grows
 # past this so a noisy room doesn't accumulate seconds of pre-speech audio
 # (which would both inflate onset latency and hand ASR a long noise clip).
@@ -134,8 +149,14 @@ class AudioCapture:
     sounddevice path — voice in is always via WebSocket, voice out via the
     same socket (TTS chunks are streamed back, the browser plays them).
 
-    `transcribing` gates processing; `tts_active` flips the silence threshold
-    while the assistant is speaking; `flush()` drains the queue on barge-in.
+    Each satellite's own `SatelliteSession.transcribing` gates processing for
+    that satellite; `SatelliteSession.tts_active` flips its silence threshold
+    while it's speaking; `SatelliteSession.vad_endpointer` is its own Silero
+    endpointer instance (built per-connection — see `satellite_recorder_thread`)
+    so two concurrent satellites endpoint independently without corrupting
+    each other's streaming VAD state. `mic_globally_enabled` is the one flag
+    still shared by every satellite (the HA-switch-facing "don't listen
+    anywhere" override). `flush()` drains the shared `audio_queue` on barge-in.
     """
 
     def __init__(
@@ -170,46 +191,54 @@ class AudioCapture:
 
         self._vad_model = None
         self._vad_get_timestamps = None
-        # Streaming endpointer (None when VAD is off/unavailable). When present
-        # it — not RMS — decides end-of-speech outside TTS; RMS remains the
-        # endpoint mechanism on the fallback path and while TTS is playing.
-        # `_endpointer` is the *live* handle the recorder reads; `_endpointer_built`
-        # retains the constructed object so `set_use_vad` can toggle VAD off and
-        # back on without a model reload (None on _built means VAD never loaded).
-        self._endpointer = None
-        self._endpointer_built = None
+        # Streaming endpointing (RMS fallback used when off/unavailable, or
+        # while TTS is playing — see satellite_recorder_thread). Each connected
+        # satellite gets its OWN `VadEndpointer` instance (built by
+        # `_build_endpointer`, stored on `SatelliteSession.vad_endpointer`) —
+        # `VADIterator` advances its model's LSTM state on every window, so one
+        # shared endpointer across concurrent satellites would corrupt every
+        # endpoint. `_vad_available` is a one-time capability probe (can this
+        # host build endpointers at all); `_use_vad_enabled` is the live
+        # on/off switch `set_use_vad` hot-toggles without rebuilding anything.
+        # `_vad_threshold` / `_vad_endpoint_silence_ms` /
+        # `_vad_soft_endpoint_silence_ms` are the current params new
+        # endpointers are built with; `set_vad_params` updates them plus every
+        # already-live endpointer in `_live_endpointers`.
+        self._vad_available = False
+        self._use_vad_enabled = False
+        self._vad_threshold = VAD_THRESHOLD if vad_threshold is None else vad_threshold
+        self._vad_endpoint_silence_ms = (
+            vad_endpoint_silence_ms if vad_endpoint_silence_ms is not None else silence_duration_ms
+        )
+        self._vad_soft_endpoint_silence_ms = (
+            VAD_SOFT_ENDPOINT_SILENCE_MS
+            if vad_soft_endpoint_silence_ms is None
+            else vad_soft_endpoint_silence_ms
+        )
+        self._endpointer_lock = threading.Lock()
+        self._live_endpointers: dict = {}
         if use_vad:
             try:
                 from silero_vad import get_speech_timestamps, load_silero_vad
 
-                from .vad import VadEndpointer
-
                 self._vad_model = load_silero_vad()
                 self._vad_get_timestamps = get_speech_timestamps
-                soft_ms = (
-                    VAD_SOFT_ENDPOINT_SILENCE_MS
-                    if vad_soft_endpoint_silence_ms is None
-                    else vad_soft_endpoint_silence_ms
-                )
-                # The soft endpoint needs its own Silero handle so it can't
-                # corrupt the hard iterator's LSTM state (see VadEndpointer).
-                soft_model = load_silero_vad() if soft_ms else None
-                self._endpointer_built = VadEndpointer(
-                    self._vad_model,
-                    sample_rate=sample_rate,
-                    threshold=VAD_THRESHOLD if vad_threshold is None else vad_threshold,
-                    endpoint_silence_ms=(
-                        vad_endpoint_silence_ms
-                        if vad_endpoint_silence_ms is not None
-                        else silence_duration_ms
-                    ),
-                    soft_model=soft_model,
-                    soft_endpoint_silence_ms=soft_ms,
-                )
-                self._endpointer = self._endpointer_built
+                # Build-and-discard probe: confirms a per-satellite endpointer
+                # can actually be constructed (model files present, silero_vad
+                # importable) without keeping this throwaway instance around —
+                # real satellites get their own via `_build_endpointer`.
+                probe = self._build_endpointer()
+                if probe is None:
+                    raise RuntimeError("endpointer probe build failed")
+                self._vad_available = True
+                self._use_vad_enabled = True
                 logger.info(
                     "Silero VAD loaded — speech-based endpointing enabled"
-                    + (f" (soft endpoint {soft_ms}ms)" if soft_ms else "")
+                    + (
+                        f" (soft endpoint {self._vad_soft_endpoint_silence_ms}ms)"
+                        if self._vad_soft_endpoint_silence_ms
+                        else ""
+                    )
                 )
             except Exception as e:
                 logger.warning(
@@ -238,36 +267,26 @@ class AudioCapture:
         self._follow_up_slack_s = silence_duration_ms / 1000.0 + 1.5
 
         # State
-        # Each item is `(buf, speech_onset_monotonic, loudness_dbfs)` — the
-        # onset lets the transcriber measure the follow-up window from when the
-        # speaker began, and the loudness tags the utterance with its dBFS
-        # volume (voiced-window RMS where VAD is active) for noise-baseline
-        # logging. None is the stop pill.
-        self.audio_queue: "queue.Queue[Optional[tuple[np.ndarray, float, float]]]" = queue.Queue()
+        # Each item is
+        # `(buf, speech_onset_monotonic, loudness_dbfs, provisional, satellite_id,
+        # endpoint_monotonic)` — the onset lets the transcriber measure the
+        # follow-up window from when the speaker began, the loudness tags the
+        # utterance with its dBFS volume (voiced-window RMS where VAD is
+        # active) for noise-baseline logging, satellite_id says which
+        # connected satellite recorded it (so a reply routes back to the same
+        # one), and endpoint_monotonic is the wall time this item was queued
+        # (utterance-end) — diffed against ASR dequeue time by
+        # `core.asr.stream_generator`'s `endpoint_wait_sink` for the A2
+        # endpoint-wait turn stat. None is the stop pill.
+        self.audio_queue: (
+            "queue.Queue[Optional[tuple[np.ndarray, float, float, bool, str, float]]]"
+        ) = queue.Queue()
         self.running = True
-        self.transcribing = True
-        # Set by Assistant while any TTS audio is playing. The satellite
-        # recorder switches to the barge-in floor (`_barge_in_rms`) so the
-        # assistant's own residue is treated as silence and utterances end on
-        # time.
-        self.tts_active = threading.Event()
-        # Set by Assistant while the wakeword-free follow-up window is open.
-        # The recorder then accepts shorter utterances (a brief reply to the
-        # assistant) instead of holding them to the full min length. Paired
-        # with `_follow_up_until` so the window auto-expires even if the
-        # Assistant never gets a chance to clear it.
-        self.follow_up_active = threading.Event()
-        self._follow_up_until = 0.0
-        # Cross-thread signal: when set, the recorder drops its in-progress
-        # buffer at the top of the next iteration. Set by `flush()`; only
-        # the recorder thread mutates `audio_buffer` to avoid races with
-        # the InputStream callback.
-        self._flush_pending = False
-        # Debounce for the soft-endpoint provisional probe: set once a provisional
-        # has been emitted for the current pause, cleared when speech resumes
-        # (the endpointer re-arms `soft_endpointed`), so each pause yields at most
-        # one provisional snapshot rather than one per chunk.
-        self._soft_probe_emitted = False
+        # Genuinely global, HA-switch-facing "don't listen anywhere" override
+        # (see `server/dashboard.py`'s `POST /mic` / the HACS mic switch
+        # entity) — ANDed with each satellite's own `SatelliteSession.transcribing`
+        # (the per-satellite half-duplex self-mute) in `satellite_recorder_thread`.
+        self.mic_globally_enabled = True
 
     # --- Live config setters (settings console hot-apply) ------------------
     # Each mutates a single derived value the recorder reads on its next loop
@@ -276,11 +295,42 @@ class AudioCapture:
 
     def set_use_vad(self, enabled: bool) -> bool:
         """Toggle VAD endpointing live. Returns False if it can't (VAD model
-        was never loaded, so enabling needs a restart)."""
-        if enabled and self._endpointer_built is None:
+        was never loaded, so enabling needs a restart).
+
+        Already-connected satellites keep whatever `VadEndpointer` they were
+        built with; `satellite_recorder_thread` reads `_use_vad_enabled` on
+        every iteration, so disabling drops straight to the RMS path and
+        re-enabling picks the same (still-live) endpointer back up — no
+        rebuild, no reconnect.
+        """
+        if enabled and not self._vad_available:
             return False
-        self._endpointer = self._endpointer_built if enabled else None
+        self._use_vad_enabled = enabled
         return True
+
+    def _build_endpointer(self):
+        """Construct a fresh per-satellite `VadEndpointer` — its own Silero
+        model instance(s), never shared with another satellite's. Returns
+        None if VAD was never available (import/model-load failure) or the
+        build itself fails (e.g. transient model-file issue)."""
+        try:
+            from silero_vad import load_silero_vad
+
+            from .vad import VadEndpointer
+
+            hard_model = load_silero_vad()
+            soft_model = load_silero_vad() if self._vad_soft_endpoint_silence_ms else None
+            return VadEndpointer(
+                hard_model,
+                sample_rate=self.sample_rate,
+                threshold=self._vad_threshold,
+                endpoint_silence_ms=self._vad_endpoint_silence_ms,
+                soft_model=soft_model,
+                soft_endpoint_silence_ms=self._vad_soft_endpoint_silence_ms,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to build per-satellite VAD endpointer ({e}); using RMS")
+            return None
 
     def set_barge_in_threshold_dbfs(self, dbfs: float) -> None:
         """Update the TTS-path silence floor (dBFS) and its linear-RMS cache."""
@@ -294,36 +344,45 @@ class AudioCapture:
     def set_vad_params(
         self, threshold=None, endpoint_silence_ms=None, soft_endpoint_silence_ms=None
     ) -> None:
-        """Live-tune the endpointer thresholds/silences (no-op without VAD)."""
-        if self._endpointer_built is not None:
-            self._endpointer_built.update_params(
+        """Live-tune the endpointer thresholds/silences (no-op without VAD).
+
+        Updates the stored defaults (so satellites connecting later pick them
+        up) and every currently-live per-satellite endpointer in place.
+        """
+        if not self._vad_available:
+            return
+        if threshold is not None:
+            self._vad_threshold = float(threshold)
+        if endpoint_silence_ms is not None:
+            self._vad_endpoint_silence_ms = int(endpoint_silence_ms)
+        if soft_endpoint_silence_ms is not None:
+            self._vad_soft_endpoint_silence_ms = int(soft_endpoint_silence_ms)
+        with self._endpointer_lock:
+            live = list(self._live_endpointers.values())
+        for ep in live:
+            ep.update_params(
                 threshold=threshold,
                 endpoint_silence_ms=endpoint_silence_ms,
                 soft_endpoint_silence_ms=soft_endpoint_silence_ms,
             )
 
-    def arm_follow_up(self, window_seconds: float) -> None:
-        """Open the follow-up window for `window_seconds` (plus capture slack).
+    def arm_follow_up(self, session: "SatelliteSession", window_seconds: float) -> None:
+        """Open `session`'s follow-up window for `window_seconds` (plus capture slack).
 
-        While open the recorder uses `follow_up_min_utterance_samples`, so a
-        short reply isn't dropped before it reaches ASR.
+        While open, `session`'s own recorder loop uses
+        `follow_up_min_utterance_samples`, so a short reply isn't dropped
+        before it reaches ASR. Per-satellite: B's follow-up window is
+        unaffected by A opening or closing its own.
         """
-        self._follow_up_until = time.monotonic() + window_seconds + self._follow_up_slack_s
-        self.follow_up_active.set()
+        session.follow_up_deadline = time.monotonic() + window_seconds + self._follow_up_slack_s
 
-    def clear_follow_up(self) -> None:
-        """Close the follow-up window (e.g. when a fresh turn begins)."""
-        self.follow_up_active.clear()
-        self._follow_up_until = 0.0
+    def clear_follow_up(self, session: "SatelliteSession") -> None:
+        """Close `session`'s follow-up window (e.g. when a fresh turn begins)."""
+        session.follow_up_deadline = 0.0
 
-    def _follow_up_open(self) -> bool:
-        """True while the follow-up window is armed and not yet expired."""
-        if not self.follow_up_active.is_set():
-            return False
-        if time.monotonic() >= self._follow_up_until:
-            self.follow_up_active.clear()
-            return False
-        return True
+    def _follow_up_open(self, session: "SatelliteSession") -> bool:
+        """True while `session`'s follow-up window is armed and not yet expired."""
+        return session.follow_up_deadline > 0.0 and time.monotonic() < session.follow_up_deadline
 
     def _audio_callback(self, indata, frames, time_info, status):
         # Local-mic callback removed — voice input is exclusively via the
@@ -350,81 +409,259 @@ class AudioCapture:
         if drained:
             logger.debug(f"Flushed {drained} queued utterances after barge-in")
 
-    def satellite_recorder_thread(self, chunk_q: "queue.Queue") -> None:
+    def satellite_recorder_thread(self, session: SatelliteSession) -> None:
         """WebSocket satellite audio source: reads float32 16 kHz mono chunks from
-        chunk_q, applies RMS silence-endpointing + post-hoc VAD, and pushes
-        complete utterances to audio_queue for the transcriber.  Stops on a
-        None sentinel (sent by Assistant.disconnect_satellite).
+        `session.chunk_q`, endpoints them, and pushes complete utterances to
+        `audio_queue` for the transcriber. Stops on a None sentinel (sent by
+        Assistant.disconnect_satellite). `session.id` tags each pushed
+        utterance so the transcriber can route the reply back to the satellite
+        that recorded it. Gates on both `self.mic_globally_enabled` (the
+        HA-switch-facing global override) and `session.transcribing` (this
+        satellite's own half-duplex self-mute) — satellite B keeps recording
+        while A is muted for either reason.
+
+        Endpointing: when VAD is available and enabled (`_use_vad_enabled`),
+        this satellite gets its own `VadEndpointer` (built once here, stored
+        on `session.vad_endpointer` — see the class docstring on why it can't
+        be shared) and speech-probability, not RMS energy, decides
+        end-of-speech — robust in a noisy room where energy never drops to a
+        silence floor. A short *soft* pause (see `VAD_SOFT_ENDPOINT_SILENCE_MS`)
+        emits one debounced provisional snapshot per pause
+        (`session.soft_probe_emitted`) for the transcriber's early-commit gate,
+        without clearing the growing buffer. RMS remains the endpoint
+        mechanism when VAD is off/unavailable for this satellite, and always
+        while its TTS is playing (a latency mechanism for barge-in, not a
+        noise problem — the VAD path is skipped, not endpointed, during TTS).
+
+        `session.server_vad=False` (forward-compat hook for the Phase 5
+        satellite-v2 protocol, where the client does its own VAD and sends
+        pre-endpointed audio) skips RMS/VAD endpointing entirely: chunks
+        accumulate in a buffer and are pushed as one utterance only when a
+        `FLUSH` sentinel arrives (from the client's `audio.flush` message) —
+        a server_vad=False client may stream several chunks before flushing,
+        so a chunk boundary alone can't mean "utterance complete" here.
+        Default `True` keeps today's browser behaviour.
         """
         from collections import deque
 
+        chunk_q = session.chunk_q
         sat_buf: deque = deque()
         silence_counter = 0
         speech_onset_t: Optional[float] = None
 
-        logger.info("Satellite recorder started")
-        while True:
-            try:
-                chunk = chunk_q.get(timeout=0.5)
-            except queue.Empty:
-                if not self.running:
+        if session.server_vad:
+            session.vad_endpointer = self._build_endpointer()
+            if session.vad_endpointer is not None:
+                with self._endpointer_lock:
+                    self._live_endpointers[session.id] = session.vad_endpointer
+
+        logger.info("Satellite recorder started (%s)", session.id)
+        try:
+            while True:
+                try:
+                    chunk = chunk_q.get(timeout=0.5)
+                except queue.Empty:
+                    if not self.running:
+                        break
+                    continue
+
+                if chunk is None:
                     break
-                continue
 
-            if chunk is None:
-                break
+                if not session.server_vad:
+                    if chunk is FLUSH:
+                        if sat_buf and self.mic_globally_enabled and session.transcribing:
+                            buf = np.concatenate(list(sat_buf), axis=0)
+                            onset = speech_onset_t if speech_onset_t is not None else time.monotonic()
+                            self.audio_queue.put(
+                                (
+                                    buf,
+                                    onset,
+                                    rms_to_dbfs(_buf_rms(buf)),
+                                    False,
+                                    session.id,
+                                    time.monotonic(),
+                                )
+                            )
+                        sat_buf.clear()
+                        speech_onset_t = None
+                        continue
+                    if not self.mic_globally_enabled or not session.transcribing:
+                        sat_buf.clear()
+                        speech_onset_t = None
+                        continue
+                    if speech_onset_t is None:
+                        speech_onset_t = time.monotonic()
+                    sat_buf.append(chunk)
+                    continue
 
-            sat_buf.append(chunk)
+                sat_buf.append(chunk)
 
-            if not self.transcribing:
+                if not self.mic_globally_enabled or not session.transcribing:
+                    sat_buf.clear()
+                    silence_counter = 0
+                    speech_onset_t = None
+                    session.soft_probe_emitted = False
+                    if session.vad_endpointer is not None:
+                        session.vad_endpointer.reset()
+                    continue
+
+                tts_active = session.tts_active.is_set()
+                endpointer = session.vad_endpointer if self._use_vad_enabled else None
+
+                if endpointer is not None and not tts_active:
+                    endpointer.process(sat_buf[-1])
+                    buffer_samples = sum(c.size for c in sat_buf)
+
+                    # Discard accumulating noise before any speech is detected
+                    # so a noisy room neither inflates onset latency nor hands
+                    # ASR a long noise clip.
+                    if not endpointer.speech_started and buffer_samples >= self.vad_idle_reset_samples:
+                        sat_buf.clear()
+                        endpointer.reset()
+                        continue
+
+                    # Soft (early) endpoint: the speaker has briefly paused but
+                    # the hard endpoint hasn't fired. Emit one provisional
+                    # snapshot per pause for the transcriber to probe — it
+                    # commits the turn early if the partial is a complete/safe
+                    # command, else drops it and waits for the hard endpoint.
+                    # Nothing is cleared/reset here, so the buffer keeps
+                    # growing toward the real endpoint regardless.
+                    if (
+                        endpointer.soft_endpointed
+                        and not endpointer.endpointed
+                        and endpointer.speech_started
+                    ):
+                        if not session.soft_probe_emitted:
+                            min_required = (
+                                self.follow_up_min_utterance_samples
+                                if self._follow_up_open(session)
+                                else self.min_utterance_samples
+                            )
+                            if buffer_samples >= min_required:
+                                buf = np.concatenate(list(sat_buf), axis=0)
+                                onset = endpointer.speech_onset or time.monotonic()
+                                rms = endpointer.voiced_rms
+                                if rms is None:
+                                    rms = _buf_rms(buf)
+                                loudness_db = rms_to_dbfs(rms)
+                                self.audio_queue.put(
+                                    (buf, onset, loudness_db, True, session.id, time.monotonic())
+                                )
+                                session.soft_probe_emitted = True
+                                secs = buf.size / self.sample_rate
+                                logger.debug(
+                                    "VAD soft endpoint: provisional %.2fs enqueued (%s)",
+                                    secs,
+                                    session.id,
+                                )
+                    elif not endpointer.soft_endpointed:
+                        # Speech resumed (or never paused) — re-arm the probe.
+                        session.soft_probe_emitted = False
+
+                    hit_silence = endpointer.endpointed
+                    hit_max = buffer_samples >= self.max_utterance_samples
+                    if not (hit_silence or hit_max):
+                        continue
+
+                    # Speech-duration floor (silence-endpointed segments only —
+                    # a hit_max segment is long genuine speech). Drop a
+                    # too-brief voiced burst (a cough Silero scored as speech)
+                    # before it reaches ASR and gets hallucinated into the
+                    # wakeword. Exempt while the follow-up window is open: a
+                    # cough there is indistinguishable from a one-word reply.
+                    if (
+                        hit_silence
+                        and not self._follow_up_open(session)
+                        and endpointer.last_speech_samples < self.vad_min_speech_samples
+                    ):
+                        secs = endpointer.last_speech_samples / self.sample_rate
+                        logger.debug(
+                            "VAD: speech span %.2fs < min — dropped as noise (%s)", secs, session.id
+                        )
+                        sat_buf.clear()
+                        endpointer.reset()
+                        continue
+
+                    # A short reply during the follow-up window ("yes", "stop")
+                    # would fall under the normal min; accept the shorter floor
+                    # while it's open.
+                    min_required = (
+                        self.follow_up_min_utterance_samples
+                        if self._follow_up_open(session)
+                        else self.min_utterance_samples
+                    )
+                    buf = np.concatenate(list(sat_buf), axis=0)
+                    if buf.size >= min_required and endpointer.speech_started:
+                        onset = endpointer.speech_onset or time.monotonic()
+                        # Tag with the voiced-window loudness; fall back to
+                        # whole-buffer RMS if no segment finalised (hit_max
+                        # before an endpoint).
+                        rms = endpointer.voiced_rms
+                        if rms is None:
+                            rms = _buf_rms(buf)
+                        loudness_db = rms_to_dbfs(rms)
+                        self.audio_queue.put(
+                            (buf, onset, loudness_db, False, session.id, time.monotonic())
+                        )
+                        secs = buf.size / self.sample_rate
+                        logger.debug("VAD endpoint: enqueued %.2fs for transcription (%s)", secs, session.id)
+                    sat_buf.clear()
+                    endpointer.reset()
+                    continue
+
+                # RMS fallback: VAD unavailable/disabled for this satellite, or
+                # its TTS is currently playing (barge-in always uses the RMS
+                # floor — a stricter, faster-reacting mechanism than the
+                # hard-endpoint VAD silence window).
+                threshold = self._barge_in_rms if tts_active else self.silence_threshold
+
+                if is_silent(sat_buf[-1], threshold):
+                    silence_counter += 1
+                else:
+                    silence_counter = 0
+                    if speech_onset_t is None:
+                        speech_onset_t = time.monotonic()
+
+                buffer_samples = sum(c.size for c in sat_buf)
+                max_s = self.tts_max_utterance_samples if tts_active else self.max_utterance_samples
+                min_s = (
+                    self.tts_min_utterance_samples
+                    if tts_active
+                    else self.follow_up_min_utterance_samples
+                    if self._follow_up_open(session)
+                    else self.min_utterance_samples
+                )
+                hit_silence = silence_counter >= self.silence_chunks_needed
+                hit_max = buffer_samples >= max_s
+                if not (hit_silence or hit_max):
+                    continue
+
+                buf = np.concatenate(list(sat_buf), axis=0)
+                if buf.size >= min_s and (
+                    self._vad_model is None
+                    or _contains_speech(buf, self._vad_model, self._vad_get_timestamps, self.sample_rate)
+                ):
+                    onset = speech_onset_t if speech_onset_t is not None else time.monotonic()
+                    self.audio_queue.put(
+                        (buf, onset, rms_to_dbfs(_buf_rms(buf)), False, session.id, time.monotonic())
+                    )
+                    logger.debug("Satellite: enqueued %.2fs for transcription", buf.size / self.sample_rate)
+
+                if tts_active and hit_max and not hit_silence:
+                    total = sum(c.size for c in sat_buf)
+                    while len(sat_buf) > 1 and total - sat_buf[0].size >= self.tts_overlap_samples:
+                        total -= sat_buf.popleft().size
+                    continue
+
                 sat_buf.clear()
                 silence_counter = 0
                 speech_onset_t = None
-                continue
-
-            tts_active = self.tts_active.is_set()
-            threshold = self._barge_in_rms if tts_active else self.silence_threshold
-
-            if is_silent(sat_buf[-1], threshold):
-                silence_counter += 1
-            else:
-                silence_counter = 0
-                if speech_onset_t is None:
-                    speech_onset_t = time.monotonic()
-
-            buffer_samples = sum(c.size for c in sat_buf)
-            max_s = self.tts_max_utterance_samples if tts_active else self.max_utterance_samples
-            min_s = (
-                self.tts_min_utterance_samples
-                if tts_active
-                else self.follow_up_min_utterance_samples
-                if self._follow_up_open()
-                else self.min_utterance_samples
-            )
-            hit_silence = silence_counter >= self.silence_chunks_needed
-            hit_max = buffer_samples >= max_s
-            if not (hit_silence or hit_max):
-                continue
-
-            buf = np.concatenate(list(sat_buf), axis=0)
-            if buf.size >= min_s and (
-                self._vad_model is None
-                or _contains_speech(buf, self._vad_model, self._vad_get_timestamps, self.sample_rate)
-            ):
-                onset = speech_onset_t if speech_onset_t is not None else time.monotonic()
-                self.audio_queue.put((buf, onset, rms_to_dbfs(_buf_rms(buf))))
-                logger.debug("Satellite: enqueued %.2fs for transcription", buf.size / self.sample_rate)
-
-            if tts_active and hit_max and not hit_silence:
-                total = sum(c.size for c in sat_buf)
-                while len(sat_buf) > 1 and total - sat_buf[0].size >= self.tts_overlap_samples:
-                    total -= sat_buf.popleft().size
-                continue
-
-            sat_buf.clear()
-            silence_counter = 0
-            speech_onset_t = None
-        logger.info("Satellite recorder stopped")
+        finally:
+            with self._endpointer_lock:
+                self._live_endpointers.pop(session.id, None)
+            logger.info("Satellite recorder stopped (%s)", session.id)
 
     def stop(self):
         """Signal the recorder to stop and inject poison pill."""

@@ -98,3 +98,30 @@ def test_empty_queue_stops_immediately_on_sentinel():
     q = queue.Queue()
     q.put(None)
     assert list(stream_generator(q)) == []
+
+
+def test_endpoint_wait_sink_holds_dequeue_minus_endpoint_time():
+    import time
+
+    q = queue.Queue()
+    endpoint_t = time.monotonic() - 0.05  # queued 50ms ago
+    q.put((_buf(), 11.0, -42.0, False, "sat-a", endpoint_t))
+    q.put(None)
+    sink = {"s": None}
+    gen = stream_generator(q, None, None, None, None, None, sink)
+
+    next(gen)
+    assert sink["s"] is not None
+    assert sink["s"] >= 0.05
+
+
+def test_endpoint_wait_sink_none_without_endpoint_time():
+    # 5-tuple (no endpoint_monotonic) still unpacks; sink reports None.
+    q = queue.Queue()
+    q.put((_buf(), 11.0, -42.0, False, "sat-a"))
+    q.put(None)
+    sink = {"s": "unset"}
+    gen = stream_generator(q, None, None, None, None, None, sink)
+
+    next(gen)
+    assert sink["s"] is None

@@ -58,6 +58,33 @@ ACK_PHRASES = [
     "Right.",
 ]
 
+# Played the moment a "redirect" barge-in (bare wakeword/name, no stop word)
+# cancels an in-flight turn and opens the follow-up window. Without this the
+# cancellation is silent — a false trigger (cough, TV, ASR hallucination)
+# stops whatever the assistant was doing with no audible sign anything
+# happened, and the user has no idea their original request was dropped.
+# A pure "stop" still stands down silently by design (see _is_pure_stop);
+# this only covers the redirect path, where the assistant is now listening.
+BARGE_ACK_PHRASES = [
+    "Yes?",
+    "Go ahead.",
+    "I'm listening.",
+    "Mm-hmm?",
+]
+
+# Played on a satellite whose turn attempt lost the TurnArbiter (another
+# satellite, or a dashboard text turn, already owns it). Short and
+# side-stepping rather than apologetic — this is a normal, frequent
+# occurrence in a multi-satellite home, not an error. Pre-rendered to
+# `busy_cache` in `_warm_and_announce`, played via `_play_busy_phrase`
+# (voice) or spoken directly as text (dashboard chat, which has no TTS).
+BUSY_PHRASES = [
+    "Just a second, I'm already helping out elsewhere.",
+    "Give me a moment, I'm mid-conversation.",
+    "Hang on, I'm talking to another room.",
+    "One moment — I'm busy right now.",
+]
+
 # Played before each replan SLM iteration (2nd, 3rd agent call in a multi-step
 # turn) so the gap isn't silent and the user knows the agent is mid-process —
 # not just re-acknowledging. Pre-rendered at warmup.

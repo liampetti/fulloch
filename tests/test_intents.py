@@ -433,10 +433,11 @@ class TestNoLlmReactive:
         return types.SimpleNamespace(
             llm_enabled=False,
             _history=[],
+            _history_for=lambda session: [],
             _trim_history=lambda: None,
             _emit_agent_event=lambda *a, **k: None,
             _record_spoken=lambda s: spoken.__setitem__("said", s),
-            _speak_no_ai_fallback=lambda session, source: (
+            _speak_no_ai_fallback=lambda session, source, satellite_id=None: (
                 spoken.__setitem__("said", "NO_AI") or "NO_AI"
             ),
         )

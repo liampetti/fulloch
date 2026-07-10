@@ -5,7 +5,8 @@ residue leaked the wakeword (or a near-homophone of it) back through ASR.
 The unit under test is `Assistant._is_self_echo` plus the integration with
 `_check_barge_in`. Both can be exercised against a bare instance — no
 models loaded — because the relevant code paths only touch in-process
-state (`_last_spoken_text`, `_turn_active`, `barge_in`).
+per-satellite state (`SatelliteSession.last_spoken_text`/`turn_active`) plus
+`barge_in`. Every fixture here uses a single satellite keyed `"sat-a"`.
 """
 
 import sys
@@ -15,6 +16,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from core.satellite import SatelliteSession  # noqa: E402
+
+
+def _add_satellite(a, satellite_id="sat-a", turn_active=True):
+    """Register a bare SatelliteSession on `a`, standing in for a real
+    `connect_satellite` call (which would open a real recorder thread)."""
+    a.satellites[satellite_id] = SatelliteSession(
+        id=satellite_id, chunk_q=None, turn_active=turn_active
+    )
 
 
 @pytest.fixture
@@ -32,56 +43,56 @@ def assistant():
             wakeword="atticus",
             barge_in="wakeword",
         )
-        a._turn_active = True  # pretend a turn is running so checks engage
+        _add_satellite(a)  # pretend a turn is running so checks engage
         return a
 
 
 class TestIsSelfEcho:
     def test_no_recent_spoken_text_means_not_echo(self, assistant):
-        assistant._last_spoken_text = ""
-        assert assistant._is_self_echo("atticus what time is it") is False
+        assistant.satellites["sat-a"].last_spoken_text = ""
+        assert assistant._is_self_echo("sat-a", "atticus what time is it") is False
 
     def test_multi_word_overlap_above_threshold(self, assistant):
         # Assistant said this; mic picks up most of it as a barge-in.
-        assistant._last_spoken_text = "atticus is a local voice assistant"
-        assert assistant._is_self_echo("atticus is a local") is True
+        assistant.satellites["sat-a"].last_spoken_text = "atticus is a local voice assistant"
+        assert assistant._is_self_echo("sat-a", "atticus is a local") is True
 
     def test_multi_word_overlap_below_threshold(self, assistant):
         # User's real request shares only stop-words with the prior answer.
-        assistant._last_spoken_text = "the time is half past four"
-        assert assistant._is_self_echo("play some jazz music for me") is False
+        assistant.satellites["sat-a"].last_spoken_text = "the time is half past four"
+        assert assistant._is_self_echo("sat-a", "play some jazz music for me") is False
 
     def test_single_word_wakeword_in_recent_speech_is_echo(self, assistant):
         # The assistant's answer mentioned "atticus" — a stray single-word
         # "atticus" transcript is almost certainly AEC residue.
-        assistant._last_spoken_text = "atticus is a great narrator"
-        assert assistant._is_self_echo("atticus") is True
+        assistant.satellites["sat-a"].last_spoken_text = "atticus is a great narrator"
+        assert assistant._is_self_echo("sat-a", "atticus") is True
 
     def test_single_word_wakeword_not_in_recent_speech_is_not_echo(self, assistant):
         # The prior answer didn't mention the wakeword, so an "atticus" transcript
         # is a legitimate barge-in attempt.
-        assistant._last_spoken_text = "it is sunny and twenty two degrees"
-        assert assistant._is_self_echo("atticus") is False
+        assistant.satellites["sat-a"].last_spoken_text = "it is sunny and twenty two degrees"
+        assert assistant._is_self_echo("sat-a", "atticus") is False
 
 
 class TestCheckBargeIn:
     def test_does_not_barge_when_self_echo(self, assistant):
-        assistant._last_spoken_text = "atticus is a local voice assistant"
-        assert assistant._check_barge_in("atticus is a local") is False
+        assistant.satellites["sat-a"].last_spoken_text = "atticus is a local voice assistant"
+        assert assistant._check_barge_in("sat-a", "atticus is a local") is False
 
     def test_barges_on_real_user_utterance(self, assistant):
-        assistant._last_spoken_text = "it is sunny and twenty two degrees"
-        assert assistant._check_barge_in("atticus stop") is True
+        assistant.satellites["sat-a"].last_spoken_text = "it is sunny and twenty two degrees"
+        assert assistant._check_barge_in("sat-a", "atticus stop") is True
 
     def test_does_not_barge_when_turn_inactive(self, assistant):
-        assistant._turn_active = False
-        assistant._last_spoken_text = "it is sunny"
-        assert assistant._check_barge_in("atticus stop") is False
+        assistant.satellites["sat-a"].turn_active = False
+        assistant.satellites["sat-a"].last_spoken_text = "it is sunny"
+        assert assistant._check_barge_in("sat-a", "atticus stop") is False
 
     def test_does_not_barge_when_barge_in_off(self, assistant):
         assistant.barge_in = "off"
-        assistant._last_spoken_text = "it is sunny"
-        assert assistant._check_barge_in("atticus stop") is False
+        assistant.satellites["sat-a"].last_spoken_text = "it is sunny"
+        assert assistant._check_barge_in("sat-a", "atticus stop") is False
 
 
 @pytest.fixture
@@ -95,7 +106,7 @@ def multiword_assistant():
             wakeword="hey atticus",
             barge_in="wakeword",
         )
-        a._turn_active = True
+        _add_satellite(a)
         return a
 
 
@@ -132,8 +143,8 @@ class TestTolerantWakewordMatcher:
     def test_two_word_wakeword_self_echo(self, multiword_assistant):
         # The assistant's reply mentioned the wakeword, so a stray
         # "hey atticus" transcript is AEC residue, not a real barge-in.
-        multiword_assistant._last_spoken_text = "hey atticus is a friendly australian voice"
-        assert multiword_assistant._is_self_echo("hey atticus") is True
+        multiword_assistant.satellites["sat-a"].last_spoken_text = "hey atticus is a friendly australian voice"
+        assert multiword_assistant._is_self_echo("sat-a", "hey atticus") is True
 
     def test_s_in_wakeword_matches_z_transcript(self, multiword_assistant):
         # ASR routinely transcribes the trailing /s/ of names like
@@ -150,14 +161,14 @@ class TestTolerantWakewordMatcher:
             from core.assistant import Assistant
 
             a = Assistant(wakeword="atticuz", barge_in="wakeword")
-            a._turn_active = True
+            _add_satellite(a)
         assert a._wakeword_re.search("atticuz stop") is not None
         assert a._wakeword_re.search("atticus stop") is not None
 
     def test_two_word_wakeword_barge_in_with_comma(self, multiword_assistant):
-        multiword_assistant._last_spoken_text = "it is sunny and warm today"
+        multiword_assistant.satellites["sat-a"].last_spoken_text = "it is sunny and warm today"
         # Even with a comma inserted by ASR, the barge-in should fire.
-        assert multiword_assistant._check_barge_in("hey, atticus stop") is True
+        assert multiword_assistant._check_barge_in("sat-a", "hey, atticus stop") is True
 
 
 def _make_assistant(**kwargs):
@@ -167,7 +178,7 @@ def _make_assistant(**kwargs):
         from core.assistant import Assistant
 
         a = Assistant(barge_in="wakeword", **kwargs)
-    a._turn_active = True
+    _add_satellite(a)
     return a
 
 
@@ -239,29 +250,29 @@ class TestPrefixOptionalBargeIn:
         assert atticus._wakeword_re.search("hey atticus stop") is not None
 
     def test_barge_fires_without_prefix(self, atticus):
-        atticus._last_spoken_text = "it is sunny and warm today"
-        assert atticus._check_barge_in("atticus stop") is True
-        assert atticus._check_barge_in("atticus, be quiet") is True
+        atticus.satellites["sat-a"].last_spoken_text = "it is sunny and warm today"
+        assert atticus._check_barge_in("sat-a", "atticus stop") is True
+        assert atticus._check_barge_in("sat-a", "atticus, be quiet") is True
 
     def test_barge_still_fires_with_prefix(self, atticus):
-        atticus._last_spoken_text = "it is sunny and warm today"
+        atticus.satellites["sat-a"].last_spoken_text = "it is sunny and warm today"
         # Full wakeword (incl. the "attic us" split) still routes through
         # the base pattern.
-        assert atticus._check_barge_in("hey atticus stop") is True
-        assert atticus._check_barge_in("hey attic us stop") is True
+        assert atticus._check_barge_in("sat-a", "hey atticus stop") is True
+        assert atticus._check_barge_in("sat-a", "hey attic us stop") is True
 
     def test_barge_respects_word_boundaries(self, atticus):
-        atticus._last_spoken_text = "it is sunny and warm today"
+        atticus.satellites["sat-a"].last_spoken_text = "it is sunny and warm today"
         # The bare-name branch must not fire inside a longer word.
-        assert atticus._check_barge_in("fanaticus rules everything") is False
+        assert atticus._check_barge_in("sat-a", "fanaticus rules everything") is False
 
     def test_bare_name_barge_for_auto_built_wakeword(self):
         # No explicit pattern — the greeting prefix is stripped off the
         # auto-built wakeword too.
         a = _make_assistant(wakeword="hey atticus")
-        a._last_spoken_text = "it is sunny and warm today"
+        a.satellites["sat-a"].last_spoken_text = "it is sunny and warm today"
         assert a._wakeword_re.search("atticus stop") is None  # idle: needs prefix
-        assert a._check_barge_in("atticus stop") is True  # barge: prefix optional
+        assert a._check_barge_in("sat-a", "atticus stop") is True  # barge: prefix optional
 
 
 class TestBareStopBargeIn:
@@ -283,26 +294,26 @@ class TestBareStopBargeIn:
     # --- Should fire ---
 
     def test_bare_stop_triggers_barge_in(self, atticus):
-        atticus._last_spoken_text = "the model supports a range of modalities"
-        assert atticus._check_barge_in("stop") is True
+        atticus.satellites["sat-a"].last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("sat-a", "stop") is True
 
     def test_mangled_name_plus_stop_triggers_barge_in(self, atticus):
         # Real-world failure: ASR transcribes "Atticus" as "Aricus" or
         # "Arica" at normal mic distance.  Name fails the barge_re, but
         # "stop" must still fire via _BARGE_STOP_RE.
-        atticus._last_spoken_text = "the model supports a range of modalities"
-        assert atticus._check_barge_in("aricus, stop") is True
-        assert atticus._check_barge_in("arica, stop") is True
+        atticus.satellites["sat-a"].last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("sat-a", "aricus, stop") is True
+        assert atticus._check_barge_in("sat-a", "arica, stop") is True
 
     def test_other_stop_words_trigger_barge_in(self, atticus):
-        atticus._last_spoken_text = "the model supports a range of modalities"
+        atticus.satellites["sat-a"].last_spoken_text = "the model supports a range of modalities"
         for word in ("halt", "cancel", "pause", "quiet", "enough"):
-            assert atticus._check_barge_in(word) is True, f"{word!r} should fire"
+            assert atticus._check_barge_in("sat-a", word) is True, f"{word!r} should fire"
 
     def test_stop_in_longer_utterance_triggers_barge_in(self, atticus):
-        atticus._last_spoken_text = "the model supports a range of modalities"
-        assert atticus._check_barge_in("okay stop that") is True
-        assert atticus._check_barge_in("please cancel that") is True
+        atticus.satellites["sat-a"].last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("sat-a", "okay stop that") is True
+        assert atticus._check_barge_in("sat-a", "please cancel that") is True
 
     # --- Should NOT fire ---
 
@@ -310,30 +321,30 @@ class TestBareStopBargeIn:
         # If the assistant's TTS just said "stop", a bare "stop" transcript
         # is likely AEC residue — _is_self_echo must catch it before
         # _BARGE_STOP_RE has a chance to fire.
-        atticus._last_spoken_text = "i will stop the music right away"
-        assert atticus._check_barge_in("stop") is False
+        atticus.satellites["sat-a"].last_spoken_text = "i will stop the music right away"
+        assert atticus._check_barge_in("sat-a", "stop") is False
 
     def test_stop_does_not_fire_when_turn_inactive(self, atticus):
-        atticus._turn_active = False
-        atticus._last_spoken_text = "the model supports a range of modalities"
-        assert atticus._check_barge_in("stop") is False
+        atticus.satellites["sat-a"].turn_active = False
+        atticus.satellites["sat-a"].last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("sat-a", "stop") is False
 
     def test_stop_does_not_fire_when_barge_in_off(self, atticus):
         atticus.barge_in = "off"
-        atticus._last_spoken_text = "the model supports a range of modalities"
-        assert atticus._check_barge_in("stop") is False
+        atticus.satellites["sat-a"].last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("sat-a", "stop") is False
 
     def test_word_boundary_not_triggered_by_stopped(self, atticus):
         # "stopped" contains "stop" but _BARGE_STOP_RE requires \b on both
         # sides, so inflected forms must not fire.
-        atticus._last_spoken_text = "the model supports a range of modalities"
-        assert atticus._check_barge_in("i stopped the timer") is False
-        assert atticus._check_barge_in("that is unstoppable") is False
+        atticus.satellites["sat-a"].last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("sat-a", "i stopped the timer") is False
+        assert atticus._check_barge_in("sat-a", "that is unstoppable") is False
 
     def test_word_boundary_not_triggered_by_paused(self, atticus):
-        atticus._last_spoken_text = "the model supports a range of modalities"
-        assert atticus._check_barge_in("music is paused") is False
-        assert atticus._check_barge_in("it was cancelled yesterday") is False
+        atticus.satellites["sat-a"].last_spoken_text = "the model supports a range of modalities"
+        assert atticus._check_barge_in("sat-a", "music is paused") is False
+        assert atticus._check_barge_in("sat-a", "it was cancelled yesterday") is False
 
 
 class TestIsPureStop:

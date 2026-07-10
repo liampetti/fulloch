@@ -20,6 +20,26 @@ import pytest
 # test module imports tools.home_assistant (conftest is loaded first).
 os.environ.setdefault("FULLOCH_HA_ALIAS_RETRIES", "0")
 
+# Point every config reader that loads once at import time (tools._config,
+# tools.notes_root) at the checked-in data/config.example.yml instead of the
+# real, gitignored data/config.yml. Without this, whatever a developer
+# happens to have configured locally (a real `home_assistant:`/`spotify:`
+# block) silently changes which code paths the suite exercises —
+# nondeterministic across machines and unreproducible in CI, which never has
+# the real file at all. Must be set BEFORE any test module imports
+# tools._config or tools.notes_root (conftest is loaded first).
+#
+# server.credentials_store.DEFAULT_PATH is deliberately NOT overridden this
+# way: it's a plain relative path re-resolved on every read/write (not baked
+# in at import time), and tests that need it sandboxed already do so with
+# `monkeypatch.chdir()` + an explicit `path=` — the same mechanism this repo
+# uses for server.config_store's config.yml default. A global override here
+# would break that chdir-based isolation instead of adding any (see the
+# credentials.example.json values in data/credentials.example.json for what
+# a fresh/blank credentials file looks like, if a new test wants to seed one).
+_REPO_ROOT = Path(__file__).parent.parent
+os.environ.setdefault("FULLOCH_CONFIG_PATH", str(_REPO_ROOT / "data" / "config.example.yml"))
+
 # Point tools.notes_root at a scratch override file instead of the real
 # data/notes_root_override.json. The real one is a *sticky* pointer to
 # whatever vault the Obsidian plugin last connected — often a Docker-only

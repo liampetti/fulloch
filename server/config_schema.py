@@ -104,24 +104,6 @@ SCHEMA: tuple = (
     ),
     Field(
         "general",
-        "input_device",
-        "str",
-        "General",
-        None,
-        "Mic device-name substring (PortAudio). Blank = system default. "
-        "Native (non-Docker) only; on Linux/Docker use PULSE_SOURCE.",
-    ),
-    Field(
-        "general",
-        "output_device",
-        "str",
-        "General",
-        None,
-        "Speaker device-name substring (PortAudio). Blank = system default. "
-        "Native (non-Docker) only; on Linux/Docker use PULSE_SINK.",
-    ),
-    Field(
-        "general",
         "asr_context_hint",
         "bool",
         "General",
@@ -302,7 +284,8 @@ SCHEMA: tuple = (
         "str",
         "Home Assistant",
         None,
-        "Spotify media_player (friendly name or entity_id). Auto-detected if blank.",
+        "Default media_player for music (friendly name or entity_id). No autodetection — "
+        "also the play_song dispatch target if tools/spotify.py's spotify: block is configured.",
     ),
     Field(
         "home_assistant",

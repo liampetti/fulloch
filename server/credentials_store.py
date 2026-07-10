@@ -15,6 +15,12 @@ Credentials map to os.environ names injected at startup via inject_env():
 
 System-level env vars (Docker compose, shell exports) always take precedence —
 inject_env() uses os.environ.setdefault() and never overwrites existing values.
+
+`DEFAULT_PATH` is deliberately a plain relative path, re-resolved against the
+process's cwd on every read/write rather than baked in at import time — the
+test suite relies on this, sandboxing it per-test with `monkeypatch.chdir()`
+rather than a global override (unlike `tools._config`, which loads its config
+dict once at import and so takes a `FULLOCH_CONFIG_PATH` env override instead).
 """
 
 import json

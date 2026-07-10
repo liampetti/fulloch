@@ -97,7 +97,7 @@ _DATA_DIR = Path("./data")
 _OVERRIDE_PATH = Path(
     os.environ.get("FULLOCH_NOTES_ROOT_OVERRIDE_PATH", str(_DATA_DIR / "notes_root_override.json"))
 )
-_CONFIG_PATH = _DATA_DIR / "config.yml"
+_CONFIG_PATH = Path(os.environ.get("FULLOCH_CONFIG_PATH", str(_DATA_DIR / "config.yml")))
 
 _lock = threading.Lock()
 _override: Optional[Path] = None

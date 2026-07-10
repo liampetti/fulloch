@@ -8,7 +8,7 @@
 
 _The **Ful**ly **Loc**al **H**ome Voice Assistant, a private voice layer for your notes, your home, and the web._
 
-Fulloch lets you talk to your setup while your hands stay on the keyboard. Ask questions, capture thoughts, and search your **[Obsidian](https://github.com/obsidianmd/obsidian-releases)** vault by voice. Control your home via **[Home Assistant](https://github.com/home-assistant)**. Pull live answers from the web with **[SearXNG](https://github.com/searxng/searxng)**. All without your voice, your notes, or your home state leaving your machine.
+Fulloch is your fully private, local voice assistant running on your own PC or Mac. Ask questions, capture thoughts, and search your **[Obsidian](https://github.com/obsidianmd/obsidian-releases)** vault by voice. Control your home via **[Home Assistant](https://github.com/home-assistant)**. Pull live answers from the web with **[SearXNG](https://github.com/searxng/searxng)**. All fully private and running on your home PC.
 
 ## Features
 
@@ -17,9 +17,8 @@ Fulloch lets you talk to your setup while your hands stay on the keyboard. Ask q
 - **Web search** - ask a question, get a spoken summary pulled live from a self-hosted search engine, optionally saved to your vault
 - **Conversational** - holds context across a turn; follow-ups like *"and tomorrow?"* just work
 - **Memory** - facts persist across restarts and build up over time
-- **Smart-home control** - lights, climate, media, calendar, weather, scenes, and entity history via Home Assistant; any entity can be switched off for voice control from the dashboard
-- **Long-term recall** - *"what did we talk about yesterday afternoon?"*, summarised from Home Assistant history
-- **Music search & play** - *"play the Beatles"* via [SpotifyPlus](https://github.com/thlucas1/homeassistantcomponent_spotifyplus)
+- **Smart-home control** - control any of your smart home devices using Home Assistant, integrate Fulloch into Home Assistant to trigger voice notifications and track your conversational history
+- **Music search & play** - *"play the Beatles"*, *"play jazz in the kitchen"*, *"play music everywhere"* - smart search on Spotify directly and hand playback off to Home Assistant
 - **Calendar reminders** - creates events on a dedicated HA calendar and speaks them at the right time
 - **Barge-in** - interrupt mid-sentence with the wakeword
 - **Cloned voice** *(GPU override)* - speaks in a voice cloned from a few seconds of reference audio; the default CPU stack uses fast built-in named voices (Kokoro) instead
@@ -129,9 +128,7 @@ Use events in automations, e.g. dim lights on `fulloch_wakeword_detected`, resto
 
 The dashboard's **Entities** tab blocks specific entities (locks, alarms) from voice control without affecting dashboard or automation access. Changes apply immediately.
 
-> [SpotifyPlus](https://github.com/thlucas1/homeassistantcomponent_spotifyplus) is required for search-by-name music queries (*"play the Beatles"*). Basic playback control works without it.
->
-> Alternatively, add a `spotify:` block to `config.yml` to search-and-play directly via the Spotify Web API instead of SpotifyPlus, more reliable search, at the cost of a one-time manual OAuth step to get a refresh token. See the `spotify:` section in `data/config.example.yml` for the config keys and `data/credentials.json` fields. Pause/resume/skip still go through Home Assistant either way (so they keep working for AVR/TV too).
+> Search-by-name music queries (*"play the Beatles"*, *"play jazz in the kitchen"*, *"play music everywhere"*) need a `spotify:` block in `config.yml`, Fulloch searches Spotify directly via the Web API, then hands the resolved track/playlist off to a Home Assistant `media_player` entity to actually play. Requires a one-time manual OAuth step to get a refresh token. See the `spotify:` section in `data/config.example.yml` for the config keys and `data/credentials.json` fields. Without a `spotify:` block, there's no music search, pause/resume/skip still work through Home Assistant regardless (so they keep working for AVR/TV too).
 
 ## Obsidian Integration
 
@@ -149,7 +146,7 @@ To point Fulloch at a different vault later, use the **Switch vault** section on
 
 **Running Fulloch in Docker?** The plugin runs on the host, so it reports host paths (e.g. `/Users/you/Documents/MyVault`). Fulloch inside the container can't see those. Two edits to wire it up:
 
-1. Uncomment the volume mount in `compose.yml` and point it at your vault. Pick a clean container path (e.g. `/vault`).
+1. Add your vault's directory as a volume when launching Docker container `-v /Users/you/Documents/MyVault:/vault:rw`
 2. Add the same mapping under `obsidian.path_translation` in `data/config.yml`:
 
    ```yaml

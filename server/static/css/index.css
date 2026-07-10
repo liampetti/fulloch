@@ -411,6 +411,25 @@ nav.tabs {
 #llm-alert:hover { background: rgba(239, 68, 68, 0.15); }
 #llm-alert svg { width: 18px; height: 18px; }
 
+/* Busy-status banner (another satellite, or dashboard text chat, is mid-turn) —
+   informational, not an error, so it's styled neutral/blue rather than red. */
+.busy-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0.5rem 0 0;
+  padding: 0.6rem 0.85rem;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+.busy-banner[hidden] { display: none; }
+.busy-banner svg { width: 18px; height: 18px; flex: 0 0 auto; }
+.busy-banner span { flex: 1 1 auto; }
+
 /* Facts panel */
 #facts-form {
   display: flex;
@@ -1009,6 +1028,45 @@ nav.tabs {
 }
 .tag.voice { color: var(--tag-voice); }
 .tag.text  { color: var(--tag-text); }
+/* Which satellite/room a turn came from — a separate, muted pill from the
+   voice/text source tag above so the two don't visually compete. */
+.tag.location { color: var(--text-muted); border-style: dashed; }
+
+/* Browser-satellite area picker (6b) — a synthetic assistant bubble with
+   HA-zone buttons instead of typed text, shown once until the user picks
+   (or skips), plus a small reopenable pill to change the choice later. */
+.area-picker-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.area-picker-btn {
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bubble-assist);
+  color: var(--bubble-assist-text);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.area-picker-btn:hover { filter: brightness(1.08); }
+.area-picker-btn.skip { opacity: 0.7; }
+
+.sat-area-pill {
+  display: none;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  cursor: pointer;
+  margin-inline-start: 6px;
+  white-space: nowrap;
+}
+.sat-area-pill.shown { display: inline-flex; }
 
 .stats-btn {
   margin-left: auto;

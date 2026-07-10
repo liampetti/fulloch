@@ -12,11 +12,18 @@ import core.assistant as a
 
 def _stub_self(cache, delivered=False):
     calls = []
+    tts_module = types.SimpleNamespace(
+        play_chunks=lambda chunks, sr, session=None, sink=None, tts_active_event=None: calls.append(
+            (chunks, sr)
+        )
+    )
+    satellite = types.SimpleNamespace(tts_sink=None, tts_active=None)
     self = types.SimpleNamespace(
         greeting_cache=cache,
         _greeting_delivered=delivered,
         tts_session=None,
-        play_chunks=lambda chunks, sr, session=None: calls.append((chunks, sr)),
+        _tts_module=tts_module,
+        satellites={"sat-a": satellite},
     )
     return self, calls
 
@@ -25,7 +32,7 @@ def test_replay_greeting_plays_cached_chunks_once():
     cache = [(["c1"], 24000), (["c2"], 24000)]
     self, calls = _stub_self(cache)
 
-    a.Assistant.replay_greeting(self)
+    a.Assistant.replay_greeting(self, "sat-a")
 
     assert calls == [(["c1"], 24000), (["c2"], 24000)]
     assert self._greeting_delivered is True
@@ -35,8 +42,8 @@ def test_replay_greeting_is_idempotent_on_reconnect():
     cache = [(["c1"], 24000)]
     self, calls = _stub_self(cache)
 
-    a.Assistant.replay_greeting(self)
-    a.Assistant.replay_greeting(self)  # simulated reconnect
+    a.Assistant.replay_greeting(self, "sat-a")
+    a.Assistant.replay_greeting(self, "sat-a")  # simulated reconnect
 
     assert calls == [(["c1"], 24000)]
 
@@ -44,7 +51,7 @@ def test_replay_greeting_is_idempotent_on_reconnect():
 def test_replay_greeting_noop_without_cache():
     self, calls = _stub_self([])
 
-    a.Assistant.replay_greeting(self)
+    a.Assistant.replay_greeting(self, "sat-a")
 
     assert calls == []
     assert self._greeting_delivered is False
@@ -54,6 +61,6 @@ def test_replay_greeting_skips_empty_chunk_lists():
     cache = [([], 24000), (["c1"], 24000)]
     self, calls = _stub_self(cache)
 
-    a.Assistant.replay_greeting(self)
+    a.Assistant.replay_greeting(self, "sat-a")
 
     assert calls == [(["c1"], 24000)]

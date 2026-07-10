@@ -76,7 +76,7 @@ def _import_assistant_module():
 
 def test_search_stall_plays_before_dispatch():
     a = _import_assistant_module()
-    src = inspect.getsource(a.AgentLoop.run)
+    src = inspect.getsource(a.AgentLoop._run)
     # The stall must be gated on is_web_search and sit before handle_action.
     assert "is_web_search" in src, "search stall not gated on is_web_search"
     stall_pos = src.index("is_web_search")
@@ -88,7 +88,7 @@ def test_search_stall_plays_before_dispatch():
 
 def test_summary_surfaced_in_spoken_output():
     a = _import_assistant_module()
-    src = inspect.getsource(a.AgentLoop.run)
+    src = inspect.getsource(a.AgentLoop._run)
     # The web summary is tracked across replan iterations and folded into the
     # terminal spoken output so a trailing write_note doesn't bury it.
     assert "web_summary_text" in src, "web summary not tracked for spoken output"
@@ -96,7 +96,7 @@ def test_summary_surfaced_in_spoken_output():
 
 def test_agent_generation_wrapped_in_progress_watchdog():
     a = _import_assistant_module()
-    src = inspect.getsource(a.AgentLoop.run)
+    src = inspect.getsource(a.AgentLoop._run)
     # A slow (esp. remote) agent generation must get periodic progress stalls,
     # not just the one-shot replan stall — so it isn't silent for many seconds.
     wd_pos = src.index("ThinkingWatchdog(")
@@ -114,7 +114,7 @@ def test_is_web_search_importable():
 
 def test_prose_emission_recovered_as_reply():
     a = _import_assistant_module()
-    src = inspect.getsource(a.AgentLoop.run)
+    src = inspect.getsource(a.AgentLoop._run)
     # A grammar-less remote model replying in prose (not the JSON envelope) must
     # not drop the turn — the prose is treated as a reply and falls through to
     # the reply branch, rather than returning "I don't understand".
@@ -126,7 +126,7 @@ def test_prose_emission_recovered_as_reply():
 
 def test_bundled_reply_pseudo_action_split_out():
     a = _import_assistant_module()
-    src = inspect.getsource(a.AgentLoop.run)
+    src = inspect.getsource(a.AgentLoop._run)
     # A `reply` bundled inside `actions` must be split out (so real tools still
     # dispatch and the guard doesn't block the turn), and spoken at the terminal.
     assert "REPLY_PSEUDO_INTENTS" in src, "pseudo-reply actions must be recognised"
@@ -140,7 +140,7 @@ def test_bundled_reply_pseudo_action_split_out():
 
 def test_reply_branch_prefers_grounded_web_summary():
     a = _import_assistant_module()
-    src = inspect.getsource(a.AgentLoop.run)
+    src = inspect.getsource(a.AgentLoop._run)
     # After a web search, a replan `reply` is the model re-answering from a
     # compressed summary — a fabrication opening. The grounded summary (built
     # from the actual snippets) must be preferred over the model's reply.
@@ -154,7 +154,7 @@ def test_reply_branch_prefers_grounded_web_summary():
 
 def test_hallucinated_tool_blocked_before_dispatch():
     a = _import_assistant_module()
-    src = inspect.getsource(a.AgentLoop.run)
+    src = inspect.getsource(a.AgentLoop._run)
     # The guard checks the loaded registry (direct match) and speaks the canned
     # fallback, and it must run BEFORE the main-loop dispatch so a hallucinated
     # tool can't replan into a fabricated answer or cause partial side effects.
@@ -177,7 +177,7 @@ def test_tool_unavailable_cache_wired():
 
 def test_search_cached_before_dispatch():
     a = _import_assistant_module()
-    src = inspect.getsource(a.AgentLoop.run)
+    src = inspect.getsource(a.AgentLoop._run)
     # Repeated identical queries within a turn must reuse the cached summary
     # rather than re-dispatching the search tool.
     assert "search_cache" in src, "per-turn search cache missing"
@@ -188,7 +188,7 @@ def test_search_cached_before_dispatch():
 
 def test_web_search_always_replans():
     a = _import_assistant_module()
-    src = inspect.getsource(a.AgentLoop.run)
+    src = inspect.getsource(a.AgentLoop._run)
     # A summarised web search must hand control back to the agent every time
     # (not only when bundled with other actions), so the agent decides the
     # next move from the findings. The old `len(actions) > 1` gate is gone.

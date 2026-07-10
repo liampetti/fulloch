@@ -8,34 +8,8 @@ max_temp attributes enforce safe bounds.
 """
 
 import datetime
-import importlib
+import json
 from unittest.mock import MagicMock, patch
-
-import pytest
-
-
-@pytest.fixture
-def ha_with_play_song():
-    """`tools.home_assistant.play_song` only exists when no `spotify:` block is
-    configured (HA's own play_song is suppressed in favor of tools/spotify.py
-    when one is present — see test_spotify.py's collision test). These tests
-    exercise HA's play_song fallback chain directly, so they must not depend
-    on whether the machine running the suite happens to have Spotify
-    configured in data/config.yml; force the no-spotify branch for the
-    duration of the test and restore the module's real state after."""
-    import tools.home_assistant as ha
-
-    had_spotify = "spotify" in ha.config
-    spotify_cfg = ha.config.get("spotify")
-    if had_spotify:
-        del ha.config["spotify"]
-        importlib.reload(ha)
-    try:
-        yield ha
-    finally:
-        if had_spotify:
-            ha.config["spotify"] = spotify_cfg
-            importlib.reload(ha)
 
 
 def test_import_does_no_network_load_lazily(monkeypatch):
@@ -61,6 +35,7 @@ def test_import_does_no_network_load_lazily(monkeypatch):
         ("HA_TOKEN", "tok"),
         ("_ENTITY_ALIASES", {}),
         ("_ENTITY_ALIASES_MULTI", {}),
+        ("_AREA_MAP", {}),
         ("_DEFAULT_WEATHER_ENTITY", None),
         ("SPOTIFY_ENTITY", None),
         ("TV_ENTITY", None),
@@ -70,6 +45,7 @@ def test_import_does_no_network_load_lazily(monkeypatch):
     ):
         monkeypatch.setattr(ha, _name, _val)
     monkeypatch.setattr(ha, "_fetch_entity_aliases", fake_fetch)
+    monkeypatch.setattr(ha, "_fetch_area_map", lambda: {})
 
     assert calls["n"] == 0  # nothing fetched yet
     ha._ensure_loaded()
@@ -107,80 +83,6 @@ def test_set_climate_passes_temperature_through():
         set_climate("office", 21)
         sent = call.call_args.args[3]
         assert sent["temperature"] == 21
-
-
-def test_play_song_picks_playlist_when_playlists_match(ha_with_play_song):
-    """First call: search_playlists returns a result → playlist context plays."""
-    with (
-        patch("tools.home_assistant.SPOTIFY_ENTITY", "media_player.spotify"),
-        patch("tools.home_assistant._resolve_entity", return_value="media_player.spotify"),
-        patch("tools.home_assistant._call_service_with_response") as search,
-        patch("tools.home_assistant._call_service") as play,
-    ):
-        search.side_effect = [
-            {"result": {"items": [{"uri": "spotify:playlist:abc", "name": "Calm Evening"}]}},
-        ]
-        from tools.home_assistant import play_song
-
-        play_song("calm evening")
-        # Only one search call (playlists), not a tracks call
-        assert search.call_count == 1
-        assert search.call_args_list[0].args[1] == "search_playlists"
-        # play_media was called with the playlist URI
-        play.assert_called_once()
-        args = play.call_args.args
-        assert args[1] == "play_media"
-        assert args[3]["media_content_id"] == "spotify:playlist:abc"
-        assert args[3]["media_content_type"] == "playlist"
-
-
-def test_play_song_falls_through_to_track_when_no_playlists(ha_with_play_song):
-    """Playlists empty → tracks searched → track URI played."""
-    with (
-        patch("tools.home_assistant.SPOTIFY_ENTITY", "media_player.spotify"),
-        patch("tools.home_assistant._resolve_entity", return_value="media_player.spotify"),
-        patch("tools.home_assistant._call_service_with_response") as search,
-        patch("tools.home_assistant._call_service") as play,
-    ):
-        search.side_effect = [
-            {"result": {"items": []}},
-            {"result": {"items": [{"uri": "spotify:track:xyz", "name": "Wagon Wheel"}]}},
-        ]
-        from tools.home_assistant import play_song
-
-        play_song("wagon wheel")
-        assert search.call_count == 2
-        assert search.call_args_list[1].args[1] == "search_tracks"
-        play.assert_called_once()
-        assert play.call_args.args[3]["media_content_id"] == "spotify:track:xyz"
-        assert play.call_args.args[3]["media_content_type"] == "music"
-
-
-def test_play_song_generic_fallback_when_no_results(ha_with_play_song):
-    """No SpotifyPlus results → generic media_player.play_media fallback."""
-    with (
-        patch("tools.home_assistant.SPOTIFY_ENTITY", "media_player.spotify"),
-        patch("tools.home_assistant._resolve_entity", return_value="media_player.spotify"),
-        patch("tools.home_assistant._call_service_with_response") as search,
-        patch("tools.home_assistant._call_service") as play,
-    ):
-        search.side_effect = [
-            {"result": {"items": []}},
-            {"result": {"items": []}},
-        ]
-        from tools.home_assistant import play_song
-
-        play_song("nothing matches this")
-        play.assert_called_once()
-        assert play.call_args.args[3]["media_content_id"] == "spotify:search:nothing matches this"
-
-
-def test_play_song_returns_friendly_error_when_spotify_entity_unset(ha_with_play_song):
-    with patch("tools.home_assistant.SPOTIFY_ENTITY", None):
-        from tools.home_assistant import play_song
-
-        result = play_song("anything")
-        assert "spotify" in result.lower()
 
 
 def test_humanize_condition_maps_ha_slugs_to_speech():
@@ -425,6 +327,231 @@ def test_get_temperature_resolves_collided_climate_over_light():
         assert "living" not in result.lower()
 
 
+def test_get_temperature_reports_climate_target_when_different():
+    """A climate zone's target/setpoint should surface alongside the current
+    reading, e.g. answering "what's it set to?" without a second tool."""
+    from tools.home_assistant import get_temperature
+
+    state = {
+        "entity_id": "climate.upstairs",
+        "state": "heat",
+        "attributes": {
+            "friendly_name": "Upstairs",
+            "current_temperature": 18.3,
+            "temperature": 21.0,
+        },
+    }
+    with (
+        patch("tools.home_assistant._resolve_with_variants", return_value="climate.upstairs"),
+        patch("tools.home_assistant._get_state", return_value=state),
+    ):
+        result = get_temperature("upstairs")
+
+    assert "18" in result
+    assert "21" in result
+
+
+def test_get_temperature_omits_target_when_equal_to_current():
+    from tools.home_assistant import get_temperature
+
+    state = {
+        "entity_id": "climate.upstairs",
+        "state": "heat",
+        "attributes": {
+            "friendly_name": "Upstairs",
+            "current_temperature": 21.0,
+            "temperature": 21.0,
+        },
+    }
+    with (
+        patch("tools.home_assistant._resolve_with_variants", return_value="climate.upstairs"),
+        patch("tools.home_assistant._get_state", return_value=state),
+    ):
+        result = get_temperature("upstairs")
+
+    assert result.lower() == "upstairs is 21 degrees celsius"
+    assert "set to" not in result
+
+
+def test_get_temperature_sensor_ignores_temperature_attr_as_target():
+    """A plain sensor's `temperature` attribute (if present) isn't a
+    thermostat setpoint — only climate.* entities get the "set to" phrasing."""
+    from tools.home_assistant import get_temperature
+
+    state = {
+        "entity_id": "sensor.upstairs_temperature",
+        "state": "18.3",
+        "attributes": {"friendly_name": "Upstairs Temperature", "temperature": 21.0},
+    }
+    with (
+        patch(
+            "tools.home_assistant._resolve_with_variants",
+            return_value="sensor.upstairs_temperature",
+        ),
+        patch("tools.home_assistant._get_state", return_value=state),
+    ):
+        result = get_temperature("upstairs")
+
+    assert "set to" not in result
+
+
+def test_open_cover_uses_cover_domain_for_cover_entity():
+    import tools.home_assistant as ha
+
+    resp = MagicMock()
+    resp.raise_for_status = lambda: None
+    with (
+        patch.object(ha, "HA_TOKEN", "tok"),
+        patch.object(ha, "_DENIED_ENTITIES", frozenset()),
+        patch("tools.home_assistant._resolve_entity", return_value="cover.garage"),
+        patch("tools.home_assistant.requests.post", return_value=resp) as post,
+    ):
+        ha.open_cover("garage")
+
+    url = post.call_args.args[0]
+    assert "/services/cover/open_cover" in url
+
+
+def test_open_cover_uses_valve_domain_for_valve_entity():
+    """A valve.* entity gets valve.open_valve, not cover.open_cover — same
+    voice verb ("open the valve"), different HA domain/service."""
+    import tools.home_assistant as ha
+
+    resp = MagicMock()
+    resp.raise_for_status = lambda: None
+    with (
+        patch.object(ha, "HA_TOKEN", "tok"),
+        patch.object(ha, "_DENIED_ENTITIES", frozenset()),
+        patch("tools.home_assistant._resolve_entity", return_value="valve.main_water"),
+        patch("tools.home_assistant.requests.post", return_value=resp) as post,
+    ):
+        result = ha.open_cover("main water valve")
+
+    url = post.call_args.args[0]
+    assert "/services/valve/open_valve" in url
+    assert "Opened" in result
+
+
+def test_set_cover_position_clamps_and_targets_valve_service():
+    import tools.home_assistant as ha
+
+    resp = MagicMock()
+    resp.raise_for_status = lambda: None
+    with (
+        patch.object(ha, "HA_TOKEN", "tok"),
+        patch.object(ha, "_DENIED_ENTITIES", frozenset()),
+        patch("tools.home_assistant._resolve_entity", return_value="valve.main_water"),
+        patch("tools.home_assistant.requests.post", return_value=resp) as post,
+    ):
+        ha.set_cover_position("main water valve", 150)
+
+    url = post.call_args.args[0]
+    payload = post.call_args.kwargs["json"]
+    assert "/services/valve/set_valve_position" in url
+    assert payload["position"] == 100
+
+
+def test_ha_vacuum_dispatches_known_action():
+    import tools.home_assistant as ha
+
+    resp = MagicMock()
+    resp.raise_for_status = lambda: None
+    with (
+        patch.object(ha, "HA_TOKEN", "tok"),
+        patch.object(ha, "_DENIED_ENTITIES", frozenset()),
+        patch("tools.home_assistant._resolve_entity", return_value="vacuum.roomba"),
+        patch("tools.home_assistant.requests.post", return_value=resp) as post,
+    ):
+        result = ha.ha_vacuum("roomba", "dock")
+
+    url = post.call_args.args[0]
+    assert "/services/vacuum/return_to_base" in url
+    assert "dock" in result.lower()
+
+
+def test_ha_vacuum_rejects_unknown_action():
+    import tools.home_assistant as ha
+
+    with (
+        patch.object(ha, "HA_TOKEN", "tok"),
+        patch("tools.home_assistant._resolve_entity", return_value="vacuum.roomba"),
+        patch("tools.home_assistant.requests.post") as post,
+    ):
+        result = ha.ha_vacuum("roomba", "levitate")
+
+    assert "don't know how to" in result.lower()
+    post.assert_not_called()
+
+
+def test_get_entity_state_reports_humidity_battery_and_position():
+    import tools.home_assistant as ha
+
+    state = {
+        "state": "on",
+        "attributes": {
+            "friendly_name": "Upstairs Sensor",
+            "humidity": 45,
+            "battery_level": 20,
+            "current_position": 60,
+            "hvac_action": "heating",
+        },
+    }
+    with (
+        patch("tools.home_assistant._resolve_entity", return_value="sensor.upstairs"),
+        patch("tools.home_assistant._get_state", return_value=state),
+    ):
+        result = ha.get_entity_state("upstairs")
+
+    assert "humidity: 45%" in result
+    assert "battery: 20%" in result
+    assert "position: 60% open" in result
+    assert "hvac action: heating" in result
+
+
+def test_complete_todo_item_matches_by_substring():
+    import tools.home_assistant as ha
+
+    items = [
+        {"summary": "Buy milk", "uid": "1"},
+        {"summary": "Call the plumber", "uid": "2"},
+    ]
+    resp = MagicMock()
+    resp.raise_for_status = lambda: None
+    with (
+        patch.object(ha, "HA_TOKEN", "tok"),
+        patch.object(ha, "TODO_ENTITY", "todo.shopping_list"),
+        patch.object(ha, "_DENIED_ENTITIES", frozenset()),
+        patch(
+            "tools.home_assistant._call_service_with_response",
+            return_value={"todo.shopping_list": {"items": items}},
+        ),
+        patch("tools.home_assistant.requests.post", return_value=resp) as post,
+    ):
+        result = ha.complete_todo_item("milk")
+
+    payload = post.call_args.kwargs["json"]
+    assert payload["item"] == "Buy milk"
+    assert payload["status"] == "completed"
+    assert "Buy milk" in result
+
+
+def test_complete_todo_item_no_match_is_spoken_directly():
+    import tools.home_assistant as ha
+
+    items = [{"summary": "Buy milk", "uid": "1"}]
+    with (
+        patch.object(ha, "HA_TOKEN", "tok"),
+        patch.object(ha, "TODO_ENTITY", "todo.shopping_list"),
+        patch(
+            "tools.home_assistant._call_service_with_response",
+            return_value={"todo.shopping_list": {"items": items}},
+        ),
+    ):
+        result = ha.complete_todo_item("dentist appointment")
+
+    assert "couldn't find" in result.lower()
+
+
 def test_resolve_entity_without_domain_keeps_first_wins():
     """No domain hint → first registration order entity (unchanged behaviour)."""
     with patch(
@@ -436,19 +563,15 @@ def test_resolve_entity_without_domain_keeps_first_wins():
         assert _resolve_entity("upstairs") == "light.upstairs"
 
 
-def test_autodetect_spotify_picks_media_player_spotify_prefix():
+def test_autodetect_spotify_uses_configured_entity():
+    """No autodetection — the configured friendly name resolves via the alias map."""
     with (
-        _patch_aliases(
-            {
-                "kitchen speaker": "media_player.kitchen",
-                "spotify": "media_player.spotify_alice",
-            }
-        ),
-        patch("tools.home_assistant.HA_CONFIG", {}),
+        _patch_aliases({"sonos living room": "media_player.sonos_living_room"}),
+        patch("tools.home_assistant.HA_CONFIG", {"spotify_entity": "Sonos Living Room"}),
     ):
         from tools.home_assistant import _autodetect_spotify_entity
 
-        assert _autodetect_spotify_entity() == "media_player.spotify_alice"
+        assert _autodetect_spotify_entity() == "media_player.sonos_living_room"
 
 
 def test_autodetect_spotify_returns_none_with_no_match():
@@ -678,3 +801,221 @@ def test_entity_history_returns_full_change_list_for_the_agent():
         result = ha.get_entity_history("dining room lights")
     assert "History for" in result
     assert ": on" in result and ": off" in result
+
+
+def test_get_entity_state_not_found_is_reactive():
+    """A miss must be a `Reactive question:` sentinel, not a plain apology —
+    otherwise a batch of alternate-name guesses in one turn gets every failed
+    guess joined verbatim into the spoken reply alongside a successful one."""
+    import tools.home_assistant as ha
+
+    with (
+        patch("tools.home_assistant._resolve_entity", return_value="climate.nope"),
+        patch("tools.home_assistant._get_state", return_value=None),
+    ):
+        result = ha.get_entity_state("downstairs thermostat")
+
+    assert result.startswith("Reactive question:")
+
+
+def test_resolve_area_matches_by_display_name():
+    import tools.home_assistant as ha
+
+    with patch.object(ha, "_AREA_MAP", {"downstairs": "Downstairs", "office": "Office"}):
+        assert ha._resolve_area("downstairs") == "downstairs"
+        assert ha._resolve_area("the office") == "office"
+        assert ha._resolve_area("upstairs") is None
+
+
+def test_list_entities_in_area_filters_domain_and_denylist():
+    import tools.home_assistant as ha
+
+    entity_ids = ["light.downstairs_office", "light.downstairs_hallway", "switch.downstairs_fan"]
+    with (
+        patch.object(ha, "HA_TOKEN", "tok"),
+        patch.object(ha, "_AREA_MAP", {"downstairs": "Downstairs"}),
+        patch.object(ha, "_DENIED_ENTITIES", frozenset({"light.downstairs_hallway"})),
+        patch("tools.home_assistant._resolve_area", return_value="downstairs"),
+        patch("tools.home_assistant._render_template", return_value=json.dumps(entity_ids)),
+    ):
+        result = ha.list_entities_in_area("downstairs", "light")
+
+    assert "downstairs office" in result
+    assert "downstairs hallway" not in result  # deny-listed
+    assert "downstairs fan" not in result  # wrong domain
+
+
+def test_list_entities_in_area_unknown_area_is_reactive():
+    import tools.home_assistant as ha
+
+    with (
+        patch.object(ha, "HA_TOKEN", "tok"),
+        patch("tools.home_assistant._resolve_area", return_value=None),
+    ):
+        result = ha.list_entities_in_area("nonexistent zone")
+
+    assert result.startswith("Reactive question:")
+
+
+# --- Spotify Connect fallback for transport controls (pause/resume/skip/previous) ---
+# Covers the Spotify-only-no-HA setup: no media_player entity resolves via
+# HA, so these fall back to direct Spotify Connect instead of a dead
+# "I don't know which player" response.
+
+
+def test_spotify_transport_fallback_skipped_when_spotify_not_configured():
+    import tools.home_assistant as ha
+
+    with patch.object(ha, "config", {}):
+        assert ha._spotify_transport_fallback("pause") is None
+
+
+def test_spotify_transport_fallback_none_without_spotify_credentials():
+    import tools.home_assistant as ha
+
+    with (
+        patch.object(ha, "config", {"spotify": {}}),
+        patch("tools.spotify._get_client", return_value=None),
+    ):
+        assert ha._spotify_transport_fallback("pause") is None
+
+
+def test_spotify_transport_fallback_pause_calls_spotify_connect():
+    import tools.home_assistant as ha
+
+    sp = MagicMock()
+    with (
+        patch.object(ha, "config", {"spotify": {}}),
+        patch("tools.spotify._get_client", return_value=sp),
+        patch("tools.spotify._get_active_device", return_value="device1"),
+    ):
+        result = ha._spotify_transport_fallback("pause")
+        assert result == "Spotify paused"
+        sp.pause_playback.assert_called_once_with(device_id="device1")
+
+
+def test_spotify_transport_fallback_resume_calls_spotify_connect():
+    import tools.home_assistant as ha
+
+    sp = MagicMock()
+    with (
+        patch.object(ha, "config", {"spotify": {}}),
+        patch("tools.spotify._get_client", return_value=sp),
+        patch("tools.spotify._get_active_device", return_value="device1"),
+    ):
+        result = ha._spotify_transport_fallback("resume")
+        assert result == "Spotify resumed"
+        sp.start_playback.assert_called_once_with(device_id="device1")
+
+
+def test_spotify_transport_fallback_skip_calls_spotify_connect():
+    import tools.home_assistant as ha
+
+    sp = MagicMock()
+    with (
+        patch.object(ha, "config", {"spotify": {}}),
+        patch("tools.spotify._get_client", return_value=sp),
+        patch("tools.spotify._get_active_device", return_value="device1"),
+    ):
+        result = ha._spotify_transport_fallback("skip")
+        assert result == "Skipped to the next track on Spotify"
+        sp.next_track.assert_called_once_with(device_id="device1")
+
+
+def test_spotify_transport_fallback_previous_calls_spotify_connect():
+    import tools.home_assistant as ha
+
+    sp = MagicMock()
+    with (
+        patch.object(ha, "config", {"spotify": {}}),
+        patch("tools.spotify._get_client", return_value=sp),
+        patch("tools.spotify._get_active_device", return_value="device1"),
+    ):
+        result = ha._spotify_transport_fallback("previous")
+        assert result == "Back a track on Spotify"
+        sp.previous_track.assert_called_once_with(device_id="device1")
+
+
+def test_spotify_transport_fallback_returns_friendly_error_on_failure():
+    import tools.home_assistant as ha
+
+    sp = MagicMock()
+    sp.pause_playback.side_effect = Exception("no active device")
+    with (
+        patch.object(ha, "config", {"spotify": {}}),
+        patch("tools.spotify._get_client", return_value=sp),
+        patch("tools.spotify._get_active_device", return_value=None),
+    ):
+        result = ha._spotify_transport_fallback("pause")
+        assert result == "Couldn't control Spotify — no active device found."
+
+
+def test_pause_falls_back_to_spotify_when_no_ha_target_resolves():
+    import tools.home_assistant as ha
+
+    with (
+        patch.object(ha, "SPOTIFY_ENTITY", None),
+        patch.object(ha, "AVR_ENTITY", None),
+        patch.object(ha, "TV_ENTITY", None),
+        patch.object(ha, "_spotify_transport_fallback", return_value="Spotify paused") as fallback,
+    ):
+        assert ha.pause() == "Spotify paused"
+        fallback.assert_called_once_with("pause")
+
+
+def test_pause_keeps_original_message_when_spotify_fallback_unavailable():
+    import tools.home_assistant as ha
+
+    with (
+        patch.object(ha, "SPOTIFY_ENTITY", None),
+        patch.object(ha, "AVR_ENTITY", None),
+        patch.object(ha, "TV_ENTITY", None),
+        patch.object(ha, "_spotify_transport_fallback", return_value=None),
+    ):
+        assert ha.pause() == "I don't know which player to pause."
+
+
+# --- HA @tool registration gated on "home_assistant" being configured ---
+# Guards the leak where tools/spotify.py's module-level `import
+# tools.home_assistant` (needed for its area-resolution helpers) used to
+# register every HA tool into the SLM's tool registry even when
+# home_assistant wasn't configured at all.
+
+
+def test_ha_tool_decorator_skips_registration_when_not_configured():
+    import tools.home_assistant as ha
+    from tools.tool_registry import tool_registry
+
+    probe_name = "_test_probe_unconfigured"
+    with patch.object(ha, "config", {}):
+
+        @ha.tool(name=probe_name)
+        def probe():
+            return "ok"
+
+    try:
+        assert probe_name not in tool_registry._tools
+        assert probe_name not in tool_registry._schemas
+        assert probe() == "ok"  # still a fully working plain function
+    finally:
+        tool_registry._tools.pop(probe_name, None)
+        tool_registry._schemas.pop(probe_name, None)
+
+
+def test_ha_tool_decorator_registers_when_configured():
+    import tools.home_assistant as ha
+    from tools.tool_registry import tool_registry
+
+    probe_name = "_test_probe_configured"
+    with patch.object(ha, "config", {"home_assistant": {}}):
+
+        @ha.tool(name=probe_name)
+        def probe():
+            return "ok"
+
+    try:
+        assert probe_name in tool_registry._tools
+        assert probe_name in tool_registry._schemas
+    finally:
+        tool_registry._tools.pop(probe_name, None)
+        tool_registry._schemas.pop(probe_name, None)

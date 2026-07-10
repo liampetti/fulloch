@@ -35,6 +35,7 @@ from utils.intents import MAX_AGENT_CALLS_PER_TURN, StepKind, StepResult
 from utils.phrases import STALL_PHRASES
 from utils.prompts import get_agent_system_prompt, get_thinking_system_prompt
 
+from .satellite_context import current_satellite_id as _current_satellite_id
 from .slm import ContextExhaustedError, RemoteUnreachable
 from .text_utils import clean_for_tts
 from .thinking_watchdog import ThinkingWatchdog
@@ -49,6 +50,16 @@ NOTE_SEARCH_INTENTS = frozenset({"search_notes", "search_notes_semantic", "read_
 # "!"/"?" so ASR's "Hey Atticus! Stop." yields the bare "stop" without trailing
 # punctuation confusing intent matching.
 _PROMPT_STRIP_CHARS = " ,.!?;:"
+
+# The calling satellite's id for the duration of the current `AgentLoop.run`
+# call (None outside a turn, or for a turn with no satellite — e.g. a fresh
+# text turn's "dashboard-text" pseudo-id still sets this). This is the one
+# hook tools need to read "which satellite/room is this turn for" without
+# every `@tool` signature growing a satellite_id parameter — only the HA
+# per-satellite area default (#14) reads it so far. Lives in
+# `core/satellite_context.py`, not here, so a tool module can import it
+# without pulling in this module's much heavier dependency chain (`core.slm`
+# alone imports `torch`).
 
 
 def _normalise_search_query(args) -> Optional[str]:
@@ -95,6 +106,8 @@ class AgentLoop:
         source: str = "voice",
         stats=None,
         on_slm_start: Optional[callable] = None,
+        satellite_id: Optional[str] = None,
+        satellite=None,
     ):
         self.host = host
         self.session = session
@@ -102,6 +115,13 @@ class AgentLoop:
         self.stats = stats
         self.on_slm_start = on_slm_start
         self.cancel_check = (lambda: session.cancelled) if session is not None else None
+        # satellite_id/satellite identify the calling satellite (or
+        # "dashboard-text" for a typed turn); cheap to pass since AgentLoop is
+        # constructed fresh per turn anyway. Read by `run` to set
+        # `_current_satellite_id` for the duration of the call — the only
+        # hook tools need to read the calling satellite (#14).
+        self.satellite_id = satellite_id
+        self.satellite = satellite
 
     def run(self, user_prompt: str) -> str:
         """Drive the agent loop for `user_prompt` and return the spoken text.
@@ -114,7 +134,15 @@ class AgentLoop:
         stats = self.stats
         on_slm_start = self.on_slm_start
         cancel_check = self.cancel_check
+        token = _current_satellite_id.set(self.satellite_id)
+        try:
+            return self._run(host, session, source, stats, on_slm_start, cancel_check, user_prompt)
+        finally:
+            _current_satellite_id.reset(token)
 
+    def _run(
+        self, host, session, source, stats, on_slm_start, cancel_check, user_prompt: str
+    ) -> str:
         logger.info(f"Handling turn: {user_prompt}")
 
         # Every tool result / planning emission in history now belongs to an
@@ -125,7 +153,7 @@ class AgentLoop:
         # conversations don't blow N_CONTEXT.
         host._compact_completed_turns()
 
-        host._history.append({"role": "user", "content": user_prompt})
+        host._history_for(self.satellite).append({"role": "user", "content": user_prompt})
         host._trim_history()
 
         # Regex fast-path: if it matches, use it as the first agent emission.
@@ -133,11 +161,17 @@ class AgentLoop:
         first_emission = caught if isinstance(caught, dict) else None
         if first_emission is not None:
             logger.debug(f"Regex caught: {first_emission}")
+            # A2 route stat: overwritten to "agent" below if an SLM call ever
+            # actually runs this turn (e.g. a replan after the regex catch).
+            if stats is not None:
+                stats.route = "regex"
 
         # No-LLM tier (llm.backend: none): the regex catch is the only path.
         # Dispatch a match, or speak the 'basic commands only' fallback —
         # never touch the SLM.
         if not host.llm_enabled:
+            if stats is not None:
+                stats.route = "no_llm"
             return self._run_without_llm(user_prompt, first_emission)
 
         slm_started = False
@@ -175,6 +209,8 @@ class AgentLoop:
             else:
                 if not slm_started:
                     slm_started = True
+                    if stats is not None:
+                        stats.route = "agent"
                     if on_slm_start is not None:
                         try:
                             on_slm_start()
@@ -213,9 +249,12 @@ class AgentLoop:
                             system_prompt=get_agent_system_prompt(
                                 host.wakeword_name,
                                 vault_context=getattr(host, "_vault_current_file", None),
+                                satellite_area=(
+                                    self.satellite.ha_area if self.satellite is not None else None
+                                ),
                             ),
                             cancel_check=cancel_check,
-                            history=host._history,
+                            history=host._history_for(self.satellite),
                             stats=stats,
                         )
                 except ContextExhaustedError:
@@ -224,7 +263,9 @@ class AgentLoop:
                     logger.warning("Remote LLM unreachable; regex-only this turn")
                     host._note_llm_remote_status(False, str(e))
                     if first_emission is None:
-                        return host._speak_llm_error_fallback(self.session, self.source)
+                        return host._speak_llm_error_fallback(
+                            self.session, self.source, satellite_id=self.satellite_id
+                        )
                     return self._run_without_llm(user_prompt, first_emission)
                 host._note_llm_remote_status(True)
                 logger.debug(f"Agent emission: {emission_text}")
@@ -301,7 +342,7 @@ class AgentLoop:
                         bundled_reply = None
                     emission_text = json.dumps(emission)
 
-            host._history.append({"role": "assistant", "content": emission_text})
+            host._history_for(self.satellite).append({"role": "assistant", "content": emission_text})
             host._trim_history()
 
             # Emit a `plan` event so dashboards can show what the agent decided.
@@ -331,7 +372,7 @@ class AgentLoop:
                 # goes through the actions branch + terminal path, not here.)
                 if web_summary_text and web_summary_text.strip():
                     grounded = web_summary_text.strip()
-                    host._history[-1] = {
+                    host._history_for(self.satellite)[-1] = {
                         "role": "assistant",
                         "content": json.dumps({"reply": grounded}),
                     }
@@ -371,7 +412,9 @@ class AgentLoop:
                     },
                     source=source,
                 )
-                return host._speak_tool_unavailable_fallback(session, source)
+                return host._speak_tool_unavailable_fallback(
+                    session, source, satellite_id=self.satellite_id
+                )
 
             # Dispatch each action in order. Stop on the first replan trigger.
             result_strs: list = []
@@ -470,7 +513,9 @@ class AgentLoop:
                             logger.warning("Remote LLM unreachable mid-turn; regex-only")
                             host._note_llm_remote_status(False, str(e))
                             if first_emission is None:
-                                return host._speak_llm_error_fallback(self.session, self.source)
+                                return host._speak_llm_error_fallback(
+                            self.session, self.source, satellite_id=self.satellite_id
+                        )
                             return self._run_without_llm(user_prompt, first_emission)
                         if session is not None and session.cancelled:
                             return ""
@@ -482,7 +527,7 @@ class AgentLoop:
                         if search_query is not None:
                             search_cache[search_query] = summary
 
-                host._history.append(
+                host._history_for(self.satellite).append(
                     {
                         "role": "tool",
                         "name": action.get("intent", "?"),
@@ -569,7 +614,7 @@ class AgentLoop:
                             user_prompt=query,
                             system_prompt=get_thinking_system_prompt(host.wakeword_name),
                             cancel_check=cancel_check,
-                            history=host._history,
+                            history=host._history_for(self.satellite),
                             thinking_mode=True,
                             stats=stats,
                         )
@@ -579,7 +624,9 @@ class AgentLoop:
                     logger.warning("Remote LLM unreachable mid-think; regex-only")
                     host._note_llm_remote_status(False, str(e))
                     if first_emission is None:
-                        return host._speak_llm_error_fallback(self.session, self.source)
+                        return host._speak_llm_error_fallback(
+                            self.session, self.source, satellite_id=self.satellite_id
+                        )
                     return self._run_without_llm(user_prompt, first_emission)
                 if session is not None and session.cancelled:
                     # Stash the partial reasoning for a follow-up
@@ -656,19 +703,19 @@ class AgentLoop:
         source = self.source
 
         if first_emission is None:
-            return host._speak_no_ai_fallback(session, source)
+            return host._speak_no_ai_fallback(session, source, satellite_id=self.satellite_id)
 
-        host._history.append({"role": "assistant", "content": json.dumps(first_emission)})
+        host._history_for(self.satellite).append({"role": "assistant", "content": json.dumps(first_emission)})
         host._trim_history()
         host._emit_agent_event("plan", first_emission, source=source)
 
         if "reply" in first_emission:
             reply = (first_emission.get("reply") or "").strip()
-            return reply or host._speak_no_ai_fallback(session, source)
+            return reply or host._speak_no_ai_fallback(session, source, satellite_id=self.satellite_id)
 
         actions = first_emission.get("actions") or []
         if not actions:
-            return host._speak_no_ai_fallback(session, source)
+            return host._speak_no_ai_fallback(session, source, satellite_id=self.satellite_id)
 
         result_strs: list = []
         for action in actions[:3]:
@@ -684,7 +731,7 @@ class AgentLoop:
                 source=source,
             )
             step = intents.classify_step(intents.handle_action(action))
-            host._history.append(
+            host._history_for(self.satellite).append(
                 {
                     "role": "tool",
                     "name": intent_name,
@@ -709,7 +756,7 @@ class AgentLoop:
                     spoken = intents.reactive_to_speech(step.text)
                     host._record_spoken(spoken)
                     return spoken
-                return host._speak_no_ai_fallback(session, source)
+                return host._speak_no_ai_fallback(session, source, satellite_id=self.satellite_id)
             if step.in_output:
                 result_strs.append(step.text)
         host._trim_history()

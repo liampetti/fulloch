@@ -122,7 +122,7 @@ def test_context_exhausted_reply_clears_history():
 
 def test_both_slm_calls_guard_context_exhaustion():
     a = _import_assistant_module()
-    src = inspect.getsource(a.AgentLoop.run)
+    src = inspect.getsource(a.AgentLoop._run)
     # Agent call + thinking call must each be wrapped.
     assert src.count("except ContextExhaustedError") == 2
     assert "_context_exhausted_reply()" in src

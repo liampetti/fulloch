@@ -27,6 +27,25 @@ _GEMMA_CHANNEL_STRAY = re.compile(r"</?\|?channel\|?>")
 # returned string is itself a valid utterance.
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
+# Break at sentence + clause punctuation, keeping the delimiter on the left
+# part. Shared by every TTS backend that overlaps synthesis with playback
+# (core/tts_onnx.py, core/tts_crispasr.py — non-autoregressive/chunked
+# backends where one fragment plays while the next renders) and by
+# utils/reply_stream.py's incremental reply parser (A1a), which emits
+# clause-level fragments as the SLM streams so TTS can start on the first
+# clause instead of waiting for the whole reply.
+CLAUSE_SPLIT = re.compile(r"(?<=[.!?,;:])\s+")
+
+
+def split_clauses(text: str):
+    """Yield clause/sentence fragments of `text`, dropping whitespace-only
+    pieces. One fragment per clause so the first can start playing/rendering
+    while the rest streams in or renders."""
+    for fragment in CLAUSE_SPLIT.split(text.strip()):
+        fragment = fragment.strip()
+        if fragment:
+            yield fragment
+
 
 def clean_for_tts(text: str, strip_think: bool = True) -> str:
     """Prepare raw SLM output for speech: strip quotes, asterisks, <think>, emoji."""

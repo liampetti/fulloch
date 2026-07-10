@@ -10,9 +10,9 @@ dropped outright. Dropping them entirely used to leave history with nothing
 but `{"reply": ...}` entries — indistinguishable from a fact the model merely
 asserted out loud — so a relative follow-up ("brighten them now") had no
 signal that a tool genuinely ran last turn versus the model just having said
-a number (docs/TODO.md #7). Truncating (instead of keeping the raw payload,
-which can be multi-KB for a note read or search result) keeps that signal
-without re-bloating history.
+a number. Truncating (instead of keeping the raw payload, which can be
+multi-KB for a note read or search result) keeps that signal without
+re-bloating history.
 """
 
 import sys

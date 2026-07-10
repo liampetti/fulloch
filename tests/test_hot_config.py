@@ -19,14 +19,14 @@ from core.audio import AudioCapture, dbfs_to_rms  # noqa: E402
 
 
 def test_set_use_vad_cannot_enable_without_model():
-    # use_vad=False keeps Silero out, so _endpointer_built is None and VAD can't
+    # use_vad=False keeps Silero out, so _vad_available is False and VAD can't
     # be turned on live — the setter reports False (caller flags restart).
     ac = AudioCapture(use_vad=False)
     assert ac.set_use_vad(True) is False
-    assert ac._endpointer is None
+    assert ac._use_vad_enabled is False
     # Disabling is always fine and idempotent.
     assert ac.set_use_vad(False) is True
-    assert ac._endpointer is None
+    assert ac._use_vad_enabled is False
 
 
 def test_set_barge_in_threshold_recomputes_rms():

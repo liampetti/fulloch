@@ -27,6 +27,10 @@
   Output:
   {"actions": [{"intent": "get_entity_state", "args": ["living room lights"]}]}
 
+- User: "What other lights do we have downstairs?"
+  Output:
+  {"actions": [{"intent": "list_entities_in_area", "args": ["downstairs", "light"]}]}
+
 - User: "What's the weather forecast"
   Output:
   {"actions": [{"intent": "get_weather_forecast", "args": []}]}
@@ -92,6 +96,22 @@
 - User: "Add eggs to the shopping list"
   Output:
   {"actions": [{"intent": "add_todo_item", "args": ["eggs"]}]}
+
+- User: "I already picked up the eggs, take them off the list"
+  Output:
+  {"actions": [{"intent": "complete_todo_item", "args": ["eggs"]}]}
+
+- User: "Send the vacuum home"
+  Output:
+  {"actions": [{"intent": "ha_vacuum", "args": ["living room", "dock"]}]}
+
+- User: "Unmute the TV"
+  Output:
+  {"actions": [{"intent": "ha_mute", "args": ["TV", false]}]}
+
+- User: "Open the blinds halfway"
+  Output:
+  {"actions": [{"intent": "ha_set_cover_position", "args": ["blinds", 50]}]}
 
 - User: "Add a note to my shopping list about which brand of coffee we use"
   Output:

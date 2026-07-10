@@ -129,6 +129,49 @@ class TestTotalWithTts:
         assert s.total_with_tts() >= 0.2
 
 
+class TestA2LatencyFields:
+    """endpoint_wait_seconds / endpoint_kind / route (A0's measurement base)."""
+
+    def test_omitted_when_unset(self):
+        payload = TurnStats().to_payload()
+        assert "endpoint_wait_seconds" not in payload
+        assert "endpoint_kind" not in payload
+        assert "route" not in payload
+
+    def test_included_when_set(self):
+        s = TurnStats(endpoint_wait_seconds=0.03, endpoint_kind="soft", stt_seconds=0.2)
+        s.route = "agent"
+        payload = s.to_payload()
+        assert payload["endpoint_wait_seconds"] == 0.03
+        assert payload["endpoint_kind"] == "soft"
+        assert payload["route"] == "agent"
+
+    def test_log_line_includes_set_fields(self):
+        s = TurnStats(
+            stt_seconds=0.15, endpoint_wait_seconds=0.02, endpoint_kind="hard"
+        )
+        s.route = "regex"
+        line = s.log_line()
+        assert line.startswith("turn_stats ")
+        assert "route=regex" in line
+        assert "endpoint=hard" in line
+        assert "endpoint_wait=0.02s" in line
+        assert "stt=0.15s" in line
+        assert "llm_ttft" not in line  # no LLM calls this turn
+
+    def test_log_line_includes_llm_and_tts_when_present(self):
+        s = TurnStats(llm_calls=1, llm_ttft=0.3, llm_gen_seconds=1.2)
+        s.tts_seconds = 0.4
+        line = s.log_line()
+        assert "llm_ttft=0.30s" in line
+        assert "llm_gen=1.20s" in line
+        assert "tts_ttfa=0.40s" in line
+
+    def test_log_line_minimal_turn_still_has_total(self):
+        line = TurnStats().log_line()
+        assert line.startswith("turn_stats total=")
+
+
 class TestReadVram:
     def test_returns_pair_or_none(self):
         # CUDA may or may not be present in the test env; either is fine, but

@@ -328,6 +328,7 @@ def test_agent_loop_degrades_to_regex_on_remote_unreachable():
     host = types.SimpleNamespace(
         llm_enabled=True,
         _history=[],
+        _history_for=lambda session: [],
         grammar=object(),
         wakeword_name="Fulloch",
         tts_session=None,
@@ -344,11 +345,11 @@ def test_agent_loop_degrades_to_regex_on_remote_unreachable():
 
     host._generate_with_context_recovery = _raise
 
-    def _no_ai_fallback(session, source):
+    def _no_ai_fallback(session, source, satellite_id=None):
         calls["no_ai_fallback"] += 1
         return "BASIC COMMANDS ONLY"
 
-    def _llm_error_fallback(session, source):
+    def _llm_error_fallback(session, source, satellite_id=None):
         calls["llm_error_fallback"] += 1
         return "LLM SERVER UNREACHABLE"
 

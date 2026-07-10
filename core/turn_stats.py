@@ -9,7 +9,7 @@ without pulling in the heavy model modules.
 Model display labels live here (the backend is the source of truth; the UI just
 renders what it's given). They mirror the real identifiers in `core/asr.py`
 (`ASR_MODEL_NAME`), `core/slm.py` (`MODEL_PATH`), `core/tts.py`, and
-`tools/notes_index.py` (`EMBED_MODEL_NAME`).
+`core/embeddings.py` (`EMBED_MODEL_NAME`).
 """
 
 import logging
@@ -46,6 +46,23 @@ class TurnStats:
 
     # Audio input (voice turns only).
     stt_seconds: Optional[float] = None
+    # A2 latency instrumentation (voice turns only). endpoint_wait_seconds:
+    # time the utterance sat queued between the recorder detecting its
+    # endpoint and ASR dequeuing it (see core.asr.stream_generator's
+    # endpoint_wait_sink) — makes queueing delay visible separately from ASR
+    # compute time. endpoint_kind: "soft" (committed early on A0's 500ms
+    # speculative endpoint) or "hard" (the full 1.5s silence endpoint) —
+    # makes A0's effect on perceived latency directly measurable.
+    endpoint_wait_seconds: Optional[float] = None
+    endpoint_kind: Optional[str] = None
+
+    # A2: which path resolved the turn — "regex" (utils/intent_catch.py
+    # matched, no SLM call), "agent" (the SLM/agent loop ran, even if it
+    # started from a regex catch and only replanned into the SLM), or
+    # "no_llm" (llm.backend: none — regex-or-fallback only). Set by
+    # core.agent_loop.AgentLoop._run; None for text turns that never reach
+    # the agent loop's routing decision (shouldn't happen in practice).
+    route: Optional[str] = None
 
     # Context retrieval (only when a note-search tool ran this turn).
     retrieval_seconds: Optional[float] = None
@@ -93,6 +110,29 @@ class TurnStats:
             base = round(self.answer_seconds(), 2)
         return round(base + (self.tts_seconds or 0.0), 2)
 
+    def log_line(self) -> str:
+        """One structured `key=value` line summarising this turn's timings
+        (A2) — logged once per turn, after TTS TTFA (if any) is known, so it
+        can be grepped straight out of the logs rather than needing the
+        dashboard. The measurement base for A0's/A1's acceptance criteria and
+        the seed of the deferred turn-trace dashboard surface."""
+        parts = [f"total={self.total_with_tts():.2f}s"]
+        if self.route is not None:
+            parts.append(f"route={self.route}")
+        if self.endpoint_kind is not None:
+            parts.append(f"endpoint={self.endpoint_kind}")
+        if self.endpoint_wait_seconds is not None:
+            parts.append(f"endpoint_wait={self.endpoint_wait_seconds:.2f}s")
+        if self.stt_seconds is not None:
+            parts.append(f"stt={self.stt_seconds:.2f}s")
+        if self.llm_calls > 0:
+            ttft = f"{self.llm_ttft:.2f}s" if self.llm_ttft is not None else "n/a"
+            parts.append(f"llm_ttft={ttft}")
+            parts.append(f"llm_gen={self.llm_gen_seconds:.2f}s")
+        if self.tts_seconds is not None:
+            parts.append(f"tts_ttfa={self.tts_seconds:.2f}s")
+        return "turn_stats " + " ".join(parts)
+
     def to_payload(self) -> dict:
         """JSON-ready dict for the dashboard. Omits stages that didn't run so
         the UI can render adaptive rows."""
@@ -105,6 +145,15 @@ class TurnStats:
                 "seconds": round(self.stt_seconds, 2),
                 "model": _LABELS["stt"],
             }
+
+        if self.endpoint_wait_seconds is not None:
+            payload["endpoint_wait_seconds"] = round(self.endpoint_wait_seconds, 2)
+
+        if self.endpoint_kind is not None:
+            payload["endpoint_kind"] = self.endpoint_kind
+
+        if self.route is not None:
+            payload["route"] = self.route
 
         if self.retrieval_seconds is not None:
             payload["retrieval"] = {

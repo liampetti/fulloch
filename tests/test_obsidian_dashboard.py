@@ -103,6 +103,10 @@ def test_switch_vault_translates_host_path(ctx, tmp_path, monkeypatch):
         "obsidian": {"path_translation": {"/Users/jane": str(tmp_path / "container")}}
     }))
     from tools import notes_root
+    # conftest.py points _CONFIG_PATH at data/config.example.yml (absolute,
+    # fixed at import time) so this test's own tmp_path/data/config.yml is
+    # only picked up if we redirect it here too.
+    monkeypatch.setattr(notes_root, "_CONFIG_PATH", tmp_path / "data" / "config.yml")
     notes_root.reload_translation_map()
     client = _client(ctx)
     r = client.post("/api/obsidian/switch-vault", json={"path": "/Users/jane/MyVault"})

@@ -165,7 +165,7 @@ class TestThinkingLoopFix:
         import inspect
 
         a = _import_assistant_module()
-        src = inspect.getsource(a.AgentLoop.run)
+        src = inspect.getsource(a.AgentLoop._run)
         # The thinking branch runs the dedicated free-text prompt...
         assert "get_thinking_system_prompt" in src
         # ...and does NOT pass the agent grammar on that call (free text so
@@ -177,7 +177,7 @@ class TestThinkingLoopFix:
         import inspect
 
         a = _import_assistant_module()
-        src = inspect.getsource(a.AgentLoop.run)
+        src = inspect.getsource(a.AgentLoop._run)
         # The old looping flag is gone — thinking terminates the turn.
         assert "thinking_for_next" not in src
 
@@ -185,7 +185,7 @@ class TestThinkingLoopFix:
         import inspect
 
         a = _import_assistant_module()
-        src = inspect.getsource(a.AgentLoop.run)
+        src = inspect.getsource(a.AgentLoop._run)
         # The saw_thinking block ends by returning the cleaned answer rather
         # than `continue`-ing back into the loop.
         block = src[src.index("if saw_thinking") :]

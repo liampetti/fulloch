@@ -141,7 +141,7 @@ def _import_agent_loop():
 
 def test_run_bypasses_slm_when_llm_disabled():
     al = _import_agent_loop()
-    src = inspect.getsource(al.AgentLoop.run)
+    src = inspect.getsource(al.AgentLoop._run)
     # The bypass is taken before the SLM agent loop body.
     assert "if not host.llm_enabled:" in src
     bypass_pos = src.index("host.llm_enabled")

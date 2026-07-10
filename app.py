@@ -161,8 +161,6 @@ _ASSISTANT_OPTION_KEYS = (
     "barge_in",
     "barge_in_threshold_dbfs",
     "follow_up_time",
-    "input_device",
-    "output_device",
     "asr_language",
     "asr_context_hint",
     "asr_context_terms",

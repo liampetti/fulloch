@@ -48,7 +48,6 @@ own data/voices/<name>.wav reference).
 
 import logging
 import queue
-import re
 import sys
 import threading
 import time
@@ -58,6 +57,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from .text_utils import split_clauses
 from .tts_session import TtsSession
 from .turn_stats import TurnStats
 
@@ -97,23 +97,22 @@ _GPU_DISABLED_REASON = (
 SAMPLE_RATE = 24000
 _CHUNK_SAMPLES = SAMPLE_RATE // 2  # ~500ms barge-in granularity, matching core/tts_onnx.py
 
-# Break at sentence + clause punctuation, keeping the delimiter on the left part —
-# same split as core/tts_onnx.py so the first clause plays while later ones render.
-_CLAUSE_SPLIT = re.compile(r"(?<=[.!?,;:])\s+")
-
 _session = None  # crispasr.Session, warm — set by load_tts()
-_satellite_sink: Optional["queue.Queue"] = None
-_TTS_ACTIVE_EVENT = None
 
 
-def set_satellite_sink(q: Optional["queue.Queue"]) -> None:
-    global _satellite_sink
-    _satellite_sink = q
+def force_cancel_playback(sink: Optional["queue.Queue"] = None) -> None:
+    """Tell the browser to stop already-scheduled audio right now.
 
-
-def set_tts_active_event(event) -> None:
-    global _TTS_ACTIVE_EVENT
-    _TTS_ACTIVE_EVENT = event
+    See core/tts.py's `force_cancel_playback` docstring: on fast hardware
+    generation can outrun playback and finish before a stop/barge-in ever
+    flips the session's cancelled flag, so nothing is left to emit the
+    mid-stream "cancel" message. Callers stopping a turn must call this
+    unconditionally rather than relying on the session flag alone.
+    """
+    if sink is None:
+        return
+    _drain_queue_nowait(sink)
+    sink.put(("cancel",))
 
 
 def load_tts(
@@ -225,17 +224,6 @@ def _to_chunks(audio: np.ndarray) -> list:
     return [audio[i : i + _CHUNK_SAMPLES] for i in range(0, len(audio), _CHUNK_SAMPLES)]
 
 
-def _iter_fragments(text: str):
-    """Yield synthesis fragments split on clause/sentence punctuation.
-
-    One fragment per clause so the first plays while the rest renders.
-    """
-    for fragment in _CLAUSE_SPLIT.split(text.strip()):
-        fragment = fragment.strip()
-        if fragment:
-            yield fragment
-
-
 @dataclass
 class _Job:
     text: str
@@ -254,7 +242,7 @@ def _worker_loop() -> None:
     while True:
         job = _job_queue.get()
         try:
-            for fragment in list(_iter_fragments(job.text)) or [job.text]:
+            for fragment in list(split_clauses(job.text)) or [job.text]:
                 if job.session.cancelled:
                     break
                 for chunk in _to_chunks(_synth(fragment)):
@@ -312,7 +300,13 @@ def warmup_model(prompt=None):
     logger.info("CrispASR TTS ready")
 
 
-def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
+def play_chunks(
+    chunks,
+    sample_rate: int,
+    session: Optional[TtsSession] = None,
+    sink: Optional["queue.Queue"] = None,
+    tts_active_event: Optional[threading.Event] = None,
+):
     """Play pre-rendered chunks (e.g. a cached greeting) with no fresh synthesis."""
     if session is None:
         session = TtsSession()
@@ -321,9 +315,8 @@ def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
     try:
         if not chunks or session.cancelled:
             return
-        sink = _satellite_sink
-        if _TTS_ACTIVE_EVENT is not None:
-            _TTS_ACTIVE_EVENT.set()
+        if tts_active_event is not None:
+            tts_active_event.set()
         try:
             if sink is not None:
                 sink.put(("start", sample_rate))
@@ -335,8 +328,8 @@ def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
             else:
                 logger.debug("No satellite connected; TTS chunks dropped on the floor.")
         finally:
-            if _TTS_ACTIVE_EVENT is not None:
-                _TTS_ACTIVE_EVENT.clear()
+            if tts_active_event is not None:
+                tts_active_event.clear()
     finally:
         session.active = False
 
@@ -347,6 +340,8 @@ def speak_stream(
     session: Optional[TtsSession] = None,
     stats: Optional[TurnStats] = None,
     on_first_audio: Optional[Callable[[], None]] = None,
+    sink: Optional["queue.Queue"] = None,
+    tts_active_event: Optional[threading.Event] = None,
 ):
     """Synthesise on the worker (overlapped) and play back here, cancellable.
 
@@ -377,9 +372,8 @@ def speak_stream(
             except Exception as e:
                 logger.warning(f"on_first_audio hook failed: {e}")
         first_chunk, sr = first
-        sink = _satellite_sink
-        if _TTS_ACTIVE_EVENT is not None:
-            _TTS_ACTIVE_EVENT.set()
+        if tts_active_event is not None:
+            tts_active_event.set()
         t_playback_start = time.monotonic()
         total_samples = 0
         try:
@@ -407,8 +401,8 @@ def speak_stream(
                 logger.debug("No satellite connected; TTS chunks dropped on the floor.")
                 _drain(out)
         finally:
-            if _TTS_ACTIVE_EVENT is not None:
-                _TTS_ACTIVE_EVENT.clear()
+            if tts_active_event is not None:
+                tts_active_event.clear()
         if sink is None or not sr:
             return time.monotonic()
         return t_playback_start + total_samples / sr

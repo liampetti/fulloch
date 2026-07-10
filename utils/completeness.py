@@ -1,7 +1,7 @@
 """Heuristics for deciding whether a *partial* transcript is safe to act on
 before the speaker has actually finished (the early-endpoint / speculation path).
 
-See `docs/speculative-early-action.md`. Two questions live here:
+Two questions live here:
 
 - `is_complete(text)` — is this partial *syntactically closed*, or does it end on
   a word that invites continuation ("turn off the …", "play some music and …")?

@@ -52,6 +52,7 @@ def _with_facts(base: str) -> str:
 def get_agent_system_prompt(
     name: str = "Fulloch",
     vault_context: "Optional[dict]" = None,
+    satellite_area: "Optional[str]" = None,
 ) -> str:
     """Unified agent prompt — emits either `actions` dispatch or `reply` text.
 
@@ -64,6 +65,14 @@ def get_agent_system_prompt(
     `vault_context` is the metadata dict for the note currently open in
     Obsidian (supplied by the plugin when connected). Injected into the prompt
     so "this note", "here", "what I'm looking at" resolve correctly.
+
+    `satellite_area` is the calling satellite's configured HA area/room
+    (#14 6b) — e.g. "kitchen". Told to the model so it can reason about an
+    ambiguous multi-entity command ("turn off the lights and lock up") in
+    terms of where the user actually is, not just so the regex fast-path's
+    own lights-only area default (`tools/home_assistant.py`) can resolve a
+    bare name — the model never overrides an explicitly named room, only
+    fills in when the user's command doesn't say where.
     """
     sunday = _next_sunday_str()
     examples = (_MODULE_DIR / "intent_examples.txt").read_text()
@@ -116,10 +125,22 @@ For `create_calendar_event`, the `date` arg follows the same absolute YYYY-MM-DD
 
 You can only CREATE calendar events — there is NO tool to edit, move, reschedule, or delete one, so never claim you changed, moved, fixed, or removed an event. If asked to change one, say plainly you can't edit events, offer to add a corrected new one with `create_calendar_event`, and tell them to delete the old one in Home Assistant. Only say something is in their calendar after `create_calendar_event` has actually run and returned success.
 
+`whats_on` reads calendar events two ways depending on what's asked:
+- A fixed window ("what's on today/tomorrow/this week?"): pass just `day`, e.g. {{"actions": [{{"intent": "whats_on", "args": ["today"]}}]}}.
+- A named event, whenever the user names something and asks if/when it's coming up, was on, or is scheduled ("any concerts coming up?", "when's the dentist?", "did I already miss the boiler service?"): pass `day` then `event_name`, e.g. {{"actions": [{{"intent": "whats_on", "args": ["today", "the dentist"]}}]}}. This searches 30 days before and after today by default (not just today) — never rely on the fixed-window form for a named search, it won't find events outside today's window.
+
+Home control:
+- `ha_open_cover`/`ha_close_cover`: full open or close — covers, blinds, garage doors, AND valves (same verb, HA just uses a different domain under the hood). `ha_set_cover_position`: a partial position, e.g. "open the blinds halfway" → position 50. `ha_stop_cover`: halt one mid-travel.
+- `ha_vacuum`: `action` is exactly "start" (default), "pause", "stop", "dock", or "locate" — never invent another action string.
+- `ha_mute`: pass `muted` as `false` to unmute — picking the tool via an "unmute" phrase doesn't set that for you.
+- `complete_todo_item` checks an item off; `add_todo_item` adds one — never use one for the other (e.g. "I already bought the milk" is `complete_todo_item`, not a new add).
+
 Home & live readings:
 - To check whether a device is on or off, or to read a live device state — a light/lock/door/cover status, what's playing, a temperature, humidity, or other sensor reading — dispatch `get_entity_state`. For example, "are the living room lights on?" becomes:
 {{"actions": [{{"intent": "get_entity_state", "args": ["living room lights"]}}]}}
   Don't reply that you can't check a device's state when this tool can — reach for it, then answer from what it returns.
+  If you're unsure of the exact entity name, dispatch ONE call with your best guess — name resolution already does fuzzy matching, so it does not need help. NEVER dispatch several `get_entity_state` calls guessing different spellings/variants of the same entity in one turn; if a guess comes back as `Reactive question:` (not found), just retry once with a better name or drop it, and never mention the failed guess to the user when another action already answered the question.
+- To find out what devices/entities exist in a room or zone ("what lights do we have downstairs", "what else is in the office"), dispatch `list_entities_in_area` with the room name (and a domain like "light" if the user asked about a specific kind) — don't say you have no way to list them, and don't guess individual entity names for an open-ended "what do we have" question.
 - A relative or incremental change to something you already set — "brighten them now", "turn it up more", "make it warmer" — always needs a fresh tool dispatch, even if history shows you set a specific value moments ago. Never compute or assert a new number yourself from a value you remember saying; that value may only ever have been spoken, not actually applied. Check history for the last tool result for that device (a `role: tool` entry, not just your own spoken reply) to see the real current value, then dispatch the action.
 - Report a smart-home device state or a live local reading — a temperature or other sensor value, a light/lock/door status, what's playing, the local weather forecast — ONLY after a tool has actually returned it. If you genuinely have no tool for it in your available tools, you cannot access it: say so plainly (for example, "I don't have a way to check that one") and NEVER invent or guess a number, status, or forecast — and never claim a specific failure you can't verify, such as that Home Assistant is offline or disconnected. This does not restrict general knowledge you can answer directly.
 
@@ -153,6 +174,12 @@ Respond with exactly one JSON object matching the grammar.
             "Use search_notes with the note name to retrieve its content before quoting or summarising it."
         )
         body = body + vault_line
+    if satellite_area:
+        body = body + (
+            f"\nThe user is currently in the {satellite_area}. If their request doesn't "
+            "name a room, assume they mean here — but always use the room they actually "
+            "named instead when they do."
+        )
     return _with_facts(body)
 
 

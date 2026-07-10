@@ -198,13 +198,9 @@ def test_speak_stream_returns_estimated_playback_end():
 
     tts.model.stream_generate_voice_clone = fake_gen
     sink: "queue.Queue" = queue.Queue()
-    tts.set_satellite_sink(sink)
-    try:
-        t_before = time.monotonic()
-        playback_end = tts.speak_stream("hello", object(), session=tts.TtsSession())
-        t_after = time.monotonic()
-    finally:
-        tts.set_satellite_sink(None)
+    t_before = time.monotonic()
+    playback_end = tts.speak_stream("hello", object(), session=tts.TtsSession(), sink=sink)
+    t_after = time.monotonic()
 
     # 3 seconds of audio; generation itself (a python loop over lists) takes
     # a negligible fraction of that, so the estimate must land close to 3s
@@ -215,11 +211,11 @@ def test_speak_stream_returns_estimated_playback_end():
 
 
 def test_speak_stream_sends_cancel_not_end_on_barge_in():
-    """Regression coverage for the "Always Listen doesn't stop playback" bug
-    (docs/TODO.md #6): a barge-in used to leave "end" as the final message,
-    which the client treats as a no-op — already-scheduled audio just kept
-    playing. Mid-stream cancellation must now emit "cancel" instead, so the
-    client actually stops it."""
+    """Regression coverage for the "Always Listen doesn't stop playback" bug:
+    a barge-in used to leave "end" as the final message, which the client
+    treats as a no-op — already-scheduled audio just kept playing. Mid-stream
+    cancellation must now emit "cancel" instead, so the client actually stops
+    it."""
     tts = _import_tts()
 
     def fake_gen(text, voice_clone_prompt=None, **kw):
@@ -228,30 +224,26 @@ def test_speak_stream_sends_cancel_not_end_on_barge_in():
 
     tts.model.stream_generate_voice_clone = fake_gen
     sink: "queue.Queue" = queue.Queue()
-    tts.set_satellite_sink(sink)
     session = tts.TtsSession()
-    try:
-        # Cancel from on_first_audio, which fires synchronously on
-        # speak_stream's own thread right after "start" and the first chunk
-        # are queued — deterministic, unlike racing a barge-in against a
-        # background generation thread from the test.
-        t = threading.Thread(
-            target=tts.speak_stream,
-            args=("hello", object()),
-            kwargs={"session": session, "on_first_audio": session.stop},
-            daemon=True,
-        )
-        t.start()
-        t.join(timeout=5.0)
-        assert not t.is_alive(), "speak_stream did not wind down after cancel"
+    # Cancel from on_first_audio, which fires synchronously on speak_stream's
+    # own thread right after "start" and the first chunk are queued —
+    # deterministic, unlike racing a barge-in against a background
+    # generation thread from the test.
+    t = threading.Thread(
+        target=tts.speak_stream,
+        args=("hello", object()),
+        kwargs={"session": session, "on_first_audio": session.stop, "sink": sink},
+        daemon=True,
+    )
+    t.start()
+    t.join(timeout=5.0)
+    assert not t.is_alive(), "speak_stream did not wind down after cancel"
 
-        kinds = []
-        while True:
-            try:
-                kinds.append(sink.get_nowait()[0])
-            except queue.Empty:
-                break
-        assert "cancel" in kinds
-        assert "end" not in kinds
-    finally:
-        tts.set_satellite_sink(None)
+    kinds = []
+    while True:
+        try:
+            kinds.append(sink.get_nowait()[0])
+        except queue.Empty:
+            break
+    assert "cancel" in kinds
+    assert "end" not in kinds

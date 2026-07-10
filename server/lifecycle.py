@@ -189,6 +189,13 @@ class AppContext:
 
     def set_assistant(self, assistant) -> None:
         self.assistant = assistant
+        # Registers the live instance so tool modules (which never import
+        # core.assistant itself — too heavy) can reach per-satellite state
+        # like SatelliteSession.ha_area via core.satellite_context instead of
+        # needing an assistant handle threaded through tool dispatch (#14 6b).
+        from core.satellite_context import set_current_assistant
+
+        set_current_assistant(assistant)
         for cb in self._on_attach:
             try:
                 cb(assistant)

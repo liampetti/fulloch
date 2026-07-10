@@ -34,10 +34,12 @@ from .agent_loop import (
 )
 from .audio import AudioCapture
 from .backends import ASR, LLM, TTS, get_module, resolve_models
-from .noise_baseline import BackgroundNoiseBaseline
+from .satellite import SatelliteSession
+from .satellite_context import current_satellite_id as _current_satellite_id
 from .slm import ContextExhaustedError, RemoteUnreachable, generate_slm, load_slm
 from .text_utils import clean_for_tts, split_sentences
 from .tts_session import TtsSession, parse_barge_time
+from .turn_arbiter import TurnArbiter
 from .turn_stats import TurnStats, set_model_labels
 
 logger = logging.getLogger(__name__)
@@ -183,6 +185,8 @@ def _build_barge_pattern(wakeword: str, base_pattern: str) -> str:
 # Spoken phrase pools live in `utils.phrases` — edit them there.
 from utils.phrases import (  # noqa: E402
     ACK_PHRASES,
+    BARGE_ACK_PHRASES,
+    BUSY_PHRASES,
     GREETING_TOPICS,
     LLM_ERROR_PHRASES,
     NO_AI_PHRASES,
@@ -362,8 +366,12 @@ class Assistant:
             vad_soft_endpoint_silence_ms=vad_soft_endpoint_silence_ms,
         )
         # Mic stays muted through model load and the opening greeting;
-        # `_warm_and_announce`'s `finally` flips it on once warmup ends.
-        self.audio_capture.transcribing = False
+        # `_warm_and_announce`'s `finally` flips it on once warmup ends. This
+        # is the genuinely global HA-switch-facing flag (see
+        # AudioCapture.mic_globally_enabled's docstring) — every satellite's
+        # recorder also gates on its own SatelliteSession.transcribing, which
+        # is what the half-duplex self-mute uses.
+        self.audio_capture.mic_globally_enabled = False
         self.tts_session = TtsSession()
 
         if barge_in not in ("off", "wakeword"):
@@ -372,7 +380,6 @@ class Assistant:
         self.barge_in = barge_in
         self.follow_up_seconds = parse_barge_time(follow_up_time)
         self.tts_start_time = 0.0
-        self._last_turn_end = 0.0
         # Written by the ASR stream generator with the speech-onset time of
         # the buffer currently being transcribed. The follow-up window
         # measures against this (when the user started talking) rather than
@@ -394,47 +401,17 @@ class Assistant:
         # without the context bias to confirm it isn't a bias-prompt echo (see
         # `_verify_bare_wakeword`).
         self._asr_audio: dict = {"buf": None}
-        self._noise_baseline = BackgroundNoiseBaseline()
-
-        # Turn state (only meaningful in barge-in mode). A "turn" runs the SLM
-        # intent/chat path + stall + final TTS in a worker thread; the
-        # transcriber loop can cancel it via _cancel_turn().
-        self._turn_active = False
-        self._turn_session: Optional[TtsSession] = None
-        self._turn_thread: Optional[threading.Thread] = None
-        # Cancel handle for whichever turn is currently in flight — voice
-        # barge-in, voice half-duplex, or a dashboard text turn. `request_stop`
-        # signals it so the SLM stream and any TTS abort; set/cleared by each
-        # turn path, None when idle. Also drives `get_state` so the dashboard
-        # knows the agent is working even outside barge-in mode.
-        self._active_session: Optional[TtsSession] = None
-        # Monotonic deadline: ASR results returned before this are dropped.
-        # Set briefly after a barge-in so any inference already on the GPU
-        # at the moment of cancel doesn't get treated as a fresh turn. The
-        # window is short (see DROP_AFTER_CANCEL_S) so a user reply spoken
-        # ~1s+ after the cancel isn't accidentally swallowed.
-        self._drop_results_until: float = 0.0
-
-        # Lower-cased text the assistant last spoke. Self-echo suppression
-        # in `_check_barge_in` compares incoming transcripts against it so
-        # AEC residue containing the wakeword (or near-homophones) doesn't
-        # interrupt mid-answer. Updated just before each `speak_stream`.
-        self._last_spoken_text: str = ""
 
         # Unified conversation memory — every user / assistant / tool entry
         # for the agent's view of the session. Mutated only from the active
-        # turn (one at a time, under `_turn_lock`) so no lock is needed.
+        # turn (serialised under `_turn_lock` for the SLM portion; a turn's
+        # own history writes are done by the time it releases the lock) so no
+        # extra lock is needed. Shared across every satellite ("one assistant
+        # mind heard from multiple rooms") — see `_history_for`.
         # Each entry: {"role": "user"|"assistant"|"tool", "content": str,
         #              "name": <intent>?}  (assistant content is raw agent
         # JSON; tool content is the tool's return string).
         self._history: list = []
-
-        # One-shot flag set when the user said the wakeword alone (often a
-        # barge-in followed by "OK, now I'll ask my actual question"). The
-        # follow-up branch consumes it to skip the self-echo check — the
-        # user just explicitly opened a turn, and their question will often
-        # share topic words with the just-cancelled response.
-        self._skip_followup_self_echo = False
 
         # Partial-thinking capture for the interrupt-and-summarise path.
         # Set when a thinking-mode chat call is cancelled mid-stream;
@@ -514,6 +491,14 @@ class Assistant:
         # acquire this. Voice barge-in cancels mid-stream so the lock releases
         # quickly even while a text turn waits behind it.
         self._turn_lock = threading.Lock()
+        # Exclusive ownership of "whose turn is it" across every satellite
+        # and the dashboard's "dashboard-text" pseudo-satellite — spans the
+        # whole turn (dispatch decision through TTS), not just the SLM call
+        # `_turn_lock` guards. Closes the text/voice turn race Phase 2 left
+        # open: two sources could each run a turn concurrently (serialised
+        # only at the SLM call), each safely bookkept on its own
+        # SatelliteSession, but still interleaving _history writes.
+        self._turn_arbiter = TurnArbiter()
 
         # Dashboard / external observers subscribe here to receive every
         # finalised user/assistant exchange. Listeners must be cheap (they
@@ -521,15 +506,64 @@ class Assistant:
         self._turn_listeners: list = []
         self._turn_listeners_lock = threading.Lock()
 
-        # Satellite (browser WebSocket) audio session.
-        # _satellite_chunk_q: fed by the WebSocket handler; consumed by satellite_recorder_thread.
-        # _satellite_always_listen: when True, the wakeword check is bypassed entirely.
-        self._satellite_chunk_q: Optional[queue.Queue] = None
+        # Satellite (browser WebSocket, and from Phase 5 onward /ws/satellite-v2)
+        # sessions, keyed by satellite_id. Each connect mints a SatelliteSession
+        # (core/satellite.py) holding that connection's own chunk_q/tts_sink and
+        # turn/echo/follow-up/noise-baseline state, so two satellites connected
+        # at once don't clobber each other's queues *or* each other's turns —
+        # a barge-in / follow-up / self-echo decision for satellite B is judged
+        # purely against B's own history, never A's.
+        self.satellites: dict[str, SatelliteSession] = {}
+        # Still a single flag shared by every connected satellite — unlike
+        # turn/echo/follow-up state, always-listen wasn't moved onto
+        # SatelliteSession in this phase (a per-browser toggle today, via
+        # localStorage + a WS message; known pre-existing limitation with 2+
+        # satellites, not made worse here — revisit separately if it matters).
+        # When True, the wakeword check is bypassed entirely.
         self._satellite_always_listen: bool = False
-        # Mirrors the sink handed to the TTS module in set_satellite_sink, so
-        # _play_alarm_tone can push straight to it without reaching into the
-        # active TTS backend module's private state.
-        self._satellite_sink: Optional[queue.Queue] = None
+        # Dashboard text turns (`handle_text_turn`) aren't a satellite at all,
+        # but need the same per-turn state (active_session, last_turn_end for
+        # the history-timeout check, etc.) as a real one — a reserved,
+        # never-disconnected pseudo-session gets that for free instead of a
+        # parallel set of bare `self._text_*` fields. `chunk_q=None` since it
+        # never receives audio; `tts_sink=None` since text turns never speak.
+        self.satellites["dashboard-text"] = SatelliteSession(id="dashboard-text", chunk_q=None)
+        # The most recently connected (real) satellite's id. Used as the sink
+        # target for satellite-agnostic speech (speak_proactive/reminders)
+        # that isn't a reply to any particular satellite's utterance. With
+        # more than one satellite connected this is a known limitation — a
+        # proactive announcement goes to whichever one connected last, not
+        # every one of them; revisit if that's needed before Phase 6.
+        self._last_connected_satellite_id: Optional[str] = None
+        # Per-thread scratch space for whichever turn is running on *this*
+        # thread — `.sink` / `.tts_active_event`, resolved fresh at the top of
+        # `_run_half_duplex`/`_run_turn` from the turn's own satellite session
+        # and read by the `play_chunks`/`speak_stream` wrapper methods below.
+        # A plain instance attribute would be wrong here: in barge-in mode two
+        # satellites' turns can genuinely run concurrently (each on its own
+        # `_turn_thread`, serialised only at the SLM call via `_turn_lock`),
+        # so a shared field would let one satellite's sink leak into the
+        # other's `play_chunks` call. threading.local() gives each turn's
+        # thread its own slot for free.
+        self._turn_local = threading.local()
+        # Written by the ASR stream generator with the id of the satellite
+        # that recorded the buffer currently being transcribed — mirrors
+        # `_asr_onset`/`_asr_loudness`/`_asr_provisional` above. Lets the
+        # transcriber loop route a turn's reply back to the satellite that
+        # actually spoke, even though `_run_transcriber_loop` still drains one
+        # shared `audio_queue` fed by every connected satellite's recorder.
+        self._asr_satellite_id: dict = {"id": None}
+        # Written by the ASR stream generator (A2): seconds the buffer
+        # currently being transcribed sat queued between the recorder
+        # detecting its endpoint and ASR dequeuing it. None when the
+        # recorder didn't tag an endpoint time (old-style queue item).
+        # Snapshotted into a turn's `TurnStats.endpoint_wait_seconds`
+        # alongside `stt_seconds` at dispatch.
+        self._asr_endpoint_wait: dict = {"s": None}
+        # A2: the last completed turn's stats payload (`TurnStats.to_payload()`),
+        # for `GET /status` to expose without the caller needing to scrape SSE
+        # history. None until the first turn finishes.
+        self._last_turn_stats: Optional[dict] = None
 
         # Obsidian plugin state — set by the dashboard when the plugin connects.
         # vault_current_file: metadata about the note currently open in Obsidian.
@@ -725,10 +759,6 @@ class Assistant:
         # re-render, so it stays restart-only (see apply_hot_config).
         self._tts_module = tts_mod
         self._tts_backend = tts_cfg["backend"]
-        # The satellite recorder uses this to switch to a stricter silence
-        # threshold while we're talking, so AEC residue doesn't keep
-        # utterances alive.
-        tts_mod.set_tts_active_event(self.audio_capture.tts_active)
         logger.info(f"Using {tts_cfg['spec'].display_name} with voice clone: {self.voice_clone}")
         tts_mod.load_tts(model_id=tts_cfg["model"], **tts_cfg["opts"])
         if self.tts_speed is not None and hasattr(tts_mod, "set_speed"):
@@ -736,14 +766,20 @@ class Assistant:
         self.voice_clone_prompt = tts_mod.set_voice(self.voice_clone)
         tts_mod.warmup_model(self.voice_clone_prompt)
 
-        self.speak_stream = tts_mod.speak_stream
+        # play_chunks/speak_stream are real bound methods (defined below),
+        # not raw rebindings of the tts module's functions — they resolve
+        # `self._turn_local` (this thread's sink/tts_active_event slot)
+        # explicitly on every call so callers (agent_loop.py, the stall/ack
+        # helpers below) need no changes: they keep calling
+        # `self.play_chunks(...)` / `self.speak_stream(...)` exactly as before.
         self.synthesize = tts_mod.synthesize
-        self.play_chunks = tts_mod.play_chunks
         self.web_search_stall_cache: list = []
         self.note_write_stall_cache: list = []
         self.pre_thinking_stall_cache: list = []
         self.thinking_stall_cache: list = []
         self.ack_cache: list = []
+        self.barge_ack_cache: list = []
+        self.busy_cache: list = []
         self.replan_stall_cache: list = []
 
         # --- LLM -----------------------------------------------------------
@@ -830,13 +866,13 @@ class Assistant:
         Order matters for the user experience: all silent warmup work
         (agent KV-cache prime, every TTS pre-render, the notes index)
         runs *before* the greeting, so the greeting becomes the last
-        audible event of startup. `audio_capture.transcribing` is
+        audible event of startup. `audio_capture.mic_globally_enabled` is
         re-armed in the `finally` immediately after greeting playback
         ends, meaning the mic comes alive precisely when the speaker
         goes quiet — no awkward silent gap between "online and ready"
         and the assistant actually listening.
         """
-        self.audio_capture.transcribing = False
+        self.audio_capture.mic_globally_enabled = False
         try:
             # Pre-render the "no AI model" fallback + ack clips. The fallback
             # is the no-LLM tier's spoken miss-handler (and the remote-down
@@ -852,6 +888,14 @@ class Assistant:
             logger.info("Caching ack phrases...")
             self.ack_cache = [
                 self.synthesize(phrase, self.voice_clone_prompt) for phrase in ACK_PHRASES
+            ]
+            logger.info("Caching barge-in ack phrases...")
+            self.barge_ack_cache = [
+                self.synthesize(phrase, self.voice_clone_prompt) for phrase in BARGE_ACK_PHRASES
+            ]
+            logger.info("Caching busy phrases...")
+            self.busy_cache = [
+                self.synthesize(phrase, self.voice_clone_prompt) for phrase in BUSY_PHRASES
             ]
             logger.info("Caching tool-unavailable phrases...")
             self.tool_unavailable_cache = [
@@ -969,7 +1013,7 @@ class Assistant:
 
             logger.info("Warmup complete")
         finally:
-            self.audio_capture.transcribing = True
+            self.audio_capture.mic_globally_enabled = True
 
     def _reminder_poll_loop(self) -> None:
         """Daemon thread: speak upcoming Fulloch calendar events via speak_proactive.
@@ -1036,12 +1080,22 @@ class Assistant:
         t.start()
 
     def _maybe_reset_session(self) -> None:
-        """Clear unified history if the silence gap exceeds the session timeout."""
-        if self._last_turn_end == 0.0:
+        """Clear unified history if every satellite has been silent past the
+        session timeout.
+
+        `_history` is shared across every satellite ("one assistant mind
+        heard from multiple rooms"), so the timeout is gated on the most
+        recently active satellite, not the one triggering this check —
+        otherwise satellite B merely being idle for a while would wipe
+        satellite A's still-fresh conversation the moment B took a turn.
+        """
+        last_ends = [s.last_turn_end for s in self.satellites.values()]
+        most_recent = max(last_ends) if last_ends else 0.0
+        if most_recent == 0.0:
             return
         if not self._history:
             return
-        if time.monotonic() - self._last_turn_end > CHAT_SESSION_TIMEOUT_S:
+        if time.monotonic() - most_recent > CHAT_SESSION_TIMEOUT_S:
             logger.info(
                 f"Session timeout ({CHAT_SESSION_TIMEOUT_S:.0f}s) — "
                 f"clearing {len(self._history)} history entries"
@@ -1049,7 +1103,19 @@ class Assistant:
             self._history.clear()
             self._last_thinking_partial = None
             self._last_thinking_question = None
-            self._skip_followup_self_echo = False
+            for s in self.satellites.values():
+                s.skip_followup_self_echo = False
+
+    def _history_for(self, session: Optional[SatelliteSession]) -> list:
+        """The conversation history a turn's prompt should be built from.
+
+        Returns the one shared `_history` today regardless of `session` —
+        per-satellite history is out of scope for this refactor (see the
+        plan's "Out of scope" list). The indirection lands now so a future
+        per-satellite history would be a one-method change here instead of
+        touching every prompt-building call site in `agent_loop.py` again.
+        """
+        return self._history
 
     def _trim_history(self) -> None:
         """Cap `_history` at HISTORY_MAX_MESSAGES with FIFO eviction."""
@@ -1071,9 +1137,9 @@ class Assistant:
         indistinguishable from a fact the model merely asserted out loud: a
         relative follow-up ("brighten them now") had no way to tell "I really
         set this to 30%" from "I once said 30% out loud", so the model would
-        sometimes invent a new number instead of dispatching a fresh tool call
-        (docs/TODO.md #7). Keeping a short trace of which tool ran gives it
-        that signal back without re-bloating history with full payloads.
+        sometimes invent a new number instead of dispatching a fresh tool call.
+        Keeping a short trace of which tool ran gives it that signal back
+        without re-bloating history with full payloads.
         """
         kept = []
         for msg in self._history:
@@ -1163,13 +1229,28 @@ class Assistant:
         content: str,
         source: str,
         stats: Optional[TurnStats] = None,
+        satellite_id: Optional[str] = None,
     ) -> float:
+        """Emit a `user`/`assistant` chat-bubble event to `/stream` subscribers.
+
+        `satellite_id` tags which satellite (or `"dashboard-text"`) the turn
+        belongs to, so the dashboard can show a "from <label>" tag on a voice
+        turn (#14 6a). Threaded explicitly by the caller rather than read off
+        `_current_satellite_id` (as `_emit_agent_event` does) — half of this
+        method's call sites fire before `AgentLoop.run()` sets that ctxvar
+        (the "user" event) or after it's already reset (the final "assistant"
+        reply, emitted once `AgentLoop.run()` has returned), so the ctxvar
+        wouldn't be in scope for them.
+        """
         ts = time.time()
+        sat = self.satellites.get(satellite_id) if satellite_id else None
         event = {
             "role": role,
             "content": content,
             "ts": ts,
             "source": source,
+            "satellite_id": satellite_id,
+            "satellite_label": (sat.label or sat.ha_area_name) if sat is not None else None,
         }
         if stats is not None:
             event["stats"] = stats.to_payload()
@@ -1208,13 +1289,27 @@ class Assistant:
         failed. Surfaced so dashboards can label it instead of looking like the
         previous plan silently failed. Kept off `payload` (which mirrors the raw
         emission shape the frontend parses) — it's event metadata, not the plan.
+
+        Tags the event with `satellite_id`/`satellite_label` by reading
+        `AgentLoop`'s `_current_satellite_id` contextvar rather than taking a
+        parameter — that ctxvar is already scoped to exactly the duration of
+        the `AgentLoop.run` call this fires from, so reusing it here avoids
+        threading a second, redundant satellite-identity parameter through
+        every one of the ~8 `host._emit_agent_event(...)` call sites in
+        `agent_loop.py`. Today the dashboard's `/stream` consumer ignores
+        these fields; Phase 6a's SSE tagging just reads them off the event
+        dict that's already flowing.
         """
+        satellite_id = _current_satellite_id.get()
+        sat = self.satellites.get(satellite_id) if satellite_id else None
         event = {
             "role": "agent",
             "kind": kind,
             "ts": time.time(),
             "source": source,
             "payload": payload,
+            "satellite_id": satellite_id,
+            "satellite_label": (sat.label or sat.ha_area_name) if sat is not None else None,
         }
         if replan:
             event["replan"] = True
@@ -1253,73 +1348,178 @@ class Assistant:
         logger.info("Live LLM model switched to %s", model)
         return {"ok": True, "model": model}
 
-    def connect_satellite(self, wakeword_bypass: bool = False) -> "queue.Queue":
-        """Start a browser satellite session.  Returns the audio chunk queue.
+    def connect_satellite(
+        self,
+        satellite_id: str,
+        wakeword_bypass: bool = False,
+        *,
+        label: Optional[str] = None,
+        ha_area: Optional[str] = None,
+        ha_area_name: Optional[str] = None,
+        server_vad: bool = True,
+        auth_token: Optional[str] = None,
+    ) -> "queue.Queue":
+        """Start a satellite session (browser `/ws/satellite` or a
+        `/ws/satellite-v2` client). Returns the audio chunk queue.
 
-        The WebSocket handler feeds float32 16 kHz mono chunks into the queue;
-        the satellite_recorder_thread drains it and pushes utterances to the
-        ASR pipeline. `wakeword_bypass=True` enables always-listen mode (no
-        wakeword required); False keeps normal wakeword-after-follow-up behaviour
-        but opens a 60 s grace window so the first utterance needs no wakeword.
+        `satellite_id` is minted by the caller (the WS handler), not here —
+        the caller needs to know it synchronously at connect time (to key
+        `set_satellite_sink`/`disconnect_satellite` and, from Phase 4, to
+        tell the browser its own id). The WebSocket handler feeds float32
+        16 kHz mono chunks into the returned queue; the satellite_recorder_thread
+        drains it and pushes utterances to the ASR pipeline. `wakeword_bypass=True`
+        enables always-listen mode (no wakeword required); False keeps normal
+        wakeword-after-follow-up behaviour but opens a 60 s grace window so the
+        first utterance needs no wakeword.
+
+        `label`/`server_vad`/`auth_token` are the satellite-v2 forward-compat
+        fields (#12/#13) — the browser path leaves them at their defaults
+        (`None`/`True`/`None`); only the `/ws/satellite-v2` handler passes
+        real values. `ha_area` (#14, 6b) IS set by the browser path too, from
+        the `?area=` query param on `/ws/satellite` — the user's one-time
+        room picker choice, persisted client-side in `localStorage`.
+        `ha_area_name` is that same choice's display name (`?area_name=`),
+        used only for the `satellite_label` fallback in `_emit_turn_event`/
+        `_emit_agent_event` — never for area-scoping logic, which always goes
+        through `ha_area`'s id.
         """
         self._satellite_always_listen = wakeword_bypass
         chunk_q: "queue.Queue" = queue.Queue(maxsize=100)
-        self._satellite_chunk_q = chunk_q
-        threading.Thread(
+        session = SatelliteSession(
+            id=satellite_id,
+            chunk_q=chunk_q,
+            always_listen=wakeword_bypass,
+            label=label,
+            ha_area=ha_area,
+            ha_area_name=ha_area_name,
+            server_vad=server_vad,
+            auth_token=auth_token,
+        )
+        self.satellites[satellite_id] = session
+        self._last_connected_satellite_id = satellite_id
+        session.recorder_thread = threading.Thread(
             target=self.audio_capture.satellite_recorder_thread,
-            args=(chunk_q,),
+            args=(session,),
             daemon=True,
             name="satellite-recorder",
-        ).start()
+        )
+        session.recorder_thread.start()
         # Open a generous initial window so the user can speak immediately
         # without having to say the wakeword after clicking the button.
         if not wakeword_bypass:
-            self._last_turn_end = time.monotonic()
-            self.audio_capture.arm_follow_up(60)
-        logger.info("Satellite connected (always_listen=%s)", wakeword_bypass)
+            session.last_turn_end = time.monotonic()
+            self.audio_capture.arm_follow_up(session, 60)
+        logger.info("Satellite %s connected (always_listen=%s)", satellite_id, wakeword_bypass)
         return chunk_q
 
-    def disconnect_satellite(self) -> None:
-        """Tear down the satellite session; stop the satellite recorder thread."""
-        q = self._satellite_chunk_q
-        if q is not None:
-            q.put(None)  # sentinel → satellite_recorder_thread exits
-        self._satellite_chunk_q = None
+    def disconnect_satellite(self, satellite_id: str) -> None:
+        """Tear down one satellite session; stop its recorder thread.
+
+        Only touches `satellite_id`'s own session — a second connected
+        satellite's queue/sink/recorder thread is untouched.
+        """
+        session = self.satellites.pop(satellite_id, None)
+        if session is not None:
+            session.chunk_q.put(None)  # sentinel → satellite_recorder_thread exits
         self._satellite_always_listen = False
-        self.audio_capture.clear_follow_up()
-        logger.info("Satellite disconnected")
+        # A mid-turn disconnect must release the arbiter like a stop would —
+        # otherwise a satellite that vanished mid-reply would wedge every
+        # other satellite's turns behind a lock nobody will ever release.
+        self._turn_arbiter.release(satellite_id)
+        logger.info("Satellite %s disconnected", satellite_id)
 
     def set_satellite_wakeword(self, bypass: bool) -> None:
-        """Toggle always-listen mode on a live satellite session."""
+        """Toggle always-listen mode, broadcast to every connected satellite.
+
+        `_satellite_always_listen` is still a single shared flag (see its
+        docstring in `__init__`) rather than per-`SatelliteSession` — arming
+        every satellite's follow-up window here matches that existing
+        broadcast behaviour rather than only the one browser that sent the
+        toggle.
+        """
         self._satellite_always_listen = bypass
         if bypass:
-            self.audio_capture.arm_follow_up(3600)
+            for session in self.satellites.values():
+                self.audio_capture.arm_follow_up(session, 3600)
         logger.info("Satellite always_listen=%s", bypass)
 
-    def set_satellite_sink(self, q: Optional["queue.Queue"]) -> None:
-        """Route TTS output to the WebSocket satellite queue (or None to restore speakers)."""
-        self._satellite_sink = q
-        tts_mod = getattr(self, "_tts_module", None)
-        if tts_mod is not None and hasattr(tts_mod, "set_satellite_sink"):
-            tts_mod.set_satellite_sink(q)
+    def set_satellite_sink(self, satellite_id: str, q: Optional["queue.Queue"]) -> None:
+        """Route TTS output to `satellite_id`'s WebSocket queue (or None to clear it)."""
+        session = self.satellites.get(satellite_id)
+        if session is not None:
+            session.tts_sink = q
 
-    def replay_greeting(self) -> None:
+    def _sink_for(self, satellite_id: Optional[str]) -> Optional["queue.Queue"]:
+        session = self.satellites.get(satellite_id) if satellite_id else None
+        return session.tts_sink if session is not None else None
+
+    def play_chunks(self, chunks, sample_rate: int, session: Optional[TtsSession] = None):
+        """Route pre-synthesized chunks to whichever satellite the current
+        turn belongs to (`self._turn_local`, set by whichever of
+        `_run_half_duplex`/`_run_turn`/`speak_proactive` is running on *this*
+        thread). A thin bound wrapper around the active TTS backend's
+        `play_chunks` — kept so the ~15 call sites in agent_loop.py (stall/ack
+        phrases, fallback replies) need no changes to pass a sink explicitly;
+        the sink is resolved once per turn instead.
+        """
+        return self._tts_module.play_chunks(
+            chunks,
+            sample_rate,
+            session=session,
+            sink=getattr(self._turn_local, "sink", None),
+            tts_active_event=getattr(self._turn_local, "tts_active_event", None),
+        )
+
+    def speak_stream(
+        self,
+        text: str,
+        prompt,
+        session: Optional[TtsSession] = None,
+        stats: Optional[TurnStats] = None,
+        on_first_audio: Optional[Callable[[], None]] = None,
+    ):
+        """Synthesise and speak on whichever satellite the current turn
+        belongs to (`self._turn_local`). See `play_chunks` for why this is a
+        bound wrapper rather than a raw rebinding of the tts module function.
+        """
+        return self._tts_module.speak_stream(
+            text,
+            prompt,
+            session=session,
+            stats=stats,
+            on_first_audio=on_first_audio,
+            sink=getattr(self._turn_local, "sink", None),
+            tts_active_event=getattr(self._turn_local, "tts_active_event", None),
+        )
+
+    def replay_greeting(self, satellite_id: str) -> None:
         """Play the cached opening greeting once, on the first satellite connect.
 
         See greeting_cache's docstring in __init__ for why _warm_and_announce's
         own playback attempt during startup almost never reaches a listener.
         No-op on any later reconnect, or if there's no cached greeting (e.g.
-        startup hit an error before _warm_and_announce populated it).
+        startup hit an error before _warm_and_announce populated it). Plays on
+        the connecting satellite specifically, not whatever `self._turn_local`
+        happens to hold (there is no turn in flight at connect time).
         """
         if self._greeting_delivered or not self.greeting_cache:
             return
         self._greeting_delivered = True
+        session = self.satellites.get(satellite_id)
+        sink = session.tts_sink if session is not None else None
+        tts_active_event = session.tts_active if session is not None else None
         for chunks, sr in self.greeting_cache:
             if chunks:
-                self.play_chunks(chunks, sr, session=self.tts_session)
+                self._tts_module.play_chunks(
+                    chunks,
+                    sr,
+                    session=self.tts_session,
+                    sink=sink,
+                    tts_active_event=tts_active_event,
+                )
 
     def _play_alarm_tone(self, session: Optional[TtsSession] = None) -> float:
-        """Push the pre-rendered alarm tone straight to the satellite sink.
+        """Push the pre-rendered alarm tone straight to the current turn's sink.
 
         Uses the same ("start", sr) / (chunk, None) / ("end",) sink protocol
         as speak_stream, so it queues seamlessly ahead of a spoken reminder on
@@ -1328,7 +1528,7 @@ class Assistant:
         duration in seconds (0.0 if it couldn't be played) so the caller can
         add it to the reminder's own playback-end estimate.
         """
-        sink = self._satellite_sink
+        sink = getattr(self._turn_local, "sink", None)
         if sink is None or (session is not None and session.cancelled):
             return 0.0
         try:
@@ -1381,6 +1581,8 @@ class Assistant:
         ("llm_error_cache", LLM_ERROR_PHRASES, False),
         ("tool_unavailable_cache", TOOL_UNAVAILABLE_PHRASES, False),
         ("ack_cache", ACK_PHRASES, False),
+        ("barge_ack_cache", BARGE_ACK_PHRASES, False),
+        ("busy_cache", BUSY_PHRASES, False),
         ("web_search_stall_cache", WEB_SEARCH_STALL_PHRASES, True),
         ("note_write_stall_cache", NOTE_WRITE_STALL_PHRASES, True),
         ("pre_thinking_stall_cache", PRE_THINKING_STALL_PHRASES, True),
@@ -1492,29 +1694,50 @@ class Assistant:
             if not prompt:
                 return ""
 
-        self._emit_turn_event("user", prompt, "text")
+        self._emit_turn_event("user", prompt, "text", satellite_id="dashboard-text")
+        # Text turns get the same per-turn bookkeeping a real satellite would,
+        # via the reserved "dashboard-text" pseudo-session (see __init__).
+        text_session = self.satellites["dashboard-text"]
+        if not self._turn_arbiter.try_acquire("dashboard-text"):
+            # A satellite's voice turn already owns the arbiter — text turns
+            # have no TTS, so the bounce is just a spoken-style text reply
+            # rather than an audio clip.
+            busy = random.choice(BUSY_PHRASES)
+            self._emit_turn_event("assistant", busy, "text", satellite_id="dashboard-text")
+            return busy
         # Per-turn cancel handle so the dashboard Stop button can abort the SLM
-        # stream mid-turn (request_stop signals `_active_session`).
+        # stream mid-turn (request_stop signals `active_session`).
         session = TtsSession()
-        self._active_session = session
+        text_session.active_session = session
         try:
             self._maybe_reset_session()
             stats = TurnStats()  # text turns have no STT/TTS
-            answer = self._handle_wakeword(prompt, session=session, source="text", stats=stats)
+            answer = self._handle_wakeword(
+                prompt, session=session, source="text", stats=stats, satellite_id="dashboard-text"
+            )
             if session.cancelled:
                 # Stopped from the dashboard — stand down silently, no bubble.
                 return ""
             cleaned = clean_for_tts(answer)
-            self._emit_turn_event("assistant", cleaned, "text", stats=stats)
+            self._emit_turn_event(
+                "assistant", cleaned, "text", stats=stats, satellite_id="dashboard-text"
+            )
+            logger.info(stats.log_line())
+            self._last_turn_stats = stats.to_payload()
             return cleaned
         except Exception as e:
             logger.error(f"Text turn error: {e}")
             self._note_runtime_error(e)
             err = "Sorry, something went wrong handling that."
-            self._emit_turn_event("assistant", err, "text")
+            self._emit_turn_event("assistant", err, "text", satellite_id="dashboard-text")
             return err
         finally:
-            self._active_session = None
+            text_session.active_session = None
+            # Feeds `_maybe_reset_session`'s "most recently active satellite"
+            # scan — without this, dashboard-text never contributes to it and
+            # active text chatting alone couldn't keep the shared history alive.
+            text_session.last_turn_end = time.monotonic()
+            self._turn_arbiter.release("dashboard-text")
 
     def _record_spoken(self, spoken: str) -> None:
         """Replace the most recent assistant entry with one whose `reply` is
@@ -1549,7 +1772,29 @@ class Assistant:
         except Exception:
             logger.exception("ack playback failed")
 
-    def _speak_no_ai_fallback(self, session: Optional[TtsSession], source: str) -> str:
+    def _play_busy_phrase(self, sat: SatelliteSession) -> None:
+        """Play a `BUSY_PHRASES` clip on `sat`'s own sink — the audible
+        bounce when `sat` loses the `TurnArbiter` to another satellite (or
+        the dashboard's text turn). Not wrapped in a turn, so resolves
+        `self._turn_local` explicitly against `sat` rather than relying on
+        the usual per-turn setup in `_run_half_duplex`/`_run_turn`.
+        """
+        if not self.busy_cache:
+            return
+        chunks, sr = random.choice(self.busy_cache)
+        self._turn_local.sink = sat.tts_sink
+        self._turn_local.tts_active_event = sat.tts_active
+        try:
+            self.play_chunks(chunks, sr, session=self.tts_session)
+        except Exception:
+            logger.exception("busy-phrase playback failed")
+        finally:
+            self._turn_local.sink = None
+            self._turn_local.tts_active_event = None
+
+    def _speak_no_ai_fallback(
+        self, session: Optional[TtsSession], source: str, satellite_id: Optional[str] = None
+    ) -> str:
         """No-LLM miss handler: surface a 'basic commands only' phrase.
 
         Records the phrase in `_history`. For a voice turn with a populated
@@ -1562,7 +1807,7 @@ class Assistant:
         phrase = NO_AI_PHRASES[i]
         self._record_spoken(phrase)
         if source == "voice" and self.no_ai_cache:
-            self._emit_turn_event("assistant", phrase, "voice")
+            self._emit_turn_event("assistant", phrase, "voice", satellite_id=satellite_id)
             chunks, sr = self.no_ai_cache[i]
             try:
                 self.play_chunks(chunks, sr, session=session or self.tts_session)
@@ -1571,7 +1816,9 @@ class Assistant:
             return ""
         return phrase
 
-    def _speak_llm_error_fallback(self, session: Optional[TtsSession], source: str) -> str:
+    def _speak_llm_error_fallback(
+        self, session: Optional[TtsSession], source: str, satellite_id: Optional[str] = None
+    ) -> str:
         """Remote LLM failure handler: surface an 'AI server unreachable' phrase.
 
         Used when `RemoteUnreachable` fires during an agent turn and the regex
@@ -1583,7 +1830,7 @@ class Assistant:
         phrase = LLM_ERROR_PHRASES[i]
         self._record_spoken(phrase)
         if source == "voice" and self.llm_error_cache:
-            self._emit_turn_event("assistant", phrase, "voice")
+            self._emit_turn_event("assistant", phrase, "voice", satellite_id=satellite_id)
             chunks, sr = self.llm_error_cache[i]
             try:
                 self.play_chunks(chunks, sr, session=session or self.tts_session)
@@ -1592,7 +1839,9 @@ class Assistant:
             return ""
         return phrase
 
-    def _speak_tool_unavailable_fallback(self, session: Optional[TtsSession], source: str) -> str:
+    def _speak_tool_unavailable_fallback(
+        self, session: Optional[TtsSession], source: str, satellite_id: Optional[str] = None
+    ) -> str:
         """Hallucinated-tool guard handler: the agent named a tool that isn't
         loaded. Speak a canned 'can't do that' instead of letting the model
         fabricate an answer from priors.
@@ -1606,7 +1855,7 @@ class Assistant:
         phrase = TOOL_UNAVAILABLE_PHRASES[i]
         self._record_spoken(phrase)
         if source == "voice" and self.tool_unavailable_cache:
-            self._emit_turn_event("assistant", phrase, "voice")
+            self._emit_turn_event("assistant", phrase, "voice", satellite_id=satellite_id)
             chunks, sr = self.tool_unavailable_cache[i]
             try:
                 self.play_chunks(chunks, sr, session=session or self.tts_session)
@@ -1685,6 +1934,7 @@ class Assistant:
         source: str = "voice",
         on_slm_start: Optional[Callable[[], None]] = None,
         stats: Optional[TurnStats] = None,
+        satellite_id: Optional[str] = None,
     ) -> str:
         """Run a user prompt through the unified agent loop.
 
@@ -1702,6 +1952,11 @@ class Assistant:
         skipped entirely when the regex fast-path satisfies the turn.
         Voice callers use it to kick off a parallel "got it" ack.
 
+        `satellite_id` identifies the calling satellite (or `"dashboard-text"`
+        for a typed turn) — forwarded to `AgentLoop` so tools can later read
+        the calling satellite's identity via the `_current_satellite_id`
+        contextvar (only HA's per-satellite area default, #14, uses this so far).
+
         Serialised under `_turn_lock` — llama-cpp-python isn't thread-safe
         and dashboard text turns share this method with voice turns.
         """
@@ -1712,28 +1967,62 @@ class Assistant:
                 source=source,
                 stats=stats,
                 on_slm_start=on_slm_start,
+                satellite_id=satellite_id,
+                satellite=self.satellites.get(satellite_id),
             ).run(user_prompt)
 
-    def _run_half_duplex(self, user_prompt: str, stt_seconds=None) -> None:
+    def _run_half_duplex(
+        self,
+        user_prompt: str,
+        satellite_id: Optional[str] = None,
+        stt_seconds=None,
+        endpoint_wait_seconds=None,
+        endpoint_kind=None,
+    ) -> None:
         """Synchronous handle + speak, with mic muted during TTS playback."""
+        sat = self.satellites.get(satellite_id)
+        if sat is None:
+            # The satellite disconnected between this utterance being
+            # captured and dispatch — nowhere to reply, drop the turn.
+            logger.info("Dropping turn: satellite %s no longer connected", satellite_id)
+            return
+        if not self._turn_arbiter.try_acquire(satellite_id):
+            # Another satellite (or the dashboard's text turn) already owns
+            # the arbiter — bounce audibly on this satellite's own sink
+            # rather than interleaving into the winner's turn.
+            logger.info("Turn bounced (busy): satellite %s", satellite_id)
+            self._play_busy_phrase(sat)
+            return
+        # Resolve which satellite's sink/tts_active this turn's TTS goes to
+        # before anything downstream (ack, fallback phrases, the final
+        # reply) can call play_chunks/speak_stream — those read
+        # self._turn_local (this thread's slot) rather than taking a sink
+        # argument, so it must be set first.
+        self._turn_local.sink = sat.tts_sink
+        self._turn_local.tts_active_event = sat.tts_active
         # A real turn is starting — close the prior follow-up window; it's
         # re-armed at the end of this method via `_mark_turn_end`.
-        self.audio_capture.clear_follow_up()
+        self.audio_capture.clear_follow_up(sat)
         self._maybe_reset_session()
-        self._emit_turn_event("user", user_prompt, "voice")
-        stats = TurnStats(stt_seconds=stt_seconds)
+        self._emit_turn_event("user", user_prompt, "voice", satellite_id=satellite_id)
+        stats = TurnStats(
+            stt_seconds=stt_seconds,
+            endpoint_wait_seconds=endpoint_wait_seconds,
+            endpoint_kind=endpoint_kind,
+        )
 
         # Per-turn cancel handle so the dashboard Stop button can abort the SLM
-        # stream and TTS (request_stop signals `_active_session`).
+        # stream and TTS (request_stop signals `active_session`).
         session = TtsSession()
-        self._active_session = session
+        sat.active_session = session
 
         ack_thread: list = []
 
         def _start_ack() -> None:
-            # Mute the recorder before the ack plays so it doesn't re-enter
-            # the ASR queue. Half-duplex relies on this flag, not on AEC.
-            self.audio_capture.transcribing = False
+            # Mute this satellite's recorder before the ack plays so it
+            # doesn't re-enter the ASR queue. Half-duplex relies on this
+            # flag, not on AEC.
+            sat.transcribing = False
             t = threading.Thread(
                 target=self._play_random_ack,
                 args=(session,),
@@ -1749,9 +2038,10 @@ class Assistant:
                 source="voice",
                 on_slm_start=_start_ack,
                 stats=stats,
+                satellite_id=satellite_id,
             )
             cleaned = clean_for_tts(answer)
-            self.audio_capture.transcribing = False
+            sat.transcribing = False
             try:
                 if ack_thread:
                     ack_thread[0].join()
@@ -1765,7 +2055,9 @@ class Assistant:
                 if cleaned:
                     # Emit before speaking so the dashboard can reveal the text while
                     # TTS plays, not only after playback finishes.
-                    ts = self._emit_turn_event("assistant", cleaned, "voice", stats=stats)
+                    ts = self._emit_turn_event(
+                        "assistant", cleaned, "voice", stats=stats, satellite_id=satellite_id
+                    )
                     # Emit the TTS stat as soon as the first audio chunk is ready, so the
                     # panel doesn't wait for the whole reply to finish playing.
                     playback_end = self.speak_stream(
@@ -1779,40 +2071,90 @@ class Assistant:
                             {"tts": stats.tts_payload(), "total": stats.total_with_tts()},
                         ),
                     )
+                # A2: one structured line per turn — the measurement base for
+                # A0's/A1's acceptance criteria and the seed of the deferred
+                # turn-trace dashboard.
+                logger.info(stats.log_line())
+                self._last_turn_stats = stats.to_payload()
             finally:
-                self.audio_capture.transcribing = True
+                sat.transcribing = True
         finally:
-            self._active_session = None
+            sat.active_session = None
+            self._turn_local.sink = None
+            self._turn_local.tts_active_event = None
+            self._turn_arbiter.release(satellite_id)
         # A stop stands down without a follow-up window.
         if not session.cancelled:
-            self._mark_turn_end(playback_end)
+            self._mark_turn_end(satellite_id, playback_end)
 
-    def _start_turn(self, user_prompt: str, stt_seconds=None) -> None:
+    def _start_turn(
+        self,
+        user_prompt: str,
+        satellite_id: Optional[str] = None,
+        stt_seconds=None,
+        endpoint_wait_seconds=None,
+        endpoint_kind=None,
+    ) -> None:
         """Kick off a barge-in turn (handle + speak) on a worker thread."""
+        sat = self.satellites.get(satellite_id)
+        if sat is None:
+            logger.info("Dropping turn: satellite %s no longer connected", satellite_id)
+            return
+        # Wait briefly for any prior turn *on this satellite* to wind down so
+        # its session can't leak forward and abort the new turn, *before*
+        # trying the arbiter — a same-satellite re-trigger (e.g. barge-in
+        # redirect) should win its own turn back, not get bounced by its own
+        # not-yet-released prior attempt.
+        if sat.turn_thread is not None and sat.turn_thread.is_alive():
+            sat.turn_thread.join(timeout=2.0)
+        if not self._turn_arbiter.try_acquire(satellite_id):
+            # A different satellite (or the dashboard's text turn) owns the
+            # arbiter — bounce audibly rather than interleaving into it.
+            logger.info("Turn bounced (busy): satellite %s", satellite_id)
+            self._play_busy_phrase(sat)
+            return
         # A real turn is starting — close the prior follow-up window; the new
         # turn re-arms it at its end via `_mark_turn_end`.
-        self.audio_capture.clear_follow_up()
-        # Wait briefly for any prior turn to wind down so its session can't
-        # leak forward and abort the new turn.
-        if self._turn_thread is not None and self._turn_thread.is_alive():
-            self._turn_thread.join(timeout=2.0)
+        self.audio_capture.clear_follow_up(sat)
         session = TtsSession()
-        self._turn_session = session
-        self._active_session = session
-        self._turn_active = True
-        self._turn_thread = threading.Thread(
+        sat.turn_session = session
+        sat.active_session = session
+        sat.turn_active = True
+        sat.turn_thread = threading.Thread(
             target=self._run_turn,
-            args=(user_prompt, session, stt_seconds),
+            args=(user_prompt, session, satellite_id, stt_seconds, endpoint_wait_seconds, endpoint_kind),
             daemon=True,
         )
-        self._turn_thread.start()
+        sat.turn_thread.start()
 
-    def _run_turn(self, user_prompt: str, session: TtsSession, stt_seconds=None) -> None:
+    def _run_turn(
+        self,
+        user_prompt: str,
+        session: TtsSession,
+        satellite_id: Optional[str] = None,
+        stt_seconds=None,
+        endpoint_wait_seconds=None,
+        endpoint_kind=None,
+    ) -> None:
         """Worker-thread body: handle the prompt, then speak the answer."""
+        sat = self.satellites.get(satellite_id)
+        if sat is None:
+            logger.info("Dropping turn: satellite %s no longer connected", satellite_id)
+            return
+        # See _run_half_duplex: must be resolved before any nested
+        # play_chunks/speak_stream call (ack, fallback phrases, the reply).
+        # This is thread-local, so a concurrent turn on another satellite's
+        # own worker thread has its own independent slot.
+        self._turn_local.sink = sat.tts_sink
+        self._turn_local.tts_active_event = sat.tts_active
         try:
             self._maybe_reset_session()
-            self._emit_turn_event("user", user_prompt, "voice")
-            stats = TurnStats(stt_seconds=stt_seconds)
+            self._emit_turn_event("user", user_prompt, "voice", satellite_id=satellite_id)
+            stats = TurnStats(
+                stt_seconds=stt_seconds,
+                endpoint_wait_seconds=endpoint_wait_seconds,
+                endpoint_kind=endpoint_kind,
+            )
 
             ack_thread: list = []
 
@@ -1833,6 +2175,7 @@ class Assistant:
                 source="voice",
                 on_slm_start=_start_ack,
                 stats=stats,
+                satellite_id=satellite_id,
             )
             if session.cancelled:
                 logger.info("Turn cancelled before TTS")
@@ -1848,12 +2191,14 @@ class Assistant:
             playback_end = None
             if cleaned:
                 # Recorded for self-echo suppression in `_check_barge_in`.
-                self._last_spoken_text = cleaned.lower()
+                sat.last_spoken_text = cleaned.lower()
                 self.tts_start_time = time.monotonic()
                 # Emit before speaking so the dashboard reveals the text while TTS
                 # plays. Barge-in may cut speech short; the full text still shows,
                 # while _history is reconciled to the spoken text via _record_spoken.
-                ts = self._emit_turn_event("assistant", cleaned, "voice", stats=stats)
+                ts = self._emit_turn_event(
+                    "assistant", cleaned, "voice", stats=stats, satellite_id=satellite_id
+                )
                 # Emit the TTS stat as soon as the first audio chunk is ready, so the
                 # panel doesn't wait for the whole reply to finish playing.
                 playback_end = self.speak_stream(
@@ -1867,57 +2212,108 @@ class Assistant:
                         {"tts": stats.tts_payload(), "total": stats.total_with_tts()},
                     ),
                 )
+            # A2: one structured line per turn — the measurement base for
+            # A0's/A1's acceptance criteria and the seed of the deferred
+            # turn-trace dashboard.
+            logger.info(stats.log_line())
+            self._last_turn_stats = stats.to_payload()
             if not session.cancelled:
                 # Mic stays live during barge-in TTS, so the queue contains
                 # audio of our own voice captured while we were speaking.
                 # Flush it before opening the follow-up window — same treatment
                 # as a barge-in cancel — otherwise the tail chunk arrives with
-                # onset ≈ _last_turn_end (speech_onset_t was never set because
+                # onset ≈ last_turn_end (speech_onset_t was never set because
                 # the residue stayed below the barge-in floor) and falls
                 # inside the follow-up window as a spurious new turn.
                 self.audio_capture.flush()
-                self._drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
-                self._mark_turn_end(playback_end)
+                sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
+                self._mark_turn_end(satellite_id, playback_end)
         except Exception as e:
             logger.error(f"Turn error: {e}")
             self._note_runtime_error(e)
         finally:
-            self._turn_active = False
-            self._active_session = None
+            sat.turn_active = False
+            sat.active_session = None
+            self._turn_local.sink = None
+            self._turn_local.tts_active_event = None
+            self._turn_arbiter.release(satellite_id)
 
-    def _cancel_turn(self) -> None:
-        """Signal the active turn to abort and wait briefly for it to wind down."""
-        if self._turn_session is not None:
-            self._turn_session.stop()
-        if self._turn_thread is not None:
-            self._turn_thread.join(timeout=2.0)
+    def _cancel_turn(self, satellite_id: str) -> None:
+        """Signal `satellite_id`'s active turn to abort and wait briefly for
+        it to wind down. Barge-in is always self-referential — a satellite's
+        mic can't hear another's speaker — so this only ever cancels the
+        satellite whose own utterance triggered the barge-in.
+        """
+        sat = self.satellites.get(satellite_id)
+        if sat is None:
+            return
+        # sat.tts_sink is a plain attribute (not the turn's thread-local), so
+        # it's safe to read here even though this runs on the transcriber
+        # thread while the turn itself runs on its own worker thread.
+        sink = sat.tts_sink
+        if sat.turn_session is not None:
+            sat.turn_session.stop()
+        if sat.turn_thread is not None:
+            sat.turn_thread.join(timeout=2.0)
+        # Belt-and-suspenders: on fast (GPU) hardware, generation can outrun
+        # playback enough that speak_stream's send loop already exited
+        # before the flag above was set — nothing is left to emit the
+        # mid-stream "cancel" message, and the browser keeps playing
+        # everything already queued. Force it regardless of turn state.
+        tts_mod = getattr(self, "_tts_module", None)
+        if tts_mod is not None:
+            tts_mod.force_cancel_playback(sink)
 
-    def request_stop(self) -> None:
+    def request_stop(self, satellite_id: Optional[str] = None) -> None:
         """Stop whatever the agent is doing right now — SLM generation, TTS
         playback, an in-flight turn — silently, and stand down with no
         follow-up window. Safe no-op when idle. This is the dashboard Stop
         button's effect; the voice equivalent is a pure-stop barge-in. An
         in-flight tool dispatch runs to completion (see Known Gaps); the turn
         cancels at the next checkpoint.
+
+        `satellite_id` (or `"dashboard-text"`) picks which turn to stop.
+        Omit it to fall back to whichever satellite currently owns the
+        `TurnArbiter` — with the arbiter enforcing exclusivity, that's the
+        only turn that could possibly be running. A "stop everywhere"
+        admin action is out of scope (TODO #14 stretch) — wire it later as
+        `for sid in self.satellites: self.request_stop(sid)`.
         """
-        session = self._active_session
-        if session is not None:
-            session.stop()
-        # Belt-and-suspenders for any out-of-band playback on the shared session.
+        target = satellite_id if satellite_id is not None else self._turn_arbiter.owner
+        if target is not None:
+            sat = self.satellites.get(target)
+            if sat is not None and sat.active_session is not None:
+                sat.active_session.stop()
+                # On fast (GPU) hardware, generation can outrun playback
+                # enough that speak_stream's send loop already exited — and
+                # its mid-stream "cancel" path with it — before either flag
+                # above was ever checked, so the browser keeps playing
+                # everything already queued. Force a cancel unconditionally
+                # rather than relying on those flags alone.
+                tts_mod = getattr(self, "_tts_module", None)
+                if tts_mod is not None:
+                    tts_mod.force_cancel_playback(sat.tts_sink)
+                if sat.turn_active:
+                    # Barge-in worker: flush the mic and drop in-flight ASR
+                    # so our own speech captured mid-turn doesn't replay,
+                    # mirroring a voice barge-in.
+                    self.audio_capture.flush()
+                    sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
+                # A stop means stand down — no wakeword-free follow-up window.
+                sat.last_turn_end = 0.0
+                self.audio_capture.clear_follow_up(sat)
+            self._turn_arbiter.release(target)
+        # Belt-and-suspenders for any out-of-band playback on the shared
+        # session (greeting replay / warmup — not a satellite's own turn).
         self.tts_session.stop()
-        if self._turn_active:
-            # Barge-in worker: flush the mic and drop in-flight ASR so our own
-            # speech captured mid-turn doesn't replay, mirroring a voice barge-in.
-            self.audio_capture.flush()
-            self._drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
-        # A stop means stand down — no wakeword-free follow-up window.
-        self._last_turn_end = 0.0
-        self.audio_capture.clear_follow_up()
         self._dispatch_event({"role": "stopped", "ts": time.time()})
         logger.info("Stop requested — standing down")
 
-    def _mark_turn_end(self, playback_end: Optional[float] = None) -> None:
-        """Record the turn-end time and open the wakeword-free follow-up window.
+    def _mark_turn_end(
+        self, satellite_id: Optional[str], playback_end: Optional[float] = None
+    ) -> None:
+        """Record `satellite_id`'s turn-end time and open its wakeword-free
+        follow-up window.
 
         `playback_end` is the estimated monotonic-clock time the TTS audio
         actually finishes playing on the browser (`speak_stream`'s return
@@ -1931,15 +2327,18 @@ class Assistant:
 
         The recorder reads the armed window to accept short replies (which the
         full min-utterance length would otherwise drop); the transcriber gauges
-        the window itself from `_last_turn_end` against each utterance's onset.
-        In satellite always-listen mode the recorder window is kept open
-        indefinitely so short utterances are never dropped.
+        the window itself from the satellite's own `last_turn_end` against
+        each utterance's onset. In satellite always-listen mode the recorder
+        window is kept open indefinitely so short utterances are never dropped.
         """
+        sat = self.satellites.get(satellite_id)
+        if sat is None:
+            return
         now = time.monotonic()
-        self._last_turn_end = max(now, playback_end) if playback_end is not None else now
+        sat.last_turn_end = max(now, playback_end) if playback_end is not None else now
         window = 3600.0 if self._satellite_always_listen else self.follow_up_seconds
         if window > 0:
-            self.audio_capture.arm_follow_up(window)
+            self.audio_capture.arm_follow_up(sat, window)
 
     def _is_context_echo(self, command: str) -> bool:
         """True if `command` is built solely from ASR context-bias tokens.
@@ -2031,18 +2430,20 @@ class Assistant:
         )
         return appears
 
-    def _is_self_echo(self, text_lower: str, short_only: bool = False) -> bool:
-        """True if `text_lower` looks like AEC residue of the assistant's voice.
+    def _is_self_echo(self, satellite_id: Optional[str], text_lower: str, short_only: bool = False) -> bool:
+        """True if `text_lower` looks like AEC residue of `satellite_id`'s own
+        assistant voice.
 
         AEC suppresses the speaker-into-mic energy but isn't a phoneme filter,
         so ASR can still re-transcribe parts of the assistant's own answer —
         and if the answer happened to contain the wakeword (or a homophone),
         the assistant would interrupt itself. We sidestep that by checking
         whether the incoming utterance is mostly drawn from the words we just
-        spoke. Real user speech rarely overlaps the assistant's prior answer
-        by more than half.
+        spoke *on this satellite*. Real user speech rarely overlaps the
+        assistant's prior answer by more than half.
         """
-        spoken = self._last_spoken_text
+        sat = self.satellites.get(satellite_id)
+        spoken = sat.last_spoken_text if sat is not None else ""
         if not spoken:
             return False
         # Strip *all* non-word chars (punctuation and whitespace) from
@@ -2076,11 +2477,34 @@ class Assistant:
         overlap = sum(1 for w in words if w in spoken_norm) / len(words)
         return overlap >= 0.6
 
-    def _check_barge_in(self, text_lower: str) -> bool:
-        """Return True if `text_lower` should interrupt the active turn."""
-        if not self._turn_active or self.barge_in == "off":
+    def _is_speaking(self, satellite_id: Optional[str]) -> bool:
+        """True while `satellite_id`'s own turn is generating, or its TTS is
+        still estimated to be playing on the browser.
+
+        Judged purely against this satellite's own state — a turn on A never
+        makes B read as "speaking". `last_turn_end` holds the *estimated*
+        playback-end timestamp (see `_mark_turn_end`), not when generation
+        handed off its last chunk — on fast (GPU) hardware, generation can
+        finish handing chunks to the satellite sink well before the browser
+        actually finishes playing them. Gating barge-in on `turn_active`
+        alone leaves a dead zone between those two moments where the reply is
+        still audibly playing but nothing treats it as interruptible:
+        `turn_active` has already flipped False, and the follow-up window
+        hasn't opened yet either (its own gate requires the elapsed time
+        since `last_turn_end` to be *non-negative*). Checking `last_turn_end`
+        here too closes that gap.
+        """
+        sat = self.satellites.get(satellite_id)
+        if sat is None:
             return False
-        if self._is_self_echo(text_lower):
+        return sat.turn_active or time.monotonic() < sat.last_turn_end
+
+    def _check_barge_in(self, satellite_id: Optional[str], text_lower: str) -> bool:
+        """Return True if `text_lower` should interrupt `satellite_id`'s own
+        active turn."""
+        if not self._is_speaking(satellite_id) or self.barge_in == "off":
+            return False
+        if self._is_self_echo(satellite_id, text_lower):
             return False
         return (
             self._barge_re.search(text_lower) is not None
@@ -2136,6 +2560,8 @@ class Assistant:
                 self._asr_loudness,
                 self._asr_provisional,
                 self._asr_audio,
+                self._asr_satellite_id,
+                self._asr_endpoint_wait,
             ),
             batch_size=1,
             generate_kwargs={"max_new_tokens": 256},
@@ -2145,7 +2571,25 @@ class Assistant:
                 if not text:
                     continue
 
-                if time.monotonic() < self._drop_results_until:
+                # Which satellite recorded this utterance — set by the ASR
+                # stream generator just before yielding it, so it's still
+                # correct for this exact result. Resolved up front since
+                # every gating check below (barge-in, follow-up, echo,
+                # noise-baseline) is judged against this satellite's own
+                # state, never another connected satellite's.
+                turn_satellite_id = self._asr_satellite_id.get("id")
+                sat = self.satellites.get(turn_satellite_id)
+                if sat is None:
+                    # The satellite disconnected between recording this
+                    # utterance and it reaching the transcriber.
+                    logger.debug(
+                        "Dropping ASR result for disconnected satellite %s: %r",
+                        turn_satellite_id,
+                        text,
+                    )
+                    continue
+
+                if time.monotonic() < sat.drop_results_until:
                     logger.debug(f"Dropping post-cancel ASR result: {text}")
                     continue
 
@@ -2176,7 +2620,7 @@ class Assistant:
                 # the real hard endpoint stays authoritative. Mid-turn a partial
                 # is ignored outright — barge-in waits for the hard endpoint.
                 provisional = self._asr_provisional.get("flag", False)
-                if provisional and self._turn_active:
+                if provisional and sat.turn_active:
                     logger.debug(f"Ignoring provisional during active turn: {text!r}")
                     continue
 
@@ -2195,22 +2639,23 @@ class Assistant:
                 # mid-turn is us, not the room — feeding either would poison the
                 # "background is quieter than the user" estimate.
                 loudness_db = self._asr_loudness.get("db")
-                baseline_db = self._noise_baseline.value()
+                baseline_db = sat.noise_baseline.value()
                 _vol = f"{loudness_db:.1f}" if loudness_db is not None else "n/a"
                 logger.debug(
                     f"Transcribed: {text} [volume={_vol} dBFS, baseline={baseline_db:.1f} dBFS]"
                 )
 
-                if self._turn_active:
-                    # Mid-turn transcriptions are only acted on as potential
-                    # barge-ins; otherwise they're echo of our own voice (or
-                    # cross-talk during SLM thinking) and must be ignored.
-                    if not self._check_barge_in(text_lower):
+                if self._is_speaking(turn_satellite_id):
+                    # Mid-turn (or still-audibly-playing-back) transcriptions
+                    # are only acted on as potential barge-ins; otherwise
+                    # they're echo of our own voice (or cross-talk during SLM
+                    # thinking) and must be ignored.
+                    if not self._check_barge_in(turn_satellite_id, text_lower):
                         logger.debug(f"Suppressed (mid-turn, no barge-in match): {text!r}")
                         continue
 
                     logger.info(f"BARGE-IN: {text}")
-                    self._cancel_turn()
+                    self._cancel_turn(turn_satellite_id)
                     # Buffer contains TTS-bleed accumulated during the
                     # cancelled turn; flush so the next user utterance is
                     # captured cleanly. Then open a short drop window so
@@ -2218,7 +2663,7 @@ class Assistant:
                     # audio gets discarded — without swallowing the user's
                     # real reply, which can't arrive for ≥1.5s.
                     self.audio_capture.flush()
-                    self._drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
+                    sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
                     just_barged_in = True
                 elif not wakeword_present:
                     # Follow-up window: a brief grace period after TTS ends
@@ -2228,34 +2673,34 @@ class Assistant:
                     # the window means "started replying within N seconds",
                     # and a long answer isn't disqualified by its own length
                     # plus the silence-detection tail and ASR latency.
-                    onset_gap = self._asr_onset["t"] - self._last_turn_end
+                    onset_gap = self._asr_onset["t"] - sat.last_turn_end
                     in_follow_up = (
                         self.follow_up_seconds > 0
-                        and self._last_turn_end > 0
+                        and sat.last_turn_end > 0
                         and 0 <= onset_gap < self.follow_up_seconds
                     ) or self._satellite_always_listen
                     if not in_follow_up:
                         # Genuine background: non-wakeword, not an accepted
                         # follow-up, and not mid-turn (that path is handled by
-                        # the `_turn_active` branch above). This is the only
+                        # the `turn_active` branch above). This is the only
                         # site that feeds the noise baseline — the room/TV
                         # talking to itself, which is exactly what we estimate.
                         # A provisional is not a final utterance — never feed it
                         # into the background-noise baseline estimate.
                         if loudness_db is not None and not provisional:
-                            self._noise_baseline.add(loudness_db)
+                            sat.noise_baseline.add(loudness_db)
                         logger.debug(
                             f"Suppressed (no wakeword, outside follow-up window "
                             f"[gap={onset_gap:.1f}s, window={self.follow_up_seconds:.0f}s]): {text!r}"
                         )
                         continue
-                    if self._skip_followup_self_echo:
+                    if sat.skip_followup_self_echo:
                         # One-shot bypass after a wakeword-alone barge-in:
                         # this utterance is the user's deliberate question,
                         # even if every word also appears in the cancelled
                         # response. Consume the flag here.
-                        self._skip_followup_self_echo = False
-                    elif self._is_self_echo(text_lower, short_only=True):
+                        sat.skip_followup_self_echo = False
+                    elif self._is_self_echo(turn_satellite_id, text_lower, short_only=True):
                         # Suppress brief AEC reverb after TTS ends (typically
                         # 1–3 word fragments). Longer utterances are user
                         # speech — even if the words overlap the assistant's
@@ -2271,6 +2716,13 @@ class Assistant:
                         # acknowledgement. A bare stop is an instruction to
                         # cease entirely, not a preface to a new request, so the
                         # wakeword is required again before the next turn.
+                        # Reset last_turn_end so `_is_speaking()` (and thus
+                        # barge-in eligibility) doesn't keep reading True off
+                        # a stale future playback-end estimate now that the
+                        # audio has been force-cancelled — same as
+                        # `request_stop()`.
+                        sat.last_turn_end = 0.0
+                        self.audio_capture.clear_follow_up(sat)
                         logger.info("Barge-in (pure stop) — standing down")
                         continue
                     # Redirect barge-in ("stop — actually do X"): TTS has
@@ -2279,8 +2731,30 @@ class Assistant:
                     # the partial chunk that triggered the barge-in — silence
                     # detection may have cut the sentence short, so the content
                     # here is unreliable.
-                    self._mark_turn_end()
-                    self._skip_followup_self_echo = True
+                    self._mark_turn_end(turn_satellite_id)
+                    sat.skip_followup_self_echo = True
+                    # Audible sign the cancellation actually happened. Without
+                    # this, a false trigger (cough, TV, an ASR hallucination
+                    # that happens to contain the wakeword) silently kills the
+                    # in-flight turn with nothing telling the user anything
+                    # occurred — if they don't happen to keep talking, the
+                    # follow-up window just times out and the original request
+                    # is gone with no trace. Backgrounded so it doesn't block
+                    # the transcriber loop; overlaps fine with the user's next
+                    # utterance since `skip_followup_self_echo` above already
+                    # exempts it from self-echo suppression.
+                    #
+                    # Not wrapped in a turn (_run_turn/_run_half_duplex), so
+                    # play_chunks' usual self._turn_local resolution doesn't
+                    # apply here — resolve explicitly against the satellite
+                    # that sent *this* barge-in utterance.
+                    self._turn_local.sink = sat.tts_sink
+                    self._turn_local.tts_active_event = sat.tts_active
+                    threading.Thread(
+                        target=self._play_random_ack,
+                        kwargs={"cache": self.barge_ack_cache},
+                        daemon=True,
+                    ).start()
                     logger.info("Barge-in — follow-up window open")
                     continue
 
@@ -2293,8 +2767,8 @@ class Assistant:
                     # to confirm the user really only said "stop".
                     if provisional:
                         continue
-                    self._last_turn_end = 0.0
-                    self.audio_capture.clear_follow_up()
+                    sat.last_turn_end = 0.0
+                    self.audio_capture.clear_follow_up(sat)
                     logger.info("Pure stop in follow-up — standing down")
                     continue
 
@@ -2344,8 +2818,8 @@ class Assistant:
                         # one-shot bypass so the user's question isn't
                         # suppressed as self-echo when it shares words
                         # with the response we just cancelled.
-                        self._mark_turn_end()
-                        self._skip_followup_self_echo = True
+                        self._mark_turn_end(turn_satellite_id)
+                        sat.skip_followup_self_echo = True
                         logger.info("Wakeword alone — awaiting follow-up")
                     else:
                         logger.debug("Nothing in utterance")
@@ -2366,26 +2840,51 @@ class Assistant:
                     # accumulating) is discarded, and briefly guard any in-flight
                     # result on the contaminated tail.
                     self.audio_capture.flush()
-                    self._drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
+                    sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
                     logger.info(f"Committing early on soft endpoint: {user_prompt!r}")
 
                 # Snapshot the STT latency of the utterance that triggered this
                 # turn before later (echo/cross-talk) transcriptions overwrite it.
                 stt_seconds = getattr(self.asr_pipe, "last_transcribe_seconds", None)
+                # A2: how long the utterance sat queued after the recorder
+                # detected its endpoint, before ASR dequeued it — and whether
+                # this turn committed on the 500ms soft endpoint or the full
+                # 1.5s hard endpoint (see A0). Both snapshotted here for the
+                # same reason as stt_seconds above.
+                endpoint_wait_seconds = self._asr_endpoint_wait.get("s")
+                endpoint_kind = "soft" if provisional else "hard"
                 if self.barge_in == "off":
-                    self._run_half_duplex(user_prompt, stt_seconds=stt_seconds)
+                    self._run_half_duplex(
+                        user_prompt,
+                        satellite_id=turn_satellite_id,
+                        stt_seconds=stt_seconds,
+                        endpoint_wait_seconds=endpoint_wait_seconds,
+                        endpoint_kind=endpoint_kind,
+                    )
                 else:
-                    self._start_turn(user_prompt, stt_seconds=stt_seconds)
+                    self._start_turn(
+                        user_prompt,
+                        satellite_id=turn_satellite_id,
+                        stt_seconds=stt_seconds,
+                        endpoint_wait_seconds=endpoint_wait_seconds,
+                        endpoint_kind=endpoint_kind,
+                    )
 
             except Exception as e:
                 logger.error(f"Transcription error: {e}")
                 self._note_runtime_error(e)
 
     def get_state(self) -> str:
-        """Return the current assistant state: idle | thinking | speaking."""
-        if self.audio_capture.tts_active.is_set():
+        """Return the current assistant state: idle | thinking | speaking.
+
+        Scans every satellite (plus the "dashboard-text" pseudo-session) —
+        with only one turn normally active at a time (until Phase 3's
+        arbiter), this reports the same thing the old single global flags
+        did, just found by looking rather than read directly.
+        """
+        if any(s.tts_active.is_set() for s in self.satellites.values()):
             return "speaking"
-        if self._turn_active or self._active_session is not None:
+        if any(s.turn_active or s.active_session is not None for s in self.satellites.values()):
             return "thinking"
         return "idle"
 
@@ -2394,9 +2893,10 @@ class Assistant:
 
         Waits for any in-progress voice turn (SLM + TTS) to fully complete
         before speaking. `_turn_lock` covers only the SLM phase; TTS runs
-        without it, so we also spin on `_turn_active` (barge-in worker) and
-        `tts_active` (half-duplex TTS) to avoid two audio streams overlapping.
-        Mutes the mic for the duration. Blocks until playback finishes.
+        without it, so we also spin on every satellite's `turn_active`
+        (barge-in worker) and `tts_active` (half-duplex TTS) to avoid two
+        audio streams overlapping. Mutes every satellite's mic for the
+        duration. Blocks until playback finishes.
 
         `alarm=True` (timer completions) plays the pre-rendered alert tone
         immediately before the spoken text.
@@ -2405,25 +2905,45 @@ class Assistant:
             logger.warning("speak_proactive: models not ready")
             return
         deadline = time.monotonic() + 60.0
-        while self._turn_active or self.audio_capture.tts_active.is_set():
+        while any(s.turn_active or s.tts_active.is_set() for s in self.satellites.values()):
             if time.monotonic() > deadline:
                 logger.warning("speak_proactive: timed out waiting for active turn")
                 break
             time.sleep(0.05)
         with self._turn_lock:
-            self.audio_capture.transcribing = False
+            for s in self.satellites.values():
+                s.transcribing = False
+            # Proactive speech isn't a reply to any particular satellite's
+            # utterance, so there's no originating sid to resolve against —
+            # falls back to whichever satellite connected most recently (see
+            # `_last_connected_satellite_id`'s docstring for the known
+            # multi-satellite limitation this implies).
+            proactive_sat = self.satellites.get(self._last_connected_satellite_id)
+            self._turn_local.sink = proactive_sat.tts_sink if proactive_sat is not None else None
+            self._turn_local.tts_active_event = (
+                proactive_sat.tts_active if proactive_sat is not None else None
+            )
             try:
                 session = TtsSession()
                 cleaned = clean_for_tts(text)
                 if not cleaned:
                     return
                 alarm_seconds = self._play_alarm_tone(session) if alarm else 0.0
-                self._emit_turn_event("assistant", cleaned, "proactive")
+                self._emit_turn_event(
+                    "assistant",
+                    cleaned,
+                    "proactive",
+                    satellite_id=proactive_sat.id if proactive_sat is not None else None,
+                )
                 playback_end = self.speak_stream(cleaned, self.voice_clone_prompt, session=session)
                 playback_end += alarm_seconds
             finally:
-                self.audio_capture.transcribing = True
-            self._mark_turn_end(playback_end)
+                for s in self.satellites.values():
+                    s.transcribing = True
+                self._turn_local.sink = None
+                self._turn_local.tts_active_event = None
+            if proactive_sat is not None:
+                self._mark_turn_end(proactive_sat.id, playback_end)
 
     def run(self):
         """Start the transcriber thread and block until Ctrl+C.

@@ -45,18 +45,6 @@ torch.set_float32_matmul_precision("high")
 VOICES_DIR = "./data/voices"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Event the satellite recorder reads to switch to a stricter silence
-# threshold while we're producing audio (AEC residue otherwise prevents
-# silence detection). Registered once at startup by Assistant via
-# `set_tts_active_event` — kept module-level so play_chunks/speak_stream
-# can toggle it without needing an AudioCapture reference.
-_TTS_ACTIVE_EVENT: Optional[threading.Event] = None
-# When set, audio chunks go here (WebSocket satellite) instead of being
-# dropped on the floor. Items: ("start", sr) | (np.ndarray, None) |
-# ("end",) | ("stop",). With no browser open, TTS chunks are simply not
-# routed anywhere — voice is a browser-only I/O channel.
-_satellite_sink: Optional[queue.Queue] = None
-
 # Shared kwargs for every `stream_generate_voice_clone` call — warmup,
 # pre-render, and live streaming all use the same generation cadence so the
 # voice clone sounds consistent across them.
@@ -73,17 +61,6 @@ _STREAM_KWARGS = {
     "first_chunk_decode_window": 48,
     "first_chunk_frames": 48,
 }
-
-
-def set_tts_active_event(event: Optional[threading.Event]) -> None:
-    """Register the event toggled by play_chunks/speak_stream during playback."""
-    global _TTS_ACTIVE_EVENT
-    _TTS_ACTIVE_EVENT = event
-
-
-def set_satellite_sink(q: Optional[queue.Queue]) -> None:
-    global _satellite_sink
-    _satellite_sink = q
 
 
 # Populated by `load_tts()` once a backend is chosen — `import core.tts`
@@ -219,6 +196,24 @@ def _drain_queue_nowait(q: "queue.Queue") -> None:
             break
 
 
+def force_cancel_playback(sink: Optional[queue.Queue] = None) -> None:
+    """Tell the browser to stop already-scheduled audio right now.
+
+    On fast hardware, generation can outrun playback enough that
+    `speak_stream`'s send loop finishes and exits *before* a barge-in/stop
+    ever flips `session.cancelled` — at that point nothing is left polling
+    the session, so the mid-stream "cancel" path in `speak_stream` never
+    fires and the browser just keeps playing everything already queued.
+    Callers that stop a turn (`request_stop`, barge-in) must call this
+    unconditionally, not rely on `session.cancelled` alone, since by the
+    time they run there may be no generation loop left to catch it.
+    """
+    if sink is None:
+        return
+    _drain_queue_nowait(sink)
+    sink.put(("cancel",))
+
+
 def set_voice(voice_name: str):
     """Build a voice-clone prompt from data/voices/<voice_name>.wav + transcript.
 
@@ -301,15 +296,19 @@ def synthesize(text: str, prompt):
     return chunks, sample_rate
 
 
-def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
+def play_chunks(
+    chunks,
+    sample_rate: int,
+    session: Optional[TtsSession] = None,
+    sink: Optional[queue.Queue] = None,
+    tts_active_event: Optional[threading.Event] = None,
+):
     """Route a pre-synthesized chunk list to the WebSocket satellite.
 
-    TTS is a browser-only I/O channel: chunks are pushed to the satellite
-    sink when a browser is connected (sink is non-None). With no browser
-    open, the chunks are dropped on the floor and the user simply doesn't
-    hear this turn — the generation cost is wasted but the pipeline stays
-    consistent. Callers that need an in-process speech output (e.g. a CLI
-    test harness) can register a custom sink via `set_satellite_sink`.
+    TTS is a browser-only I/O channel: chunks are pushed to `sink` when a
+    browser is connected (sink is non-None). With no browser open, the
+    chunks are dropped on the floor and the user simply doesn't hear this
+    turn — the generation cost is wasted but the pipeline stays consistent.
 
     The TtsSession.cancelled path is honoured: a barge-in stops enqueuing
     further chunks and emits the "end" sentinel so the browser flushes.
@@ -321,9 +320,8 @@ def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
     try:
         if not chunks or session.cancelled:
             return
-        sink = _satellite_sink
-        if _TTS_ACTIVE_EVENT is not None:
-            _TTS_ACTIVE_EVENT.set()
+        if tts_active_event is not None:
+            tts_active_event.set()
         try:
             if sink is not None:
                 sink.put(("start", sample_rate))
@@ -335,8 +333,8 @@ def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
             else:
                 logger.debug("No satellite connected; TTS chunks dropped on the floor.")
         finally:
-            if _TTS_ACTIVE_EVENT is not None:
-                _TTS_ACTIVE_EVENT.clear()
+            if tts_active_event is not None:
+                tts_active_event.clear()
     finally:
         session.active = False
 
@@ -347,6 +345,8 @@ def speak_stream(
     session: Optional[TtsSession] = None,
     stats: Optional[TurnStats] = None,
     on_first_audio: Optional[Callable[[], None]] = None,
+    sink: Optional[queue.Queue] = None,
+    tts_active_event: Optional[threading.Event] = None,
 ):
     """Synthesise `text` with the given voice-clone prompt and play it back.
 
@@ -392,9 +392,8 @@ def speak_stream(
                 logger.warning(f"on_first_audio hook failed: {e}")
         first_chunk, sample_rate = first_item
 
-        sink = _satellite_sink
-        if _TTS_ACTIVE_EVENT is not None:
-            _TTS_ACTIVE_EVENT.set()
+        if tts_active_event is not None:
+            tts_active_event.set()
         t_playback_start = time.monotonic()
         total_samples = 0
         try:
@@ -429,8 +428,8 @@ def speak_stream(
                 logger.debug("No satellite connected; TTS chunks dropped on the floor.")
                 _drain_job(out)
         finally:
-            if _TTS_ACTIVE_EVENT is not None:
-                _TTS_ACTIVE_EVENT.clear()
+            if tts_active_event is not None:
+                tts_active_event.clear()
         if sink is None or not sample_rate:
             return time.monotonic()
         return t_playback_start + total_samples / sample_rate

@@ -7,6 +7,7 @@ and `_turn_lock` so the two inputs never race on the SLM.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ import shutil
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -334,6 +336,14 @@ class MicRequest(BaseModel):
     enabled: bool
 
 
+class StopRequest(BaseModel):
+    # None (the default, and what the dashboard's Stop button sends today)
+    # falls back to whichever satellite currently owns the TurnArbiter — the
+    # dashboard has no per-connection satellite identity yet to supply one
+    # explicitly (that lands with Phase 5's satellite-v2 protocol).
+    satellite_id: Optional[str] = None
+
+
 class FactRequest(BaseModel):
     text: str
 
@@ -614,10 +624,17 @@ def create_app(
                     last_response = event.get("content", "")
                 if last_utterance and last_response:
                     break
+        # Busy-status surface (#13): how many satellites are connected (the
+        # "dashboard-text" pseudo-satellite doesn't count — it isn't a real
+        # connection) and, if a turn is in flight, which one owns it. The UI
+        # uses this to show "busy — talking to <label>" on every satellite
+        # except the one currently active, instead of a silent stall.
+        owner_id = context.assistant._turn_arbiter.owner
+        owner_sat = context.assistant.satellites.get(owner_id) if owner_id else None
         payload.update(
             {
                 "state": context.assistant.get_state(),
-                "mic_enabled": context.assistant.audio_capture.transcribing,
+                "mic_enabled": context.assistant.audio_capture.mic_globally_enabled,
                 "last_utterance": last_utterance,
                 "last_response": last_response,
                 # Remote-LLM mode: the LLM is off-device; the UI swaps the character
@@ -627,6 +644,17 @@ def create_app(
                 # shows a red banner that we're degraded to regex/fast-path only.
                 "llm_unreachable": _is_remote_llm()
                 and bool(getattr(context.assistant, "remote_llm_unreachable", False)),
+                "satellite_count": sum(
+                    1 for sid in context.assistant.satellites if sid != "dashboard-text"
+                ),
+                "active_owner_id": owner_id,
+                "active_owner_label": (
+                    (owner_sat.label or owner_sat.ha_area_name) if owner_sat is not None else None
+                ),
+                # A2: the last completed turn's latency breakdown (endpoint-wait,
+                # STT/LLM/TTS seconds, route, endpoint kind) — None until the
+                # first turn finishes. Seeds the deferred turn-trace dashboard.
+                "last_turn_stats": context.assistant._last_turn_stats,
             }
         )
         return JSONResponse(payload)
@@ -644,16 +672,23 @@ def create_app(
 
     @app.post("/mic")
     def set_mic(req: MicRequest) -> dict:
+        # Genuinely global (HA switch entity, custom_components/fulloch/switch.py):
+        # mutes/unmutes every connected satellite at once. Distinct from each
+        # satellite's own SatelliteSession.transcribing, the internal
+        # half-duplex self-mute during that satellite's own reply.
         _require_ready()
-        context.assistant.audio_capture.transcribing = req.enabled
+        context.assistant.audio_capture.mic_globally_enabled = req.enabled
         return {"ok": True, "mic_enabled": req.enabled}
 
     @app.post("/stop")
-    def stop_turn() -> dict:
+    def stop_turn(req: StopRequest = StopRequest()) -> dict:  # noqa: B008
         # Complete, silent stop: aborts the SLM/TTS of whatever turn is in
         # flight (voice or text) and stands down without a follow-up window.
+        # req defaults to an empty body — the dashboard's Stop button sends
+        # no JSON today, and request_stop()'s own fallback (the arbiter's
+        # current owner) covers that case.
         _require_ready()
-        context.assistant.request_stop()
+        context.assistant.request_stop(req.satellite_id)
         return {"ok": True}
 
     @app.post("/chat")
@@ -752,6 +787,20 @@ def create_app(
             raise HTTPException(status_code=400, detail="empty entity_id")
         ha.set_entity_denied(entity_id, req.denied)
         return JSONResponse({"available": True, "entities": ha.list_entities()})
+
+    @app.get("/ha/areas")
+    def ha_areas() -> JSONResponse:
+        # Backs the browser satellite's area picker (6b) — buttons only render
+        # when HA is actually configured; a thin/native satellite client
+        # configures its area via YAML instead and never calls this.
+        _require_ready()
+        from tools._config import config
+
+        if "home_assistant" not in config:
+            return JSONResponse({"available": False, "areas": []})
+        from tools import home_assistant as ha
+
+        return JSONResponse({"available": True, "areas": ha.list_areas()})
 
     # --- Setup / settings console (work with or without an assistant) ------
     # These are NOT _require_ready-gated: they drive first-run setup (no
@@ -1313,14 +1362,39 @@ def create_app(
 
         await ws.accept()
 
+        # Minted here, not inside connect_satellite: this handler needs the id
+        # synchronously (to key set_satellite_sink/disconnect_satellite below,
+        # and — from Phase 4 — to tell the browser its own id for the busy
+        # banner), so the caller owns id generation rather than the callee.
+        satellite_id = uuid.uuid4().hex
         tts_q: queue.Queue = queue.Queue(maxsize=200)
         wakeword_bypass = ws.query_params.get("bypass", "0") == "1"
-        chunk_q = context.assistant.connect_satellite(wakeword_bypass=wakeword_bypass)
-        context.assistant.set_satellite_sink(tts_q)
+        # 6b: the user's one-time area-picker choice (persisted client-side in
+        # localStorage), sent as ?area=<area_id> on connect. Blank/absent —
+        # e.g. HA not configured, or the user skipped the picker — leaves the
+        # satellite with no area default, same as before this field existed.
+        ha_area = ws.query_params.get("area", "").strip() or None
+        # Display name for the same choice (?area_name=), so completed turns
+        # can show a "location" pill without the server re-resolving area_id
+        # -> name itself — see SatelliteSession.ha_area_name.
+        ha_area_name = ws.query_params.get("area_name", "").strip() or None
+        chunk_q = context.assistant.connect_satellite(
+            satellite_id,
+            wakeword_bypass=wakeword_bypass,
+            ha_area=ha_area,
+            ha_area_name=ha_area_name,
+        )
+        context.assistant.set_satellite_sink(satellite_id, tts_q)
+        # Tell the browser its own id so it can tell (via /status's
+        # active_owner_id) whether a busy turn belongs to it or another
+        # satellite. Shape-aligned with the satellite-v2 protocol's
+        # session.started frame (Phase 5) — same identity handshake, just
+        # not yet worth a second message type for the browser path.
+        await ws.send_json({"type": "session", "satellite_id": satellite_id})
         # The opening greeting was synthesised during startup, before any
         # satellite could possibly be connected — replay it once, now that
         # one actually is. No-op on every later reconnect.
-        context.assistant.replay_greeting()
+        context.assistant.replay_greeting(satellite_id)
 
         async def _receive():
             try:
@@ -1384,8 +1458,167 @@ def create_app(
                 except (asyncio.CancelledError, Exception):
                     pass
         finally:
-            context.assistant.disconnect_satellite()
-            context.assistant.set_satellite_sink(None)
+            context.assistant.disconnect_satellite(satellite_id)
+            context.assistant.set_satellite_sink(satellite_id, None)
+
+    @app.websocket("/ws/satellite-v2")
+    async def satellite_ws_v2(ws: WebSocket):
+        """Generic (non-browser) satellite protocol — a documented WebSocket
+        API for a headless client (native app, ESP32/Pi satellite box, CI
+        smoke test) instead of the browser-optimised `/ws/satellite`. JSON
+        control frames both directions; audio is binary Float32 PCM (primary)
+        or base64-JSON (debug path).
+
+        client → server  session.start   {auth_token?, label?, ha_area?,
+                                           server_vad? (default true),
+                                           always_listen? (default false)}
+        server → client  session.started {satellite_id}
+        client → server  audio.frame     binary Float32 PCM (primary) OR
+                                          {"type":"audio.frame","data":<base64>}
+        client → server  audio.flush     force an utterance boundary
+                                          (only meaningful if server_vad=false)
+        client → server  wake_word.disable / wake_word.enable
+        client → server  session.stop    graceful end
+        server → client  turn.tts_start  {sample_rate}
+        server → client  turn.tts_frame  binary Float32 PCM
+        server → client  turn.tts_end
+        server → client  turn.tts_cancel
+        server → client  error           {code, message}
+
+        Reuses the exact `Assistant.connect_satellite`/sink-tuple contract
+        `/ws/satellite` does — this handler is a pure edge-translator, not a
+        second plumbing implementation (see the plan's Phase 1 note on the
+        sink tuple contract being declared stable for this reason).
+        """
+        if context.assistant is None or not lifecycle.is_ready():
+            await ws.close(code=1013)
+            return
+
+        await ws.accept()
+
+        try:
+            first = await ws.receive_json()
+        except Exception:
+            await ws.close(code=1002)
+            return
+        if not isinstance(first, dict) or first.get("type") != "session.start":
+            await ws.send_json(
+                {"type": "error", "code": "protocol", "message": "expected session.start"}
+            )
+            await ws.close(code=1002)
+            return
+
+        # Local-network trust model by default (same as /ws/satellite) —
+        # only gated when satellite_tokens is actually configured, so
+        # existing/no-token setups keep working unauthenticated.
+        from .config_store import read_config
+
+        auth_token = first.get("auth_token")
+        tokens = read_config().get("satellite_tokens") or []
+        if tokens and not any(
+            auth_token and secrets.compare_digest(str(auth_token), str(t)) for t in tokens
+        ):
+            await ws.send_json(
+                {"type": "error", "code": "auth", "message": "invalid or missing auth_token"}
+            )
+            await ws.close(code=1008)
+            return
+
+        satellite_id = uuid.uuid4().hex
+        tts_q: queue.Queue = queue.Queue(maxsize=200)
+        always_listen = bool(first.get("always_listen", False))
+        chunk_q = context.assistant.connect_satellite(
+            satellite_id,
+            wakeword_bypass=always_listen,
+            label=first.get("label"),
+            ha_area=first.get("ha_area"),
+            server_vad=bool(first.get("server_vad", True)),
+            auth_token=auth_token,
+        )
+        context.assistant.set_satellite_sink(satellite_id, tts_q)
+        await ws.send_json({"type": "session.started", "satellite_id": satellite_id})
+
+        async def _receive():
+            from core.audio import FLUSH
+
+            try:
+                while True:
+                    msg = await ws.receive()
+                    if msg.get("type") == "websocket.disconnect":
+                        return
+                    if "bytes" in msg and msg["bytes"]:
+                        arr = np.frombuffer(msg["bytes"], dtype=np.float32).copy()
+                        try:
+                            chunk_q.put_nowait(arr)
+                        except queue.Full:
+                            pass
+                    elif "text" in msg and msg["text"]:
+                        try:
+                            data = json.loads(msg["text"])
+                        except json.JSONDecodeError:
+                            continue
+                        mtype = data.get("type") if isinstance(data, dict) else None
+                        if mtype == "audio.frame":
+                            # Debug path — binary frames are primary.
+                            b64 = data.get("data")
+                            if b64:
+                                try:
+                                    arr = np.frombuffer(
+                                        base64.b64decode(b64), dtype=np.float32
+                                    ).copy()
+                                    chunk_q.put_nowait(arr)
+                                except (ValueError, queue.Full):
+                                    pass
+                        elif mtype == "audio.flush":
+                            try:
+                                chunk_q.put_nowait(FLUSH)
+                            except queue.Full:
+                                pass
+                        elif mtype == "wake_word.disable":
+                            context.assistant.set_satellite_wakeword(True)
+                        elif mtype == "wake_word.enable":
+                            context.assistant.set_satellite_wakeword(False)
+                        elif mtype == "session.stop":
+                            return
+            except WebSocketDisconnect:
+                return
+
+        async def _send():
+            while True:
+                try:
+                    item = await asyncio.to_thread(lambda: tts_q.get(timeout=0.5))
+                except Exception:
+                    continue
+                kind = item[0]
+                if isinstance(kind, str) and kind == "stop":
+                    return
+                try:
+                    if isinstance(kind, str) and kind == "start":
+                        await ws.send_json({"type": "turn.tts_start", "sample_rate": item[1]})
+                    elif isinstance(kind, str) and kind == "end":
+                        await ws.send_json({"type": "turn.tts_end"})
+                    elif isinstance(kind, str) and kind == "cancel":
+                        await ws.send_json({"type": "turn.tts_cancel"})
+                    else:
+                        await ws.send_bytes(kind.astype(np.float32).tobytes())
+                except Exception:
+                    return
+
+        recv_task = asyncio.create_task(_receive())
+        send_task = asyncio.create_task(_send())
+        try:
+            _done, pending = await asyncio.wait(
+                [recv_task, send_task], return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in pending:
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+        finally:
+            context.assistant.disconnect_satellite(satellite_id)
+            context.assistant.set_satellite_sink(satellite_id, None)
 
     @app.websocket("/ws/obsidian")
     async def obsidian_ws(ws: WebSocket):

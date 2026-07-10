@@ -7,7 +7,7 @@ Why offer it over the 0.6B: higher accuracy (0% vs 3.3% WER on the synthetic
 voice set; the 0.6B makes a systematic 1-word error per clip), at ~1.5x the
 latency — still ~0.2x real-time on CPU. The accuracy headroom is what resists the
 ASR context-bias failures (wakeword misspellings / hallucinations) that the 0.6B
-hits; see docs/wakeword-detection-asr-and-dedicated-models.md (Appendix C).
+hits.
 
 The export differs from the 0.6B in three ways, so it gets its own loader:
   - **Encoder is unified** (`encoder.onnx`): mel in, audio features out — it does
@@ -41,6 +41,7 @@ from .asr_onnx import (
     HOP_LENGTH,
     N_FFT,
     QwenOnnxASRPipelineWrapper,
+    _create_session,
     _get_mel_filters,
     _onnx_providers,
     _Tokenizer,
@@ -117,12 +118,12 @@ class _OnnxAsr17B:
             root,
         )
 
-        self.encoder = ort.InferenceSession(str(root / enc_name), opts, providers=cpu)
-        self.decoder_init = ort.InferenceSession(
-            str(root / f"decoder_init{sfx}.onnx"), opts, providers=cpu
+        self.encoder = _create_session(str(root / enc_name), opts, cpu)
+        self.decoder_init = _create_session(
+            str(root / f"decoder_init{sfx}.onnx"), opts, cpu
         )
-        self.decoder_step = ort.InferenceSession(
-            str(root / f"decoder_step{sfx}.onnx"), opts, providers=cpu
+        self.decoder_step = _create_session(
+            str(root / f"decoder_step{sfx}.onnx"), opts, cpu
         )
 
         # float16 on disk; cast to float32 for the step-loop input_embeds.

@@ -18,7 +18,6 @@ module costs nothing.
 
 import logging
 import queue
-import re
 import string
 import threading
 import time
@@ -28,6 +27,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from .text_utils import split_clauses
 from .tts_session import TtsSession
 from .turn_stats import TurnStats
 
@@ -42,12 +42,11 @@ DEFAULT_VOICE = "af_heart"  # recommended default; Kokoro's highest-graded voice
 
 # Kokoro is non-autoregressive: one forward pass renders the whole input span,
 # so time-to-first-audio == synth time of the first span. We split the input on
-# clause/sentence punctuation and synthesise one fragment at a time, so the first
-# clause plays while the rest renders (the consumer overlaps playback). Synth
-# is fast enough that this simple clause split needs no word-budget tuning;
-# the earlier small-first-fragment ramp only added audible mid-sentence gaps.
-# Break at sentence + clause punctuation, keeping the delimiter on the left part.
-_CLAUSE_SPLIT = re.compile(r"(?<=[.!?,;:])\s+")
+# clause/sentence punctuation (core.text_utils.split_clauses) and synthesise one
+# fragment at a time, so the first clause plays while the rest renders (the
+# consumer overlaps playback). Synth is fast enough that this simple clause
+# split needs no word-budget tuning; the earlier small-first-fragment ramp only
+# added audible mid-sentence gaps.
 
 # Kokoro v1.0 phoneme -> token id map (fixed; from hexgrad/Kokoro-82M config.json).
 # Embedded so the backend needs only the ONNX model + voice files at runtime.
@@ -172,8 +171,8 @@ VOCAB = {
 # also ships non-English packs (ef_/em_/ff_/hf_/jf_/...) which we don't list —
 # they'd mispronounce English — but set_voice still loads any present .bin.
 # All 28 English voices: under the fp32 model every one renders NaN-free and
-# transcribes back at the same ~7% ASR WER (verified — see
-# docs/kokoro-onnx-tts-latency.md). The 11 that emitted NaN under fp16 are back.
+# transcribes back at the same ~7% ASR WER (verified). The 11 that emitted NaN
+# under fp16 are back.
 KOKORO_VOICES = frozenset(
     {
         # American female / male
@@ -225,22 +224,19 @@ _voice = DEFAULT_VOICE
 _voice_style: Optional[np.ndarray] = None  # (-1, 1, 256) for the active voice
 _speed = 1.2
 
-_TTS_ACTIVE_EVENT = None
-# TTS is a browser-only I/O channel: chunks are pushed here when a satellite
-# is connected, dropped on the floor otherwise. See core/tts.py's speak_stream
-# docstring.
-# Items: ("start", sr) | (np.ndarray, None) | ("end",) | ("stop",)
-_satellite_sink: Optional[queue.Queue] = None
+def force_cancel_playback(sink: Optional[queue.Queue] = None) -> None:
+    """Tell the browser to stop already-scheduled audio right now.
 
-
-def set_satellite_sink(q: Optional[queue.Queue]) -> None:
-    global _satellite_sink
-    _satellite_sink = q
-
-
-def set_tts_active_event(event) -> None:
-    global _TTS_ACTIVE_EVENT
-    _TTS_ACTIVE_EVENT = event
+    See core/tts.py's `force_cancel_playback` docstring: on fast hardware
+    generation can outrun playback and finish before a stop/barge-in ever
+    flips the session's cancelled flag, so nothing is left to emit the
+    mid-stream "cancel" message. Callers stopping a turn must call this
+    unconditionally rather than relying on the session flag alone.
+    """
+    if sink is None:
+        return
+    _drain_queue_nowait(sink)
+    sink.put(("cancel",))
 
 
 def _build_g2p(en_module):
@@ -442,18 +438,6 @@ def _to_chunks(audio: np.ndarray) -> list:
     return [audio[i : i + _CHUNK_SAMPLES] for i in range(0, len(audio), _CHUNK_SAMPLES)]
 
 
-def _iter_fragments(text: str):
-    """Yield synthesis fragments split on clause/sentence punctuation.
-
-    One fragment per clause so the first plays while the rest renders. Whitespace
-    runs and empty pieces are dropped.
-    """
-    for fragment in _CLAUSE_SPLIT.split(text.strip()):
-        fragment = fragment.strip()
-        if fragment:
-            yield fragment
-
-
 @dataclass
 class _Job:
     text: str
@@ -472,7 +456,7 @@ def _worker_loop() -> None:
     while True:
         job = _job_queue.get()
         try:
-            for fragment in list(_iter_fragments(job.text)) or [job.text]:
+            for fragment in list(split_clauses(job.text)) or [job.text]:
                 if job.session.cancelled:
                     break
                 for chunk in _to_chunks(_synth(fragment)):
@@ -534,7 +518,13 @@ def warmup_model(prompt=None):
     logger.info("TTS model ready")
 
 
-def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
+def play_chunks(
+    chunks,
+    sample_rate: int,
+    session: Optional[TtsSession] = None,
+    sink: Optional[queue.Queue] = None,
+    tts_active_event: Optional[threading.Event] = None,
+):
     if session is None:
         session = TtsSession()
     session.stop_event.clear()
@@ -542,9 +532,8 @@ def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
     try:
         if not chunks or session.cancelled:
             return
-        sink = _satellite_sink
-        if _TTS_ACTIVE_EVENT is not None:
-            _TTS_ACTIVE_EVENT.set()
+        if tts_active_event is not None:
+            tts_active_event.set()
         try:
             if sink is not None:
                 sink.put(("start", sample_rate))
@@ -556,8 +545,8 @@ def play_chunks(chunks, sample_rate: int, session: Optional[TtsSession] = None):
             else:
                 logger.debug("No satellite connected; TTS chunks dropped on the floor.")
         finally:
-            if _TTS_ACTIVE_EVENT is not None:
-                _TTS_ACTIVE_EVENT.clear()
+            if tts_active_event is not None:
+                tts_active_event.clear()
     finally:
         session.active = False
 
@@ -568,6 +557,8 @@ def speak_stream(
     session: Optional[TtsSession] = None,
     stats: Optional[TurnStats] = None,
     on_first_audio: Optional[Callable[[], None]] = None,
+    sink: Optional[queue.Queue] = None,
+    tts_active_event: Optional[threading.Event] = None,
 ):
     """Synthesise on the worker (overlapped) and play back here, cancellable.
 
@@ -598,9 +589,8 @@ def speak_stream(
             except Exception as e:
                 logger.warning(f"on_first_audio hook failed: {e}")
         first_chunk, sr = first
-        sink = _satellite_sink
-        if _TTS_ACTIVE_EVENT is not None:
-            _TTS_ACTIVE_EVENT.set()
+        if tts_active_event is not None:
+            tts_active_event.set()
         t_playback_start = time.monotonic()
         total_samples = 0
         try:
@@ -636,8 +626,8 @@ def speak_stream(
                 logger.debug("No satellite connected; TTS chunks dropped on the floor.")
                 _drain(out)
         finally:
-            if _TTS_ACTIVE_EVENT is not None:
-                _TTS_ACTIVE_EVENT.clear()
+            if tts_active_event is not None:
+                tts_active_event.clear()
         if sink is None or not sr:
             return time.monotonic()
         return t_playback_start + total_samples / sr

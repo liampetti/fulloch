@@ -57,6 +57,23 @@ class TestAgentPromptShape:
         assert "3" in prompt or "three" in prompt.lower()
 
 
+class TestAgentPromptSatelliteArea:
+    """#14 6b: the calling satellite's HA area is told to the model so it can
+    reason about an unqualified command in terms of where the user actually
+    is — the model never overrides an explicitly named room, only fills in
+    when the command doesn't say where."""
+
+    def test_no_area_line_when_unset(self, notes_dir):
+        prompt = prompts.get_agent_system_prompt()
+        assert "currently in the" not in prompt
+
+    def test_area_line_appended_when_set(self, notes_dir):
+        prompt = prompts.get_agent_system_prompt(satellite_area="kitchen")
+        assert "currently in the kitchen" in prompt
+        # Base prompt content survives intact alongside it.
+        assert '"actions"' in prompt
+
+
 class TestGreetingPrompt:
     def test_greeting_prompt_minimal(self, notes_dir):
         prompt = prompts.get_greeting_system_prompt()

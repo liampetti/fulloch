@@ -1,4 +1,4 @@
-"""Regression coverage for the follow-up-window timing bug (docs/TODO.md #5).
+"""Regression coverage for the follow-up-window timing bug.
 
 `_mark_turn_end` used to stamp `_last_turn_end` at `time.monotonic()` the
 instant TTS finished *generating and queuing* audio — not when the browser
@@ -58,53 +58,56 @@ class _StubAudioCapture:
     def __init__(self):
         self.armed_window = None
 
-    def arm_follow_up(self, seconds):
+    def arm_follow_up(self, session, seconds):
         self.armed_window = seconds
 
 
 def _make_stub_assistant(follow_up_seconds=5.0, always_listen=False):
+    from core.satellite import SatelliteSession
+
     assistant = _import_assistant_module()
     self = assistant.Assistant.__new__(assistant.Assistant)
     self.audio_capture = _StubAudioCapture()
     self.follow_up_seconds = follow_up_seconds
     self._satellite_always_listen = always_listen
-    self._last_turn_end = 0.0
-    return self, assistant
+    sat = SatelliteSession(id="sat-a", chunk_q=None)
+    self.satellites = {"sat-a": sat}
+    return self, assistant, sat
 
 
 def test_mark_turn_end_uses_playback_end_when_later_than_now():
     import time
 
-    self, assistant = _make_stub_assistant()
+    self, assistant, sat = _make_stub_assistant()
     future = time.monotonic() + 30.0
 
-    assistant.Assistant._mark_turn_end(self, future)
+    assistant.Assistant._mark_turn_end(self, "sat-a", future)
 
-    assert self._last_turn_end == future
+    assert sat.last_turn_end == future
 
 
 def test_mark_turn_end_falls_back_to_now_without_estimate():
     import time
 
-    self, assistant = _make_stub_assistant()
+    self, assistant, sat = _make_stub_assistant()
     before = time.monotonic()
 
-    assistant.Assistant._mark_turn_end(self, None)
+    assistant.Assistant._mark_turn_end(self, "sat-a", None)
 
     after = time.monotonic()
-    assert before <= self._last_turn_end <= after
+    assert before <= sat.last_turn_end <= after
 
 
 def test_mark_turn_end_never_regresses_before_now():
-    """A stale/short estimate must not pull _last_turn_end into the past —
+    """A stale/short estimate must not pull last_turn_end into the past —
     that would open the follow-up window artificially early relative to now."""
     import time
 
-    self, assistant = _make_stub_assistant()
+    self, assistant, sat = _make_stub_assistant()
     stale_past = time.monotonic() - 100.0
     before = time.monotonic()
 
-    assistant.Assistant._mark_turn_end(self, stale_past)
+    assistant.Assistant._mark_turn_end(self, "sat-a", stale_past)
 
     after = time.monotonic()
-    assert before <= self._last_turn_end <= after
+    assert before <= sat.last_turn_end <= after

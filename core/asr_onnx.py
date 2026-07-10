@@ -45,6 +45,32 @@ def _onnx_providers() -> list:
         return ["CoreMLExecutionProvider", "CPUExecutionProvider"]
     return ["CPUExecutionProvider"]
 
+
+def _create_session(
+    path: str, opts: "ort.SessionOptions", providers: list
+) -> "ort.InferenceSession":
+    """`ort.InferenceSession` with a CPU-only retry for a known CoreML EP bug.
+
+    CoreML EP's graph-partitioning pass loses the model's directory context
+    for external-data models (a small `.onnx` shell + companion `.onnx.data`
+    file, as opposed to one self-contained file) and throws
+    `model_path.empty() was false` on init — even though the same file loads
+    fine under CPUExecutionProvider alone. Retry CPU-only on exactly that
+    failure rather than disabling CoreML globally, since it works fine for
+    the single-file decoder models.
+    """
+    try:
+        return ort.InferenceSession(path, opts, providers=providers)
+    except Exception as exc:
+        if "CoreMLExecutionProvider" in providers and "model_path" in str(exc):
+            logger.warning(
+                "CoreML EP failed to load %s (external-data bug) — retrying CPU-only",
+                path,
+            )
+            return ort.InferenceSession(path, opts, providers=["CPUExecutionProvider"])
+        raise
+
+
 DEFAULT_MODEL_DIR = "./data/models/qwen3-asr-0.6b-onnx"
 SAMPLE_RATE = 16000
 N_FFT = 400
@@ -157,14 +183,14 @@ class _OnnxAsr:
         ds = "decoder_step.int8.onnx" if dec == "int8" else "decoder_step.onnx"
         logger.info("Loading Qwen3-ASR ONNX (decoder: %s) from %s", dec, onnx_dir)
 
-        self.encoder_conv = ort.InferenceSession(
-            str(onnx_dir / "encoder_conv.onnx"), opts, providers=cpu
+        self.encoder_conv = _create_session(
+            str(onnx_dir / "encoder_conv.onnx"), opts, cpu
         )
-        self.encoder_transformer = ort.InferenceSession(
-            str(onnx_dir / "encoder_transformer.onnx"), opts, providers=cpu
+        self.encoder_transformer = _create_session(
+            str(onnx_dir / "encoder_transformer.onnx"), opts, cpu
         )
-        self.decoder_init = ort.InferenceSession(str(onnx_dir / di), opts, providers=cpu)
-        self.decoder_step = ort.InferenceSession(str(onnx_dir / ds), opts, providers=cpu)
+        self.decoder_init = _create_session(str(onnx_dir / di), opts, cpu)
+        self.decoder_step = _create_session(str(onnx_dir / ds), opts, cpu)
 
         self.embed_tokens = np.fromfile(
             str(onnx_dir / "embed_tokens.bin"), dtype=np.float32

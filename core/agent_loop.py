@@ -226,7 +226,11 @@ class AgentLoop:
                         threading.Thread(
                             target=host._play_random_ack,
                             args=(session or host.tts_session,),
-                            kwargs={"cache": host.replan_stall_cache},
+                            kwargs={
+                                "cache": host.replan_stall_cache,
+                                "sink": getattr(host._turn_local, "sink", None),
+                                "tts_active_event": getattr(host._turn_local, "tts_active_event", None),
+                            },
                             daemon=True,
                         ).start()
                 logger.debug(f"Agent call (iter {iteration})")
@@ -242,6 +246,8 @@ class AgentLoop:
                         host.replan_stall_cache,
                         host.play_chunks,
                         session or host.tts_session,
+                        sink=getattr(host._turn_local, "sink", None),
+                        tts_active_event=getattr(host._turn_local, "tts_active_event", None),
                     ):
                         emission_text = host._generate_with_context_recovery(
                             user_prompt=None,
@@ -503,6 +509,10 @@ class AgentLoop:
                             threading.Thread(
                                 target=host._play_random_ack,
                                 args=(session or host.tts_session,),
+                                kwargs={
+                                    "sink": getattr(host._turn_local, "sink", None),
+                                    "tts_active_event": getattr(host._turn_local, "tts_active_event", None),
+                                },
                                 daemon=True,
                             ).start()
                         try:
@@ -609,6 +619,8 @@ class AgentLoop:
                         host.thinking_stall_cache,
                         host.play_chunks,
                         watchdog_session,
+                        sink=getattr(host._turn_local, "sink", None),
+                        tts_active_event=getattr(host._turn_local, "tts_active_event", None),
                     ):
                         answer = host._generate_with_context_recovery(
                             user_prompt=query,

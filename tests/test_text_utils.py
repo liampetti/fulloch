@@ -5,7 +5,7 @@ TTS jobs so the CUDA-graph cache picks up multiple prefill shapes during
 warmup (smooths first-real-turn latency).
 """
 
-from core.text_utils import clean_for_tts, split_sentences
+from core.text_utils import clean_for_tts, split_clauses, split_sentences
 
 
 def test_empty_string_returns_empty_list():
@@ -67,3 +67,15 @@ def test_strips_stray_gemma_channel_markers():
 
 def test_keeps_plain_text_untouched():
     assert clean_for_tts("The answer is forty two.") == "The answer is forty two."
+
+
+def test_normalises_news_semicolons_and_acronyms_without_sentence_fragments():
+    cleaned = clean_for_tts("WA news; NRL and AFL in NY.")
+
+    assert cleaned == "W A news. N R L and A F L in N Y."
+    assert split_sentences(cleaned) == ["W A news.", "N R L and A F L in N Y."]
+    assert list(split_clauses(cleaned)) == ["W A news.", "N R L and A F L in N Y."]
+
+
+def test_preserves_commas_but_turns_semicolons_into_sentence_breaks():
+    assert clean_for_tts("One, two; three") == "One, two. three"

@@ -13,6 +13,7 @@ can't reasonably synthesise live while the SLM is the GPU-bound task).
 from __future__ import annotations
 
 import logging
+import queue
 import random
 import threading
 from typing import Callable, List, Optional, Tuple
@@ -33,6 +34,8 @@ class ThinkingWatchdog:
         session: the active `TtsSession` — playback honours `.cancelled`
             so a barge-in stops the stall mid-phrase, and the watchdog
             itself exits early when the session flips to cancelled.
+        sink / tts_active_event: forwarded from the call site's own thread
+            (`_turn_local` doesn't reach the watchdog's daemon thread).
         interval: seconds between stalls. First stall fires after one
             interval (not immediately) — the user just asked for thinking
             and expects a brief delay before any vocal feedback.
@@ -43,11 +46,15 @@ class ThinkingWatchdog:
         stall_cache: List[Tuple],
         play_chunks: Callable,
         session,
+        sink: Optional["queue.Queue"] = None,
+        tts_active_event: Optional[threading.Event] = None,
         interval: float = DEFAULT_INTERVAL_SECONDS,
     ):
         self._stall_cache = stall_cache or []
         self._play = play_chunks
         self._session = session
+        self._sink = sink
+        self._tts_active_event = tts_active_event
         self._interval = interval
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -75,7 +82,7 @@ class ThinkingWatchdog:
                 return
             try:
                 chunks, sample_rate = random.choice(self._stall_cache)
-                self._play(chunks, sample_rate, session=self._session)
+                self._play(chunks, sample_rate, session=self._session, sink=self._sink, tts_active_event=self._tts_active_event)
             except Exception as e:
                 # A failed stall must not break the SLM call — log and let
                 # the watchdog tick again on the next interval.

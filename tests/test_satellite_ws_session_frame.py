@@ -14,10 +14,11 @@ from fastapi.testclient import TestClient
 from server.dashboard import create_app
 
 
-def _stub_assistant():
+def _stub_assistant(barge_in="off"):
     a = MagicMock()
     a.connect_satellite.return_value = queue.Queue()
     a.satellites = {}
+    a.barge_in = barge_in
     return a
 
 
@@ -41,6 +42,26 @@ def test_connect_satellite_called_with_the_same_id_sent_to_the_browser():
 
     sent_id = a.connect_satellite.call_args[0][0]
     assert sent_id == msg["satellite_id"]
+
+
+def test_session_marks_default_mode_as_half_duplex():
+    a = _stub_assistant()
+    client = TestClient(create_app(a))
+
+    with client.websocket_connect("/ws/satellite") as ws:
+        msg = ws.receive_json()
+
+    assert msg["half_duplex"] is True
+
+
+def test_session_keeps_microphone_live_for_wakeword_barge_in():
+    a = _stub_assistant(barge_in="wakeword")
+    client = TestClient(create_app(a))
+
+    with client.websocket_connect("/ws/satellite") as ws:
+        msg = ws.receive_json()
+
+    assert msg["half_duplex"] is False
 
 
 def test_disconnect_tears_down_the_same_satellite_id():

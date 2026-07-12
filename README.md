@@ -57,6 +57,8 @@ docker run -d \
 ```
 
 > The commented-out `-v` line exposes your Obsidian vault to Fulloch so voice notes can read/write it. Uncomment it, edit the host path, and add a matching `obsidian.path_translation` entry in `data/config.yml`, see the Obsidian section below.
+>
+> **Named volumes** (e.g. `-v fulloch-data:/app/data:rw` in compose) work too — the image's entrypoint chowns the volume to the container's user on first boot, so no separate `chown` init container is needed. The bind mount above (the default in this README) inherits the host's UID and is even simpler.
 
 ### SearXNG sidecar (optional, for live web answers)
 
@@ -76,7 +78,52 @@ docker run -d \
 Then in the Fulloch setup wizard, set **Web search URL** to `http://searxng:8080/search`. (Skip the `-p 8080:8080` if you don't need to reach SearXNG from the host, the Fulloch container only needs the in-network name.)
 
 ### Once launched
-- Open `http://localhost:8765` and follow the wizard.
+- Open `https://localhost:8765` and follow the wizard. See [First 2 minutes](#first-2-minutes) below for a step-by-step walkthrough of what to expect.
+
+## First 2 minutes
+
+What the first two minutes of a fresh install actually look like, so
+nothing in the timeline surprises you:
+
+1. **`docker run` returns in a second.** The container starts and the
+   entrypoint chowns the data dir (a no-op on bind mounts; fixes named
+   volumes on first boot). The image is ~2 GB for the CPU stack and ~6
+   GB for the GPU stack; only download size, not memory.
+2. **Open `https://localhost:8765`.** The dashboard's first render
+   shows the URL banner with a Copy button and a one-line note about
+   the self-signed-cert warning. Click through the warning; it's
+   expected for a private LAN install.
+3. **Walk the wizard.** Four steps: pick a thinking mode (regex
+   simple / full GPU / remote LLM), pick a name and voice, optionally
+   connect Home Assistant and SearXNG, optionally connect Obsidian.
+   The wizard's preflight (disk + network + GPU) blocks the download
+   with a clear error if anything is missing — you'll never see a
+   half-finished download.
+4. **Models download.** This is the long bit. The CPU stack pulls
+   roughly 1.5 GB (Qwen3-ASR 0.6B ONNX + Kokoro 82M); the GPU
+   stack pulls roughly 6 GB (Qwen3-ASR 1.7B + Qwen3-TTS 1.7B + the
+   9B language model). Plan on **3–10 minutes** on a residential
+   connection, longer on a phone hotspot. The download is silent on
+   the dashboard but you can watch it live with
+   `docker logs -f fulloch-ai` — the assistant's `setup` step
+   streams each model's progress.
+5. **First wake.** Once the progress bar fills, the assistant
+   transitions to `READY` and the mic button on the dashboard
+   lights up. The default wakeword is **"hey atticus"**; say it out
+   loud and the assistant should reply with a chime. If it doesn't,
+   check that the browser tab has microphone permission (the URL bar
+   shows a mic icon when granted).
+
+If anything in those five steps goes wrong, the most useful single
+command is:
+
+```bash
+docker logs -f fulloch-ai
+```
+
+…which streams the same logs the dashboard's loading screen renders.
+Permission errors, model download failures, and the wizard's
+preflight errors all surface there.
 
 ## Configuration
 
@@ -94,7 +141,7 @@ The web dashboard is **unauthenticated and bound to `127.0.0.1` by default**. To
 
 The moment you point the language model at an OpenAI-compatible endpoint, the avatar and favicon swap to a travelling version of the character (Let's call him *Parloch*: The **Par**tially **loc**al **h**ome voice assistant), and the tagline reads *"language model is off-device."* Pick a local model again (**None** or the GPU 9B) and Fulloch comes home. It triggers as soon as a remote endpoint is *configured*, even if it is on your home network.
 
-> **Important:** If you are using an OpenAI endpoint you will lose the GBNF enforced JSON formatting that comes with the built-in LLM. This means there is a higher risk of tool call errors when running the LLM remotely.
+> **Note:** GBNF grammar is passed through to llama.cpp-family servers (llama-server, LM Studio, Unsloth Studio), so the remote path enforces the same action/reply shape as the local one. Other OpenAI-compatible endpoints ignore the undocumented `grammar` field and fall back to `response_format: json_object` plus a one-shot repair round-trip, so tool-call errors are more likely there.
 
 ## Home Assistant Integration
 

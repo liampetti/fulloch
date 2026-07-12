@@ -70,6 +70,13 @@ class SatelliteSession:
     # VAD is unavailable/disabled (the RMS fallback is used instead).
     vad_endpointer: Optional["VadEndpointer"] = None
     soft_probe_emitted: bool = False
+    # Onset timestamp of a soft-endpoint provisional that was committed early.
+    # The hard VAD endpoint fires ~200ms later for the same speech; without this
+    # guard the duplicate transcription is treated as a barge-in and cancels the
+    # turn that the soft endpoint just started. Checked in the transcriber loop:
+    # if the hard endpoint's onset matches this, it's the same utterance — drop.
+    # 0.0 = no committed provisional pending.
+    provisional_committed_onset: float = 0.0
 
     # --- Forward-compat hooks (phases 4-6) ---------------------------------
     # All optional/default-None so a Phase 1 connect leaves them inert. They

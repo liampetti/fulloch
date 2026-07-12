@@ -329,6 +329,7 @@ def test_agent_loop_degrades_to_regex_on_remote_unreachable():
         llm_enabled=True,
         _history=[],
         _history_for=lambda session: [],
+        _turn_local=types.SimpleNamespace(sink=None, tts_active_event=None),
         grammar=object(),
         wakeword_name="Fulloch",
         tts_session=None,

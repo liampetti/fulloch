@@ -15,6 +15,7 @@ import queue
 import re as _re
 import secrets
 import shutil
+import socket
 import sys
 import threading
 import time
@@ -33,6 +34,7 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel
 
+from .config_store import read_config
 from .lifecycle import (
     DOWNLOADING,
     ERROR,
@@ -44,6 +46,40 @@ from .lifecycle import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Config cache: the dashboard polls /status frequently and the YAML parse
+# in read_config isn't free. Cache the (path, mtime, parsed-data) tuple
+# so repeated reads within the same file mtime return the same dict object.
+# A config edit invalidates the cache automatically — no need to wire cache
+# invalidation through the wizard or the settings console. The
+# /status handler is the only hot consumer; other config reads (wizard,
+# settings) happen on user-initiated changes, not in a tight loop.
+_CONFIG_CACHE: dict = {"path": None, "mtime": None, "data": None}
+
+
+def _read_config_cached(path: str) -> dict:
+    """Read config from `path`, cached by mtime.
+
+    Returns the cached parsed config if `path`'s mtime is unchanged
+    since the last read. Falls back to a fresh read on OSError (file
+    missing) so the first-run / pre-bootstrap case still works.
+    """
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return read_config(path)
+    if (
+        _CONFIG_CACHE["path"] == path
+        and _CONFIG_CACHE["mtime"] == mtime
+        and _CONFIG_CACHE["data"] is not None
+    ):
+        return _CONFIG_CACHE["data"]
+    data = read_config(path)
+    _CONFIG_CACHE["path"] = path
+    _CONFIG_CACHE["mtime"] = mtime
+    _CONFIG_CACHE["data"] = data
+    return data
 
 
 def _normalize_llm_url(url: str) -> str:
@@ -455,6 +491,17 @@ def create_app(
                 detail="assistant not ready (setup or model load in progress)",
             )
 
+    @app.middleware("http")
+    async def _no_cache_static(request, call_next):
+        """Force revalidation on /static/* so satellite-protocol edits (e.g.
+        the iOS loudspeaker / half-duplex mic mute) reach the browser without
+        a hard-refresh. ETag-based revalidation is cheap; the cost is one
+        round-trip per asset, which is irrelevant on a LAN device."""
+        response = await call_next(request)
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     def _reset_marker_path() -> Path:
         return _reset_marker_for(context)
 
@@ -590,13 +637,55 @@ def create_app(
         _schedule_restart()
         return JSONResponse({"restarting": True})
 
+    @app.get("/ready")
+    def ready() -> JSONResponse:
+        """Liveness/readiness probe for `docker compose ps` and HEALTHCHECK.
+
+        Returns 200 + `{"ready": true}` as soon as the dashboard server
+        is serving HTTP — the wizard, download progress, or dashboard
+        are all reachable from the browser, which is the right "ready"
+        definition for a first-run UX (the assistant being fully
+        *loaded* with the SLM/ASR/TTS warm can be minutes away on a
+        first run; that's tracked separately by /status's `phase`).
+
+        Semantics for Docker:
+          - HEALTHCHECK passing means "the container is alive and the
+            web UI is reachable". A user who hits the URL right now
+            will see *something* useful (the wizard, a progress bar,
+            or an actionable error), not a connection refused.
+          - 503 would mean the dashboard server crashed. We don't
+            currently return 503; the FastAPI app either responds
+            (server alive) or doesn't (server dead → connection
+            refused → Docker marks unhealthy via the connection
+            failure, not via the HTTP code).
+
+        Task 7a of docs/ease-of-use-tasks.md.
+        """
+        return JSONResponse({"ready": True})
+
     @app.get("/status")
-    def get_status() -> JSONResponse:
+    def get_status(request: Request) -> JSONResponse:
         # Lifecycle phase (NEEDS_SETUP/DOWNLOADING/LOADING/READY/ERROR) drives
         # wizard-vs-dashboard routing + the progress/loading screens. Always
         # available, even before the assistant exists.
         payload = lifecycle.snapshot()
         payload["auth_enabled"] = bool(context.dashboard_password_hash)
+        # When the dashboard is serving over TLS, surface the URL the user
+        # is currently accessing (built from the live request's scheme +
+        # Host header — works for localhost, LAN IPs, and custom hostnames).
+        # The setup wizard renders this as a banner with the cert-warning
+        # copy + a copy button; HTTP installs omit the field entirely.
+        cfg = _read_config_cached(context.config_path)
+        general = cfg.get("general") or {}
+        cert = general.get("dashboard_ssl_certfile")
+        key = general.get("dashboard_ssl_keyfile")
+        if (
+            cert
+            and key
+            and Path(cert).is_file()
+            and Path(key).is_file()
+        ):
+            payload["dashboard_url"] = f"{request.url.scheme}://{request.url.netloc}"
         if context.downloader is not None and context.downloader.active:
             payload["download"] = context.downloader.snapshot()
         if context.assistant is None or not lifecycle.is_ready():
@@ -904,6 +993,41 @@ def create_app(
         resolved = resolve_models(models)
         assets = plan_assets(resolved)
         return JSONResponse({"assets": [a.snapshot() for a in assets]})
+
+    @app.post("/setup/preflight-download")
+    def setup_preflight_download() -> JSONResponse:
+        """Run the blocking preflight (disk + network + GPU) for the wizard.
+
+        Called on the "Start download" click so the user gets a clear
+        pass/fail with one structured error per failed check before any
+        model bytes flow. `ok` is True only when every check passes.
+        Task 3 of docs/ease-of-use-tasks.md.
+        """
+
+        from .config_store import read_config
+        from .preflight import (
+            check_disk_for_models,
+            check_gpu_for_models,
+            check_network,
+        )
+
+        cfg = read_config(context.config_path)
+        models = cfg.get("models") or {}
+        errors: list[dict] = []
+
+        ok, msg = check_disk_for_models(models)
+        if not ok:
+            errors.append({"check": "disk", "message": msg})
+
+        ok, msg = check_network()
+        if not ok:
+            errors.append({"check": "network", "message": msg})
+
+        ok, msg = check_gpu_for_models(models)
+        if not ok:
+            errors.append({"check": "gpu", "message": msg})
+
+        return JSONResponse({"ok": not errors, "errors": errors})
 
     @app.post("/setup/install")
     def setup_install() -> JSONResponse:
@@ -1390,7 +1514,15 @@ def create_app(
         # satellite. Shape-aligned with the satellite-v2 protocol's
         # session.started frame (Phase 5) — same identity handshake, just
         # not yet worth a second message type for the browser path.
-        await ws.send_json({"type": "session", "satellite_id": satellite_id})
+        await ws.send_json(
+            {
+                "type": "session",
+                "satellite_id": satellite_id,
+                # Browser satellites release the microphone during speech by
+                # default. Wakeword barge-in deliberately keeps it live.
+                "half_duplex": context.assistant.barge_in != "wakeword",
+            }
+        )
         # The opening greeting was synthesised during startup, before any
         # satellite could possibly be connected — replay it once, now that
         # one actually is. No-op on every later reconnect.
@@ -1918,12 +2050,25 @@ def start_dashboard(
     ssl_keyfile: Optional[str] = None,
     lifecycle: Optional[Lifecycle] = None,
     context: Optional[AppContext] = None,
+    http_redirect_port: Optional[int] = None,
 ) -> threading.Thread:
     """Launch the dashboard on a daemon thread. Non-blocking.
 
     Pass both ``ssl_certfile`` and ``ssl_keyfile`` to serve over HTTPS (uvicorn
     terminates TLS). If only one is given, or a file is missing, TLS is skipped
     and the dashboard falls back to HTTP with a loud warning.
+
+    When HTTPS is enabled, a tiny TLS-sniffing dispatcher is started on the
+    *public* port. It accepts raw TCP, peeks the first byte of every new
+    connection, and either:
+      - proxies through to a localhost-bound uvicorn (TLS backend), or
+      - sends a single 308 redirect to ``https://{host}:{port}{path}``
+    so a user typing ``http://`` lands on the TLS dashboard without a manual
+    URL edit. The redirect, the TLS listener, and the FastAPI app all share
+    the single configured port — no second port mapping required.
+
+    The ``http_redirect_port`` argument is accepted for backward compatibility
+    but ignored; the dispatcher is on the same port as the dashboard.
 
     Prefer a shared ``context`` (so the assistant can attach after setup); a
     bare ``assistant`` (may be None) + ``lifecycle`` still works.
@@ -1956,17 +2101,305 @@ def start_dashboard(
             ssl_kwargs = {"ssl_certfile": ssl_certfile, "ssl_keyfile": ssl_keyfile}
 
     app = create_app(assistant, lifecycle=lifecycle, context=context)
+
+    if ssl_kwargs:
+        # Bind uvicorn (TLS) on 127.0.0.1, then front it with a dispatcher on
+        # the public port. The OS picks an ephemeral internal port to avoid
+        # colliding with anything the user might have on the chosen offset.
+        backend_port = _pick_free_local_port()
+        uvicorn_config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=backend_port,
+            log_level="warning",
+            access_log=False,
+            **ssl_kwargs,
+        )
+        uvicorn_server = uvicorn.Server(uvicorn_config)
+        uvicorn_thread = threading.Thread(
+            target=uvicorn_server.run, daemon=True, name="dashboard-uvicorn"
+        )
+        uvicorn_thread.start()
+        try:
+            start_tls_dispatcher(
+                public_host=host,
+                public_port=port,
+                backend_host="127.0.0.1",
+                backend_port=backend_port,
+            )
+        except OSError as e:
+            logger.warning(
+                "Could not start TLS dispatcher on %s:%s (%s). "
+                "Users on http:// will see a TLS error; share the https:// URL directly.",
+                host,
+                port,
+                e,
+            )
+        scheme = "https"
+        logger.info(f"Dashboard listening on {scheme}://{host}:{port} (http→https redirect on the same port)")
+        return uvicorn_thread
+
+    # No TLS — uvicorn binds the public port directly. No redirect needed.
     config = uvicorn.Config(
         app,
         host=host,
         port=port,
         log_level="warning",
         access_log=False,
-        **ssl_kwargs,
     )
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True, name="dashboard-uvicorn")
     thread.start()
-    scheme = "https" if ssl_kwargs else "http"
-    logger.info(f"Dashboard listening on {scheme}://{host}:{port}")
+    logger.info(f"Dashboard listening on http://{host}:{port}")
     return thread
+
+
+def _pick_free_local_port() -> int:
+    """Ask the OS for an ephemeral localhost port (port 0 → OS-assigned)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+_TLS_HANDSHAKE_BYTE = 0x16  # first byte of a TLS ClientHello record
+
+
+async def _dispatch_connection(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    backend_host: str,
+    backend_port: int,
+    https_port: int,
+) -> None:
+    """Peek the first byte of a new connection; route to TLS proxy or 308.
+
+    Module-level (rather than nested in start_tls_dispatcher) so tests can
+    exercise the routing logic without binding a socket.
+
+    Security note for future maintainers
+    ------------------------------------
+    This is an in-process port multiplexer — the same idea as sslh / hitch /
+    HAProxy's `req_ssl_hello_type 1` check, but inside the Python process
+    rather than as a separate reverse proxy. The protocol handling is
+    standard (the 0x16 first byte is the IANA TLS record-type byte, peeked
+    with MSG_PEEK so the kernel's socket buffer is untouched).
+
+    For Fulloch's single-LAN-user use case that's fine. The classic
+    cross-cutting risks for this pattern are resource-exhaustion rather than
+    protocol ones — see sslh's security review by Matthias Gerstner
+    (OpenSUSE, 2025) for the canonical writeup. Concretely, if this is ever
+    exposed to anything beyond the home LAN, add:
+      - a per-connection read timeout (a client that opens a TCP connection
+        and never sends the first byte currently holds the dispatcher slot
+        until the OS's TCP keepalive eventually reaps it — several minutes);
+      - a cap on concurrent in-flight connections, with oldest dropped.
+    A reverse-proxy deployment (Caddy / nginx / Traefik in front) sidesteps
+    both concerns and is the right move for any multi-tenant exposure.
+    """
+    try:
+        sock_info = writer.transport.get_extra_info("socket")
+        if sock_info is None:
+            return
+        # asyncio (and uvloop) wraps the raw socket in a TransportSocket
+        # that doesn't expose recv() directly. The peek has to go through
+        # the underlying fd: dup it so closing our peek-socket doesn't
+        # tear down the asyncio transport's socket, and do the MSG_PEEK
+        # via the stdlib socket API. The kernel buffer is shared with the
+        # asyncio reader, so a peek here doesn't consume the byte — the
+        # TLS ClientHello or HTTP request line is still available when
+        # we hand the reader off to the backend.
+        raw_fd = sock_info.fileno()
+        peek_sock = socket.socket(fileno=os.dup(raw_fd))
+        try:
+            peek_sock.setblocking(False)
+            try:
+                first = peek_sock.recv(1, socket.MSG_PEEK)
+            except (BlockingIOError, InterruptedError, OSError):
+                # No first byte yet — TCP connection is open but idle.
+                # Pipe to the backend; if the client eventually sends
+                # a TLS ClientHello the backend handles it, and if they
+                # never send anything the kernel eventually reaps the
+                # connection.
+                await _pipe_to_backend(reader, writer, backend_host, backend_port)
+                return
+        finally:
+            peek_sock.close()
+
+        if first and first[0] == _TLS_HANDSHAKE_BYTE:
+            await _pipe_to_backend(reader, writer, backend_host, backend_port)
+        else:
+            await _send_308(reader, writer, https_port)
+    except Exception as e:  # noqa: BLE001 — connection-scoped; just close
+        logger.debug("dispatcher connection error: %s", e)
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+
+def start_tls_dispatcher(
+    public_host: str, public_port: int, backend_host: str, backend_port: int
+) -> threading.Thread:
+    """Start a TLS-sniffing TCP dispatcher that fronts a TLS uvicorn backend.
+
+    The dispatcher binds ``(public_host, public_port)`` and accepts raw TCP.
+    For each connection it peeks the first byte (without consuming it):
+      - ``0x16`` (TLS ClientHello) → open a localhost connection to the
+        uvicorn backend, pipe bytes both ways until either side closes.
+      - anything else → read the HTTP request, send a 308 to
+        ``https://{host}:{public_port}{path}``, close.
+
+    The peeked byte is not consumed, so the byte is still in the socket
+    buffer when we hand the connection off — TLS Clients and HTTP request
+    lines both stay intact.
+
+    The dispatcher runs on its own asyncio event loop in a daemon thread so
+    the rest of the process (FastAPI handlers, ASGI) is unaffected.
+    """
+    loop = asyncio.new_event_loop()
+
+    async def _serve() -> None:
+        async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await _dispatch_connection(
+                reader, writer, backend_host, backend_port, public_port
+            )
+
+        server = await asyncio.start_server(_handle, public_host, public_port)
+        async with server:
+            await server.serve_forever()
+
+    def _run() -> None:
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_serve())
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=_run, daemon=True, name="dashboard-tls-dispatcher")
+    thread.start()
+    return thread
+
+
+async def _pipe_to_backend(
+    client_reader: asyncio.StreamReader,
+    client_writer: asyncio.StreamWriter,
+    backend_host: str,
+    backend_port: int,
+) -> None:
+    """Open a localhost connection to the TLS backend and bidirectionally pipe bytes."""
+    try:
+        backend_reader, backend_writer = await asyncio.open_connection(backend_host, backend_port)
+    except Exception:
+        return
+
+    async def _pump(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
+        try:
+            while True:
+                data = await src.read(65536)
+                if not data:
+                    break
+                dst.write(data)
+                await dst.drain()
+        except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
+            pass
+        except Exception:
+            pass
+        finally:
+            try:
+                dst.close()
+            except Exception:
+                pass
+
+    try:
+        await asyncio.gather(
+            _pump(client_reader, backend_writer),
+            _pump(backend_reader, client_writer),
+        )
+    finally:
+        for w in (client_writer, backend_writer):
+            try:
+                w.close()
+            except Exception:
+                pass
+
+
+async def _send_308(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    https_port: int,
+) -> None:
+    """Read a plain-HTTP request and respond with a 308 to https://{host}:{port}{path}.
+
+    Parses just enough of the request to build a sensible Location header —
+    the request line for the path, and the ``Host:`` header for the hostname.
+    Anything malformed gets a best-effort 308 to the bare origin.
+    """
+    try:
+        data = await _read_until_double_crlf(reader)
+        request_line, host = _parse_request_host(data)
+        path = request_line or "/"
+        location = f"https://{host}:{https_port}{path}"
+    except Exception:
+        location = f"https://{host}:{https_port}/"
+
+    response = (
+        b"HTTP/1.1 308 Permanent Redirect\r\n"
+        b"Location: " + location.encode("ascii", errors="replace") + b"\r\n"
+        b"Content-Length: 0\r\n"
+        b"Connection: close\r\n"
+        b"\r\n"
+    )
+    try:
+        writer.write(response)
+        await writer.drain()
+    except Exception:
+        pass
+
+
+async def _read_until_double_crlf(reader: asyncio.StreamReader, max_bytes: int = 16384) -> bytes:
+    buf = b""
+    while b"\r\n\r\n" not in buf and len(buf) < max_bytes:
+        chunk = await reader.read(1024)
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+
+def _parse_request_host(data: bytes) -> tuple[str, str]:
+    """Best-effort: return (path, hostname) from a partial HTTP request.
+
+    ``hostname`` is the inbound Host header with the port stripped — that's
+    what we want in the redirect Location so a user typing
+    ``http://192.168.1.10:8765/…`` lands on
+    ``https://192.168.1.10:8765/…``.
+    """
+    if not data:
+        return "/", "localhost"
+    try:
+        head = data.split(b"\r\n\r\n", 1)[0]
+    except Exception:
+        return "/", "localhost"
+    lines = head.split(b"\r\n")
+    path = "/"
+    if lines:
+        try:
+            parts = lines[0].decode("latin-1", errors="replace").split(" ", 2)
+            if len(parts) >= 2 and parts[1].startswith("/"):
+                path = parts[1]
+        except Exception:
+            pass
+    host = "localhost"
+    for line in lines[1:]:
+        if line.lower().startswith(b"host:"):
+            try:
+                host_header = line.split(b":", 1)[1].strip().decode("latin-1", errors="replace")
+                host = host_header.split(":", 1)[0] or host
+            except Exception:
+                pass
+            break
+    return path, host

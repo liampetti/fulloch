@@ -1453,7 +1453,14 @@ class Assistant:
         session = self.satellites.get(satellite_id) if satellite_id else None
         return session.tts_sink if session is not None else None
 
-    def play_chunks(self, chunks, sample_rate: int, session: Optional[TtsSession] = None):
+    def play_chunks(
+        self,
+        chunks,
+        sample_rate: int,
+        session: Optional[TtsSession] = None,
+        sink: Optional["queue.Queue"] = None,
+        tts_active_event: Optional[threading.Event] = None,
+    ):
         """Route pre-synthesized chunks to whichever satellite the current
         turn belongs to (`self._turn_local`, set by whichever of
         `_run_half_duplex`/`_run_turn`/`speak_proactive` is running on *this*
@@ -1461,13 +1468,21 @@ class Assistant:
         `play_chunks` — kept so the ~15 call sites in agent_loop.py (stall/ack
         phrases, fallback replies) need no changes to pass a sink explicitly;
         the sink is resolved once per turn instead.
+
+        `sink` / `tts_active_event` can be passed explicitly for callers on a
+        different thread (ThinkingWatchdog, daemon ack threads) that don't have
+        `self._turn_local` set.
         """
+        if sink is None:
+            sink = getattr(self._turn_local, "sink", None)
+        if tts_active_event is None:
+            tts_active_event = getattr(self._turn_local, "tts_active_event", None)
         return self._tts_module.play_chunks(
             chunks,
             sample_rate,
             session=session,
-            sink=getattr(self._turn_local, "sink", None),
-            tts_active_event=getattr(self._turn_local, "tts_active_event", None),
+            sink=sink,
+            tts_active_event=tts_active_event,
         )
 
     def speak_stream(
@@ -1493,30 +1508,26 @@ class Assistant:
         )
 
     def replay_greeting(self, satellite_id: str) -> None:
-        """Play the cached opening greeting once, on the first satellite connect.
+        """Mark the greeting as delivered without playing it.
 
-        See greeting_cache's docstring in __init__ for why _warm_and_announce's
-        own playback attempt during startup almost never reaches a listener.
-        No-op on any later reconnect, or if there's no cached greeting (e.g.
-        startup hit an error before _warm_and_announce populated it). Plays on
-        the connecting satellite specifically, not whatever `self._turn_local`
-        happens to hold (there is no turn in flight at connect time).
+        The opening greeting was already synthesised during startup by
+        `_warm_and_announce` to warm the TTS model and the LLM cache — the
+        actual playback attempt during startup silently dropped because no
+        satellite was connected. Now that one is, we mark it delivered so
+        the next (real) user turn doesn't trigger a second greeting, but
+        playing it back here would inject several seconds of irrelevant
+        audio into the mic, which gets transcribed as user input while the
+        mic is still live between connect and the first `tts_start` frame.
+
+        The warming effect is already done; no audible output is needed.
+
+        No-op (no delivered mark) when cache is empty — startup may have
+        failed, and a later replay_greeting on reconnect would have nothing
+        to skip.
         """
-        if self._greeting_delivered or not self.greeting_cache:
+        if not self.greeting_cache:
             return
         self._greeting_delivered = True
-        session = self.satellites.get(satellite_id)
-        sink = session.tts_sink if session is not None else None
-        tts_active_event = session.tts_active if session is not None else None
-        for chunks, sr in self.greeting_cache:
-            if chunks:
-                self._tts_module.play_chunks(
-                    chunks,
-                    sr,
-                    session=self.tts_session,
-                    sink=sink,
-                    tts_active_event=tts_active_event,
-                )
 
     def _play_alarm_tone(self, session: Optional[TtsSession] = None) -> float:
         """Push the pre-rendered alarm tone straight to the current turn's sink.
@@ -1757,20 +1768,39 @@ class Assistant:
         self._trim_history()
 
     def _play_random_ack(
-        self, session: Optional[TtsSession] = None, cache: Optional[list] = None
+        self,
+        session: Optional[TtsSession] = None,
+        cache: Optional[list] = None,
+        sink: Optional["queue.Queue"] = None,
+        tts_active_event: Optional[threading.Event] = None,
     ) -> None:
         """Play one pre-rendered ack chunk. Safe no-op if the cache is empty
         (e.g. an early failure before `_warm_and_announce` populated it).
         Pass `cache` to use an alternate phrase pool (e.g. replan_stall_cache).
+
+        `sink` and `tts_active_event` are accepted explicitly because this is
+        almost always called from a daemon thread spawned by the SLM worker;
+        `self._turn_local` is a `threading.local()`, so that thread otherwise
+        sees no sink and the ack falls through to "TTS chunks dropped on the
+        floor". When omitted we fall back to the caller's thread-local.
         """
         c = cache if cache is not None else self.ack_cache
         if not c:
             return
         chunks, sr = random.choice(c)
+        prev_sink = getattr(self._turn_local, "sink", None)
+        prev_active = getattr(self._turn_local, "tts_active_event", None)
+        if sink is not None:
+            self._turn_local.sink = sink
+        if tts_active_event is not None:
+            self._turn_local.tts_active_event = tts_active_event
         try:
             self.play_chunks(chunks, sr, session=session or self.tts_session)
         except Exception:
             logger.exception("ack playback failed")
+        finally:
+            self._turn_local.sink = prev_sink
+            self._turn_local.tts_active_event = prev_active
 
     def _play_busy_phrase(self, sat: SatelliteSession) -> None:
         """Play a `BUSY_PHRASES` clip on `sat`'s own sink — the audible
@@ -2026,6 +2056,10 @@ class Assistant:
             t = threading.Thread(
                 target=self._play_random_ack,
                 args=(session,),
+                kwargs={
+                    "sink": getattr(self._turn_local, "sink", None),
+                    "tts_active_event": getattr(self._turn_local, "tts_active_event", None),
+                },
                 daemon=True,
             )
             t.start()
@@ -2164,6 +2198,10 @@ class Assistant:
                 t = threading.Thread(
                     target=self._play_random_ack,
                     args=(session,),
+                    kwargs={
+                        "sink": getattr(self._turn_local, "sink", None),
+                        "tts_active_event": getattr(self._turn_local, "tts_active_event", None),
+                    },
                     daemon=True,
                 )
                 t.start()
@@ -2624,6 +2662,23 @@ class Assistant:
                     logger.debug(f"Ignoring provisional during active turn: {text!r}")
                     continue
 
+                # Drop the hard VAD endpoint when it's the same utterance as a
+                # soft endpoint we already committed. The soft endpoint fires
+                # ~200ms before the hard endpoint, and flush()+drop_results_until
+                # (0.5s) doesn't cover the ~1.5-2s ASR processing time of the
+                # hard endpoint's audio. Without this guard the duplicate
+                # transcription matches the wakeword and is treated as a
+                # self-barge-in, cancelling the turn that just started.
+                if not provisional and sat.provisional_committed_onset > 0:
+                    onset = self._asr_onset.get("t", 0.0)
+                    if abs(onset - sat.provisional_committed_onset) < 0.5:
+                        logger.debug(
+                            f"Dropping hard endpoint (duplicate of committed soft endpoint): {text!r}"
+                        )
+                        sat.provisional_committed_onset = 0.0
+                        continue
+                    sat.provisional_committed_onset = 0.0
+
                 text_lower = text.lower()
                 wakeword_match = self._wakeword_re.search(text_lower)
                 wakeword_present = wakeword_match is not None
@@ -2752,7 +2807,11 @@ class Assistant:
                     self._turn_local.tts_active_event = sat.tts_active
                     threading.Thread(
                         target=self._play_random_ack,
-                        kwargs={"cache": self.barge_ack_cache},
+                        kwargs={
+                            "cache": self.barge_ack_cache,
+                            "sink": sat.tts_sink,
+                            "tts_active_event": sat.tts_active,
+                        },
                         daemon=True,
                     ).start()
                     logger.info("Barge-in — follow-up window open")
@@ -2841,6 +2900,7 @@ class Assistant:
                     # result on the contaminated tail.
                     self.audio_capture.flush()
                     sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
+                    sat.provisional_committed_onset = self._asr_onset.get("t", 0.0)
                     logger.info(f"Committing early on soft endpoint: {user_prompt!r}")
 
                 # Snapshot the STT latency of the utterance that triggered this

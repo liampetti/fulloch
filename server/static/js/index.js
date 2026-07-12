@@ -1394,7 +1394,30 @@
     renderLlmAlert();
   });
 
-  setInterval(pollStatus, 1000);
+  // 5s polling: the UI elements driven by /status (mic button state,
+  // branding, busy indicator, LLM-unreachable warning) all change on the
+  // order of seconds, not milliseconds. 1Hz was bloating the server log
+  // and burning battery on mobile devices; 5s is the slowest rate that
+  // still feels "live" to a human watching the dashboard. Polling also
+  // pauses when the tab is hidden (see `pollStatus` below) so a backgrounded
+  // dashboard doesn't keep firing requests.
+  const STATUS_POLL_MS = 5000;
+  let statusTimer = null;
+  const startStatusPolling = () => {
+    if (statusTimer !== null) return;
+    pollStatus();
+    statusTimer = setInterval(pollStatus, STATUS_POLL_MS);
+  };
+  const stopStatusPolling = () => {
+    if (statusTimer === null) return;
+    clearInterval(statusTimer);
+    statusTimer = null;
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") startStatusPolling();
+    else stopStatusPolling();
+  });
+  if (document.visibilityState === "visible") startStatusPolling();
 
   // Obsidian state: poll slowly and refresh the tab if it's currently visible.
   // Avoids hammering /api/obsidian/status when the user never opens the tab.
@@ -1418,7 +1441,8 @@
   //                      its own or another satellite's
   //   server  → browser: {"type":"tts_start","sr":<int>}
   //                      <binary Float32 chunks>
-  //                      {"type":"tts_end"}
+  //                      {"type":"tts_end"} — all chunks sent; browser
+  //                      playback may continue until `satPlayAt`
   //                      {"type":"tts_cancel"}  — barge-in: stop already-
   //                      scheduled playback immediately (chunks are sent
   //                      as fast as they're generated with no flow control,
@@ -1434,6 +1458,9 @@
   let satPlayAt = 0;        // AudioContext scheduled-end time for TTS chunks
   let satTtsSr = 24000;     // sample rate announced by server in tts_start
   let satScheduledSources = [];  // AudioBufferSourceNodes pending/playing, so tts_cancel can stop them
+  let satMicMuted = false;  // true during TTS playback — stops mic data to prevent echo
+  let satMicResumeTimer = null;  // setTimeout handle for delayed unmute after satPlayAt
+  let satHalfDuplex = true; // false in wakeword-barge-in mode (mic stays live)
   let satAlwaysListen = localStorage.getItem('sat_always_listen') === '1';
   let mySatelliteId = null; // this tab's own id, from the "session" frame
 
@@ -1520,6 +1547,30 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     satPlayAt = satAudioCtx ? satAudioCtx.currentTime : 0;
   };
 
+  const satMuteMicForPlayback = () => {
+    if (satMicResumeTimer !== null) {
+      clearTimeout(satMicResumeTimer);
+      satMicResumeTimer = null;
+    }
+    if (satHalfDuplex) satMicMuted = true;
+  };
+
+  const satUnmuteMicAfterPlayback = () => {
+    if (!satHalfDuplex) {
+      satMicMuted = false;
+      return;
+    }
+    // Wait until all scheduled TTS audio has actually finished playing
+    // (satPlayAt is the AudioContext time of the last chunk's end), then
+    // unmute. tts_end only means the server finished sending chunks — the
+    // browser may still be playing them for several more seconds.
+    const delayMs = satAudioCtx ? Math.max(0, satPlayAt - satAudioCtx.currentTime) * 1000 + 100 : 0;
+    satMicResumeTimer = setTimeout(() => {
+      satMicResumeTimer = null;
+      satMicMuted = false;
+    }, delayMs);
+  };
+
   const satDisconnect = () => {
     if (satWorkletNode) { try { satWorkletNode.disconnect(); } catch(_) {} satWorkletNode = null; }
     if (satMicStream) { satMicStream.getTracks().forEach(t => t.stop()); satMicStream = null; }
@@ -1527,6 +1578,9 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     if (satAudioCtx) { try { satAudioCtx.close(); } catch(_) {} satAudioCtx = null; }
     satPlayAt = 0;
     satScheduledSources = [];
+    satMicMuted = false;
+    if (satMicResumeTimer !== null) { clearTimeout(satMicResumeTimer); satMicResumeTimer = null; }
+    satHalfDuplex = true;
     mySatelliteId = null;
     syncSatBtn();
   };
@@ -1534,13 +1588,35 @@ registerProcessor('fulloch-resample', ResampleTo16k);
   const satConnect = async () => {
     if (satWs) { satDisconnect(); return; }
     try {
-      satMicStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      // Pin the mic stream: mono, 16 kHz, and disable WebRTC audio processing.
+      // Defaults (audio: true) work on macOS/Windows but on Linux/Chrome,
+      // PulseAudio/PipeWire's webrtc-audio-processing is rougher than Core
+      // Audio and introduces audible dropouts / AGC pumping. We run Silero
+      // VAD and a noise baseline server-side, so the browser's AGC/EC/NS is
+      // actively harmful here. Pinning sampleRate to 16 kHz also makes the
+      // worklet's resample ratio exactly 1.0 — the loop becomes a copy and
+      // we stop doing linear-interp on every quantum.
+      //
+      // No navigator.audioSession manipulation: previous versions let Safari
+      // manage the audio session automatically, which correctly routes TTS
+      // to the loudspeaker. Explicitly setting 'play-and-record' overrides
+      // Safari's DefaultToSpeaker option and routes to the earpiece.
+      satMicStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+        video: false,
+      });
     } catch (e) {
       console.error('Satellite: mic access denied', e);
       alert('Microphone access denied — check browser permissions.');
       return;
     }
-    satAudioCtx = new AudioContext();
+    satAudioCtx = new AudioContext({ latencyHint: 'interactive' });
     satPlayAt = 0;
 
     // Load AudioWorklet for resampling mic to 16 kHz
@@ -1569,9 +1645,10 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     satWs.binaryType = 'arraybuffer';
 
     satWs.onopen = () => {
-      // Stream resampled mic chunks to server
+      // Stream resampled mic chunks to server (muted during TTS playback for
+      // half-duplex — prevents the assistant hearing its own reply as input).
       satWorkletNode.port.onmessage = (e) => {
-        if (satWs && satWs.readyState === WebSocket.OPEN) {
+        if (satWs && satWs.readyState === WebSocket.OPEN && !satMicMuted) {
           satWs.send(e.data);
         }
       };
@@ -1584,13 +1661,15 @@ registerProcessor('fulloch-resample', ResampleTo16k);
           const msg = JSON.parse(e.data);
           if (msg.type === 'session') {
             mySatelliteId = msg.satellite_id || null;
+            satHalfDuplex = msg.half_duplex !== false;
           } else if (msg.type === 'tts_start') {
             satTtsSr = msg.sr || 24000;
             satPlayAt = satAudioCtx ? Math.max(satPlayAt, satAudioCtx.currentTime) : 0;
-          } else if (msg.type === 'tts_cancel') {
-            satCancelPlayback();
+            satMuteMicForPlayback();
+          } else if (msg.type === 'tts_end' || msg.type === 'tts_cancel') {
+            if (msg.type === 'tts_cancel') satCancelPlayback();
+            satUnmuteMicAfterPlayback();
           }
-          // tts_end: nothing to do — chunks already scheduled
         } catch(_) {}
       } else {
         // Binary Float32 PCM audio chunk from TTS

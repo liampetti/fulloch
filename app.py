@@ -197,8 +197,13 @@ def _assistant_args(cfg):
     return general.get("wakeword"), cfg.get("models"), options
 
 
-def _start_dashboard(context, host, port, certfile, keyfile):
-    """Start the single dashboard server (setup + run share it). Never fatal."""
+def _start_dashboard(context, host, port, certfile, keyfile, http_redirect_port=None):
+    """Start the single dashboard server (setup + run share it). Never fatal.
+
+    The ``http_redirect_port`` arg is accepted for backward compatibility but
+    ignored — the dashboard now serves both schemes on the same port via a
+    TLS-sniffing dispatcher (see server.dashboard.start_dashboard).
+    """
     try:
         from server.dashboard import start_dashboard
 
@@ -208,11 +213,14 @@ def _start_dashboard(context, host, port, certfile, keyfile):
             ssl_certfile=certfile,
             ssl_keyfile=keyfile,
             context=context,
+            http_redirect_port=http_redirect_port,
         )
         scheme = "https" if (certfile and keyfile) else "http"
         logger.info("=" * 60)
         logger.info(" Fulloch — open the setup wizard / dashboard at:")
         logger.info("   %s://%s:%s", scheme, host, port)
+        if scheme == "https":
+            logger.info("   (typing http:// will 308-redirect here on the same port)")
         logger.info(" (first run boots the wizard; everything persists in ./data)")
         logger.info("=" * 60)
     except Exception as e:
@@ -235,6 +243,7 @@ def main():
         set_tz(tz)
     dash_cert = general.get("dashboard_ssl_certfile")
     dash_key = general.get("dashboard_ssl_keyfile")
+    dash_http_redirect_port = general.get("dashboard_http_redirect_port")
 
     # Phase A: decide whether first-run setup is needed before loading anything.
     decision = detect_setup_state(cfg)
@@ -259,9 +268,23 @@ def main():
     # wizard's install endpoint downloads models then releases the block below,
     # and the assistant is attached to this same server (no second server).
     if decision.needs_setup:
-        _start_dashboard(context, dash_host, dash_port or _SETUP_FALLBACK_PORT, dash_cert, dash_key)
+        _start_dashboard(
+            context,
+            dash_host,
+            dash_port or _SETUP_FALLBACK_PORT,
+            dash_cert,
+            dash_key,
+            http_redirect_port=dash_http_redirect_port,
+        )
     elif dash_port:
-        _start_dashboard(context, dash_host, dash_port, dash_cert, dash_key)
+        _start_dashboard(
+            context,
+            dash_host,
+            dash_port,
+            dash_cert,
+            dash_key,
+            http_redirect_port=dash_http_redirect_port,
+        )
 
     if decision.needs_setup:
         logger.warning("Setup required: %s", detail)

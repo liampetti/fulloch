@@ -14,6 +14,19 @@ _EMOJI_PATTERN = re.compile(
     flags=re.UNICODE,
 )
 
+# Dots in abbreviations are sentence boundaries to `split_sentences` and
+# `split_clauses`, so use spaces to make these news acronyms unambiguously
+# letter-by-letter without fragmenting speech.
+_TTS_ACRONYMS = frozenset({
+    "WA", "NSW", "QLD", "VIC", "TAS", "SA", "NT", "ACT",
+    "NRL", "AFL", "NBA", "NFL", "MLB", "UFC", "FIFA",
+    "NY", "UK", "US", "USA", "NZ", "EU",
+})
+_TTS_ACRONYM_RE = re.compile(
+    r"\b(" + "|".join(sorted(_TTS_ACRONYMS, key=len, reverse=True)) + r")\b"
+)
+_SEMICOLON_RE = re.compile(r"\s*;\s*")
+
 _THINK_PATTERN = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
 # Gemma 4 wraps its reasoning in a "thought" channel: `<|channel>thought ... <channel|>`.
 # Its template also emits an empty `<|channel>thought\n<channel|>` ghost block even
@@ -48,13 +61,15 @@ def split_clauses(text: str):
 
 
 def clean_for_tts(text: str, strip_think: bool = True) -> str:
-    """Prepare raw SLM output for speech: strip quotes, asterisks, <think>, emoji."""
+    """Prepare raw SLM output for speech."""
     text = text.replace('"', "").replace("*", "")
     if strip_think:
         text = _THINK_PATTERN.sub("", text)
         text = _GEMMA_THINK_PATTERN.sub("", text)
         text = _GEMMA_CHANNEL_STRAY.sub("", text).strip()
-    return _EMOJI_PATTERN.sub("", text)
+    text = _EMOJI_PATTERN.sub("", text)
+    text = _SEMICOLON_RE.sub(". ", text)
+    return _TTS_ACRONYM_RE.sub(lambda m: " ".join(m.group(1)), text)
 
 
 def split_sentences(text: str) -> list:

@@ -35,6 +35,9 @@ general:
   dashboard_host: "127.0.0.1"    # 0.0.0.0 to expose to LAN (set a dashboard password first).
   # HTTPS — both paths required, or TLS is skipped. Under Docker the files
   # must live under ./data. A self-signed cert is generated on first install.
+  # When HTTPS is on, a tiny dispatcher fronts the same port: http://
+  # requests get a 308 redirect to https://, https:// requests are proxied
+  # through to the TLS listener — one port handles both schemes.
   # dashboard_ssl_certfile: "./data/certs/dashboard.crt"
   # dashboard_ssl_keyfile:  "./data/certs/dashboard.key"
 

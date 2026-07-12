@@ -21,6 +21,7 @@ def _host(**overrides):
         "llm_enabled": True,
         "_history": [],
         "_history_for": lambda session: [],
+        "_turn_local": types.SimpleNamespace(sink=None, tts_active_event=None),
         "_trim_history": lambda: None,
         "_emit_agent_event": lambda *a, **k: None,
         "_compact_completed_turns": lambda: None,

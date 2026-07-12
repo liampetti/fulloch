@@ -535,6 +535,34 @@ def _pick_by_domain(entity_ids: list, domain: str = None) -> str:
     return entity_ids[0]
 
 
+_SINGULARIZE_SUFFIXES = frozenset({"shes", "ches", "xes", "zes", "sses"})
+
+
+def _singularize(word: str) -> str:
+    """Crude English singularizer for entity-name token matching.
+
+    Handles the plural patterns actually found in home-automation entity
+    names (simple -s, -es after sibilants, -ies, -ves) without a dependency
+    on a full NLP stemmer.  Input shorter than 4 characters is left alone
+    to avoid stripping real words like ``gas`` or ``bus``.
+    """
+    if len(word) <= 3:
+        return word
+    # -ies → -y  (berries → berry, batteries → battery)
+    if word.endswith("ies"):
+        return word[:-3] + "y"
+    # -ves → -f (leaves → leaf, shelves → shelf)
+    if word.endswith("ves"):
+        return word[:-3] + "f"
+    # -shes / -ches / -xes / -zes / -sses → strip "es"
+    if word.endswith(tuple(_SINGULARIZE_SUFFIXES)):
+        return word[:-2]
+    # Simple -s, guarded against -ss and -us singulars
+    if word.endswith("s") and not word.endswith("ss") and not word.endswith("us"):
+        return word[:-1]
+    return word
+
+
 def _resolve_entity(name: str, domain: str = None) -> str:
     """Resolve a friendly name to an entity_id.
 
@@ -568,12 +596,15 @@ def _resolve_entity(name: str, domain: str = None) -> str:
     # "Downstairs Office Ceiling Light" because every input token appears
     # in the alias's tokens. Pick the shortest matching alias (most specific
     # to the input) to break ties.
-    input_tokens = set(key.split())
+    #
+    # Both sides are singularized so plurals match their singular forms
+    # ("lights" ≈ "light", "switches" ≈ "switch", "berries" ≈ "berry").
+    input_tokens = {_singularize(t) for t in key.split()}
     if input_tokens:
         fuzzy = [
             (alias, eid)
             for alias, eid in _ENTITY_ALIASES.items()
-            if input_tokens.issubset(set(alias.split()))
+            if input_tokens.issubset({_singularize(t) for t in alias.split()})
         ]
         if fuzzy:
             fuzzy.sort(key=lambda kv: len(kv[0]))
@@ -609,12 +640,12 @@ def _resolve_area(name: str) -> Optional[str]:
         if key == area_id.lower() or key == area_name.lower():
             return area_id
 
-    input_tokens = set(key.split())
+    input_tokens = {_singularize(t) for t in key.split()}
     if input_tokens:
         fuzzy = [
             (area_id, area_name)
             for area_id, area_name in _AREA_MAP.items()
-            if input_tokens.issubset(set(area_name.lower().split()))
+            if input_tokens.issubset({_singularize(t) for t in area_name.lower().split()})
         ]
         if fuzzy:
             fuzzy.sort(key=lambda kv: len(kv[1]))
@@ -1233,7 +1264,7 @@ def get_entity_state(entity: str) -> str:
     attrs = state.get("attributes", {})
     details = [f"{friendly_name} is {entity_state}"]
 
-    if "brightness" in attrs:
+    if "brightness" in attrs and attrs["brightness"] is not None:
         brightness_pct = int((attrs["brightness"] / 255) * 100)
         details.append(f"brightness: {brightness_pct}%")
     if "temperature" in attrs:

@@ -331,7 +331,7 @@ def play_chunks(
                     sink.put((chunk, None))
                 sink.put(("end",))
             else:
-                logger.debug("No satellite connected; TTS chunks dropped on the floor.")
+                logger.warning("No satellite connected; TTS chunks dropped on the floor.")
         finally:
             if tts_active_event is not None:
                 tts_active_event.clear()
@@ -425,7 +425,7 @@ def speak_stream(
                 else:
                     sink.put(("end",))
             else:
-                logger.debug("No satellite connected; TTS chunks dropped on the floor.")
+                logger.warning("No satellite connected; TTS chunks dropped on the floor.")
                 _drain_job(out)
         finally:
             if tts_active_event is not None:

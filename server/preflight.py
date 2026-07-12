@@ -5,10 +5,18 @@ Lets the wizard warn before a multi-GB download won't fit, or before picking a
 tier the GPU can't hold, or before a CPU tier needs more RAM than is available.
 GPU detection imports torch lazily (and tolerates its absence) so this stays
 usable in setup mode on a CPU-only box.
+
+The `check_*` functions are the *blocking* preflight that runs at the moment
+the user clicks "Start download" (Task 3 of docs/ease-of-use-tasks.md): they
+return `(ok, message)` pairs and are intentionally short and loud rather than
+informative. The wizard's role is to translate each message into a clear
+"X is the problem, here's what to do" UI line.
 """
 
 import logging
 import shutil
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -158,3 +166,70 @@ def preflight(models_dir: str = "./data") -> dict:
         "ram": ram,
         "tier_fit": tier_fit(gpu, disk, ram),
     }
+
+
+# --- blocking preflight: runs at "Start download" click -------------------
+#
+# Each `check_*` returns (ok, message). The wizard reads the messages and
+# surfaces them in the error pane. The check is intentionally synchronous
+# (urllib HEAD, stat, file system) — no background work, no streaming — so
+# the user gets an immediate pass/fail before any download bytes flow.
+
+
+def check_disk_for_models(models: dict, models_dir: str = "./data") -> tuple[bool, str]:
+    """Fail if free disk space is less than the tier's expected download size.
+
+    Hard-fail: returns (False, message) when there's not enough room. The
+    message names both numbers ("X GB free, Y GB needed") so the user
+    can decide whether to free space or pick a smaller tier.
+    """
+    needed = _models_download_gb(models)
+    free = disk_free_gb(models_dir)
+    if needed <= 0:
+        return True, ""  # tier has no download (regex-only or remote LLM)
+    if free >= needed:
+        return True, ""
+    return False, (
+        f"only {free}GB free, but the chosen stack needs ~{needed}GB for "
+        f"the model download. Free up space or pick a smaller tier."
+    )
+
+
+def check_network(url: str = "https://huggingface.co/", timeout: float = 5.0) -> tuple[bool, str]:
+    """HEAD on `url` with a 5s connect+read timeout.
+
+    Doesn't validate the specific model repo — a healthy HF root is a strong
+    enough signal; per-repo 404s surface as clear download errors anyway.
+    stdlib urllib so we don't add a runtime dep for a single HEAD.
+    """
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            if 200 <= r.status < 400:
+                return True, ""
+            return False, f"model hub returned HTTP {r.status} — try again in a moment"
+    except urllib.error.URLError as e:
+        # Most common: DNS failure, connection refused, captive portal.
+        reason = getattr(e, "reason", str(e))
+        return False, f"can't reach the model hub at {url}: {reason}"
+    except (TimeoutError, OSError):
+        return False, f"timeout reaching {url} after {timeout}s — check your network or proxy"
+
+
+def check_gpu_for_models(models: dict) -> tuple[bool, str]:
+    """Fail if any selected backend requires a GPU but none is visible.
+
+    Only runs when a backend actually needs a GPU — the CPU tiers never
+    trip this check, so a CPU-only box picking `cpu_local` is fine.
+    """
+    if not _needs_gpu(models):
+        return True, ""
+    gpu = gpu_info()
+    if gpu["available"]:
+        return True, ""
+    return False, (
+        "no NVIDIA GPU detected, but the chosen stack needs one. "
+        "Either run the GPU container (`:latest` image with `--gpus all`) "
+        "or pick a CPU tier."
+    )
+

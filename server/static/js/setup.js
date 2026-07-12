@@ -54,7 +54,24 @@ function showAlert(detail) {
 }
 function clearAlert() { const a = $('alert'); if (a) a.innerHTML = ''; }
 
-let SCHEMA = null, PREFLIGHT = null;
+// Render the blocking preflight errors as a bulleted list in the alert pane.
+// Each error is {check: 'disk'|'network'|'gpu', message: '…'}. One banner
+// header + one bullet per failed check, so the user can fix them all in
+// one pass instead of round-tripping per failure.
+function showPreflightErrors(errors) {
+  if (!errors || !errors.length) return;
+  const labels = { disk: 'Disk space', network: 'Network', gpu: 'GPU' };
+  const items = errors.map(e => {
+    const label = labels[e.check] || e.check;
+    return `<li><strong>${label}:</strong> ${e.message}</li>`;
+  }).join('');
+  $('alert').innerHTML =
+    `<div class="alert-banner"><span class="alert-icon" aria-hidden="true">⚠</span>`
+    + `<div><strong>Can't start the model download yet.</strong>`
+    + `<ul class="alert-list">${items}</ul></div></div>`;
+}
+
+let SCHEMA = null, PREFLIGHT = null, STATUS = null;
 const sel = {
   tier: 'cpu_local', models: null,
   wakeword: 'hey atticus', wakeword_pattern: '', voice_clone: '',
@@ -85,6 +102,7 @@ async function boot() {
   let status;
   try { status = await getJSON('/status'); }
   catch (e) { screen().innerHTML = `<div class="card">Waiting for server…</div>`; setTimeout(boot, 1500); return; }
+  STATUS = status;
 
   if (status.phase === 'READY') { return openSettings(); }
   if (status.phase === 'DOWNLOADING') { return showProgress(); }
@@ -150,9 +168,55 @@ function cpuVariantNotice() {
   return el(`<div class="variant-notice">
     <h3>Running on the CPU image</h3>
     <p>Audio (speech recognition + text-to-speech) runs fully local. The language model is either regex-only (simple commands) or off-box via an OpenAI-compatible server you already run.</p>
-    <p>For the full stack (voice cloning + 9B SLM) on one box, exit and run:</p>
-    <code>docker compose -f compose.gpu.yml up --build -d</code>
+    <p>For the full stack (voice cloning + 9B SLM on one NVIDIA box), stop this container and run a new one with the <code>:latest</code> tag and <code>--gpus all</code> — see the <strong>GPU</strong> block in the README. The wizard is the same on both images; only the model download differs.</p>
   </div>`);
+}
+
+// TLS banner: shown on the first wizard step when the dashboard is
+// serving over HTTPS. Pre-empts the browser's self-signed-cert warning
+// and gives the user a copyable URL (the user might be reaching the
+// dashboard from a phone or another device on the LAN, where the URL
+// bar isn't obvious). Dismissable — we remember the dismiss in
+// localStorage so returning users don't see it again.
+const TLS_BANNER_DISMISS_KEY = 'fulloch.tls_banner_dismissed_v1';
+function tlsBanner() {
+  if (!STATUS || !STATUS.dashboard_url) return null;
+  if (localStorage.getItem(TLS_BANNER_DISMISS_KEY)) return null;
+  const url = STATUS.dashboard_url;
+  const banner = el(`<div class="banner tls-info" role="note">
+    <div class="tls-info-head">
+      <strong>Open the dashboard at this URL</strong>
+      <button class="banner-dismiss" id="tls-banner-dismiss" type="button" aria-label="Dismiss">✕</button>
+    </div>
+    <p>Your browser will warn about a self-signed certificate — click through; this is expected for a private LAN install.</p>
+    <div class="tls-url-row">
+      <code class="tls-url" id="tls-url"></code>
+      <button id="tls-url-copy" type="button">Copy</button>
+    </div>
+  </div>`);
+  banner.querySelector('#tls-url').textContent = url;
+  banner.querySelector('#tls-banner-dismiss').addEventListener('click', () => {
+    try { localStorage.setItem(TLS_BANNER_DISMISS_KEY, '1'); } catch (e) { /* private mode */ }
+    banner.remove();
+  });
+  const copyBtn = banner.querySelector('#tls-url-copy');
+  copyBtn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      const orig = copyBtn.textContent;
+      copyBtn.textContent = 'Copied';
+      setTimeout(() => { copyBtn.textContent = orig; }, 1500);
+    } catch (e) {
+      // Clipboard API blocked (insecure context, permissions). Fall back
+      // to selecting the text so the user can ⌘C / Ctrl-C it.
+      const range = document.createRange();
+      range.selectNode(banner.querySelector('#tls-url'));
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  });
+  return banner;
 }
 
 // Plain-English labels for the wizard (no model sizes in main view)
@@ -193,7 +257,15 @@ function stepBrain() {
     </details>
     <div class="actions"><span></span><button class="primary next" id="next1">Next</button></div>
   </div>`);
-  screen().innerHTML = ''; screen().appendChild(c);
+  screen().innerHTML = '';
+  const banner = tlsBanner();
+  if (banner) {
+    // Render the TLS banner above the card so it's the first thing the
+    // user sees on a fresh HTTPS install. The dismiss is per-browser
+    // (localStorage) — once acknowledged, the banner is gone for good.
+    screen().appendChild(banner);
+  }
+  screen().appendChild(c);
 
   const list = $('tier-list');
   tiers.forEach(t => {
@@ -317,23 +389,23 @@ function setBranding(remote) {
   if (img) img.src = remote ? '/logo.png?remote=1' : '/logo.png';
 }
 
-// ---- step 2: set up (wakeword + voice + optional integrations) -------------
+// ---- step 2: set up (wakeword + voice) -------------------------------------
+// HA + SearXNG used to live here as collapsed <details> cards. They were
+// moved to a dedicated sub-step (`stepConnect`) so the "skip by default"
+// treatment is the page's primary affordance instead of a footnote — the
+// step's own Skip button (and an explicit "this is optional" lead) make
+// the choice obvious. Task 4 of docs/ease-of-use-tasks.md.
 async function stepSetup() {
   curStep = 1; renderSteps(1);
   const isKokoro = ttsBackend() === 'kokoro-onnx';
   const def = KOKORO_VOICES.includes(sel.voice_clone) ? sel.voice_clone : KOKORO_RECOMMENDED;
   const kokoroOpts = KOKORO_VOICES.map(v => kokoroOption(v, def)).join('');
-  const haUrl = (sel.ha.url || '').replace(/"/g, '&quot;');
-  const haToken = (sel.ha.token || '').replace(/"/g, '&quot;');
-  const haTokenSet = SCHEMA.credentials && SCHEMA.credentials.ha_token;
-  const haTokenPh = credPlaceholder(haTokenSet, 'create one in HA → Profile → Security');
-  const searchUrl = (sel.search_url || '').replace(/"/g, '&quot;');
   const presets = SCHEMA.wakeword_presets;
   const customWake = presets.some(p => p.wakeword === sel.wakeword) ? '' : sel.wakeword;
 
   const c = el(`<div class="card">
     <h2>Set up your assistant</h2>
-    <p class="lead">Everything has a sensible default — connect what you want and click <strong>Get started</strong>.</p>
+    <p class="lead">Everything has a sensible default — pick a name and voice, then click <strong>Get started</strong>.</p>
 
     <div class="section-title">What should you call it?</div>
     <div id="wake-list"></div>
@@ -349,39 +421,6 @@ async function stepSetup() {
          <button id="gen-voice" style="margin-top:0.5rem">+ Generate new voice clone</button>
          <div id="gen-panel"></div>`
     }
-
-    <div class="section-title">Connect your world <span class="muted" style="font-weight:400;font-size:0.8rem">— all optional, skip what you don't need</span></div>
-
-    <details id="ha-section" class="connect-section">
-      <summary>
-        <span class="csname">🏠 Home Assistant</span>
-        <span class="cstatus" id="ha-cstatus"></span>
-      </summary>
-      <div class="cbody">
-        <p class="help">Control lights, media, climate, and more by voice.</p>
-        <label>URL</label>
-        <input type="text" id="ha-url" placeholder="http://homeassistant.local:8123" value="${haUrl}">
-        <label>Long-lived access token</label>
-        <input type="text" id="ha-token" placeholder="${haTokenPh}" value="${haToken}">
-        <div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.6rem">
-          <button id="ha-test">Test</button>
-          <span id="ha-status" class="muted"></span>
-        </div>
-      </div>
-    </details>
-
-    <details id="search-section" class="connect-section">
-      <summary>
-        <span class="csname">🔍 Web search</span>
-        <span class="cstatus" id="search-cstatus"></span>
-      </summary>
-      <div class="cbody">
-        <p class="help">Live web answers, summarised into a short spoken reply.</p>
-        <label>SearXNG URL <span class="muted" style="font-weight:400">(leave blank if using the bundled container)</span></label>
-        <input type="text" id="search-url" placeholder="http://localhost:8080" value="${searchUrl}">
-        <p class="help" style="margin-top:0.4rem">Run <code style="font-family:monospace;font-size:0.78rem">docker compose -f compose.yml -f compose.searxng.yml up -d</code> to start a local SearXNG automatically — then leave this blank.</p>
-      </div>
-    </details>
 
     <div class="actions">
       <button id="back2" class="back">Back</button>
@@ -420,6 +459,71 @@ async function stepSetup() {
     $('gen-voice').addEventListener('click', showGenPanel);
   }
 
+  $('back2').addEventListener('click', stepBrain);
+  // "Get started" goes to the new "Connect (optional)" sub-step where HA
+  // and SearXNG are configured. Both cards default-collapsed, and the
+  // sub-step's own Skip button drops the user straight into Obsidian
+  // (which itself has a Skip). Task 4 of docs/ease-of-use-tasks.md.
+  $('get-started').addEventListener('click', stepConnect);
+}
+
+// ---- step 2.4: connect HA + SearXNG (optional) ----------------------------
+// Same sub-step shape as Obsidian (step 2.5): one screen, one Skip button,
+// every card collapsed by default. The "skip by default" treatment matches
+// the pattern Obsidian already uses — the user only expands a card if
+// they want to configure that integration right now.
+function stepConnect() {
+  const haUrl = (sel.ha.url || '').replace(/"/g, '&quot;');
+  const haToken = (sel.ha.token || '').replace(/"/g, '&quot;');
+  const haTokenSet = SCHEMA.credentials && SCHEMA.credentials.ha_token;
+  const haTokenPh = credPlaceholder(haTokenSet, 'create one in HA → Profile → Security');
+  const searchUrl = (sel.search_url || '').replace(/"/g, '&quot;');
+
+  const c = el(`<div class="card">
+    <h2>Connect (optional)</h2>
+    <p class="lead">Skip this — your assistant works fine without any of these. Expand a card only if you want to set it up now; you can add them later from the settings console.</p>
+
+    <details id="ha-section" class="connect-section"${haUrl ? ' open' : ''}>
+      <summary>
+        <span class="csname">🏠 Home Assistant</span>
+        <span class="cstatus" id="ha-cstatus"></span>
+      </summary>
+      <div class="cbody">
+        <p class="help">Control lights, media, climate, and more by voice.</p>
+        <label>URL</label>
+        <input type="text" id="ha-url" placeholder="http://homeassistant.local:8123" value="${haUrl}">
+        <label>Long-lived access token</label>
+        <input type="text" id="ha-token" placeholder="${haTokenPh}" value="${haToken}">
+        <div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.6rem">
+          <button id="ha-test">Test</button>
+          <span id="ha-status" class="muted"></span>
+        </div>
+      </div>
+    </details>
+
+    <details id="search-section" class="connect-section"${searchUrl ? ' open' : ''}>
+      <summary>
+        <span class="csname">🔍 Web search</span>
+        <span class="cstatus" id="search-cstatus"></span>
+      </summary>
+      <div class="cbody">
+        <p class="help">Live web answers, summarised into a short spoken reply.</p>
+        <label>SearXNG URL</label>
+        <input type="text" id="search-url" placeholder="http://localhost:8080" value="${searchUrl}">
+        <p class="help" style="margin-top:0.4rem">To run a local SearXNG: <code style="font-family:monospace;font-size:0.78rem">docker run -d --name searxng -p 8080:8080 -e SEARXNG_SECRET=change-me searxng/searxng</code>, then enter <code style="font-family:monospace;font-size:0.78rem">http://localhost:8080</code> above.</p>
+      </div>
+    </details>
+
+    <div class="actions">
+      <button id="connect-back" class="back">Back</button>
+      <span style="display:flex;gap:0.5rem">
+        <button id="connect-skip">Skip</button>
+        <button class="primary" id="connect-next">Next</button>
+      </span>
+    </div>
+  </div>`);
+  screen().innerHTML = ''; screen().appendChild(c);
+
   // --- HA ---
   $('ha-url').addEventListener('input', () => sel.ha.url = $('ha-url').value.trim());
   $('ha-token').addEventListener('input', () => sel.ha.token = $('ha-token').value.trim());
@@ -441,12 +545,9 @@ async function stepSetup() {
   // --- Search ---
   $('search-url').addEventListener('input', () => sel.search_url = $('search-url').value.trim());
 
-  // Pre-open sections that already have values
-  if (sel.ha.url) $('ha-section').setAttribute('open', '');
-  if (sel.search_url) $('search-section').setAttribute('open', '');
-
-  $('back2').addEventListener('click', stepBrain);
-  $('get-started').addEventListener('click', stepObsidian);
+  $('connect-back').addEventListener('click', stepSetup);
+  $('connect-skip').addEventListener('click', stepObsidian);
+  $('connect-next').addEventListener('click', stepObsidian);
 }
 
 // ---- step 2.5: connect Obsidian (optional) ---------------------------------
@@ -473,7 +574,7 @@ async function stepObsidian() {
   </div>`);
   screen().innerHTML = ''; screen().appendChild(c);
 
-  $('obsidian-back').addEventListener('click', stepSetup);
+  $('obsidian-back').addEventListener('click', stepConnect);
   $('obsidian-skip').addEventListener('click', doInstall);
   $('obsidian-detect').addEventListener('click', async () => {
     const status = $('obsidian-status'); status.textContent = 'Scanning…'; status.style.color = '';
@@ -603,6 +704,19 @@ async function saveVoice() {
 async function doInstall() {
   const btn = $('get-started');
   if (btn) btn.disabled = true;
+  clearAlert();
+  // Blocking preflight before the model download starts: disk space,
+  // network reach to the model hub, and (for GPU tiers) an NVIDIA GPU
+  // being visible. Each failed check becomes one bullet in the error
+  // pane so the user knows exactly which to fix. Task 3 of
+  // docs/ease-of-use-tasks.md.
+  const pre = await postJSON('/setup/preflight-download');
+  const preBody = await pre.json().catch(() => ({ ok: true, errors: [] }));
+  if (!pre.ok) {
+    showPreflightErrors(preBody.errors || []);
+    if (btn) btn.disabled = false;
+    return;
+  }
   const models = chosenModels();
   await postJSON('/setup/models', { models });
   const updates = {

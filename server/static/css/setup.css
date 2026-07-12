@@ -127,6 +127,34 @@ details.advanced summary { cursor: pointer; font-size: 0.85rem; color: var(--tex
 .banner { padding: 0.7rem 0.9rem; border-radius: 10px; margin-bottom: 1rem; font-size: 0.88rem; }
 .banner.warn { background: color-mix(in srgb, var(--warn) 15%, transparent); border: 1px solid var(--warn); }
 .banner.error { background: color-mix(in srgb, var(--error) 15%, transparent); border: 1px solid var(--error); }
+/* TLS banner — first-step nudge that pre-empts the browser's self-signed-
+   cert warning and gives the user a copyable dashboard URL. */
+.banner.tls-info {
+  background: color-mix(in srgb, var(--primary) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--primary) 40%, var(--border));
+  color: var(--text);
+}
+.banner.tls-info p { margin: 0 0 0.6rem; }
+.banner.tls-info p:last-child { margin-bottom: 0; }
+.tls-info-head {
+  display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.45rem;
+}
+.tls-info-head strong { flex: 1; font-size: 0.95rem; }
+.tls-url-row {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+.tls-url {
+  flex: 1; min-width: 0; padding: 0.4rem 0.6rem; border-radius: 8px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem; word-break: break-all; user-select: all;
+}
+.banner-dismiss {
+  flex: none; background: transparent; border: none; color: var(--text-muted);
+  font-size: 0.95rem; padding: 0.1rem 0.35rem; border-radius: 6px; cursor: pointer;
+}
+.banner-dismiss:hover { background: var(--surface-2); color: var(--text); }
 #alert { margin-bottom: 1rem; }
 #alert:empty { display: none; }
 .alert-banner { display: flex; gap: 0.7rem; align-items: flex-start;
@@ -138,6 +166,10 @@ details.advanced summary { cursor: pointer; font-size: 0.85rem; color: var(--tex
 .alert-banner strong { font-size: 0.98rem; }
 .alert-banner .alert-detail { display: block; margin-top: 0.15rem;
   font-size: 0.86rem; opacity: 0.95; }
+.alert-banner .alert-list { margin: 0.4rem 0 0; padding-left: 1.2rem;
+  font-size: 0.86rem; opacity: 0.95; }
+.alert-banner .alert-list li { margin-bottom: 0.25rem; }
+.alert-banner .alert-list li:last-child { margin-bottom: 0; }
 .field { margin-bottom: 0.5rem; }
 .field .lbl { display: flex; align-items: center; gap: 0.35rem; }
 .info { cursor: help; color: var(--text-muted); border: 1px solid var(--border); border-radius: 50%;

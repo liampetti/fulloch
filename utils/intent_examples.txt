@@ -179,3 +179,47 @@
     Tool — search_notes: "Reactive question: Found 2 possible matches for 'kitchen appliances' in the user's notes (matched by keyword or by topic, so some may not contain 'kitchen appliances' literally). in 'dishwasher manual': descaling cycle every three months...; in 'kitchen reno': replaced the old appliances..."
   Output:
   {"reply": "Your dishwasher manual note covers the descaling cycle, and a kitchen reno note touches on the appliances. Want me to read the manual note?"}
+
+- User: "What's the house looking like right now"
+  Output:
+  {"actions": [{"intent": "list_entities_in_area", "args": ["downstairs office"]}]}
+
+- Conversation context:
+    User: "What's the house looking like right now"
+    Tool — list_entities_in_area: "Downstairs Office has: downstairs office, office pendant"
+  Output:
+  {"actions": [
+    {"intent": "get_entity_state", "args": ["downstairs office"]},
+    {"intent": "get_entity_state", "args": ["office pendant"]}
+  ]}
+
+- Conversation context:
+    User: "What's the house looking like right now"
+    Tool — list_entities_in_area: "Downstairs Office has: downstairs office, office pendant"
+    Tool — get_entity_state: "downstairs office is on, brightness: 75%"
+    Tool — get_entity_state: "office pendant is on"
+  Output:
+  {"reply": "The downstairs office has two lights on — the main one at 75 percent and the pendant fully on."}
+
+- Conversation context:
+    User: "What's the kitchen like"
+    Tool — list_entities_in_area: "Kitchen has: kitchen ceiling, kitchen counter, kitchen thermostat"
+  Output:
+  {"actions": [
+    {"intent": "get_entity_state", "args": ["kitchen ceiling"]},
+    {"intent": "get_entity_state", "args": ["kitchen counter"]},
+    {"intent": "get_temperature", "args": ["kitchen"]}
+  ]}
+
+- Conversation context:
+    User: "What's the kitchen like"
+    Tool — list_entities_in_area: "Kitchen has: kitchen ceiling, kitchen counter, kitchen thermostat"
+    Tool — get_entity_state: "kitchen ceiling is on"
+    Tool — get_entity_state: "kitchen counter is off"
+    Tool — get_temperature: "kitchen is 22 degrees"
+  Output:
+  {"reply": "The kitchen light is on, the counter light is off, and it's 22 degrees in there."}
+
+- User: "How's the temperature in the office"
+  Output:
+  {"actions": [{"intent": "get_temperature", "args": ["office"]}]}

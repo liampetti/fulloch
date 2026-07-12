@@ -42,9 +42,11 @@ def _import_assistant_module():
         for attr in attrs:
             setattr(mod, attr, lambda *a, **k: None)
         if name == "core.slm":
-            # Real exception class — assistant.py does `except
-            # ContextExhaustedError`, which a lambda stub can't satisfy.
+            # Real exception classes — assistant.py / agent_loop.py do
+            # `except ContextExhaustedError` / `except RemoteUnreachable`,
+            # which a lambda stub can't satisfy.
             mod.ContextExhaustedError = type("ContextExhaustedError", (RuntimeError,), {})
+            mod.RemoteUnreachable = type("RemoteUnreachable", (RuntimeError,), {})
         sys.modules[name] = mod
 
     import core.assistant as assistant  # noqa: E402
@@ -90,3 +92,44 @@ def test_run_turn_passes_callback():
     src = inspect.getsource(a.Assistant._run_turn)
     assert "on_slm_start" in src, "ack hook not wired into _run_turn"
     assert "_play_random_ack" in src, "ack playback not invoked"
+
+
+def test_play_random_ack_accepts_sink_parameter():
+    """`_play_random_ack` must accept a sink to forward to its daemon
+    thread, otherwise threading.local() leaves the daemon with a None sink
+    and the ack gets dropped on the floor.
+    """
+    a = _import_assistant_module()
+    sig = inspect.signature(a.Assistant._play_random_ack)
+    assert "sink" in sig.parameters
+    assert "tts_active_event" in sig.parameters
+
+
+def test_daemon_ack_threads_capture_parent_sink():
+    """Every place that spawns a daemon thread to play an ack must pass the
+    current thread's sink — otherwise the daemon's _turn_local is empty and
+    the audio never reaches the browser.
+    """
+    a = _import_assistant_module()
+
+    # The two on_slm_start closures in the half-duplex and barge-in turn paths.
+    for fn_name in ("_run_half_duplex", "_run_turn"):
+        src = inspect.getsource(getattr(a.Assistant, fn_name))
+        assert 'sink":' in src or 'sink=' in src, (
+            f"{fn_name} doesn't pass sink into the ack thread"
+        )
+
+    # The two agent_loop.py callers (replan stall + web-search ack) and the
+    # barge-in worker.
+    import core.agent_loop as agent_loop
+    agent_src = inspect.getsource(agent_loop)
+    assert agent_src.count('"sink"') >= 2 or agent_src.count("sink=") >= 2, (
+        "agent_loop.py daemon ack threads don't pass sink through"
+    )
+
+    assistant_src = inspect.getsource(a.Assistant)
+    # Barge-in worker also spawns an ack thread; it explicitly resolves the
+    # sat sink before calling _play_random_ack with it.
+    assert 'sat.tts_sink' in assistant_src, (
+        "barge-in ack thread isn't plumbing the satellite's sink"
+    )

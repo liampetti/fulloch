@@ -74,6 +74,8 @@ data/models/**
 !data/models/grammars/agent.gbnf
 data/cache/
 *.gguf
+config.yml
+credentials.json
 
 # =============================================================================
 # Logs and Databases

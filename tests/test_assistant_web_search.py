@@ -169,7 +169,7 @@ def test_hallucinated_tool_blocked_before_dispatch():
 def test_tool_unavailable_cache_wired():
     a = _import_assistant_module()
     # The canned clips are pre-rendered and re-rendered on a voice change.
-    specs = {attr: pool for attr, pool, _ in a.Assistant._PHRASE_CACHE_SPECS}
+    specs = {attr: pool for attr, pool, _ in a.STARTUP_CACHE_SPECS}
     assert "tool_unavailable_cache" in specs
     src = inspect.getsource(a.Assistant._speak_tool_unavailable_fallback)
     assert "tool_unavailable_cache" in src and "_record_spoken" in src

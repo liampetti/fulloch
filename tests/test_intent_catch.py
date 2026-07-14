@@ -28,7 +28,10 @@ from utils.intent_catch import (
     extract_toggle,
     extract_turn_onoff,
     extract_volume_down,
+    extract_volume_down_target,
     extract_volume_up,
+    extract_volume_up_target,
+    has_default_weather_forecast,
     has_time_query,
     list_timers,
 )
@@ -508,6 +511,18 @@ class TestVolume:
             "actions": [{"intent": "ha_volume_down", "args": []}]
         }
 
+    def test_targeted_volume_routes_to_the_named_room_or_player(self):
+        assert extract_volume_down_target("turn the volume down in the living room") == "living room"
+        assert extract_volume_up_target("turn up the volume on the Sonos speaker") == "Sonos speaker"
+        assert catchAll("turn the volume down in the living room") == {
+            "actions": [{"intent": "ha_volume_down", "args": ["living room"]}]
+        }
+
+    def test_pause_with_filler_and_music_object_uses_the_fast_path(self):
+        assert catchAll("just pause the music then") == {
+            "actions": [{"intent": "pause", "args": []}]
+        }
+
 
 class TestNoFalsePositives:
     """Conversational / ambiguous phrasings that mention trigger words but
@@ -575,6 +590,33 @@ class TestCatchAll:
     def test_catch_time(self):
         result = catchAll("what time is it")
         assert result == {"actions": [{"intent": "get_time", "args": []}]}
+
+    @pytest.mark.parametrize(
+        "utterance",
+        [
+            "what's the weather",
+            "weather forecast",
+            "forecast?",
+            "what will the weather be like",
+            "tell me the weather forecast",
+        ],
+    )
+    def test_catch_default_weather_forecast(self, utterance):
+        assert has_default_weather_forecast(utterance) is True
+        assert catchAll(utterance) == {"actions": [{"intent": "get_weather_forecast", "args": []}]}
+
+    @pytest.mark.parametrize(
+        "utterance",
+        [
+            "what's the weather forecast for tomorrow",
+            "what's the weather in London",
+            "will it rain this weekend",
+            "forecast for the kitchen",
+        ],
+    )
+    def test_default_weather_forecast_rejects_arguments(self, utterance):
+        assert has_default_weather_forecast(utterance) is None
+        assert catchAll(utterance) == utterance
 
     def test_catch_skip(self):
         result = catchAll("skip")

@@ -117,14 +117,31 @@ def plan_assets(resolved: dict, models_dir: str = "./data/models") -> list:
         model = cfg["model"]
         # Nothing to fetch for the no-LLM bypass or a remote endpoint (no HF
         # repo/file), so skip those domains.
-        if not (spec.hf_repo or spec.hf_file):
+        if not (spec.hf_repo or spec.hf_file or spec.hf_files):
+            continue
+        if spec.hf_files:
+            # Compound directory models such as Qwen3-TTS need weights from
+            # multiple HF repos (talker plus codec) in one loader directory.
+            dest = str(model)
+            for index, (repo, filename) in enumerate(spec.hf_files):
+                assets.append(
+                    Asset(
+                        key=f"{domain}:{spec.backend}" if index == 0 else f"{domain}:{spec.backend}:codec",
+                        label=spec.display_name if index == 0 else f"{spec.display_name} codec",
+                        kind="file",
+                        dest=dest,
+                        repo=repo,
+                        filename=filename,
+                        size_gb=spec.download_size_gb if index == 0 else None,
+                    )
+                )
             continue
         # A custom LOCAL model path the user points at is honoured as-is —
         # present-checked + loaded in place, regardless of the backend's default
         # form — so the scan reflects the *actual* path, not the default repo's
         # hub presence. Checked before the hf_file/snapshot defaults.
         if _is_file_model(model):
-            # A single weight file: the default GGUF, or a custom .gguf path.
+            # A single weight file: a GGUF backend or a custom .gguf path.
             fpath = Path(str(model))
             assets.append(
                 Asset(

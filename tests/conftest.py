@@ -73,18 +73,17 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # --- Heavy-dependency stubs (CI without the GPU stack) ---------------------
-# The full Qwen3 pipeline (torch / llama_cpp / qwen_asr / qwen_tts / sounddevice
+# The full Qwen3 pipeline (torch / qwen_asr / qwen_tts / sounddevice
 # / silero_vad / sentence_transformers ...) is GPU-resident and pulls hundreds
 # of MB. The pure-logic test suite doesn't exercise any of it — those imports
 # are incidental (e.g. core/asr.py imports torch at module top but the queue
 # logic under test never touches it). So we stub each heavy module ONLY when it
 # isn't importable: on the dev/GPU machine the real packages load and behaviour
 # is unchanged; in CI the stubs let imports succeed with zero heavy deps. Things
-# that genuinely need the real library (e.g. loading the llama.cpp grammar) are
-# skipped via STUBBED_MODULES rather than asserted against a mock.
+# that genuinely need a real library are skipped via STUBBED_MODULES rather than
+# asserted against a mock.
 _HEAVY_MODULES = (
     "torch",
-    "llama_cpp",
     "qwen_asr",
     "qwen_tts",
     "sounddevice",

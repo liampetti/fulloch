@@ -205,6 +205,29 @@ def update_config(updates: dict, path: str = DEFAULT_CONFIG_PATH) -> list:
 
 def write_models(models: dict, path: str = DEFAULT_CONFIG_PATH) -> None:
     """Write the structured `models:` block (tier/backends)."""
+    if not isinstance(models, dict):
+        raise ValueError("models must be an object")
+    llm = models.get("llm")
+    if not isinstance(llm, dict):
+        raise ValueError("models.llm must be an object")
+    backend = llm.get("backend")
+    if backend == "local":
+        local_model = llm.get("local_model", "qwen")
+        if local_model not in {"qwen", "gemma", "custom"}:
+            raise ValueError("models.llm.local_model must be qwen, gemma, or custom")
+        if local_model == "custom":
+            model = llm.get("model")
+            if not isinstance(model, str) or not model.lower().endswith(".gguf"):
+                raise ValueError("a custom local model must be a .gguf file")
+    elif backend == "external":
+        if not isinstance(llm.get("base_url"), str) or not llm["base_url"].strip():
+            raise ValueError("an external LLM needs a base_url")
+    elif backend not in {"llama", "gemma", "openai", "none"}:
+        raise ValueError("models.llm.backend must be local or external")
+    if "n_context" in llm and (
+        not isinstance(llm["n_context"], int) or isinstance(llm["n_context"], bool) or llm["n_context"] <= 0
+    ):
+        raise ValueError("models.llm.n_context must be a positive integer")
     doc = _load_doc(path)
     block = CommentedMap()
     for domain in ("asr", "tts", "llm"):
@@ -262,14 +285,12 @@ def _backends_view() -> dict:
 
 def _tiers_view() -> list:
     """Tier presets tagged with `offerable` for the running image variant."""
-    from core.backends import get_spec, is_offerable
+    from core.backends import is_offerable, resolve_models
 
     tiers = tier_presets_as_dicts()
     for tier in tiers:
-        models = tier["models"]
-        tier["offerable"] = all(
-            is_offerable(get_spec(domain, models[domain]["backend"])) for domain in models
-        )
+        resolved = resolve_models(tier["models"])
+        tier["offerable"] = all(is_offerable(resolved[domain]["spec"]) for domain in resolved)
     return tiers
 
 

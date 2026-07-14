@@ -95,7 +95,7 @@ class AgentLoop:
 
     Construct per turn with the owning Assistant plus the turn context, then
     call `run(user_prompt)`. Must be invoked under the host's `_turn_lock`
-    (llama-cpp-python isn't thread-safe); the caller in `Assistant` holds it.
+    (the local model server and history are shared); the caller in `Assistant` holds it.
     """
 
     def __init__(
@@ -257,6 +257,15 @@ class AgentLoop:
                                 vault_context=getattr(host, "_vault_current_file", None),
                                 satellite_area=(
                                     self.satellite.ha_area if self.satellite is not None else None
+                                ),
+                                higgs_personality=(
+                                    (
+                                        host.higgs_personality_custom.strip()
+                                        if host.higgs_personality == "custom"
+                                        else host.higgs_personality
+                                    )
+                                    if getattr(host, "_tts_backend", None) == "higgs-gguf"
+                                    else None
                                 ),
                             ),
                             cancel_check=cancel_check,

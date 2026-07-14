@@ -9,7 +9,7 @@ from here so model identity lives in exactly one place.
 
 Deliberately import-light: this module is imported during *setup mode*
 (before any model is chosen and before torch/llama are wanted), so it must
-not pull in torch, qwen, or llama_cpp. Loaders are therefore stored as
+not pull in torch or qwen. Loaders are therefore stored as
 `"module:function"` dotted-path strings and imported lazily by
 `get_loader()` only when a backend is actually loaded.
 
@@ -23,7 +23,7 @@ The `models:` config block selects backends:
         backend: qwen
       llm:
         backend: llama                  # llama | none | openai
-        model: "./data/models/Qwen3.5-9B-UD-Q4_K_XL.gguf"  # or any absolute path
+        model: "./data/models/qwen3.5-9b-mtp/Qwen3.5-9B-UD-Q4_K_XL.gguf"  # or any absolute path
         n_context: 12288
 
 When the block (or a domain within it) is absent, `resolve_models()` falls
@@ -62,6 +62,7 @@ class BackendSpec:
     default_model: Optional[str] = None
     hf_repo: Optional[str] = None
     hf_file: Optional[str] = None  # single-file download (e.g. a .gguf); else full snapshot
+    hf_files: tuple = ()  # (repo, filename) pairs downloaded into a directory model path
     hf_allow: tuple = ()  # allow_patterns for a dir snapshot (fetch only these)
     download_size_gb: Optional[float] = None
     vram_gb: Optional[float] = None
@@ -75,13 +76,6 @@ class BackendSpec:
     # (e.g. Moonshine, the GPU torch ASR, the 12B LLM). The wizard tags these
     # so users know the tier presets are the picks.
     experimental: bool = False
-    # How this model's reasoning/thinking turn is toggled on the *local*
-    # llama.cpp path. "qwen" appends Qwen3's `/think` text directive; "" (or any
-    # unknown family) adds no directive — deep_think still runs a free-text call
-    # but without an explicit chain-of-thought block. See `core.slm.generate_slm`.
-    # (The remote OpenAI path toggles reasoning via chat_template_kwargs instead,
-    # which in-process llama-cpp-python 0.3.x can't pass — see core/llm_openai.py.)
-    think_style: str = ""
     extra: dict = field(default_factory=dict)
 
     @property
@@ -110,7 +104,7 @@ _register(
         domain=ASR,
         backend="qwen",
         gpu_only=True,
-        display_name="Qwen3 ASR 1.7B",
+        display_name="Qwen3 1.7B PyTorch (default GPU)",
         loader="core.asr:load_asr_model",
         default_model="Qwen/Qwen3-ASR-1.7B",
         hf_repo="Qwen/Qwen3-ASR-1.7B",
@@ -120,6 +114,26 @@ _register(
         notes="GPU + flash-attention 2. High accuracy; biases on wakeword context.",
     )
 )
+# Smaller CrispASR CUDA ASR for the matching low-VRAM GGUF stack. It retains
+# Qwen's multilingual/context-prompting features at a lower accuracy ceiling.
+_register(
+    BackendSpec(
+        domain=ASR,
+        backend="qwen-gguf-small",
+        gpu_only=True,
+        experimental=True,
+        display_name="Qwen3 0.6B GGUF (GPU)",
+        loader="core.asr_crispasr:load_asr_model",
+        default_model="./data/models/qwen3-asr-0.6b-q4_k.gguf",
+        hf_repo="cstr/qwen3-asr-0.6b-GGUF",
+        hf_file="qwen3-asr-0.6b-q4_k.gguf",
+        download_size_gb=0.6,
+        vram_gb=1.5,
+        deps=(),
+        notes="Smaller CUDA CrispASR worker. Supports the same context prompting as the 1.7B "
+        "GGUF model, with lower accuracy.",
+    )
+)
 # Smaller GPU torch ASR (Qwen3-ASR 0.6B) — lower VRAM than the 1.7B, lower
 # accuracy. Same loader/contract as the 1.7B GPU path.
 _register(
@@ -127,7 +141,7 @@ _register(
         domain=ASR,
         backend="qwen-small",
         gpu_only=True,
-        display_name="Qwen3 ASR 0.6B",
+        display_name="Qwen3 0.6B PyTorch (GPU)",
         experimental=True,  # smaller/less accurate than the 1.7B; GPU torch
         loader="core.asr:load_asr_model",
         default_model="Qwen/Qwen3-ASR-0.6B",
@@ -153,7 +167,7 @@ _register(
         domain=ASR,
         backend="qwen-onnx",
         cpu_ok=True,
-        display_name="Qwen3-ASR 1.7B (ONNX, CPU)",
+        display_name="Qwen3 1.7B ONNX (default CPU)",
         loader="core.asr_onnx_qwen17b:load_asr_model",
         default_model="./data/models/qwen3-asr-1.7b-onnx",
         hf_repo="andrewleech/qwen3-asr-1.7b-onnx",  # snapshotted flat into default_model
@@ -188,7 +202,7 @@ _register(
         domain=ASR,
         backend="qwen-onnx-small",
         cpu_ok=True,
-        display_name="Qwen3-ASR 0.6B (ONNX, CPU)",
+        display_name="Qwen3 0.6B ONNX (CPU)",
         loader="core.asr_onnx:load_asr_model",
         default_model="./data/models/qwen3-asr-0.6b-onnx",
         hf_repo="Daumee/Qwen3-ASR-0.6B-ONNX-CPU",  # snapshotted flat into default_model (a dir)
@@ -209,7 +223,7 @@ _register(
         domain=ASR,
         backend="moonshine",
         cpu_ok=True,
-        display_name="Moonshine Base (edge)",
+        display_name="Moonshine Base (CPU)",
         experimental=True,  # English-only, no wakeword biasing; edge fallback only
         loader="core.asr_tiny:load_asr_model",
         default_model="UsefulSensors/moonshine-base",
@@ -228,7 +242,7 @@ _register(
         domain=ASR,
         backend="moonshine-tiny",
         cpu_ok=True,
-        display_name="Moonshine Tiny (smallest)",
+        display_name="Moonshine Tiny (CPU)",
         experimental=True,  # English-only, no wakeword biasing; edge fallback only
         loader="core.asr_tiny:load_asr_model",
         default_model="UsefulSensors/moonshine-tiny",
@@ -248,7 +262,7 @@ _register(
         domain=TTS,
         backend="qwen",
         gpu_only=True,
-        display_name="Qwen3 TTS 1.7B (voice clone)",
+        display_name="Qwen3 1.7B PyTorch (default GPU)",
         loader="core.tts:load_tts",
         default_model="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
         hf_repo="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
@@ -258,6 +272,48 @@ _register(
         notes="Runtime voice cloning from data/voices/<name>.{wav,txt}.",
     )
 )
+
+_register(
+    BackendSpec(
+        domain=TTS,
+        backend="qwen-gguf-small",
+        gpu_only=True,
+        experimental=True,
+        display_name="Qwen3 0.6B GGUF (GPU)",
+        loader="core.tts_crispasr:load_tts",
+        default_model="./data/models/qwen3-tts-crispasr-0.6b-gguf",
+        hf_files=(
+            ("cstr/qwen3-tts-0.6b-base-GGUF", "qwen3-tts-12hz-0.6b-base-q8_0.gguf"),
+            ("cstr/qwen3-tts-tokenizer-12hz-GGUF", "qwen3-tts-tokenizer-12hz.gguf"),
+        ),
+        download_size_gb=1.1,
+        vram_gb=2.5,
+        deps=(),
+        notes="Smaller CUDA CrispASR worker with direct PCM streaming and runtime voice cloning. "
+        "Lower quality than the 1.7B models, but substantially lower VRAM.",
+        extra={"gpu": True},
+    )
+)
+
+# Qwen3-ASR GGUF through CrispASR's CUDA runtime. The worker-backed adapter
+# keeps CrispASR's ggml isolated from other CUDA model runtimes.
+_register(
+    BackendSpec(
+        domain=ASR,
+        backend="qwen-gguf",
+        gpu_only=True,
+        display_name="Qwen3 1.7B GGUF (GPU)",
+        loader="core.asr_crispasr:load_asr_model",
+        default_model="./data/models/qwen3-asr-1.7b-q4_k.gguf",
+        hf_repo="cstr/qwen3-asr-1.7b-GGUF",
+        hf_file="qwen3-asr-1.7b-q4_k.gguf",
+        download_size_gb=1.5,
+        vram_gb=2.0,
+        deps=(),
+        notes="CUDA CrispASR worker. Q4_K decoder with a Q8 audio tower; supports "
+        "context prompting for wakeword biasing. Benchmark before production use.",
+    )
+)
 # Smaller GPU voice-clone TTS (Qwen3-TTS 0.6B Base) — lower VRAM than the 1.7B.
 # Same loader/contract as the 1.7B GPU path.
 _register(
@@ -265,7 +321,7 @@ _register(
         domain=TTS,
         backend="qwen-small",
         gpu_only=True,
-        display_name="Qwen3 TTS 0.6B (voice clone)",
+        display_name="Qwen3 0.6B PyTorch (GPU)",
         experimental=True,  # smaller than the 1.7B; GPU torch
         loader="core.tts:load_tts",
         default_model="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
@@ -284,7 +340,7 @@ _register(
         domain=TTS,
         backend="kokoro-onnx",
         cpu_ok=True,
-        display_name="Kokoro 82M (ONNX, CPU)",
+        display_name="Kokoro 82M (default CPU)",
         loader="core.tts_onnx:load_tts",
         default_model="./data/models/kokoro-82m-onnx",
         hf_repo="onnx-community/Kokoro-82M-v1.0-ONNX",
@@ -297,58 +353,47 @@ _register(
     )
 )
 
-# CrispASR-hosted Qwen3-TTS-1.7B-Base GGUF (q8_0 talker + f16 codec), CPU, via
-# CrispASR's Python ctypes binding (not the CLI binary the bench scripts use —
-# see core/tts_crispasr.py's module docstring for why that distinction
-# matters for a live assistant). Selectable, not yet a tier default: fetch is
-# manual (scripts/fetch_crispasr_tts.py), not wired into the setup wizard.
 _register(
     BackendSpec(
         domain=TTS,
-        backend="crispasr-qwen3-tts",
-        cpu_ok=True,
+        backend="higgs-gguf",
+        gpu_only=True,
         experimental=True,
-        display_name="Qwen3-TTS 1.7B q8_0 (CrispASR GGUF, CPU)",
-        loader="core.tts_crispasr:load_tts",
-        default_model="./data/models/qwen3-tts-crispasr-gguf",
-        hf_repo="cstr/qwen3-tts-1.7b-base-GGUF",
-        hf_file="qwen3-tts-12hz-1.7b-base-q8_0.gguf",
-        download_size_gb=2.3,  # ~1.9GB talker + ~0.35GB codec; runtime lib is a few MB more
-        vram_gb=0.0,
-        ram_gb=3.0,
-        deps=("crispasr",),
-        notes="Voice cloning via data/voices/<name>.wav, same convention as core/tts.py. "
-        "Needs a one-time `scripts/fetch_crispasr_tts.py` run first (runtime lib + "
-        "talker GGUF + companion codec GGUF) — not yet in the download wizard. "
-        "`models.tts.gpu: true` is currently DISABLED — see core/tts_crispasr.py's "
-        "module docstring: works in isolation but crashes in the real assistant "
-        "process (ggml symbol collision with llama-cpp-python's bundled ggml).",
+        display_name="Higgs TTS 3 Q4_K GGUF (GPU)",
+        loader="core.tts_higgs:load_tts",
+        default_model="./data/models/higgs-tts-v3-q4",
+        hf_files=(
+            ("liampetti/HiggsTTS3.gguf", "higgs-v3-tts-q4_k.gguf"),
+            ("liampetti/HiggsTTS3.gguf", "higgs_tts_v3_tokenizer.json"),
+        ),
+        download_size_gb=2.9,
+        vram_gb=6.5,
+        deps=(),
+        notes="Experimental CUDA Higgs TTS 3 voice clone with emotion, style, SFX, and prosody "
+        "control tokens. Research/non-commercial license; requires the GPU image's isolated native "
+        "runtime, Boson AI attribution, and consent for every voice reference.",
+        extra={"max_actions": 256},
     )
 )
 
-# Same runtime, smaller talker (Qwen3-TTS-0.6B-Base) — ~2x faster (RTF ~1.0x
-# vs the 1.7B's ~1.5-2.5x measured on this box), lower quality ceiling. Same
-# loader (core/tts_crispasr.py auto-detects the talker size from whichever
-# known GGUF is in default_model) and shared codec GGUF.
 _register(
     BackendSpec(
         domain=TTS,
-        backend="crispasr-qwen3-tts-0.6b",
-        cpu_ok=True,
-        experimental=True,
-        display_name="Qwen3-TTS 0.6B q8_0 (CrispASR GGUF, CPU)",
+        backend="qwen-gguf",
+        gpu_only=True,
+        display_name="Qwen3 1.7B GGUF (GPU)",
         loader="core.tts_crispasr:load_tts",
-        default_model="./data/models/qwen3-tts-crispasr-0.6b-gguf",
-        hf_repo="cstr/qwen3-tts-0.6b-base-GGUF",
-        hf_file="qwen3-tts-12hz-0.6b-base-q8_0.gguf",
-        download_size_gb=1.3,  # ~1.0GB talker + ~0.35GB codec; runtime lib is a few MB more
-        vram_gb=0.0,
-        ram_gb=2.0,
-        deps=("crispasr",),
-        notes="Same as crispasr-qwen3-tts but the 0.6B talker — faster, lower quality "
-        "ceiling. Needs a one-time `scripts/fetch_crispasr_tts.py --model 0.6b` run "
-        "first — not yet in the download wizard. `models.tts.gpu: true` is currently "
-        "DISABLED, same reason as crispasr-qwen3-tts (see its notes / core/tts_crispasr.py).",
+        default_model="./data/models/qwen3-tts-crispasr-gguf",
+        hf_files=(
+            ("cstr/qwen3-tts-1.7b-base-GGUF", "qwen3-tts-12hz-1.7b-base-f16.gguf"),
+            ("cstr/qwen3-tts-tokenizer-12hz-GGUF", "qwen3-tts-tokenizer-12hz.gguf"),
+        ),
+        download_size_gb=3.6,
+        vram_gb=5.0,
+        deps=(),
+        notes="CUDA CrispASR worker with direct PCM streaming and runtime voice cloning from "
+        "data/voices/<name>.{wav,txt}. Benchmark before production use.",
+        extra={"gpu": True},
     )
 )
 
@@ -358,33 +403,29 @@ _register(
         domain=LLM,
         backend="llama",
         gpu_only=True,
-        display_name="Qwen3.5 9B (local, llama.cpp)",
+        display_name="Qwen3.5 9B MTP (local)",
         loader="core.slm:load_slm",
-        default_model="./data/models/Qwen3.5-9B-UD-Q4_K_XL.gguf",
-        hf_repo="unsloth/Qwen3.5-9B-GGUF",
+        # The old non-MTP model used the same filename. Keep this in a dedicated
+        # directory so an existing cache cannot be mistaken for an MTP GGUF.
+        default_model="./data/models/qwen3.5-9b-mtp/Qwen3.5-9B-UD-Q4_K_XL.gguf",
+        hf_repo="unsloth/Qwen3.5-9B-MTP-GGUF",
         hf_file="Qwen3.5-9B-UD-Q4_K_XL.gguf",  # Unsloth Dynamic 2.0 — ~Q5 quality, smaller
         download_size_gb=6.0,
         vram_gb=7.5,
         n_context=12288,
-        deps=("llama_cpp",),
-        think_style="qwen",  # deep_think uses Qwen3's `/think` text directive
-        notes="Grammar-constrained agent loop. Full tier.",
+        deps=(),
+        notes="Grammar-constrained agent loop with native MTP speculative decoding. Full tier.",
+        extra={"mtp": True},
     )
 )
-# Alternative local SLM: Gemma 4 12B (QAT Q4). Same llama.cpp loader/contract as
-# the Qwen path; bigger model at a quant-aware-trained Q4 so it still fits the
-# budget. Reasoning note: Gemma toggles thinking via the chat template's
-# `enable_thinking` kwarg, which in-process llama-cpp-python can't pass, AND its
-# template force-closes an empty thought channel in the generation prompt unless
-# that kwarg is set — so deep_think runs as a plain considered answer locally (no
-# CoT block). For true Gemma reasoning use the `openai` backend against a
-# llama-server with --chat-template-kwargs. think_style="" ⇒ no `/think` directive.
+# Alternative local SLM: Gemma 4 12B (QAT Q4). It uses the same bundled
+# llama-server/OpenAI-compatible path as Qwen, without MTP speculation.
 _register(
     BackendSpec(
         domain=LLM,
         backend="gemma",
         gpu_only=True,
-        display_name="Gemma 4 12B QAT (local, llama.cpp)",
+        display_name="Gemma 4 12B QAT (local)",
         experimental=True,  # heavier than the recommended Qwen3.5 9B; tight on 16GB
         loader="core.slm:load_slm",
         default_model="./data/models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
@@ -393,8 +434,8 @@ _register(
         download_size_gb=6.72,
         vram_gb=8.0,
         n_context=10240,  # 0.7GB heavier than Qwen9B; trim ctx for KV headroom (tune per card)
-        deps=("llama_cpp",),
-        think_style="",  # see note above: local deep_think has no CoT block
+        deps=(),
+        extra={"mtp": False},
         notes="Grammar-constrained agent loop. Alternative full-tier SLM (Gemma 4).",
     )
 )
@@ -441,7 +482,24 @@ def get_spec(domain: str, backend: str) -> BackendSpec:
 
 def list_backends(domain: str) -> list[BackendSpec]:
     """All registered specs for a domain (for the wizard's dropdowns)."""
-    return [spec for (d, _b), spec in _REGISTRY.items() if d == domain]
+    order = {
+        ASR: (
+            "qwen-gguf",
+            "qwen-gguf-small",
+            "qwen-onnx",
+            "qwen-onnx-small",
+            "qwen",
+            "qwen-small",
+            "moonshine",
+            "moonshine-tiny",
+        ),
+        TTS: ("higgs-gguf", "qwen-gguf", "qwen-gguf-small", "qwen", "qwen-small", "kokoro-onnx"),
+    }.get(domain, ())
+    rank = {backend: index for index, backend in enumerate(order)}
+    return sorted(
+        (spec for (d, _b), spec in _REGISTRY.items() if d == domain),
+        key=lambda spec: rank.get(spec.backend, len(rank)),
+    )
 
 
 def variant() -> str:
@@ -492,7 +550,8 @@ def get_module(domain: str, backend: str):
     return importlib.import_module(module_path)
 
 
-# Defaults reproducing the v2.1.9 Qwen stack when `models:` is absent.
+# Defaults used when `models:` is absent. The GPU stack uses the direct-streaming
+# CrispASR GGUF models; CPU tier presets select their ONNX/Kokoro alternatives.
 _DEFAULT_BACKENDS = {ASR: "qwen", TTS: "qwen", LLM: "llama"}
 
 
@@ -500,8 +559,8 @@ def resolve_models(config_models: Optional[dict]) -> dict:
     """Resolve a `models:` config block into a fully-defaulted spec per domain.
 
     Returns `{domain: {"backend", "model", "n_context", "spec", "opts"}}`.
-    A missing block, or a missing domain within it, falls back to the current
-    Qwen stack so existing installs keep working untouched. `model` defaults
+    A missing block, or a missing domain within it, falls back to the default
+    GPU PyTorch Qwen stack. `model` defaults
     to the registry's `default_model`; `n_context` (LLM only) to the registry
     metadata. Unknown extra keys in a domain block are passed through as
     `opts` for the loader.
@@ -511,14 +570,35 @@ def resolve_models(config_models: Optional[dict]) -> dict:
     for domain in DOMAINS:
         block = dict(config_models.get(domain) or {})
         backend = block.pop("backend", None) or _DEFAULT_BACKENDS[domain]
+        if domain == LLM:
+            # Public config deliberately exposes only local/external. Keep the
+            # old implementation names readable so existing installs continue
+            # to boot after upgrading.
+            if backend == "local":
+                local_model = block.pop("local_model", "qwen")
+                if local_model in {"qwen", "qwen-mtp"}:
+                    backend = "llama"
+                elif local_model == "gemma":
+                    backend = "gemma"
+                elif local_model == "custom":
+                    backend = "llama"
+                else:
+                    raise ValueError(f"Unknown local LLM model {local_model!r}; choose qwen, gemma, or custom")
+            elif backend == "external":
+                backend = "openai"
+            # Legacy manual override. Hardware capability now selects the safe
+            # runtime automatically, so never forward it to the model loader.
+            block.pop("flash_attn", None)
         spec = get_spec(domain, backend)
         model = block.pop("model", None) or spec.default_model
         n_context = block.pop("n_context", None) or spec.n_context
+        opts = dict(spec.extra)
+        opts.update(block)  # Explicit config overrides registry loader defaults.
         resolved[domain] = {
             "backend": backend,
             "model": model,
             "n_context": n_context,
             "spec": spec,
-            "opts": block,  # leftover keys forwarded to the loader
+            "opts": opts,  # registry defaults + leftover config keys forwarded to the loader
         }
     return resolved

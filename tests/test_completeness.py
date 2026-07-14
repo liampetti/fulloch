@@ -40,6 +40,12 @@ def test_filler_tail_is_incomplete():
     assert is_complete("what time is it um") is False
 
 
+def test_dangling_request_verb_is_incomplete():
+    assert is_complete("can you read") is False
+    assert is_complete("could you bring") is False
+    assert is_complete("show") is False
+
+
 def test_trailing_punctuation_ignored():
     assert is_complete("dim the lights.") is True
     assert is_complete("and ...") is False
@@ -63,10 +69,16 @@ def _actions(*intents):
 
 
 def test_safe_regex_intent_commits_immediately():
-    # Reversible / read-only intents commit on the regex match alone.
+    # Complete reversible / read-only intents commit at the soft endpoint.
     assert should_commit_provisional("turn off the lights", _actions("turn_off")) is True
     assert should_commit_provisional("what time is it", _actions("get_time")) is True
     assert should_commit_provisional("louder", _actions("ha_volume_up")) is True
+
+
+def test_safe_regex_intent_waits_for_a_dangling_request():
+    # Broad note-read regexes must not act on "can you read, um ..." mid-speech.
+    assert should_commit_provisional("can you read", _actions("read_note")) is False
+    assert should_commit_provisional("can you read um", _actions("read_note")) is False
 
 
 def test_unsafe_regex_intent_waits():

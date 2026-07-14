@@ -53,6 +53,8 @@ class SatelliteSession:
     turn_thread: Optional[threading.Thread] = None
     last_turn_end: float = 0.0
     last_spoken_text: str = ""  # self-echo suppression compares against this
+    higgs_delivery: str = ""  # explicit user delivery request for the active/follow-up turn
+    tts_gain: float = 1.0  # per-turn output gain for explicit quiet/whisper requests
     skip_followup_self_echo: bool = False
     drop_results_until: float = 0.0
     follow_up_deadline: float = 0.0  # monotonic; 0.0 = window closed
@@ -77,6 +79,10 @@ class SatelliteSession:
     # if the hard endpoint's onset matches this, it's the same utterance — drop.
     # 0.0 = no committed provisional pending.
     provisional_committed_onset: float = 0.0
+    # Text fallback for the duplicate guard: VAD/ASR timing can differ by more
+    # than the onset tolerance after a soft endpoint has flushed the recorder.
+    provisional_committed_text: str = ""
+    provisional_committed_at: float = 0.0
 
     # --- Forward-compat hooks (phases 4-6) ---------------------------------
     # All optional/default-None so a Phase 1 connect leaves them inert. They

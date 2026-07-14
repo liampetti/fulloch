@@ -827,6 +827,26 @@ def test_resolve_area_matches_by_display_name():
         assert ha._resolve_area("upstairs") is None
 
 
+def test_media_target_prefers_spotify_and_resolves_a_room_player():
+    import tools.home_assistant as ha
+
+    with (
+        patch.object(ha, "_loaded", True),
+        patch.object(ha, "SPOTIFY_ENTITY", "media_player.sonos"),
+        patch.object(ha, "AVR_ENTITY", "media_player.avr"),
+        patch.object(ha, "TV_ENTITY", "media_player.tv"),
+        patch.object(ha, "_resolve_area", return_value="living_room"),
+        patch.object(
+            ha,
+            "_area_entities",
+            return_value=["media_player.tv", "media_player.sonos"],
+        ),
+    ):
+        assert ha._media_target(None) == "media_player.sonos"
+        assert ha._media_target("living room") == "media_player.sonos"
+        assert ha._media_target("living room", prefer_spotify=False) == "media_player.tv"
+
+
 def test_list_entities_in_area_filters_domain_and_denylist():
     import tools.home_assistant as ha
 

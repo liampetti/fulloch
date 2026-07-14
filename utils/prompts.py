@@ -53,6 +53,7 @@ def get_agent_system_prompt(
     name: str = "Fulloch",
     vault_context: "Optional[dict]" = None,
     satellite_area: "Optional[str]" = None,
+    higgs_personality: "Optional[str]" = None,
 ) -> str:
     """Unified agent prompt — emits either `actions` dispatch or `reply` text.
 
@@ -88,6 +89,8 @@ Every reply is exactly one JSON object — one of:
 Use exactly one field per object, with at most three actions — never more. When the user asks about one thing (e.g. "the temperature downstairs"), one action is enough; do not enumerate similar rooms or devices to scan. `reply` is the spoken-answer field, not a tool name — don't place it inside `actions`.
 
 A `reply` is the final spoken answer the user hears — nothing runs after it. If answering means checking, confirming, verifying, or looking up live information, emit the action that does it (`external_information` for live facts) — never a `reply` that only says you will check, look it up, confirm, or find out. Don't promise to act; act, then answer from the result.
+
+For play, pause, stop, skip, resume, mute, source, or volume requests, dispatch the matching media tool. Never claim playback or volume changed unless that tool ran successfully this turn.
 
 When the user says something open-ended ("I need to relax", "movie night"), don't dispatch tools immediately — propose a plan in `reply` and wait for the next turn. If the next turn confirms ("yes", "go ahead", "do it"), look at the prior assistant turn in history and emit the matching `actions`.
 
@@ -176,6 +179,22 @@ Respond with exactly one JSON object matching the grammar.
             f"\nThe user is currently in the {satellite_area}. If their request doesn't "
             "name a room, assume they mean here — but always use the room they actually "
             "named instead when they do."
+        )
+    if higgs_personality:
+        styles = {
+            "balanced": "Use delivery tags sparingly: occasional `<|emotion:affection|>` or `<|prosody:pause|>` for warm, natural speech.",
+            "playful": "Prefer occasional `<|emotion:amusement|>`, `<|emotion:enthusiasm|>`, `<|sfx:laughter|>Haha`, and `<|prosody:expressive_high|>` when fitting.",
+            "calm": "Prefer restrained `<|emotion:affection|>`, `<|emotion:contemplation|>`, `<|prosody:speed_slow|>`, and `<|prosody:pause|>`; avoid intense delivery.",
+            "wry": "Use dry observational humor with articulate, mildly exasperated delivery. Prefer occasional `<|emotion:amusement|>`, `<|emotion:bitterness|>`, and `<|prosody:pause|>` for dramatic timing; keep sarcasm kind and never let it undermine help or safety.",
+        }
+        body += "\nHiggs TTS is active. Reply text may use supported `<|category:value|>` delivery tags only when useful. "
+        body += styles.get(higgs_personality, higgs_personality)
+        body += (
+            " Tags are optional delivery direction, never semantic content, and must not appear in actions or tool arguments. "
+            "For an explicit whisper request use `<|style:whispering|>` before the reply. "
+            "For laughter use `<|sfx:laughter|>Haha` before the reply. "
+            "For a pause use `<|prosody:pause|>` at the desired point. "
+            "Never say you cannot whisper, laugh, sing, or adjust delivery when Higgs supports the requested effect.\n"
         )
     return _with_facts(body)
 

@@ -110,6 +110,44 @@ def test_plan_skips_none_llm():
     assert kok.kind == "dir_snapshot" and kok.allow
 
 
+def test_plan_downloads_compound_crispasr_tts_model_to_one_directory(tmp_path):
+    resolved = resolve_models(
+        {
+            "asr": {"backend": "qwen-gguf"},
+            "tts": {"backend": "qwen-gguf"},
+            "llm": {"backend": "none"},
+        }
+    )
+    assets = dl.plan_assets(resolved, models_dir=str(tmp_path))
+    asr = next(asset for asset in assets if asset.key == "asr:qwen-gguf")
+    tts = [asset for asset in assets if asset.key.startswith("tts:qwen-gguf")]
+    assert asr.kind == "file" and asr.filename.endswith("q4_k.gguf")
+    assert len(tts) == 2
+    assert {asset.filename for asset in tts} == {
+        "qwen3-tts-12hz-1.7b-base-f16.gguf",
+        "qwen3-tts-tokenizer-12hz.gguf",
+    }
+    assert len({asset.dest for asset in tts}) == 1
+
+
+def test_plan_downloads_compound_small_crispasr_tts_model(tmp_path):
+    resolved = resolve_models(
+        {
+            "asr": {"backend": "qwen-gguf-small"},
+            "tts": {"backend": "qwen-gguf-small"},
+            "llm": {"backend": "none"},
+        }
+    )
+    assets = dl.plan_assets(resolved, models_dir=str(tmp_path))
+    asr = next(asset for asset in assets if asset.key == "asr:qwen-gguf-small")
+    tts = [asset for asset in assets if asset.key.startswith("tts:qwen-gguf-small")]
+    assert asr.filename == "qwen3-asr-0.6b-q4_k.gguf"
+    assert {asset.filename for asset in tts} == {
+        "qwen3-tts-12hz-0.6b-base-q8_0.gguf",
+        "qwen3-tts-tokenizer-12hz.gguf",
+    }
+
+
 def test_download_runs_all_and_reports_done(tmp_path):
     calls = []
     mgr = dl.DownloadManager(
@@ -271,7 +309,7 @@ def test_tier_fit_warns_on_low_disk():
 
 def test_tier_fit_warns_on_low_ram():
     gpu = {"available": False, "name": None, "vram_gb": None}
-    # CPU tiers need ~1.2 GB RAM (0.8 qwen-onnx-small ASR + 0.4 TTS); 1 GB available should warn.
+    # CPU tiers need ~4.9 GB RAM (4.5 qwen-onnx ASR + 0.4 TTS); 1 GB available should warn.
     ram = {"total_gb": 4.0, "available_gb": 1.0}
     fits = pf.tier_fit(gpu, disk_gb=999, ram=ram)
     by_id = {f["id"]: f for f in fits}
@@ -303,8 +341,8 @@ def test_tier_fit_exposes_ram_gb():
     gpu = {"available": False, "name": None, "vram_gb": None}
     fits = pf.tier_fit(gpu, disk_gb=999)
     by_id = {f["id"]: f for f in fits}
-    # cpu_local: qwen-onnx-small (0.8) + kokoro-onnx (0.4) = 1.2
-    assert by_id["cpu_local"]["ram_gb"] == pytest.approx(1.2)
+    # cpu_local: qwen-onnx (4.5) + kokoro-onnx (0.4) = 4.9
+    assert by_id["cpu_local"]["ram_gb"] == pytest.approx(4.9)
     # full: ASR/TTS/LLM are all GPU-resident now, none set ram_gb
     assert by_id["full"]["ram_gb"] == pytest.approx(0.0)
 

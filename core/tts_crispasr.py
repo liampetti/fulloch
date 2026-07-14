@@ -1,42 +1,19 @@
 """CrispASR-hosted Qwen3-TTS-Base GGUF (1.7B or 0.6B) — voice-clone TTS via ggml,
 CPU by default, optionally CUDA.
 
-Uses CrispASR's Python ctypes binding (`crispasr.Session`), not the `crispasr`
-CLI binary. That distinction matters: the CLI spawns a fresh process and reloads the
-whole model on every call (fine for a one-shot benchmark, bad for a live
-assistant), while `crispasr.Session` loads the talker + codec GGUFs once and
-stays resident in-process — `synthesize(text) -> np.ndarray` calls on an
-already-open session pay only the forward-pass cost. That's the same
-load-once-then-synth-per-clause contract as core/tts.py and core/tts_onnx.py,
-so this module mirrors their worker-thread/clause-split structure directly.
+Uses CrispASR's direct Qwen3-TTS C ABI in a persistent worker. Unlike the
+unified `crispasr.Session.synthesize()` API, this ABI emits PCM while codec
+frames are generated, so browser playback starts before the full clause is
+complete.
 
-GPU (`models.tts.gpu: true`) is currently DISABLED — see _GPU_DISABLED_REASON
-below. In isolation (a bare Python process with nothing else loaded) the
-hybrid CPU-glue + CUDA-.so package assembled by
-`scripts/fetch_crispasr_tts.py --gpu` genuinely works: ~3.3GB VRAM for the
-1.7B q8_0 talker, RTF ~0.6x vs the CPU build's ~1.5-2.5x (verified by hand,
-2026-07-05, RTX 5060 Ti). But inside the real assistant process — which also
-loads llama-cpp-python for the 9B SLM — it crashes with `undefined symbol:
-ggml_col2im_1d`. Root cause: both CrispASR and llama-cpp-python bundle their
-own copy of ggml under the same sonames (libggml-base.so.0 etc, upstream
-ggml's own naming convention); whichever loads first into the process claims
-that soname process-wide, and the dynamic linker satisfies the other
-library's same-named dependency by reusing the first one rather than the
-co-located copy sitting next to it. The SLM loads before TTS in
-`_load_models()`, so llama-cpp-python's (older) ggml wins, and CrispASR's
-`libcrispasr.so` ends up resolving a symbol its own bundled ggml has but
-llama-cpp-python's older one doesn't. Fixing this needs either soname
-isolation (patchelf-renaming CrispASR's bundled ggml libs so they can't
-collide) or running CrispASR out-of-process (it has a built-in HTTP TTS
-server mode) — both real efforts, shelved for now rather than attempted
-blind. See git history around 2026-07-05 for the investigation.
+GPU runs in a persistent isolated subprocess. This prevents CrispASR's bundled
+ggml libraries from colliding with other CUDA model runtimes
+inside the main assistant process, while retaining a warm session between
+clauses.
 
-The runtime library and the two GGUFs (talker + codec) are NOT fetched here.
-This project's assistant runs with `HF_HUB_OFFLINE=1` after setup — every
-other backend's weights are fetched by the setup wizard, not lazily at
-`load_tts()` time — so run `scripts/fetch_crispasr_tts.py` (add `--gpu` for
-the CUDA runtime too) once beforehand (manual for now; this backend is
-experimental/selectable, not yet wired into the wizard's download flow).
+The GPU image bakes the pinned CUDA runtime into `/opt`; the setup wizard
+downloads the talker and codec GGUF files. The legacy fetch script remains
+useful for native development.
 
 Consent/disclaimer note: the CrispASR *CLI*'s `--i-have-rights` gate and
 `--no-spoken-disclaimer`/watermark handling live in the CLI application layer,
@@ -57,6 +34,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from .crispasr_worker import CrispASRWorker
 from .text_utils import split_clauses
 from .tts_session import TtsSession
 from .turn_stats import TurnStats
@@ -66,38 +44,38 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL_DIR = "./data/models/qwen3-tts-crispasr-gguf"
 DEFAULT_MODEL_DIR_0_6B = "./data/models/qwen3-tts-crispasr-0.6b-gguf"
 DEFAULT_LIB_DIR = "./data/models/crispasr-python"
-DEFAULT_LIB_DIR_GPU = "./data/models/crispasr-python-cuda"  # unused while gpu=True is disabled; kept for the writeup
+DEFAULT_LIB_DIR_GPU = "/opt/crispasr-python-cuda"
 CODEC_FILE = "qwen3-tts-tokenizer-12hz.gguf"
 
-# Talker filename -> CrispASR backend id (crispasr.Session(..., backend=...)).
+# Talker filenames accepted by the direct Qwen3-TTS ABI.
 # The codec (12Hz tokenizer) is shared, fixed at f16, across both sizes —
 # quantizing it hurts more than the talker does. Confirmed both
 # open+synthesize correctly with real audio.
 _TALKER_BACKENDS = {
+    "qwen3-tts-12hz-1.7b-base-f16.gguf": "qwen3-tts-1.7b-base",
     "qwen3-tts-12hz-1.7b-base-q8_0.gguf": "qwen3-tts-1.7b-base",
     "qwen3-tts-12hz-0.6b-base-q8_0.gguf": "qwen3-tts",  # registry's canonical 0.6B-base key
 }
 
 VOICES_DIR = "./data/voices"
 
-# See the module docstring: the CUDA hybrid genuinely works in isolation but
-# crashes (undefined symbol: ggml_col2im_1d) inside the real assistant
-# process, which also loads llama-cpp-python's own bundled ggml under the
-# same sonames. Guarded here so `gpu: true` fails fast with an explanation
-# instead of crashing _load_models with a cryptic ctypes OSError.
-_GPU_DISABLED_REASON = (
-    "crispasr-qwen3-tts* gpu=true is disabled: CrispASR's bundled ggml and "
-    "llama-cpp-python's bundled ggml collide (same sonames, first-loaded "
-    "wins process-wide) when both are loaded in the same process — the SLM "
-    "loads first, so CrispASR's libcrispasr.so resolves a symbol "
-    "(ggml_col2im_1d) against llama-cpp-python's older ggml, which lacks it. "
-    "See core/tts_crispasr.py's module docstring for the full writeup."
-)
-
 SAMPLE_RATE = 24000
 _CHUNK_SAMPLES = SAMPLE_RATE // 2  # ~500ms barge-in granularity, matching core/tts_onnx.py
 
-_session = None  # crispasr.Session, warm — set by load_tts()
+_session = None  # Warm CrispASR session/worker, set by load_tts().
+_worker_config = None
+_voice_prompt = None
+_worker_stream_count = 0
+
+# CrispASR's native Qwen TTS graph allocation grows with a single input span.
+# Keep long note/news replies bounded so a full 16 GB GPU stack retains room for
+# the decoder graph rather than aborting the worker on one oversized clause.
+_MAX_SYNTHESIS_CHARS = 240
+# CrispASR's direct TTS ABI retains ggml scheduler buffers between stream calls.
+# Recycle before its allocation growth can consume the Full stack's remaining
+# 16 GB headroom. A worker reload occurs between clauses while browser playback
+# already has generated PCM queued.
+_MAX_STREAMS_PER_WORKER = 8
 
 
 def force_cancel_playback(sink: Optional["queue.Queue"] = None) -> None:
@@ -131,25 +109,21 @@ def load_tts(
     `_TALKER_BACKENDS`, so the same loader serves either size — only
     `model_id` (i.e. `default_model` on the backend registration) differs.
 
-    `gpu=True` (set via `models.tts.gpu: true`) is currently disabled — see
-    _GPU_DISABLED_REASON / the module docstring.
+    `gpu=True` starts the CUDA session in an isolated worker process.
     """
-    global _session
+    global _session, _worker_config, _voice_prompt, _worker_stream_count
 
-    if gpu:
-        raise RuntimeError(_GPU_DISABLED_REASON)
     if lib_dir is None:
-        lib_dir = DEFAULT_LIB_DIR
+        lib_dir = DEFAULT_LIB_DIR_GPU if gpu else DEFAULT_LIB_DIR
+        if gpu and not Path(lib_dir).is_dir():
+            # Native development installs created by the legacy fetch script.
+            lib_dir = "./data/models/crispasr-python-cuda"
     lib_root = Path(lib_dir)
     if not (lib_root / "crispasr" / "__init__.py").is_file():
         raise FileNotFoundError(
             f"CrispASR Python runtime not found at {lib_root} — run "
             f"scripts/fetch_crispasr_tts.py{' --gpu' if gpu else ''} first."
         )
-    if str(lib_root) not in sys.path:
-        sys.path.insert(0, str(lib_root))
-    import crispasr  # heavy ctypes-backed import, deferred to load time
-
     root = Path(model_id)
     talker_path = backend_name = None
     for filename, be in _TALKER_BACKENDS.items():
@@ -166,8 +140,25 @@ def load_tts(
 
     logger.info("Loading CrispASR Qwen3-TTS GGUF (%s) …", talker_path.name)
     t0 = time.monotonic()
-    _session = crispasr.Session(str(talker_path), backend=backend_name, n_threads=int(num_threads))
-    _session.set_codec_path(str(codec_path))
+    if gpu:
+        _worker_config = {
+            "model_path": talker_path,
+            "lib_dir": lib_root,
+            "backend": backend_name,
+            "codec_path": codec_path,
+            "num_threads": num_threads,
+            "direct_tts": True,
+        }
+        _voice_prompt = None
+        _worker_stream_count = 0
+        _session = CrispASRWorker(**_worker_config)
+    else:
+        if str(lib_root) not in sys.path:
+            sys.path.insert(0, str(lib_root))
+        import crispasr  # heavy ctypes-backed import, deferred to load time
+
+        _session = crispasr.Session(str(talker_path), backend=backend_name, n_threads=int(num_threads))
+        _session.set_codec_path(str(codec_path))
     logger.info("CrispASR Qwen3-TTS ready in %.1fs", time.monotonic() - t0)
     return _session
 
@@ -184,7 +175,12 @@ def set_voice(voice_name: str):
         txt_path = Path(f"{VOICES_DIR}/default.txt")
     ref_text = txt_path.read_text().strip()
     logger.info("Setting voice clone to: %s", voice_name)
-    _session.set_voice(ref_audio, ref_text)
+    global _voice_prompt
+    _voice_prompt = (ref_audio, ref_text)
+    if isinstance(_session, CrispASRWorker):
+        _session.call("set_voice", audio=ref_audio, text=ref_text)
+    else:
+        _session.set_voice(ref_audio, ref_text)
     return ref_audio
 
 
@@ -207,7 +203,7 @@ def set_speed(speed) -> None:
 
 def _synth(text: str) -> np.ndarray:
     """Synthesise one (short) text span to float32 PCM at 24 kHz on the warm session."""
-    audio = _session.synthesize(text)
+    audio = _session.call("synthesize", text=text) if isinstance(_session, CrispASRWorker) else _session.synthesize(text)
     # PLACEHOLDER — watermarking (not implemented yet). crispasr's Python
     # package watermark_embed()/watermark_load_model() (v0.4.9, the release
     # this module targets) call an undefined `_get_lib()` helper — a real
@@ -218,6 +214,53 @@ def _synth(text: str) -> np.ndarray:
     # realistic clause-length clip before enabling by default — that's what
     # this comment is standing in for.
     return np.asarray(audio, dtype=np.float32).reshape(-1)
+
+
+def _synth_stream(text: str):
+    """Yield PCM as CrispASR decodes each generated Qwen codec window."""
+    if isinstance(_session, CrispASRWorker):
+        yield from _session.stream("synthesize_stream", text=text)
+        return
+    yield _synth(text)
+
+
+def _synthesis_fragments(text: str):
+    """Yield clause fragments small enough for CrispASR's native CUDA graph."""
+    for clause in list(split_clauses(text)) or [text]:
+        remaining = clause.strip()
+        while len(remaining) > _MAX_SYNTHESIS_CHARS:
+            cut = remaining.rfind(" ", 0, _MAX_SYNTHESIS_CHARS + 1)
+            if cut <= 0:
+                cut = _MAX_SYNTHESIS_CHARS
+            yield remaining[:cut].strip()
+            remaining = remaining[cut:].strip()
+        if remaining:
+            yield remaining
+
+
+def _restart_dead_worker(force: bool = False) -> None:
+    """Restore or recycle the native worker without replaying partial audio."""
+    global _session, _worker_stream_count
+    if not isinstance(_session, CrispASRWorker) or (_session.alive and not force):
+        return
+    if not _worker_config:
+        return
+    if force:
+        logger.info("Recycling CrispASR TTS worker to release retained CUDA buffers")
+    else:
+        logger.warning("CrispASR TTS worker exited; starting a fresh worker for the next turn")
+    _session.close()
+    _session = CrispASRWorker(**_worker_config)
+    _worker_stream_count = 0
+    if _voice_prompt is not None:
+        audio, text = _voice_prompt
+        _session.call("set_voice", audio=audio, text=text)
+
+
+def _recycle_worker_if_needed() -> None:
+    """Bound native ggml scheduler retention across a long spoken reply."""
+    if isinstance(_session, CrispASRWorker) and _worker_stream_count >= _MAX_STREAMS_PER_WORKER:
+        _restart_dead_worker(force=True)
 
 
 def _to_chunks(audio: np.ndarray) -> list:
@@ -239,19 +282,42 @@ def _worker_loop() -> None:
     ~500ms chunks to the job's output queue — one worker thread so the next
     fragment synthesises while the consumer plays the current one (overlap).
     """
+    global _worker_stream_count
     while True:
         job = _job_queue.get()
         try:
-            for fragment in list(split_clauses(job.text)) or [job.text]:
+            for fragment in _synthesis_fragments(job.text):
                 if job.session.cancelled:
                     break
-                for chunk in _to_chunks(_synth(fragment)):
+                _recycle_worker_if_needed()
+                stream_started = time.monotonic()
+                first_chunk = True
+                for audio in _synth_stream(fragment):
+                    # The native worker keeps sending PCM until it reaches its
+                    # "done" frame. Drain it after cancellation so those frames
+                    # cannot become the next turn's first audio packet.
                     if job.session.cancelled:
-                        break
-                    if chunk.size:
-                        job.out.put((chunk, SAMPLE_RATE))
+                        continue
+                    for chunk in _to_chunks(np.asarray(audio, dtype=np.float32)):
+                        if job.session.cancelled:
+                            break
+                        if chunk.size:
+                            job.out.put((chunk, SAMPLE_RATE))
+                            if first_chunk:
+                                first_chunk = False
+                                logger.debug(
+                                    "CrispASR TTS queue first PCM after %.3fs", time.monotonic() - stream_started
+                                )
+                if isinstance(_session, CrispASRWorker):
+                    _worker_stream_count += 1
+                if job.session.cancelled:
+                    break
         except Exception as e:
             logger.exception("CrispASR TTS synth error: %s: %s", type(e).__name__, e)
+            try:
+                _restart_dead_worker()
+            except Exception as restart_error:  # noqa: BLE001 - native worker boundary
+                logger.exception("CrispASR TTS worker recovery failed: %s", restart_error)
         finally:
             job.out.put(None)
 

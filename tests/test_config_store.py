@@ -99,6 +99,18 @@ def test_write_models_block(tmp_path):
     assert cfg["models"]["llm"]["backend"] == "none"
 
 
+def test_write_models_validates_public_llm_modes(tmp_path):
+    path = _write(tmp_path, "general:\n  wakeword: hi\n")
+
+    with pytest.raises(ValueError, match="custom local model"):
+        cs.write_models({"llm": {"backend": "local", "local_model": "custom", "model": "model.bin"}}, path)
+    with pytest.raises(ValueError, match="external LLM needs a base_url"):
+        cs.write_models({"llm": {"backend": "external"}}, path)
+
+    cs.write_models({"llm": {"backend": "local", "local_model": "qwen"}}, path)
+    assert cs.read_config(path)["models"]["llm"]["local_model"] == "qwen"
+
+
 def test_set_llm_model_name_preserves_rest_of_block(tmp_path):
     path = _write(
         tmp_path,
@@ -130,6 +142,7 @@ def test_settings_view_merges_values(tmp_path):
     asr = {x["backend"]: x for x in view["backends"]["asr"]}
     assert asr["qwen-onnx"]["experimental"] is False
     assert asr["qwen-onnx-small"]["experimental"] is False
+    assert asr["qwen"]["display_name"] == "Qwen3 1.7B PyTorch (default GPU)"
     assert asr["moonshine"]["experimental"] is True
 
 

@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core import backends as b  # noqa: E402
 
 
-def test_defaults_reproduce_qwen_stack():
+def test_defaults_use_the_pytorch_gpu_stack():
     r = b.resolve_models(None)
     assert r["asr"]["backend"] == "qwen"
     assert r["tts"]["backend"] == "qwen"
@@ -25,11 +25,13 @@ def test_defaults_reproduce_qwen_stack():
     # model ids / context default from the registry metadata
     assert r["asr"]["model"] == "Qwen/Qwen3-ASR-1.7B"
     assert r["llm"]["model"].endswith("Qwen3.5-9B-UD-Q4_K_XL.gguf")
+    assert r["llm"]["spec"].hf_repo == "unsloth/Qwen3.5-9B-MTP-GGUF"
+    assert r["llm"]["opts"]["mtp"] is True
     assert r["llm"]["n_context"] == 12288
 
 
 def test_empty_block_falls_back_per_domain():
-    # A models block that only sets the LLM leaves ASR/TTS on defaults.
+    # A models block that only sets the LLM leaves ASR/TTS on PyTorch GPU defaults.
     r = b.resolve_models({"llm": {"backend": "none"}})
     assert r["asr"]["backend"] == "qwen"
     assert r["llm"]["backend"] == "none"
@@ -73,10 +75,45 @@ def test_gpu_only_flags():
     assert b.get_spec("asr", "moonshine").gpu_only is False
     assert b.get_spec("tts", "kokoro-onnx").gpu_only is False
     assert b.get_spec("llm", "openai").gpu_only is False
+    assert b.get_spec("asr", "qwen-gguf").gpu_only is True
+    assert b.get_spec("tts", "qwen-gguf").gpu_only is True
+    assert b.get_spec("asr", "qwen-gguf-small").gpu_only is True
+    assert b.get_spec("tts", "qwen-gguf-small").gpu_only is True
+    assert b.get_spec("tts", "higgs-gguf").gpu_only is True
+
+
+def test_gpu_crispasr_backend_metadata():
+    asr = b.get_spec("asr", "qwen-gguf")
+    tts = b.get_spec("tts", "qwen-gguf")
+    assert asr.loader == "core.asr_crispasr:load_asr_model"
+    assert asr.hf_file == "qwen3-asr-1.7b-q4_k.gguf"
+    assert tts.loader == "core.tts_crispasr:load_tts"
+    assert len(tts.hf_files) == 2
+    assert tts.hf_files[0][1] == "qwen3-tts-12hz-1.7b-base-f16.gguf"
+    assert tts.extra == {"gpu": True}
+    assert b.resolve_models({"tts": {"backend": "qwen-gguf"}})["tts"]["opts"]["gpu"] is True
+
+
+def test_higgs_backend_metadata_and_cpu_gating():
+    higgs = b.get_spec("tts", "higgs-gguf")
+    assert higgs.loader == "core.tts_higgs:load_tts"
+    assert higgs.hf_files[0][0] == "liampetti/HiggsTTS3.gguf"
+    assert higgs.hf_files[0][1] == "higgs-v3-tts-q4_k.gguf"
+    assert higgs.extra["max_actions"] == 256
+    assert b.is_offerable(higgs, "gpu") is True
+    assert b.is_offerable(higgs, "cpu") is False
+
+
+def test_small_gguf_backend_metadata():
+    asr = b.get_spec("asr", "qwen-gguf-small")
+    tts = b.get_spec("tts", "qwen-gguf-small")
+    assert asr.hf_file == "qwen3-asr-0.6b-q4_k.gguf"
+    assert tts.hf_files[0][1] == "qwen3-tts-12hz-0.6b-base-q8_0.gguf"
+    assert b.resolve_models({"tts": {"backend": "qwen-gguf-small"}})["tts"]["opts"]["gpu"] is True
 
 
 def test_gemma_backend_metadata():
-    # Gemma 4 is an alternative local SLM through the same llama.cpp loader.
+    # Gemma 4 is an alternative local SLM through the bundled llama-server.
     g = b.get_spec("llm", "gemma")
     assert g.implemented is True
     assert g.loader == "core.slm:load_slm"  # same loader/contract as Qwen
@@ -84,17 +121,26 @@ def test_gemma_backend_metadata():
     assert g.hf_file.endswith(".gguf")
     assert g.default_model.endswith(g.hf_file)
     assert g.n_context and g.n_context > 0
-    # No working in-process reasoning toggle -> no /think directive (see slm.py).
-    assert g.think_style == ""
-    # Qwen, by contrast, drives reasoning with its /think text directive.
-    assert b.get_spec("llm", "llama").think_style == "qwen"
+    assert g.extra == {"mtp": False}
 
 
 def test_gemma_resolves_with_registry_defaults():
     r = b.resolve_models({"llm": {"backend": "gemma"}})
     assert r["llm"]["backend"] == "gemma"
     assert r["llm"]["model"].endswith("gemma-4-12B-it-qat-UD-Q4_K_XL.gguf")
-    assert r["llm"]["spec"].think_style == ""
+    assert r["llm"]["opts"]["mtp"] is False
+
+
+def test_public_local_llm_modes_resolve_to_their_internal_servers():
+    qwen = b.resolve_models({"llm": {"backend": "local", "local_model": "qwen"}})["llm"]
+    gemma = b.resolve_models({"llm": {"backend": "local", "local_model": "gemma"}})["llm"]
+    external = b.resolve_models({"llm": {"backend": "external", "base_url": "http://llm/v1"}})["llm"]
+
+    assert qwen["backend"] == "llama"
+    assert qwen["opts"]["mtp"] is True
+    assert gemma["backend"] == "gemma"
+    assert external["backend"] == "openai"
+    assert external["opts"]["base_url"] == "http://llm/v1"
 
 
 def test_variant_reads_env(monkeypatch):
@@ -113,6 +159,7 @@ def test_is_offerable_by_variant():
     assert b.is_offerable(qwen, "gpu") is True
     assert b.is_offerable(qwen, "cpu") is False
     assert b.is_offerable(moon, "cpu") is True
+    assert b.is_offerable(b.get_spec("asr", "qwen-gguf"), "cpu") is False
     assert b.is_offerable(b.get_spec("llm", "openai"), "cpu") is True
 
 
@@ -121,6 +168,28 @@ def test_list_backends_covers_each_domain():
         names = {s.backend for s in b.list_backends(domain)}
         assert names, domain
     assert "none" in {s.backend for s in b.list_backends(b.LLM)}
+
+
+def test_asr_and_tts_options_have_stable_user_facing_order():
+    assert [spec.backend for spec in b.list_backends(b.ASR)] == [
+        "qwen-gguf",
+        "qwen-gguf-small",
+        "qwen-onnx",
+        "qwen-onnx-small",
+        "qwen",
+        "qwen-small",
+        "moonshine",
+        "moonshine-tiny",
+    ]
+    assert [spec.backend for spec in b.list_backends(b.TTS)] == [
+        "higgs-gguf",
+        "qwen-gguf",
+        "qwen-gguf-small",
+        "qwen",
+        "qwen-small",
+        "kokoro-onnx",
+    ]
+    assert b.get_spec("asr", "qwen").display_name == "Qwen3 1.7B PyTorch (default GPU)"
 
 
 # --- no-LLM bypass in the agent loop ---------------------------------------

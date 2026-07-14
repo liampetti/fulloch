@@ -95,6 +95,39 @@ class TestCheckBargeIn:
         assert assistant._check_barge_in("sat-a", "atticus stop") is False
 
 
+class TestStrictBargeVerification:
+    def test_strict_wakeword_uses_unbiased_verification(self, assistant, monkeypatch):
+        verified = []
+        monkeypatch.setattr(
+            assistant,
+            "_verify_bare_wakeword",
+            lambda loudness, baseline: verified.append((loudness, baseline)) or False,
+        )
+
+        assert assistant._verify_strict_barge_wakeword("hey atticus kiama", -38, -60) is False
+        assert verified == [(-38, -60)]
+
+    def test_stop_skips_strict_verification(self, assistant, monkeypatch):
+        monkeypatch.setattr(
+            assistant,
+            "_verify_bare_wakeword",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("should not verify")),
+        )
+
+        assert assistant._verify_strict_barge_wakeword("atticus stop", -38, -60) is True
+
+    def test_bare_name_redirect_skips_strict_verification(self, multiword_assistant, monkeypatch):
+        monkeypatch.setattr(
+            multiword_assistant,
+            "_verify_bare_wakeword",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("should not verify")),
+        )
+
+        assert multiword_assistant._verify_strict_barge_wakeword(
+            "atticus what time is it", -38, -60
+        ) is True
+
+
 @pytest.fixture
 def multiword_assistant():
     """Bare Assistant with a two-word wakeword for tolerant-matcher tests."""

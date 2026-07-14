@@ -143,6 +143,23 @@ SCHEMA: tuple = (
     ),
     Field(
         "general",
+        "higgs_personality",
+        "enum",
+        "Voice",
+        "balanced",
+        "Higgs delivery preference. Only used when Higgs TTS is selected.",
+        choices=("balanced", "playful", "calm", "wry", "custom"),
+    ),
+    Field(
+        "general",
+        "higgs_personality_custom",
+        "str",
+        "Voice",
+        "",
+        "Custom Higgs delivery preference, used only when personality is custom.",
+    ),
+    Field(
+        "general",
         "barge_in",
         "enum",
         "Voice",
@@ -432,17 +449,10 @@ class TierPreset:
 
 
 # Three ready-made stacks. The Full stack is GPU end-to-end — ASR, TTS, and
-# the 9B LLM all GPU-resident — so "GPU tier" means what it sounds like. That's
-# a tight fit on a 16GB card (ASR 4.5 + TTS 4.5 + LLM 7.5 = 16.5GB before
-# context/KV-cache overhead) — a deliberate tradeoff accepted for a
-# consistent, unsurprising "everything on GPU" default rather than the
-# previous CPU-resident-ASR compromise. The two CPU-only stacks (no GPU at
-# all) default to the smaller `qwen-onnx-small` (0.6B ONNX) for ASR instead —
-# same Qwen3-ASR family (still wakeword/context biasing), but ~3x fewer
-# params so much faster per utterance on CPU, at some cost to accuracy;
-# `qwen-onnx` (1.7B ONNX) remains available there as a manual, more-accurate
-# alternative. The two CPU stacks otherwise differ only in the LLM — a
-# separate OpenAI-compatible server on your network, or regex-only/no LLM.
+# the 9B LLM all GPU-resident. It defaults to the 1.7B PyTorch ASR/TTS pair.
+# The two CPU-only stacks use the accurate 1.7B ONNX ASR with
+# Kokoro TTS. The two CPU stacks otherwise differ only in the LLM — a separate
+# OpenAI-compatible server on your network, or regex-only/no LLM.
 # (A 4B "balanced" tier was dropped — at the quant needed to be reliable it
 # costs roughly the same VRAM as the 9B, so the 9B is the local minimum.)
 TIER_PRESETS: tuple = (
@@ -451,7 +461,11 @@ TIER_PRESETS: tuple = (
         "Full (GPU)",
         "Everything GPU-accelerated — speech recognition, voice-clone TTS, and "
         "the 9B language model. Tight fit on a 16GB card; needs a 16GB GPU.",
-        {"asr": {"backend": "qwen"}, "tts": {"backend": "qwen"}, "llm": {"backend": "llama"}},
+        {
+            "asr": {"backend": "qwen"},
+            "tts": {"backend": "qwen"},
+            "llm": {"backend": "local", "local_model": "qwen"},
+        },
     ),
     TierPreset(
         "cpu_server",
@@ -460,9 +474,9 @@ TIER_PRESETS: tuple = (
         "OpenAI-compatible server you point it at (e.g. another box on your "
         "network). No GPU needed on this device.",
         {
-            "asr": {"backend": "qwen-onnx-small"},
+            "asr": {"backend": "qwen-onnx"},
             "tts": {"backend": "kokoro-onnx"},
-            "llm": {"backend": "openai"},
+            "llm": {"backend": "external"},
         },
     ),
     TierPreset(
@@ -471,7 +485,7 @@ TIER_PRESETS: tuple = (
         "Everything runs locally on CPU — no GPU, no network. Regex command "
         "matching only (no free-form language model).",
         {
-            "asr": {"backend": "qwen-onnx-small"},
+            "asr": {"backend": "qwen-onnx"},
             "tts": {"backend": "kokoro-onnx"},
             "llm": {"backend": "none"},
         },

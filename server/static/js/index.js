@@ -420,7 +420,9 @@
 
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    const text = ev.role === 'assistant' ? naturalize(ev.content) : ev.content;
+    const text = ev.role === 'assistant'
+      ? naturalize(ev.content).replace(/<\|[^|>]+\|>/g, '').replace(/\s{2,}/g, ' ').trim()
+      : ev.content;
     const animate = ev.role === 'assistant' && live && !!text;
     bubble.textContent = animate ? '' : text;
 
@@ -430,6 +432,13 @@
     tag.className = `tag ${ev.source}`;
     tag.textContent = ev.source;
     meta.append(tag);
+    if (ev.role === 'assistant' && ev.source === 'voice' && ev.tts_backend === 'higgs-gguf') {
+      const credit = 'This audio was created with Boson AI\'s Higgs Audio — https://www.boson.ai/higgs-audio';
+      const disclosure = document.createElement('span');
+      disclosure.className = 'higgs-credit';
+      disclosure.textContent = credit;
+      meta.append(disclosure);
+    }
     // Which satellite/room this turn came from — only worth a second pill
     // when there's something more specific to say than the source tag above
     // already does. A labelled satellite ("kitchen") or a chosen HA room
@@ -445,6 +454,39 @@
     const time = document.createElement('span');
     time.textContent = fmtTime(ev.ts);
     meta.append(time);
+
+    if (ev.role === 'assistant' && text) {
+      const play = document.createElement('button');
+      play.className = 'msg-play';
+      play.type = 'button';
+      play.setAttribute('aria-label', 'Read this response aloud');
+      play.title = 'Read aloud';
+      const playIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      playIcon.setAttribute('viewBox', '0 0 24 24');
+      playIcon.setAttribute('aria-hidden', 'true');
+      const playPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      playPath.setAttribute('d', 'M8 5.5v13l10-6.5z');
+      playIcon.append(playPath);
+      play.append(playIcon);
+      play.addEventListener('click', async () => {
+        play.disabled = true;
+        try {
+          if (!await satConnect(true)) {
+            throw new Error('speaker connection failed');
+          }
+          await fetch('/replay', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+          });
+        } catch (err) {
+          console.warn('replay failed', err);
+        } finally {
+          play.disabled = false;
+        }
+      });
+      meta.append(play);
+    }
 
     wrap.append(bubble, meta);
     chat.appendChild(wrap);
@@ -1462,6 +1504,7 @@
   let satMicResumeTimer = null;  // setTimeout handle for delayed unmute after satPlayAt
   let satHalfDuplex = true; // false in wakeword-barge-in mode (mic stays live)
   let satAlwaysListen = localStorage.getItem('sat_always_listen') === '1';
+  let satPlaybackOnly = false; // replay speaker connection; no microphone stream
   let mySatelliteId = null; // this tab's own id, from the "session" frame
 
   // Browser-satellite area picker (6b) — a one-time chat bubble asking which
@@ -1505,6 +1548,9 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     if (!satWs) {
       satBtn.classList.remove('active', 'always-on');
       satBtn.setAttribute('aria-label', 'Voice mode — click to connect the mic');
+    } else if (satPlaybackOnly) {
+      satBtn.classList.remove('active', 'always-on');
+      satBtn.setAttribute('aria-label', 'Speaker connected for replay; click to disconnect');
     } else if (satAlwaysListen) {
       satBtn.classList.remove('active');
       satBtn.classList.add('always-on');
@@ -1581,55 +1627,84 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     satMicMuted = false;
     if (satMicResumeTimer !== null) { clearTimeout(satMicResumeTimer); satMicResumeTimer = null; }
     satHalfDuplex = true;
+    satPlaybackOnly = false;
     mySatelliteId = null;
     syncSatBtn();
   };
 
-  const satConnect = async () => {
-    if (satWs) { satDisconnect(); return; }
-    try {
-      // Pin the mic stream: mono, 16 kHz, and disable WebRTC audio processing.
-      // Defaults (audio: true) work on macOS/Windows but on Linux/Chrome,
-      // PulseAudio/PipeWire's webrtc-audio-processing is rougher than Core
-      // Audio and introduces audible dropouts / AGC pumping. We run Silero
-      // VAD and a noise baseline server-side, so the browser's AGC/EC/NS is
-      // actively harmful here. Pinning sampleRate to 16 kHz also makes the
-      // worklet's resample ratio exactly 1.0 — the loop becomes a copy and
-      // we stop doing linear-interp on every quantum.
-      //
-      // No navigator.audioSession manipulation: previous versions let Safari
-      // manage the audio session automatically, which correctly routes TTS
-      // to the loudspeaker. Explicitly setting 'play-and-record' overrides
-      // Safari's DefaultToSpeaker option and routes to the earpiece.
-      satMicStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        },
-        video: false,
-      });
-    } catch (e) {
-      console.error('Satellite: mic access denied', e);
-      alert('Microphone access denied — check browser permissions.');
-      return;
+  const satConnect = async (playbackOnly = false) => {
+    if (satWs) {
+      if (!playbackOnly && satPlaybackOnly) {
+        // Replay leaves a speaker-only socket open. Upgrade it directly when
+        // Voice mode is requested instead of making the user click twice.
+        satDisconnect();
+        return satConnect();
+      }
+      if (playbackOnly && satWs.readyState === WebSocket.OPEN) return true;
+      if (playbackOnly && satWs.readyState === WebSocket.CONNECTING) {
+        return new Promise(resolve => {
+          const wait = setInterval(() => {
+            if (!satWs || satWs.readyState === WebSocket.CLOSED) {
+              clearInterval(wait);
+              resolve(false);
+            } else if (satWs.readyState === WebSocket.OPEN) {
+              clearInterval(wait);
+              resolve(true);
+            }
+          }, 25);
+        });
+      }
+      satDisconnect();
+      return false;
+    }
+    satPlaybackOnly = playbackOnly;
+    if (!playbackOnly) {
+      try {
+        // Pin the mic stream: mono, 16 kHz, and disable WebRTC audio processing.
+        // Defaults (audio: true) work on macOS/Windows but on Linux/Chrome,
+        // PulseAudio/PipeWire's webrtc-audio-processing is rougher than Core
+        // Audio and introduces audible dropouts / AGC pumping. We run Silero
+        // VAD and a noise baseline server-side, so the browser's AGC/EC/NS is
+        // actively harmful here. Pinning sampleRate to 16 kHz also makes the
+        // worklet's resample ratio exactly 1.0 — the loop becomes a copy and
+        // we stop doing linear-interp on every quantum.
+        //
+        // No navigator.audioSession manipulation: previous versions let Safari
+        // manage the audio session automatically, which correctly routes TTS
+        // to the loudspeaker. Explicitly setting 'play-and-record' overrides
+        // Safari's DefaultToSpeaker option and routes to the earpiece.
+        satMicStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            sampleRate: 16000,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          },
+          video: false,
+        });
+      } catch (e) {
+        console.error('Satellite: mic access denied', e);
+        alert('Microphone access denied — check browser permissions.');
+        return false;
+      }
     }
     satAudioCtx = new AudioContext({ latencyHint: 'interactive' });
     satPlayAt = 0;
 
-    // Load AudioWorklet for resampling mic to 16 kHz
-    const blob = new Blob([SAT_WORKLET], { type: 'application/javascript' });
-    const blobUrl = URL.createObjectURL(blob);
-    try {
-      await satAudioCtx.audioWorklet.addModule(blobUrl);
-    } finally {
-      URL.revokeObjectURL(blobUrl);
+    if (!playbackOnly) {
+      // Load AudioWorklet for resampling mic to 16 kHz.
+      const blob = new Blob([SAT_WORKLET], { type: 'application/javascript' });
+      const blobUrl = URL.createObjectURL(blob);
+      try {
+        await satAudioCtx.audioWorklet.addModule(blobUrl);
+      } finally {
+        URL.revokeObjectURL(blobUrl);
+      }
+      const src = satAudioCtx.createMediaStreamSource(satMicStream);
+      satWorkletNode = new AudioWorkletNode(satAudioCtx, 'fulloch-resample');
+      src.connect(satWorkletNode);
     }
-    const src = satAudioCtx.createMediaStreamSource(satMicStream);
-    satWorkletNode = new AudioWorkletNode(satAudioCtx, 'fulloch-resample');
-    src.connect(satWorkletNode);
 
     // Open WebSocket
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -1641,21 +1716,27 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     // resolving it back to a display name isn't worth a second HA round-trip.
     const areaName = satHaArea && satAreaName ? `&area_name=${encodeURIComponent(satAreaName)}` : '';
     const url = `${proto}://${location.host}/ws/satellite?bypass=${bypass}${area}${areaName}`;
-    satWs = new WebSocket(url);
-    satWs.binaryType = 'arraybuffer';
+    const ws = new WebSocket(url);
+    satWs = ws;
+    ws.binaryType = 'arraybuffer';
+    let resolveConnected;
+    const connected = new Promise(resolve => { resolveConnected = resolve; });
 
-    satWs.onopen = () => {
+    ws.onopen = () => {
       // Stream resampled mic chunks to server (muted during TTS playback for
       // half-duplex — prevents the assistant hearing its own reply as input).
-      satWorkletNode.port.onmessage = (e) => {
-        if (satWs && satWs.readyState === WebSocket.OPEN && !satMicMuted) {
-          satWs.send(e.data);
-        }
-      };
+      if (satWorkletNode) {
+        satWorkletNode.port.onmessage = (e) => {
+          if (satWs && satWs.readyState === WebSocket.OPEN && !satMicMuted) {
+            satWs.send(e.data);
+          }
+        };
+      }
       syncSatBtn();
+      resolveConnected(true);
     };
 
-    satWs.onmessage = (e) => {
+    ws.onmessage = (e) => {
       if (typeof e.data === 'string') {
         try {
           const msg = JSON.parse(e.data);
@@ -1677,9 +1758,15 @@ registerProcessor('fulloch-resample', ResampleTo16k);
       }
     };
 
-    satWs.onerror = (e) => { console.error('Satellite WS error', e); };
-    satWs.onclose = () => { satDisconnect(); };
+    ws.onerror = (e) => { console.error('Satellite WS error', e); resolveConnected(false); };
+    ws.onclose = () => {
+      resolveConnected(false);
+      // A just-closed replay socket must not tear down its replacement when
+      // the user immediately enables Voice mode.
+      if (satWs === ws) satDisconnect();
+    };
     syncSatBtn();
+    return connected;
   };
 
   const satToggleAlwaysListen = () => {
@@ -1777,7 +1864,7 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     if (areas.length) renderAreaPicker(areas);
   });
 
-  satBtn.addEventListener('click', satConnect);
+  satBtn.addEventListener('click', () => { satConnect(); });
   satAlwaysBtn.addEventListener('click', satToggleAlwaysListen);
 
   syncSatBtn();

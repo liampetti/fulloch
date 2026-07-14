@@ -3,7 +3,7 @@ turn source (every connected satellite and the dashboard's own
 `"dashboard-text"` pseudo-satellite).
 
 Wraps (does not replace) `Assistant._turn_lock`, which only ever serialises
-the SLM call itself (llama-cpp-python isn't thread-safe). The arbiter spans
+the SLM call itself (the local model server is shared). The arbiter spans
 the *whole* turn — from the moment a wakeword/text prompt is about to be
 dispatched through to the reply finishing (or being cancelled) — so a second
 source can never interleave `_history` writes or steal another satellite's

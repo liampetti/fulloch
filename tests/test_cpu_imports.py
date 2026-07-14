@@ -1,6 +1,6 @@
 """Guard the CPU-image import chain.
 
-The slim CPU image has no qwen_asr / qwen_tts / llama_cpp / flash_attn. The
+The slim CPU image has no qwen_asr / qwen_tts / flash_attn. The
 CPU ASR backends (`core.asr_tiny`, `core.asr_onnx`, `core.asr_onnx_qwen17b`)
 re-export `stream_generator` from `core.asr`, and `core.assistant` imports `core.slm` — so those modules must
 import WITHOUT the GPU-only libraries. Their heavy imports must be lazy (inside
@@ -32,11 +32,9 @@ def test_asr_does_not_import_qwen_asr_at_top():
     assert "from qwen_asr import" in p.read_text(), "should still import it lazily"
 
 
-def test_slm_does_not_import_llama_cpp_at_top():
+def test_slm_has_no_python_llama_cpp_dependency():
     p = ROOT / "core" / "slm.py"
-    assert not _top_level_imports(p, "llama_cpp"), (
-        "llama_cpp must be imported lazily in load_slm (CPU image has none)"
-    )
+    assert "llama_cpp" not in p.read_text()
 
 
 def test_tiny_asr_backends_reexport_stream_generator():
@@ -71,7 +69,7 @@ def test_cpu_image_modules_import_without_gpu_libs():
 
             pytest.skip(f"{dep} not installed")
 
-    saved = {m: sys.modules.get(m) for m in ("qwen_asr", "qwen_tts", "llama_cpp", "flash_attn")}
+    saved = {m: sys.modules.get(m) for m in ("qwen_asr", "qwen_tts", "flash_attn")}
     for m in saved:
         sys.modules[m] = None  # 'from m import X' -> ImportError
     try:

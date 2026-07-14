@@ -16,6 +16,31 @@ STALL_PHRASES = [
     "Let me see.",
 ]
 
+# === Startup-cached phrases ==================================================
+#
+# These are the only phrases synthesized during startup. Edit this section to
+# change both what is immediately available and how much startup TTS work is
+# done. The generic set is deliberately shared by acknowledgements, busy
+# replies, and all tool/thinking stall contexts.
+
+STARTUP_SHARED_PHRASES = [
+    "Okay.",
+    "One moment.",
+    "Working on that.",
+]
+
+# Cache attributes that reuse STARTUP_SHARED_PHRASES rather than each rendering
+# their own phrase pool.
+STARTUP_SHARED_CACHE_ATTRS = (
+    "ack_cache",
+    "busy_cache",
+    "web_search_stall_cache",
+    "note_write_stall_cache",
+    "pre_thinking_stall_cache",
+    "thinking_stall_cache",
+    "replan_stall_cache",
+)
+
 # Single lead-in phrase played just before a note write/append/remember so
 # the user hears activity during the SLM → tool → reply gap. Pre-rendered.
 NOTE_WRITE_STALL_PHRASES = [
@@ -66,10 +91,7 @@ ACK_PHRASES = [
 # A pure "stop" still stands down silently by design (see _is_pure_stop);
 # this only covers the redirect path, where the assistant is now listening.
 BARGE_ACK_PHRASES = [
-    "Yes?",
-    "Go ahead.",
     "I'm listening.",
-    "Mm-hmm?",
 ]
 
 # Played on a satellite whose turn attempt lost the TurnArbiter (another
@@ -115,10 +137,6 @@ THINKING_STALL_PHRASES = [
 # `_play_random_ack(cache=...)`.
 NO_AI_PHRASES = [
     "I can't do that one without an AI model running.",
-    "No AI model's connected.",
-    "That needs the AI model.",
-    "I'm running without an AI model just now.",
-    "Can't reach an AI model for that one.",
 ]
 
 # Spoken when the configured remote LLM endpoint times out or errors mid-turn.
@@ -127,8 +145,6 @@ NO_AI_PHRASES = [
 # to `llm_error_cache` in `_warm_and_announce`; played via `_speak_llm_error_fallback`.
 LLM_ERROR_PHRASES = [
     "Couldn't reach the AI server, please try again.",
-    "The AI server didn't respond — give it another go.",
-    "AI server timed out, try again in a moment.",
 ]
 
 # Spoken when the agent invokes a tool that isn't loaded (a hallucinated tool
@@ -137,10 +153,17 @@ LLM_ERROR_PHRASES = [
 # `tool_unavailable_cache` in `_warm_and_announce`, played via
 # `_speak_tool_unavailable_fallback`. Keep these honest — no guessed data.
 TOOL_UNAVAILABLE_PHRASES = [
-    "Sorry, I don't have a tool for that setup yet.",
-    "That's not something I have the tool for currently.",
-    "I don't have a tool to do that at the moment.",
+    "I don't have a tool for that setup yet.",
 ]
+
+# Cache attributes that require distinct wording. The final flag means the
+# phrase is only needed when an LLM backend is configured.
+STARTUP_CACHE_SPECS = (
+    ("no_ai_cache", NO_AI_PHRASES, False),
+    ("llm_error_cache", LLM_ERROR_PHRASES, True),
+    ("tool_unavailable_cache", TOOL_UNAVAILABLE_PHRASES, True),
+    ("barge_ack_cache", BARGE_ACK_PHRASES, False),
+)
 
 # Prefix phrases for calendar reminders spoken by the poll thread.
 # The event summary is appended after a pause dash.

@@ -11,7 +11,7 @@ selectable, so fetching is manual for now. Pulls three things:
      Pass --gpu to also (or instead) assemble a CUDA-enabled copy at
      data/models/crispasr-python-cuda/ — see fetch_lib_gpu()'s docstring for
      why that needs assembling rather than a straight download.
-  2. The requested talker GGUF(s) (q8_0):
+   2. The requested talker GGUFs (1.7B F16, 0.6B q8_0):
        1.7B: huggingface.co/cstr/qwen3-tts-1.7b-base-GGUF
        0.6B: huggingface.co/cstr/qwen3-tts-0.6b-base-GGUF
   3. The companion codec GGUF (fixed at f16 regardless of talker size —
@@ -64,7 +64,7 @@ CODEC_FILE = "qwen3-tts-tokenizer-12hz.gguf"
 TALKERS = {
     "1.7b": (
         "cstr/qwen3-tts-1.7b-base-GGUF",
-        "qwen3-tts-12hz-1.7b-base-q8_0.gguf",
+        "qwen3-tts-12hz-1.7b-base-f16.gguf",
         MODELS_ROOT / "qwen3-tts-crispasr-gguf",
     ),
     "0.6b": (
@@ -199,7 +199,7 @@ def main():
     if args.gpu:
         fetch_lib_gpu(force=args.force)
     fetch_gguf(models, force=args.force)
-    backend_ids = {"1.7b": "crispasr-qwen3-tts", "0.6b": "crispasr-qwen3-tts-0.6b"}
+    backend_ids = {"1.7b": "qwen-gguf", "0.6b": "qwen-gguf-small"}
     logger.info(
         "Done. Select backend %s (models.tts.backend) to use it%s.",
         " or ".join(backend_ids[m] for m in models),

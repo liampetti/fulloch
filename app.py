@@ -10,10 +10,8 @@ Usage:
     python app.py
 """
 
-import ctypes
 import logging
 import os
-import sys
 from pathlib import Path
 
 import yaml
@@ -29,15 +27,9 @@ from server.credentials_store import inject_env
 load_dotenv()              # root .env — compose / shell vars; never overrides
 inject_env()               # ./data/credentials.json → os.environ (setdefault)
 
-# torch must be imported before llama_cpp (load-order side effect, not used here)
+# Initialise Torch before setting the optional TORCH_LOGS defaults below. Torch
+# 2.8 treats an empty TORCH_LOGS value during first import as malformed state.
 import torch  # noqa: F401
-
-# llama_cpp is optional — the CPU image ships without it (regex + remote only).
-# When present, its log callback is installed below to silence ggml chatter.
-try:
-    import llama_cpp
-except ImportError:
-    llama_cpp = None
 
 # Load configuration early so the log level (general.log_level) is available
 # before logging is configured. A missing/empty config is tolerated — the app
@@ -110,22 +102,6 @@ for _noisy in (
 # "Setting pad_token_id to eos_token_id" fires at WARNING on every
 # transformers.generate call — silence just that submodule.
 logging.getLogger("transformers.generation.utils").setLevel(max(LOG_LEVEL, logging.ERROR))
-
-# Drop llama-cpp-python's INFO chatter (model loader, CUDA init, KV-cache
-# layout, and per-call perf timings — the dashboard stats panel reports those
-# now). Warnings and errors always pass through. Installed before any
-# `Llama(...)` instantiation. Skipped on the CPU image (no llama_cpp).
-if llama_cpp is not None:
-
-    @llama_cpp.llama_log_callback
-    def _filtered_llama_log(level, text, user_data):
-        # ggml log levels: 1=INFO, 2=WARN, 3=ERROR, 4=DEBUG, 5=CONT.
-        if level in (1, 4, 5):
-            return
-        sys.stderr.write(text.decode("utf-8", errors="replace"))
-        sys.stderr.flush()
-
-    llama_cpp.llama_log_set(_filtered_llama_log, ctypes.c_void_p(0))
 
 # Point HF cache to models folder
 models_dir = Path("./data/models").resolve()

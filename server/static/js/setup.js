@@ -140,7 +140,7 @@ async function boot() {
       ['asr', 'tts', 'llm'].every(d => (t.models[d] || {}).backend === (sel.models[d] || {}).backend));
     sel.tier = matched ? matched.id : 'custom';
     tierChosen = true;
-    if (sel.models.llm && sel.models.llm.backend === 'openai') {
+    if (sel.models.llm && (sel.models.llm.backend === 'openai' || sel.models.llm.backend === 'external')) {
       sel.openai.base_url = sel.models.llm.base_url || '';
       sel.openai.model = sel.models.llm.model || '';
     }
@@ -343,6 +343,13 @@ function renderBackendCfg() {
   const curBackend = (domain) => (sel.models && sel.models[domain] && sel.models[domain].backend) || '';
   const mk = (domain, label) => {
     const cur = curBackend(domain);
+    if (domain === 'llm') {
+      const mode = cur === 'openai' || cur === 'external' ? 'external' : 'local';
+      return `<div><label>${label}</label><select id="be-llm">
+        <option value="local"${mode === 'local' ? ' selected' : ''}>Local</option>
+        <option value="external"${mode === 'external' ? ' selected' : ''}>External</option>
+      </select></div>`;
+    }
     const opts = b[domain].filter(o => o.offerable).map(o => {
       const exp = o.experimental ? ' [experimental]' : '';
       return `<option value="${o.backend}"${o.backend === cur ? ' selected' : ''}>${o.display_name}${exp}</option>`;
@@ -353,8 +360,11 @@ function renderBackendCfg() {
     <div class="grid2">${mk('asr','Speech-to-text')}${mk('tts','Text-to-speech')}${mk('llm','Language model')}</div>`;
   const syncCustom = () => {
     sel.tier = 'custom';
+    const llmMode = $('be-llm').value;
     sel.models = { asr: { backend: $('be-asr').value }, tts: { backend: $('be-tts').value },
-                   llm: { backend: $('be-llm').value } };
+                   llm: llmMode === 'local'
+                     ? { backend: 'local', local_model: 'qwen' }
+                     : { backend: 'external' } };
     document.querySelectorAll('#tier-list .opt').forEach(o => o.classList.remove('sel'));
     syncOpenaiForm();
   };
@@ -367,7 +377,7 @@ function chosenModels() {
   let m;
   if (sel.tier === 'custom' && sel.models) m = JSON.parse(JSON.stringify(sel.models));
   else { const t = SCHEMA.tier_presets.find(x => x.id === sel.tier); m = t ? JSON.parse(JSON.stringify(t.models)) : null; }
-  if (m && m.llm && m.llm.backend === 'openai') {
+  if (m && m.llm && (m.llm.backend === 'openai' || m.llm.backend === 'external')) {
     if (sel.openai.base_url) m.llm.base_url = normalizeEndpointUrl(sel.openai.base_url);
     if (sel.openai.model) m.llm.model = sel.openai.model;
     // api_key goes to credentials.json, not models config
@@ -378,7 +388,7 @@ function ttsBackend() { const m = chosenModels(); return m && m.tts ? m.tts.back
 
 function syncOpenaiForm() {
   const m = chosenModels();
-  const isOai = !!(m && m.llm && m.llm.backend === 'openai');
+  const isOai = !!(m && m.llm && (m.llm.backend === 'openai' || m.llm.backend === 'external'));
   const form = $('openai-form');
   if (form) form.style.display = isOai ? '' : 'none';
   setBranding(isOai);
@@ -623,19 +633,22 @@ async function stepObsidian() {
 
 // --- voice preview button bound to a <select> ---
 let _voiceAudio = null, _voiceBtn = null;
+const _voiceIcon = (paused = false) => paused
+  ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3v14H7zm7 0h3v14h-3z"></path></svg>'
+  : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z"></path></svg>';
 function _voiceStop() {
   if (_voiceAudio) { _voiceAudio.pause(); _voiceAudio = null; }
-  if (_voiceBtn) { _voiceBtn.textContent = '▶'; _voiceBtn = null; }
+  if (_voiceBtn) { _voiceBtn.innerHTML = _voiceIcon(); _voiceBtn = null; }
 }
 function makeVoicePreview(selectEl) {
-  const btn = el(`<button type="button" class="voice-play" title="Preview voice" aria-label="Preview voice">▶</button>`);
+  const btn = el(`<button type="button" class="voice-play" title="Preview voice" aria-label="Preview voice">${_voiceIcon()}</button>`);
   btn.addEventListener('click', () => {
     const togglingOff = _voiceBtn === btn && _voiceAudio && !_voiceAudio.paused;
     _voiceStop();
     if (togglingOff || !selectEl.value) return;
     const url = '/voice/sample?name=' + encodeURIComponent(selectEl.value);
     const a = new Audio(url);
-    _voiceAudio = a; _voiceBtn = btn; btn.textContent = '⏸';
+    _voiceAudio = a; _voiceBtn = btn; btn.innerHTML = _voiceIcon(true);
     const reset = () => { if (_voiceBtn === btn) _voiceStop(); };
     a.onended = reset; a.onerror = reset;
     a.play().catch(reset);
@@ -796,7 +809,7 @@ function showLoading() {
   $('subtitle').textContent = cameViaWizard ? 'First-run setup' : 'Starting up';
   renderSteps(3, cameViaWizard ? undefined : 'settings');
   screen().innerHTML = `<div class="card"><h2>Starting up</h2>
-    <p class="lead">Loading models and warming up the voice — the assistant will greet you when it's ready.</p>
+    <p class="lead">Loading models and warming up prompts — the assistant will be ready shortly.</p>
     <div id="term" class="term" aria-live="polite"></div>
     <div class="term-foot"><span class="spinner sm"></span><span class="muted" id="load-detail"></span></div></div>`;
   pollLoading();
@@ -968,7 +981,7 @@ function securityCard() {
       </div>
     </details>
 
-    <details class="connect-section" id="sec-obs-section" style="margin-top:.75rem" open>
+    <details class="connect-section" id="sec-obs-section" style="margin-top:.75rem">
       <summary><span class="csname">📓 Obsidian</span><span class="cstatus" id="sec-obs-cstatus">loading…</span></summary>
       <div class="cbody">
         <p class="help" style="margin:0 0 .65rem">Connect Fulloch to an Obsidian vault for voice read/write. The plugin reports your vault and any open note. Cloud sync (Remotely Save, etc.) is unchanged — Fulloch only sees the local vault.</p>
@@ -1182,11 +1195,10 @@ function integrationsCard() {
   const haTokenPh = credPlaceholder(haTokenSet, 'create one in HA → Profile → Security');
   const notesPath = String(((SCHEMA.fields.find(f => f.path === 'notes.path') || {}).value) || '').replace(/"/g, '&quot;');
   const searchUrl = String(((SCHEMA.fields.find(f => f.path === 'search.searxng_url') || {}).value) || '').replace(/"/g, '&quot;');
-  const haOpen = haUrl ? ' open' : '';
   return el(`<div class="card"><h2>Integrations</h2>
     <p class="lead">Connect Fulloch to your other tools. Tokens take effect immediately; URL or path changes need a restart.</p>
 
-    <details class="connect-section" id="ii-ha-section"${haOpen}>
+    <details class="connect-section" id="ii-ha-section">
       <summary><span class="csname">🏠 Home Assistant</span><span class="cstatus" id="ii-ha-cstatus">${haUrl ? 'configured' : ''}</span></summary>
       <div class="cbody">
         <label>URL</label><input type="text" id="ii-ha-url" placeholder="http://homeassistant.local:8123" value="${haUrl}">
@@ -1197,7 +1209,7 @@ function integrationsCard() {
       </div>
     </details>
 
-    <details class="connect-section" id="ii-obs-section"${notesPath ? ' open' : ''}>
+    <details class="connect-section" id="ii-obs-section">
       <summary><span class="csname">📓 Obsidian notes</span><span class="cstatus" id="ii-obs-cstatus">${notesPath ? 'configured' : ''}</span></summary>
       <div class="cbody">
         <label>Path to your vault</label><input type="text" id="ii-notes-path" placeholder="/home/you/Documents/MyVault" value="${notesPath}">
@@ -1208,7 +1220,7 @@ function integrationsCard() {
       </div>
     </details>
 
-    <details class="connect-section" id="ii-search-section"${searchUrl ? ' open' : ''}>
+    <details class="connect-section" id="ii-search-section">
       <summary><span class="csname">🔍 Web search</span><span class="cstatus" id="ii-search-cstatus">${searchUrl ? 'configured' : ''}</span></summary>
       <div class="cbody">
         <label>SearXNG URL</label><input type="text" id="ii-search-url" placeholder="http://localhost:8080 (or blank for bundled container)" value="${searchUrl}">
@@ -1398,12 +1410,20 @@ let CFG_INITIAL = {};
 function modelsCard() {
   const b = SCHEMA.backends;
   const llm = (SCHEMA.models && SCHEMA.models.llm) || {};
-  const llamaCustom = llm.backend === 'llama' && llm.model &&
+  const llmMode = llm.backend === 'openai' || llm.backend === 'external' ? 'external' : 'local';
+  const llamaCustom = (llm.local_model === 'custom' || llm.backend === 'llama') && llm.model &&
     !String(llm.model).endsWith(DEFAULT_LLAMA_FILE);
+  const llmChoice = llamaCustom ? 'custom' : (llm.local_model || (llm.backend === 'gemma' ? 'gemma' : 'qwen'));
   const llamaPath = llamaCustom ? String(llm.model) : '';
-  const llamaCtx = (llm.backend === 'llama' && llm.n_context) ? llm.n_context : '';
+  const llamaCtx = llmMode === 'local' && llm.n_context ? llm.n_context : '';
   const asrPath = String(((SCHEMA.models && SCHEMA.models.asr) || {}).model || '');
   const ttsPath = String(((SCHEMA.models && SCHEMA.models.tts) || {}).model || '');
+  const fieldValue = (path, fallback = '') => {
+    const field = SCHEMA.fields.find(f => f.path === path);
+    return field && field.value != null ? field.value : fallback;
+  };
+  const higgsPersonality = String(fieldValue('general.higgs_personality', 'balanced'));
+  const higgsCustom = String(fieldValue('general.higgs_personality_custom', ''));
   const optsFor = (domain) => {
     const cur = currentBackend(domain);
     return b[domain].filter(o => o.offerable).map(o =>
@@ -1412,10 +1432,24 @@ function modelsCard() {
   };
   return el(`<div class="card"><h2>Models</h2>
     <p class="lead">Speech + language backends. <b>Model changes take effect after a restart.</b></p>
-    <div class="grid2">
+    <div class="grid2 model-speech-grid">
       <div><label>Speech-to-text</label><select id="sm-asr">${optsFor('asr')}</select></div>
-      <div><label>Text-to-speech</label><select id="sm-tts">${optsFor('tts')}</select></div>
-      <div><label>Language model</label><select id="sm-llm">${optsFor('llm')}</select></div>
+      <div><label>Text-to-speech</label><select id="sm-tts">${optsFor('tts')}</select>
+        <div id="sm-higgs-personality" style="display:none;margin-top:0.75rem">
+          <label>Higgs personality</label>
+          <select id="sm-higgs-personality-sel">
+            <option value="balanced"${higgsPersonality === 'balanced' ? ' selected' : ''}>Balanced</option>
+            <option value="playful"${higgsPersonality === 'playful' ? ' selected' : ''}>Playful</option>
+            <option value="calm"${higgsPersonality === 'calm' ? ' selected' : ''}>Calm</option>
+            <option value="wry"${higgsPersonality === 'wry' ? ' selected' : ''}>Wry</option>
+            <option value="custom"${higgsPersonality === 'custom' ? ' selected' : ''}>Custom</option>
+          </select>
+          <div id="sm-higgs-custom" style="display:none;margin-top:0.5rem">
+            <label>Custom delivery guidance</label>
+            <input type="text" id="sm-higgs-custom-text" placeholder="e.g. Warm and reassuring; use pauses sparingly." value="${higgsCustom.replace(/"/g,'&quot;')}">
+          </div>
+        </div>
+      </div>
     </div>
     <details class="advanced" id="sm-asr-custom"${asrPath ? ' open' : ''}>
       <summary>Speech-to-text: use a model I already have</summary>
@@ -1429,9 +1463,14 @@ function modelsCard() {
       <input type="text" id="sm-tts-model" placeholder="/abs/path/tts-model-dir  (or ./data/models/x)" value="${ttsPath.replace(/"/g,'&quot;')}">
       <div class="help">Load a TTS model already on disk from here instead of the default. Blank = default.</div>
     </details>
+    <label>Language model</label>
+    <select id="sm-llama-sel">
+      <option value="local"${llmMode === 'local' ? ' selected' : ''}>Local</option>
+      <option value="external"${llmMode === 'external' ? ' selected' : ''}>External</option>
+    </select>
     <div id="sm-openai" style="display:none;margin-top:0.75rem">
-      <label>Base URL</label><input type="text" id="sm-oai-url" placeholder="http://localhost:8888/v1" value="${(llm.backend === 'openai' ? llm.base_url || '' : '').replace(/"/g,'&quot;')}">
-      <label>Model (optional)</label><input type="text" id="sm-oai-model" placeholder="blank for single-model servers; e.g. gpt-4o-mini for OpenAI" value="${(llm.backend === 'openai' ? llm.model || '' : '').replace(/"/g,'&quot;')}">
+      <label>Base URL</label><input type="text" id="sm-oai-url" placeholder="http://localhost:8888/v1" value="${(llmMode === 'external' ? llm.base_url || '' : '').replace(/"/g,'&quot;')}">
+      <label>Model (optional)</label><input type="text" id="sm-oai-model" placeholder="blank for single-model servers; e.g. gpt-4o-mini for OpenAI" value="${(llmMode === 'external' ? llm.model || '' : '').replace(/"/g,'&quot;')}">
       <label>API key (optional)</label><input type="text" id="sm-oai-key" placeholder="${credPlaceholder(SCHEMA.credentials && SCHEMA.credentials.llm_api_key, '(blank for local servers; saved to credentials.json)')}">
       <div class="actions" style="justify-content:flex-start;gap:0.75rem">
         <button id="sm-oai-test">Test connection</button><span id="sm-oai-status" class="muted"></span></div>
@@ -1446,10 +1485,11 @@ function modelsCard() {
       <div class="help">An unreachable endpoint drops to limited regex-only commands at runtime.</div>
     </div>
     <div id="sm-llama" style="display:none;margin-top:0.75rem">
-      <label>Model</label>
-      <select id="sm-llama-sel">
-        <option value="default"${llamaCustom ? '' : ' selected'}>Default — Qwen3.5-9B-UD-Q4_K_XL (downloaded automatically)</option>
-        <option value="custom"${llamaCustom ? ' selected' : ''}>Custom .gguf file…</option>
+      <label>Local model</label>
+      <select id="sm-local-model">
+        <option value="qwen"${llmChoice === 'qwen' ? ' selected' : ''}>Qwen3.5 9B MTP (recommended)</option>
+        <option value="gemma"${llmChoice === 'gemma' ? ' selected' : ''}>Gemma 4 12B QAT</option>
+        <option value="custom"${llmChoice === 'custom' ? ' selected' : ''}>Custom GGUF file</option>
       </select>
       <div id="sm-llama-custom" style="display:none;margin-top:0.5rem">
         <label>Path to .gguf file</label>
@@ -1466,19 +1506,26 @@ function modelsCard() {
 }
 
 function wireModelsCard() {
-  const toggleLlm = () => {
-    const v = $('sm-llm').value;
-    $('sm-openai').style.display = v === 'openai' ? '' : 'none';
-    $('sm-llama').style.display = v === 'llama' ? '' : 'none';
-    setBranding(v === 'openai');
+  const toggleHiggsPersonality = () => {
+    const higgs = $('sm-tts').value === 'higgs-gguf';
+    $('sm-higgs-personality').style.display = higgs ? '' : 'none';
+    $('sm-higgs-custom').style.display = higgs && $('sm-higgs-personality-sel').value === 'custom' ? '' : 'none';
   };
-  $('sm-llm').addEventListener('change', toggleLlm);
-  toggleLlm();
-  const toggleLlamaCustom = () => {
-    $('sm-llama-custom').style.display = $('sm-llama-sel').value === 'custom' ? '' : 'none';
+  $('sm-tts').addEventListener('change', toggleHiggsPersonality);
+  $('sm-higgs-personality-sel').addEventListener('change', toggleHiggsPersonality);
+  toggleHiggsPersonality();
+  const toggleLlmModel = () => {
+    const mode = $('sm-llama-sel').value;
+    const isOpenai = mode === 'external';
+    const isLocal = mode === 'local';
+    $('sm-openai').style.display = isOpenai ? '' : 'none';
+    $('sm-llama').style.display = isLocal ? '' : 'none';
+    $('sm-llama-custom').style.display = isLocal && $('sm-local-model').value === 'custom' ? '' : 'none';
+    setBranding(isOpenai);
   };
-  $('sm-llama-sel').addEventListener('change', toggleLlamaCustom);
-  toggleLlamaCustom();
+  $('sm-llama-sel').addEventListener('change', toggleLlmModel);
+  $('sm-local-model').addEventListener('change', toggleLlmModel);
+  toggleLlmModel();
   $('sm-oai-url').addEventListener('blur', () => {
     const n = normalizeEndpointUrl($('sm-oai-url').value);
     if (n !== $('sm-oai-url').value) $('sm-oai-url').value = n;
@@ -1514,7 +1561,7 @@ function wireModelsCard() {
       s.style.color = 'var(--error)';
     }
   });
-  if ($('sm-llm').value === 'openai' && $('sm-oai-url').value.trim()) fetchOaiModels();
+  if ($('sm-llama-sel').value === 'external' && $('sm-oai-url').value.trim()) fetchOaiModels();
   $('save-models').addEventListener('click', saveModels);
 }
 
@@ -1537,9 +1584,9 @@ async function fetchOaiModels() {
 }
 
 async function saveModels() {
-  const llmBackend = $('sm-llm').value;
-  const llm = { backend: llmBackend };
-  if (llmBackend === 'openai') {
+  const llmMode = $('sm-llama-sel').value;
+  const llm = { backend: llmMode };
+  if (llmMode === 'external') {
     const model = $('sm-oai-model').value.trim();
     if (model) llm.model = model;
     llm.base_url = normalizeEndpointUrl($('sm-oai-url').value);
@@ -1548,8 +1595,10 @@ async function saveModels() {
       $('models-note').innerHTML = `<div class="banner error">OpenAI needs a base URL.</div>`;
       return;
     }
-  } else if (llmBackend === 'llama') {
-    if ($('sm-llama-sel').value === 'custom') {
+  } else {
+    const localModel = $('sm-local-model').value;
+    llm.local_model = localModel;
+    if (localModel === 'custom') {
       const m = $('sm-llama-model').value.trim();
       if (!m) {
         $('models-note').innerHTML = `<div class="banner error">Enter the path to your .gguf file, or pick Default.</div>`;
@@ -1570,7 +1619,7 @@ async function saveModels() {
   if (asrModel) models.asr.model = asrModel;
   if (ttsModel) models.tts.model = ttsModel;
   // API key goes to credentials.json, not config.yml.
-  const llmKey = llmBackend === 'openai' ? $('sm-oai-key').value.trim() : '';
+  const llmKey = llmMode === 'external' ? $('sm-oai-key').value.trim() : '';
   if (llmKey) await postJSON('/setup/credential', { key: 'llm_api_key', value: llmKey });
   const r = await postJSON('/setup/models', { models });
   const note = $('models-note');
@@ -1578,6 +1627,25 @@ async function saveModels() {
     const e = await r.json().catch(() => ({}));
     note.innerHTML = `<div class="banner error">Save failed: ${JSON.stringify(e.detail || r.status)}</div>`;
     return;
+  }
+  if (models.tts.backend === 'higgs-gguf') {
+    const personality = $('sm-higgs-personality-sel').value;
+    const custom = $('sm-higgs-custom-text').value.trim();
+    if (personality === 'custom' && !custom) {
+      note.innerHTML = `<div class="banner error">Enter custom Higgs delivery guidance, or choose a built-in personality.</div>`;
+      return;
+    }
+    const config = await putJSON('/config', {
+      updates: {
+        'general.higgs_personality': personality,
+        'general.higgs_personality_custom': personality === 'custom' ? custom : '',
+      },
+    });
+    if (!config.ok) {
+      const e = await config.json().catch(() => ({}));
+      note.innerHTML = `<div class="banner error">Saved model choice, but Higgs settings failed: ${JSON.stringify(e.detail || config.status)}</div>`;
+      return;
+    }
   }
   SCHEMA.models = models;
   note.innerHTML = `<div class="banner warn">Saved to config.yml. <b>Restart Fulloch</b> for the model change to take effect. If you switched to a backend whose model isn't downloaded yet, the restart re-opens the setup wizard to fetch it.
@@ -1598,6 +1666,7 @@ function autoWakePattern(wakeword) {
 }
 
 function fieldRow(f) {
+  if (f.path === 'general.higgs_personality' || f.path === 'general.higgs_personality_custom') return null;
   if (f.path === 'general.tts_speed' && currentBackend('tts') !== 'kokoro-onnx') return null;
   const id = 'cf-' + f.path.replace(/\W/g, '_');
   let needsRestart = f.apply === 'restart';

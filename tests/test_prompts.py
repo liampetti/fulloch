@@ -56,6 +56,11 @@ class TestAgentPromptShape:
         # Some phrasing in the prompt has to mention the limit.
         assert "3" in prompt or "three" in prompt.lower()
 
+    def test_higgs_prompt_teaches_delivery_tokens(self, notes_dir):
+        prompt = prompts.get_agent_system_prompt(higgs_personality="playful")
+        assert "<|style:whispering|>" in prompt
+        assert "<|sfx:laughter|>Haha" in prompt
+
 
 class TestAgentPromptSatelliteArea:
     """#14 6b: the calling satellite's HA area is told to the model so it can

@@ -100,6 +100,10 @@ details.advanced summary { cursor: pointer; font-size: 0.85rem; color: var(--tex
   font-size: 0.8rem; white-space: pre-wrap; word-break: break-all; }
 .grid2 { display: grid; grid-template-columns: 1fr; gap: 0.5rem; }
 @media (min-width: 36rem) { .grid2 { grid-template-columns: 1fr 1fr 1fr; } }
+.model-speech-grid { grid-template-columns: 1fr; }
+@media (min-width: 36rem) { .model-speech-grid { grid-template-columns: 1fr; } }
+.settings-section .cbody { display: grid; gap: 0.75rem; }
+.settings-section .field { margin-bottom: 0; }
 .asset { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0; border-top: 1px solid var(--border); }
 .asset .bar { flex: 1; height: 6px; background: var(--surface-2); border-radius: 99px; overflow: hidden; }
 .asset .bar > i { display: block; height: 100%; width: 0; background: var(--primary); transition: width .3s; }
@@ -180,8 +184,23 @@ details.advanced summary { cursor: pointer; font-size: 0.85rem; color: var(--tex
 audio { width: 100%; margin-top: 0.75rem; }
 .voice-row { display: flex; align-items: center; gap: 0.5rem; }
 .voice-row select { flex: 1; }
-.voice-play { flex: none; width: 2.4rem; padding: 0.5rem 0; font-size: 0.85rem;
-  line-height: 1; justify-content: center; }
+.voice-play {
+  flex: none;
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  border-radius: 999px;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  cursor: pointer;
+  display: inline-grid;
+  place-items: center;
+  line-height: 0;
+}
+.voice-play svg { width: 13px; height: 13px; fill: currentColor; }
+.voice-play:hover { color: #fff; border-color: var(--primary); background: var(--primary); }
+.voice-play:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 /* Section dividers inside the set-up card */
 .section-title { font-weight: 700; font-size: 0.88rem; margin: 1.25rem 0 0.6rem;
   padding-bottom: 0.35rem; border-bottom: 1px solid var(--border); color: var(--text-muted); }

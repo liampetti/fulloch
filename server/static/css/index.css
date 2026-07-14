@@ -1028,9 +1028,34 @@ nav.tabs {
 }
 .tag.voice { color: var(--tag-voice); }
 .tag.text  { color: var(--tag-text); }
+.tag.startup { color: var(--text-muted); border-style: dashed; }
 /* Which satellite/room a turn came from — a separate, muted pill from the
    voice/text source tag above so the two don't visually compete. */
 .tag.location { color: var(--text-muted); border-style: dashed; }
+
+.higgs-credit { color: var(--text-muted); font-size: 0.72rem; }
+
+.msg-play {
+  min-width: 24px;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  border-radius: 999px;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  cursor: pointer;
+  display: inline-grid;
+  place-items: center;
+  line-height: 0;
+}
+.msg-play svg { width: 11px; height: 11px; fill: currentColor; }
+.msg-play:hover {
+  color: #fff;
+  border-color: var(--primary);
+  background: var(--primary);
+}
+.msg-play:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.msg-play:disabled { opacity: 0.45; cursor: wait; }
 
 /* Browser-satellite area picker (6b) — a synthetic assistant bubble with
    HA-zone buttons instead of typed text, shown once until the user picks
@@ -1221,6 +1246,13 @@ form {
   align-items: flex-end;
 }
 
+.chat-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 textarea {
   flex: 1;
   border: 1px solid var(--border);
@@ -1345,4 +1377,29 @@ button.sat-toggle.active {
   background: var(--secondary);
   border-color: var(--secondary);
   color: #fff;
+}
+
+@media (max-width: 520px) {
+  footer { padding-inline: 10px; }
+  form { gap: 6px; }
+  .chat-actions {
+    display: grid;
+    grid-template-columns: repeat(2, 34px);
+    gap: 4px;
+    align-items: center;
+  }
+  button.send, button.satellite, button.sat-toggle {
+    width: 34px;
+    height: 34px;
+  }
+  button.send svg, button.satellite svg { width: 17px; height: 17px; }
+  button.sat-toggle svg { width: 14px; height: 14px; }
+  .sat-area-pill.shown {
+    grid-column: 1 / -1;
+    width: 72px;
+    justify-content: center;
+    margin-inline-start: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 }

@@ -29,7 +29,12 @@ _PLAY_RE = re.compile(
     r"play\s+(.+)$",
     re.IGNORECASE,
 )
-_STOP_RE = re.compile(r"^\s*(stop|pause|halt)\b", re.IGNORECASE)
+_STOP_RE = re.compile(
+    r"^\s*(?:(?:please|just|okay)\s+)*(?:stop|pause|halt)\b"
+    r"(?:\s+(?:the\s+)?(?:music|song|playback))?"
+    r"(?:\s+(?:then|now|please))?\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
 _SKIP_RE = re.compile(r"^\s*skip\b", re.IGNORECASE)
 _RESUME_RE = re.compile(r"^\s*resume\b", re.IGNORECASE)
 # Leading context is fine ("do you know what time is it"), so the start stays
@@ -42,6 +47,20 @@ _TIME_QUERY_RE = re.compile(
     r"(?:what time is it|what'?s the time|what time it is)"
     r"(?:\s+(?:right\s+now|now|currently|today|please|exactly))?"
     r"\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
+# The direct weather path is intentionally limited to generic, default-location
+# forecasts. Locations, dates, and conditional questions need the agent to set
+# tool arguments or resolve context, so they must not match this rule.
+_WEATHER_FORECAST_RE = re.compile(
+    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+)*"
+    r"(?:"
+    r"(?:what(?:'?s|\s+is)\s+(?:the\s+)?weather(?:\s+forecast)?)"
+    r"|(?:weather\s+forecast)"
+    r"|(?:forecast)"
+    r"|(?:what\s+will\s+the\s+weather\s+be\s+like)"
+    r"|(?:(?:give|tell)\s+me\s+(?:the\s+)?weather\s+forecast)"
+    r")\s*[?!.,]*\s*$",
     re.IGNORECASE,
 )
 # Anchored like _PLAY_RE so a mid-sentence "set a timer for the eggs" mention
@@ -77,6 +96,10 @@ def extract_resume(command: str) -> Optional[bool]:
 
 def has_time_query(command: str) -> Optional[bool]:
     return True if _match("Time", _TIME_QUERY_RE, command) else None
+
+
+def has_default_weather_forecast(command: str) -> Optional[bool]:
+    return True if _match("Weather forecast", _WEATHER_FORECAST_RE, command) else None
 
 
 def extract_timer(command: str) -> Optional[str]:
@@ -453,7 +476,8 @@ def extract_color(command: str) -> Optional[tuple]:
 
 
 # "louder" / "volume up" / "turn the volume up" → ha_volume_up (and the
-# symmetric down forms). No entity — the volume tools default to AVR→TV.
+# symmetric down forms). With no target, the volume tools prefer configured
+# Spotify playback, then AVR, then TV.
 _VOLUME_UP_RE = re.compile(
     r"^\s*(?:please\s+)?(?:"
     r"louder"
@@ -461,6 +485,15 @@ _VOLUME_UP_RE = re.compile(
     r"|turn\s+up(?:\s+the)?\s+(?:volume|sound)"
     r"|turn\s+(?:it|the\s+(?:volume|sound))\s+up"
     r")\s*$",
+    re.IGNORECASE,
+)
+_VOLUME_UP_TARGET_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:"
+    r"louder"
+    r"|volume\s+up"
+    r"|turn\s+up(?:\s+the)?\s+(?:volume|sound)"
+    r"|turn\s+(?:it|the\s+(?:volume|sound))\s+up"
+    r")\s+(?:in|on)\s+(?:the\s+)?(.+?)\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
 _VOLUME_DOWN_RE = re.compile(
@@ -472,14 +505,33 @@ _VOLUME_DOWN_RE = re.compile(
     r")\s*$",
     re.IGNORECASE,
 )
+_VOLUME_DOWN_TARGET_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:"
+    r"quieter|softer"
+    r"|volume\s+down"
+    r"|turn\s+down(?:\s+the)?\s+(?:volume|sound)"
+    r"|turn\s+(?:it|the\s+(?:volume|sound))\s+down"
+    r")\s+(?:in|on)\s+(?:the\s+)?(.+?)\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
 
 
 def extract_volume_up(command: str) -> Optional[bool]:
     return True if _match("Volume up", _VOLUME_UP_RE, command) else None
 
 
+def extract_volume_up_target(command: str) -> Optional[str]:
+    m = _match("Volume up target", _VOLUME_UP_TARGET_RE, command)
+    return m.group(1).strip() if m else None
+
+
 def extract_volume_down(command: str) -> Optional[bool]:
     return True if _match("Volume down", _VOLUME_DOWN_RE, command) else None
+
+
+def extract_volume_down_target(command: str) -> Optional[str]:
+    m = _match("Volume down target", _VOLUME_DOWN_TARGET_RE, command)
+    return m.group(1).strip() if m else None
 
 
 # Match explicit asks for deeper thought, not casual uses like "I think it's
@@ -598,7 +650,9 @@ _INTENT_RULES = [
     (extract_light_brightness, lambda v: {"intent": "ha_set_brightness", "args": [v[0], v[1]]}),
     (extract_dim_brighten, lambda v: {"intent": "ha_set_brightness", "args": [v[0], v[1]]}),
     (extract_color, lambda v: {"intent": "ha_set_color", "args": [v[0], v[1]]}),
+    (extract_volume_up_target, lambda v: {"intent": "ha_volume_up", "args": [v]}),
     (extract_volume_up, lambda _: {"intent": "ha_volume_up", "args": []}),
+    (extract_volume_down_target, lambda v: {"intent": "ha_volume_down", "args": [v]}),
     (extract_volume_down, lambda _: {"intent": "ha_volume_down", "args": []}),
     (
         extract_lock,
@@ -619,6 +673,7 @@ _INTENT_RULES = [
     (extract_after_play, lambda v: {"intent": "play_song", "args": [v]}),
     (extract_stop, lambda _: {"intent": "pause", "args": []}),
     (has_time_query, lambda _: {"intent": "get_time", "args": []}),
+    (has_default_weather_forecast, lambda _: {"intent": "get_weather_forecast", "args": []}),
     (extract_skip, lambda _: {"intent": "skip", "args": []}),
     (extract_resume, lambda _: {"intent": "resume", "args": []}),
     (extract_timer, lambda v: {"intent": "start_countdown", "args": [v]}),

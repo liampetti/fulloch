@@ -51,7 +51,7 @@ def test_models_endpoint_writes_tier(tmp_path):
     client, _, path = _client(tmp_path)
     r = client.post("/setup/models", json={"tier": "cpu_local"})
     assert r.status_code == 200
-    assert "qwen-onnx-small" in Path(path).read_text()
+    assert "qwen-onnx" in Path(path).read_text()
 
 
 def test_models_endpoint_rejects_unknown_tier(tmp_path):

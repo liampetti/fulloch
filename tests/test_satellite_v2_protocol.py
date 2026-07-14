@@ -8,9 +8,18 @@ import queue
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from server.dashboard import create_app
+
+
+@pytest.fixture(autouse=True)
+def _empty_satellite_token_config(monkeypatch):
+    """Keep protocol defaults independent of a developer's data/config.yml."""
+    import server.config_store as config_store
+
+    monkeypatch.setattr(config_store, "read_config", lambda *a, **k: {})
 
 
 def _stub_assistant():

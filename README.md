@@ -23,6 +23,8 @@ Fulloch is your fully private, local voice assistant running on your own PC or M
 - **Barge-in** - interrupt mid-sentence with the wakeword
 - **Cloned voice** *(GPU override)* - speaks in a voice cloned from a few seconds of reference audio; the default CPU stack uses fast built-in named voices (Kokoro) instead
 
+> **Higgs TTS 3:** The optional Higgs GPU backend is available only under Boson AI's Research and Non-Commercial License, not Fulloch's MIT license. It requires explicit consent for every voice reference. See [Model Sources and Licenses](docs/model-sources.md#higgs-tts-3-license).
+
 ## Quick installation
 
 The default stack runs on **CPU (mac/linux/windows)**. Audio runs through the browser dashboard. The LLM is either regex-only (simple commands) or off-box via an OpenAI-compatible endpoint you configure in the wizard (e.g. Ollama / LM Studio / another machine on your LAN). The dashboard avatar swaps to Parloch, the **Par**tially-**loc**al **h**ome voice assistant, when the LLM is running off-device.
@@ -58,7 +60,7 @@ docker run -d \
 
 > The commented-out `-v` line exposes your Obsidian vault to Fulloch so voice notes can read/write it. Uncomment it, edit the host path, and add a matching `obsidian.path_translation` entry in `data/config.yml`, see the Obsidian section below.
 >
-> **Named volumes** (e.g. `-v fulloch-data:/app/data:rw` in compose) work too — the image's entrypoint chowns the volume to the container's user on first boot, so no separate `chown` init container is needed. The bind mount above (the default in this README) inherits the host's UID and is even simpler.
+> **Named volumes** (e.g. `-v fulloch-data:/app/data:rw` in compose) work too, the image's entrypoint chowns the volume to the container's user on first boot, so no separate `chown` init container is needed. The bind mount above (the default in this README) inherits the host's UID and is even simpler.
 
 ### SearXNG sidecar (optional, for live web answers)
 
@@ -96,34 +98,32 @@ nothing in the timeline surprises you:
 3. **Walk the wizard.** Four steps: pick a thinking mode (regex
    simple / full GPU / remote LLM), pick a name and voice, optionally
    connect Home Assistant and SearXNG, optionally connect Obsidian.
-   The wizard's preflight (disk + network + GPU) blocks the download
-   with a clear error if anything is missing — you'll never see a
-   half-finished download.
 4. **Models download.** This is the long bit. The CPU stack pulls
-   roughly 1.5 GB (Qwen3-ASR 0.6B ONNX + Kokoro 82M); the GPU
-   stack pulls roughly 6 GB (Qwen3-ASR 1.7B + Qwen3-TTS 1.7B + the
-   9B language model). Plan on **3–10 minutes** on a residential
-   connection, longer on a phone hotspot. The download is silent on
-   the dashboard but you can watch it live with
-   `docker logs -f fulloch-ai` — the assistant's `setup` step
-   streams each model's progress.
-5. **First wake.** Once the progress bar fills, the assistant
-   transitions to `READY` and the mic button on the dashboard
-   lights up. The default wakeword is **"hey atticus"**; say it out
-   loud and the assistant should reply with a chime. If it doesn't,
-   check that the browser tab has microphone permission (the URL bar
-   shows a mic icon when granted).
+    roughly 5 GB (Qwen3 1.7B ONNX + Kokoro 82M); the GPU
+    stack pulls roughly 13 GB (Qwen3 1.7B PyTorch ASR + Qwen3 1.7B PyTorch TTS + the
+   9B language model).
+5. **Startup** Once models are downloaded the assistant can go through startup, this will happen everytime you stop and restart Fulloch. This should only take about a minute or two with the Qwen3 TTS taking the longest to warm-up. Once everything is loaded you are presented with the chat screen. You can type text or click to activate voice mode, if you also select "Always Listen" you do not need the wakeword anymore (default is 'Hey Atticus').
 
-If anything in those five steps goes wrong, the most useful single
-command is:
+### Trusted LAN HTTPS
+
+The default certificate is self-signed, which is enough for browser microphone
+permission after accepting the warning once. To remove that warning on home
+network devices, create a private Fulloch CA and dashboard certificate:
 
 ```bash
-docker logs -f fulloch-ai
+python scripts/create_local_ca.py --force
 ```
 
-…which streams the same logs the dashboard's loading screen renders.
-Permission errors, model download failures, and the wizard's
-preflight errors all surface there.
+The script writes the dashboard certificate to `data/certs/dashboard.crt`, so it
+uses the existing HTTPS configuration. It prints the one-time trust command for
+Linux, macOS, Windows, iOS/iPadOS, and Android. Install only
+`data/certs/fulloch-home-ca.crt` on client devices; never distribute
+`fulloch-home-ca.key`. Restart Fulloch after running the script. Add extra names
+or addresses before clients use them, for example:
+
+```bash
+python scripts/create_local_ca.py --force --host fulloch.home --ip 192.168.1.20
+```
 
 ## Configuration
 
@@ -233,6 +233,8 @@ Submit a [Bug Report](https://github.com/liampetti/fulloch/issues/new?labels=bug
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add tools and submit changes.
 
 ## Credits
+
+Model download sources and licensing notes are listed in [docs/model-sources.md](docs/model-sources.md).
 
 Voices in `data/voices/`:
 - **`atticus` / `tulloch`** - generated with [Qwen3-TTS-12Hz-1.7B-VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) (Apache-2.0) from text descriptions; synthetic, not clones of real people

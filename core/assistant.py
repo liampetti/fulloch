@@ -34,6 +34,7 @@ from .agent_loop import (
 )
 from .audio import AudioCapture
 from .backends import ASR, LLM, TTS, get_module, resolve_models
+from .higgs_controls import apply_delivery, extract_delivery_request
 from .satellite import SatelliteSession
 from .satellite_context import current_satellite_id as _current_satellite_id
 from .slm import ContextExhaustedError, RemoteUnreachable, generate_slm, load_slm
@@ -184,19 +185,15 @@ def _build_barge_pattern(wakeword: str, base_pattern: str) -> str:
 
 # Spoken phrase pools live in `utils.phrases` — edit them there.
 from utils.phrases import (  # noqa: E402
-    ACK_PHRASES,
-    BARGE_ACK_PHRASES,
     BUSY_PHRASES,
     GREETING_TOPICS,
     LLM_ERROR_PHRASES,
     NO_AI_PHRASES,
-    NOTE_WRITE_STALL_PHRASES,
-    PRE_THINKING_STALL_PHRASES,
     REMINDER_PREFIX_PHRASES,
-    REPLAN_STALL_PHRASES,
-    THINKING_STALL_PHRASES,
+    STARTUP_CACHE_SPECS,
+    STARTUP_SHARED_CACHE_ATTRS,
+    STARTUP_SHARED_PHRASES,
     TOOL_UNAVAILABLE_PHRASES,
-    WEB_SEARCH_STALL_PHRASES,
 )
 
 # TTL on the partial-thinking capture. Past this, a 'summarise your
@@ -257,6 +254,36 @@ DROP_AFTER_CANCEL_S = 0.5
 # the baseline; raise it to demand a clearer margin over background.
 BARE_WAKEWORD_MIN_OVER_BASELINE_DB = 0.0
 
+# User-facing estimates for the reference 16GB GPU. They are intentionally
+# broad: disk speed, CUDA cache state, and model choice materially affect load.
+_MODEL_LOAD_ESTIMATES = {
+    (ASR, "qwen"): "usually 10-20 seconds",
+    (TTS, "qwen"): "usually 30-60 seconds",
+    (LLM, "llama"): "usually 10-25 seconds",
+    (ASR, "qwen-gguf"): "usually 5-15 seconds",
+    (TTS, "qwen-gguf"): "usually 5-15 seconds",
+}
+
+
+class _GainSink:
+    """Apply a per-turn gain without changing the shared TTS sink protocol."""
+
+    def __init__(self, sink, gain: float):
+        self._sink = sink
+        self._gain = gain
+
+    def put(self, item, *args, **kwargs) -> None:
+        if (
+            isinstance(item, tuple)
+            and item
+            and isinstance(item[0], np.ndarray)
+        ):
+            item = (item[0] * self._gain, *item[1:])
+        self._sink.put(item, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._sink, name)
+
 
 class Assistant:
     """Owns the audio capture and runs the wakeword → intent → TTS loop."""
@@ -267,6 +294,8 @@ class Assistant:
         wakeword_pattern: Optional[str] = None,
         voice_clone: Optional[str] = None,
         tts_speed: Optional[float] = None,
+        higgs_personality: str = "balanced",
+        higgs_personality_custom: str = "",
         barge_in: str = "off",
         barge_in_threshold_dbfs: Optional[float] = None,
         follow_up_time: str = "0s",
@@ -337,6 +366,8 @@ class Assistant:
         )
         self.voice_clone = voice_clone
         self.tts_speed = tts_speed
+        self.higgs_personality = higgs_personality
+        self.higgs_personality_custom = higgs_personality_custom
         self.asr_language = asr_language
         self.asr_context_hint = asr_context_hint
         self.asr_context_terms = asr_context_terms or []
@@ -465,14 +496,9 @@ class Assistant:
         self.grammar = None
         self.greeting_prompt = None
         self.web_summary_prompt = None
-        # Pre-rendered "no AI model" fallback clips (see NO_AI_PHRASES).
-        # Populated in `_warm_and_announce`; played on a no-LLM miss.
+        # Pre-rendered fallback clips, populated in `_warm_and_announce`.
         self.no_ai_cache: list = []
-        # Pre-rendered "AI server unreachable" clips (see LLM_ERROR_PHRASES).
-        # Played when the configured remote LLM times out or errors.
         self.llm_error_cache: list = []
-        # Pre-rendered "tool not available" clips (see TOOL_UNAVAILABLE_PHRASES).
-        # Played by the hallucinated-tool guard instead of a fabricated answer.
         self.tool_unavailable_cache: list = []
         # Pre-rendered opening-greeting clips. `_warm_and_announce` synthesises
         # and attempts to play these during startup — before any browser could
@@ -483,12 +509,13 @@ class Assistant:
         # connection instead. `_greeting_delivered` guards against replaying
         # on every reconnect (tab refresh, follow-up browser tab, etc).
         self.greeting_cache: list = []
+        self.greeting_text = ""
         self._greeting_delivered = False
 
         # Serializes SLM access. Voice turns run on the transcriber or barge-in
         # worker; text turns from the dashboard run on the FastAPI thread —
-        # llama-cpp-python isn't thread-safe, so all `_handle_wakeword` callers
-        # acquire this. Voice barge-in cancels mid-stream so the lock releases
+        # the local model server and history are shared, so all `_handle_wakeword`
+        # callers acquire this. Voice barge-in cancels mid-stream so the lock releases
         # quickly even while a text turn waits behind it.
         self._turn_lock = threading.Lock()
         # Exclusive ownership of "whose turn is it" across every satellite
@@ -718,6 +745,7 @@ class Assistant:
 
         # --- ASR -----------------------------------------------------------
         self._loading_backend = asr_cfg["spec"]
+        self._set_loading_detail(ASR, asr_cfg)
         asr_mod = get_module(ASR, asr_cfg["backend"])
         logger.info(f"Using {asr_cfg['spec'].display_name}")
         self.asr_pipe = asr_mod.load_asr_model(
@@ -752,6 +780,7 @@ class Assistant:
 
         # --- TTS -----------------------------------------------------------
         self._loading_backend = tts_cfg["spec"]
+        self._set_loading_detail(TTS, tts_cfg)
         tts_mod = get_module(TTS, tts_cfg["backend"])
         # Kept for the settings-console hot-apply (set_voice/set_speed live).
         # The backend gates which of those can apply without a restart: Kokoro
@@ -785,6 +814,7 @@ class Assistant:
         # --- LLM -----------------------------------------------------------
         if self.llm_enabled:
             self._loading_backend = llm_cfg["spec"]
+            self._set_loading_detail(LLM, llm_cfg)
             logger.info(f"Using {llm_cfg['spec'].display_name}")
             backend = llm_cfg["backend"]
             if backend == "openai":
@@ -796,8 +826,6 @@ class Assistant:
             else:  # local llama.cpp (default)
                 load_kwargs = {
                     "model_path": llm_cfg["model"],
-                    # Reasoning-directive family (qwen | "" for Gemma/other).
-                    "think_style": llm_cfg["spec"].think_style,
                 }
                 if llm_cfg["n_context"]:
                     load_kwargs["n_ctx"] = llm_cfg["n_context"]
@@ -812,6 +840,8 @@ class Assistant:
         # endpoint surfaces the dashboard banner without waiting for a first turn.
         if self.llm_backend == "openai":
             threading.Thread(target=self._probe_remote_llm, daemon=True).start()
+        if self.lifecycle is not None:
+            self.lifecycle.set("LOADING", "warming up prompts (usually 10-20 seconds)")
         self._warm_and_announce()
         # The opening greeting has played — the assistant is live. Flip the
         # lifecycle so the dashboard hands off from the loading screen.
@@ -824,6 +854,16 @@ class Assistant:
             set_speak_callback(self.speak_proactive)
         except ImportError:
             pass
+
+    def _set_loading_detail(self, domain: str, cfg: dict) -> None:
+        """Expose the current model and a conservative load estimate to the UI."""
+        if self.lifecycle is None:
+            return
+        estimate = _MODEL_LOAD_ESTIMATES.get((domain, cfg["backend"]))
+        detail = f"loading {cfg['spec'].display_name}"
+        if estimate:
+            detail += f" ({estimate})"
+        self.lifecycle.set("LOADING", detail)
 
     def _note_llm_remote_status(self, ok: bool, error: str = "") -> None:
         """Record the last-known reachability of the remote LLM endpoint.
@@ -874,34 +914,7 @@ class Assistant:
         """
         self.audio_capture.mic_globally_enabled = False
         try:
-            # Pre-render the "no AI model" fallback + ack clips. The fallback
-            # is the no-LLM tier's spoken miss-handler (and the remote-down
-            # path in Step 6); both play regardless of whether an SLM loaded.
-            logger.info("Caching no-AI fallback phrases...")
-            self.no_ai_cache = [
-                self.synthesize(phrase, self.voice_clone_prompt) for phrase in NO_AI_PHRASES
-            ]
-            logger.info("Caching LLM-error fallback phrases...")
-            self.llm_error_cache = [
-                self.synthesize(phrase, self.voice_clone_prompt) for phrase in LLM_ERROR_PHRASES
-            ]
-            logger.info("Caching ack phrases...")
-            self.ack_cache = [
-                self.synthesize(phrase, self.voice_clone_prompt) for phrase in ACK_PHRASES
-            ]
-            logger.info("Caching barge-in ack phrases...")
-            self.barge_ack_cache = [
-                self.synthesize(phrase, self.voice_clone_prompt) for phrase in BARGE_ACK_PHRASES
-            ]
-            logger.info("Caching busy phrases...")
-            self.busy_cache = [
-                self.synthesize(phrase, self.voice_clone_prompt) for phrase in BUSY_PHRASES
-            ]
-            logger.info("Caching tool-unavailable phrases...")
-            self.tool_unavailable_cache = [
-                self.synthesize(phrase, self.voice_clone_prompt)
-                for phrase in TOOL_UNAVAILABLE_PHRASES
-            ]
+            self._render_phrase_caches()
 
             if self.llm_enabled:
                 # Prime the agent prompt's KV-cache so the first real user
@@ -918,36 +931,6 @@ class Assistant:
                     )
                 except RemoteUnreachable:
                     logger.warning("Remote LLM unreachable at startup — skipping cache prime")
-
-                # Pre-render the context-specific stall phrases so each plays
-                # instantly and in the cloned voice (synthesizing them live each
-                # turn made them too short for the clone to lock in). These are
-                # only reached on SLM-driven turns, so skip them with no LLM.
-                logger.info("Caching web-search stall phrases...")
-                self.web_search_stall_cache = [
-                    self.synthesize(phrase, self.voice_clone_prompt)
-                    for phrase in WEB_SEARCH_STALL_PHRASES
-                ]
-                logger.info("Caching note-write stall phrases...")
-                self.note_write_stall_cache = [
-                    self.synthesize(phrase, self.voice_clone_prompt)
-                    for phrase in NOTE_WRITE_STALL_PHRASES
-                ]
-                logger.info("Caching pre-thinking stall phrases...")
-                self.pre_thinking_stall_cache = [
-                    self.synthesize(phrase, self.voice_clone_prompt)
-                    for phrase in PRE_THINKING_STALL_PHRASES
-                ]
-                logger.info("Caching thinking stall phrases...")
-                self.thinking_stall_cache = [
-                    self.synthesize(phrase, self.voice_clone_prompt)
-                    for phrase in THINKING_STALL_PHRASES
-                ]
-                logger.info("Caching replan stall phrases...")
-                self.replan_stall_cache = [
-                    self.synthesize(phrase, self.voice_clone_prompt)
-                    for phrase in REPLAN_STALL_PHRASES
-                ]
 
                 # Pre-load the BGE embedding model + restore the persisted notes
                 # index so the first semantic-search query doesn't pay the
@@ -967,7 +950,7 @@ class Assistant:
             cleaned = None
             if self.llm_enabled:
                 topic = random.choice(GREETING_TOPICS)
-                logger.info(f"Generating opening greeting (topic: {topic})...")
+                logger.info(f"Preparing startup prompt (topic: {topic})...")
                 try:
                     greeting = generate_slm(
                         self.slm_model,
@@ -986,12 +969,13 @@ class Assistant:
                     "without an AI model, so I can handle simple commands like "
                     "lights, timers, and music."
                 )
+            self.greeting_text = cleaned
 
             # Splitting the greeting into individual sentences and
             # synthesising each as its own worker job populates the
             # reduce-overhead CUDA-graph cache with extra prefill shapes.
             sentences = split_sentences(cleaned) or [cleaned]
-            logger.info(f"Synthesising greeting ({len(sentences)} sentence(s))...")
+            logger.info(f"Rendering warm-up prompts ({len(sentences)} sentence(s))...")
             greeting_parts = [self.synthesize(s, self.voice_clone_prompt) for s in sentences]
             # Cached for replay_greeting() — see greeting_cache's docstring
             # above for why the live attempt below almost never actually
@@ -1252,6 +1236,8 @@ class Assistant:
             "satellite_id": satellite_id,
             "satellite_label": (sat.label or sat.ha_area_name) if sat is not None else None,
         }
+        if role == "assistant" and source == "voice":
+            event["tts_backend"] = getattr(self, "_tts_backend", None)
         if stats is not None:
             event["stats"] = stats.to_payload()
         self._dispatch_event(event)
@@ -1333,7 +1319,7 @@ class Assistant:
         backend loads its weights at startup and can't switch live, so we refuse
         and the caller tells the user a restart is required.
 
-        Serialised under `_turn_lock` (llama-cpp-python isn't thread-safe and the
+        Serialised under `_turn_lock` (the local model server and the
         handle is shared with the transcriber / barge-in worker) so an in-flight
         turn never reads a half-swapped model.
         """
@@ -1497,15 +1483,34 @@ class Assistant:
         belongs to (`self._turn_local`). See `play_chunks` for why this is a
         bound wrapper rather than a raw rebinding of the tts module function.
         """
+        sink = getattr(self._turn_local, "sink", None)
+        gain = getattr(self._turn_local, "tts_gain", 1.0)
+        if sink is not None and gain != 1.0:
+            sink = _GainSink(sink, gain)
         return self._tts_module.speak_stream(
             text,
             prompt,
             session=session,
             stats=stats,
             on_first_audio=on_first_audio,
-            sink=getattr(self._turn_local, "sink", None),
+            sink=sink,
             tts_active_event=getattr(self._turn_local, "tts_active_event", None),
         )
+
+    def _prepare_delivery_request(self, user_prompt: str, sat: SatelliteSession) -> str:
+        """Extract delivery controls and retain the cross-backend quiet setting."""
+        previous = sat.higgs_delivery if self._tts_backend == "higgs-gguf" else ""
+        agent_prompt, delivery = extract_delivery_request(user_prompt, previous)
+        sat.tts_gain = 0.5 if delivery == "<|style:whispering|>" else 1.0
+
+        if self._tts_backend == "higgs-gguf":
+            sat.higgs_delivery = delivery
+            return agent_prompt
+
+        # Other backends cannot honour Higgs pacing tags. Only remove explicit
+        # whisper wording when it has the equivalent, model-agnostic gain.
+        sat.higgs_delivery = ""
+        return agent_prompt if sat.tts_gain != 1.0 else user_prompt
 
     def replay_greeting(self, satellite_id: str) -> None:
         """Mark the greeting as delivered without playing it.
@@ -1584,22 +1589,17 @@ class Assistant:
         }
     )
 
-    # (cache attribute, phrase pool, llm_only) — the phrase clips pre-rendered at
-    # startup. Re-rendered on a live voice change so stalls/acks don't keep
-    # playing in the old voice. LLM-only pools are skipped without an SLM.
-    _PHRASE_CACHE_SPECS = (
-        ("no_ai_cache", NO_AI_PHRASES, False),
-        ("llm_error_cache", LLM_ERROR_PHRASES, False),
-        ("tool_unavailable_cache", TOOL_UNAVAILABLE_PHRASES, False),
-        ("ack_cache", ACK_PHRASES, False),
-        ("barge_ack_cache", BARGE_ACK_PHRASES, False),
-        ("busy_cache", BUSY_PHRASES, False),
-        ("web_search_stall_cache", WEB_SEARCH_STALL_PHRASES, True),
-        ("note_write_stall_cache", NOTE_WRITE_STALL_PHRASES, True),
-        ("pre_thinking_stall_cache", PRE_THINKING_STALL_PHRASES, True),
-        ("thinking_stall_cache", THINKING_STALL_PHRASES, True),
-        ("replan_stall_cache", REPLAN_STALL_PHRASES, True),
-    )
+    def _render_phrase_caches(self) -> None:
+        shared = [self.synthesize(phrase, self.voice_clone_prompt) for phrase in STARTUP_SHARED_PHRASES]
+        for attr in STARTUP_SHARED_CACHE_ATTRS:
+            setattr(self, attr, shared)
+        rendered = len(shared)
+        for attr, phrases, llm_only in STARTUP_CACHE_SPECS:
+            if llm_only and not self.llm_enabled:
+                continue
+            setattr(self, attr, [self.synthesize(phrase, self.voice_clone_prompt) for phrase in phrases])
+            rendered += len(phrases)
+        logger.info("Cached %d reusable startup phrase clips", rendered)
 
     def _rerender_phrase_caches(self) -> None:
         """Re-synthesise the pre-rendered phrase clips in the current voice.
@@ -1608,11 +1608,7 @@ class Assistant:
         thread reading a cache mid-rebuild sees the old or new list, never a
         partial one — same discipline as the HA deny-list swap.
         """
-        for attr, phrases, llm_only in self._PHRASE_CACHE_SPECS:
-            if llm_only and not self.llm_enabled:
-                continue
-            rendered = [self.synthesize(p, self.voice_clone_prompt) for p in phrases]
-            setattr(self, attr, rendered)
+        self._render_phrase_caches()
         logger.info("Phrase caches re-rendered for voice %r", self.voice_clone)
 
     def apply_hot_config(self, changes: list) -> set:
@@ -1833,12 +1829,11 @@ class Assistant:
         (see the `if cleaned:` guards in `_run_turn` / `_run_half_duplex`).
         Otherwise it returns the phrase for the caller to speak/show.
         """
-        i = random.randrange(len(NO_AI_PHRASES))
-        phrase = NO_AI_PHRASES[i]
+        phrase = NO_AI_PHRASES[0]
         self._record_spoken(phrase)
         if source == "voice" and self.no_ai_cache:
             self._emit_turn_event("assistant", phrase, "voice", satellite_id=satellite_id)
-            chunks, sr = self.no_ai_cache[i]
+            chunks, sr = self.no_ai_cache[0]
             try:
                 self.play_chunks(chunks, sr, session=session or self.tts_session)
             except Exception:
@@ -1856,12 +1851,11 @@ class Assistant:
         `_speak_no_ai_fallback`: records phrase in `_history`; voice path plays
         the pre-rendered clip and returns "" so the caller doesn't double-speak.
         """
-        i = random.randrange(len(LLM_ERROR_PHRASES))
-        phrase = LLM_ERROR_PHRASES[i]
+        phrase = LLM_ERROR_PHRASES[0]
         self._record_spoken(phrase)
         if source == "voice" and self.llm_error_cache:
             self._emit_turn_event("assistant", phrase, "voice", satellite_id=satellite_id)
-            chunks, sr = self.llm_error_cache[i]
+            chunks, sr = self.llm_error_cache[0]
             try:
                 self.play_chunks(chunks, sr, session=session or self.tts_session)
             except Exception:
@@ -1881,12 +1875,11 @@ class Assistant:
         pre-rendered clip, emits the assistant bubble, and returns "" so the
         caller doesn't speak it again. Otherwise returns the phrase to speak/show.
         """
-        i = random.randrange(len(TOOL_UNAVAILABLE_PHRASES))
-        phrase = TOOL_UNAVAILABLE_PHRASES[i]
+        phrase = TOOL_UNAVAILABLE_PHRASES[0]
         self._record_spoken(phrase)
         if source == "voice" and self.tool_unavailable_cache:
             self._emit_turn_event("assistant", phrase, "voice", satellite_id=satellite_id)
-            chunks, sr = self.tool_unavailable_cache[i]
+            chunks, sr = self.tool_unavailable_cache[0]
             try:
                 self.play_chunks(chunks, sr, session=session or self.tts_session)
             except Exception:
@@ -1987,7 +1980,7 @@ class Assistant:
         the calling satellite's identity via the `_current_satellite_id`
         contextvar (only HA's per-satellite area default, #14, uses this so far).
 
-        Serialised under `_turn_lock` — llama-cpp-python isn't thread-safe
+        Serialised under `_turn_lock` so local model turns and history remain ordered
         and dashboard text turns share this method with voice turns.
         """
         with self._turn_lock:
@@ -2035,6 +2028,16 @@ class Assistant:
         self.audio_capture.clear_follow_up(sat)
         self._maybe_reset_session()
         self._emit_turn_event("user", user_prompt, "voice", satellite_id=satellite_id)
+        agent_prompt = self._prepare_delivery_request(user_prompt, sat)
+        self._turn_local.tts_gain = sat.tts_gain
+        if agent_prompt != user_prompt:
+            logger.debug(
+                "Delivery extracted: original=%r agent=%r tag=%s gain=%s",
+                user_prompt,
+                agent_prompt,
+                sat.higgs_delivery,
+                sat.tts_gain,
+            )
         stats = TurnStats(
             stt_seconds=stt_seconds,
             endpoint_wait_seconds=endpoint_wait_seconds,
@@ -2049,6 +2052,11 @@ class Assistant:
         ack_thread: list = []
 
         def _start_ack() -> None:
+            # Cached PCM cannot inherit a per-turn Higgs delivery control. Skip
+            # it rather than breaking a whisper/slow/fast request with a loud,
+            # unstyled acknowledgement immediately before the answer.
+            if sat.tts_gain != 1.0 or (self._tts_backend == "higgs-gguf" and sat.higgs_delivery):
+                return
             # Mute this satellite's recorder before the ack plays so it
             # doesn't re-enter the ASR queue. Half-duplex relies on this
             # flag, not on AEC.
@@ -2067,7 +2075,7 @@ class Assistant:
 
         try:
             answer = self._handle_wakeword(
-                user_prompt,
+                agent_prompt,
                 session=session,
                 source="voice",
                 on_slm_start=_start_ack,
@@ -2075,6 +2083,8 @@ class Assistant:
                 satellite_id=satellite_id,
             )
             cleaned = clean_for_tts(answer)
+            if self._tts_backend == "higgs-gguf":
+                cleaned = apply_delivery(cleaned, sat.higgs_delivery)
             sat.transcribing = False
             try:
                 if ack_thread:
@@ -2116,6 +2126,7 @@ class Assistant:
             sat.active_session = None
             self._turn_local.sink = None
             self._turn_local.tts_active_event = None
+            self._turn_local.tts_gain = 1.0
             self._turn_arbiter.release(satellite_id)
         # A stop stands down without a follow-up window.
         if not session.cancelled:
@@ -2184,6 +2195,16 @@ class Assistant:
         try:
             self._maybe_reset_session()
             self._emit_turn_event("user", user_prompt, "voice", satellite_id=satellite_id)
+            agent_prompt = self._prepare_delivery_request(user_prompt, sat)
+            self._turn_local.tts_gain = sat.tts_gain
+            if agent_prompt != user_prompt:
+                logger.debug(
+                    "Delivery extracted: original=%r agent=%r tag=%s gain=%s",
+                    user_prompt,
+                    agent_prompt,
+                    sat.higgs_delivery,
+                    sat.tts_gain,
+                )
             stats = TurnStats(
                 stt_seconds=stt_seconds,
                 endpoint_wait_seconds=endpoint_wait_seconds,
@@ -2193,6 +2214,8 @@ class Assistant:
             ack_thread: list = []
 
             def _start_ack() -> None:
+                if sat.tts_gain != 1.0 or (self._tts_backend == "higgs-gguf" and sat.higgs_delivery):
+                    return
                 # Barge-in mode: recorder stays live; ack shares the turn's
                 # session so a user interruption stops it mid-utterance.
                 t = threading.Thread(
@@ -2208,7 +2231,7 @@ class Assistant:
                 ack_thread.append(t)
 
             answer = self._handle_wakeword(
-                user_prompt,
+                agent_prompt,
                 session=session,
                 source="voice",
                 on_slm_start=_start_ack,
@@ -2224,6 +2247,8 @@ class Assistant:
                     logger.info("Turn cancelled during ack")
                     return
             cleaned = clean_for_tts(answer)
+            if self._tts_backend == "higgs-gguf":
+                cleaned = apply_delivery(cleaned, sat.higgs_delivery)
             # Empty answer = the no-LLM bypass already played a pre-rendered
             # fallback clip (and emitted its bubble), so don't speak again.
             playback_end = None
@@ -2274,6 +2299,7 @@ class Assistant:
             sat.active_session = None
             self._turn_local.sink = None
             self._turn_local.tts_active_event = None
+            self._turn_local.tts_gain = 1.0
             self._turn_arbiter.release(satellite_id)
 
     def _cancel_turn(self, satellite_id: str) -> None:
@@ -2318,6 +2344,13 @@ class Assistant:
         `for sid in self.satellites: self.request_stop(sid)`.
         """
         target = satellite_id if satellite_id is not None else self._turn_arbiter.owner
+        if target is None:
+            # Proactive speech (dashboard replay, alarms) does not own an
+            # agent turn, but still exposes its TtsSession on its output satellite.
+            target = next(
+                (sid for sid, sat in self.satellites.items() if sat.active_session is not None),
+                None,
+            )
         if target is not None:
             sat = self.satellites.get(target)
             if sat is not None and sat.active_session is not None:
@@ -2549,6 +2582,23 @@ class Assistant:
             or _BARGE_STOP_RE.search(text_lower) is not None
         )
 
+    def _verify_strict_barge_wakeword(
+        self, text_lower: str, loudness_db, baseline_db: float
+    ) -> bool:
+        """Reject a strict wakeword barge-in fabricated by playback echo.
+
+        Wakeword barge-in deliberately leaves the microphone live. A fast reply
+        can therefore leave a short playback/AEC residue whose biased ASR result
+        starts with the wakeword but has meaningless trailing text. Explicit stop
+        commands and bare-name redirects keep their current low-latency path;
+        only the strict "hey atticus ..." shape pays an unbiased re-transcribe.
+        """
+        if _BARGE_STOP_RE.search(text_lower) is not None:
+            return True
+        if self._wakeword_re.search(text_lower) is None:
+            return True
+        return self._verify_bare_wakeword(loudness_db, baseline_db)
+
     def _is_pure_stop(self, text_lower: str) -> bool:
         """True if a barge-in utterance is *only* a stop/cancel command.
 
@@ -2671,13 +2721,23 @@ class Assistant:
                 # self-barge-in, cancelling the turn that just started.
                 if not provisional and sat.provisional_committed_onset > 0:
                     onset = self._asr_onset.get("t", 0.0)
-                    if abs(onset - sat.provisional_committed_onset) < 0.5:
+                    hard_text = re.sub(r"[^\w\s]", "", text.lower()).strip()
+                    same_committed_text = (
+                        sat.provisional_committed_text
+                        and hard_text.endswith(sat.provisional_committed_text)
+                        and time.monotonic() - sat.provisional_committed_at < 3.0
+                    )
+                    if abs(onset - sat.provisional_committed_onset) < 0.5 or same_committed_text:
                         logger.debug(
                             f"Dropping hard endpoint (duplicate of committed soft endpoint): {text!r}"
                         )
                         sat.provisional_committed_onset = 0.0
+                        sat.provisional_committed_text = ""
+                        sat.provisional_committed_at = 0.0
                         continue
                     sat.provisional_committed_onset = 0.0
+                    sat.provisional_committed_text = ""
+                    sat.provisional_committed_at = 0.0
 
                 text_lower = text.lower()
                 wakeword_match = self._wakeword_re.search(text_lower)
@@ -2707,6 +2767,12 @@ class Assistant:
                     # thinking) and must be ignored.
                     if not self._check_barge_in(turn_satellite_id, text_lower):
                         logger.debug(f"Suppressed (mid-turn, no barge-in match): {text!r}")
+                        continue
+
+                    if not self._verify_strict_barge_wakeword(
+                        text_lower, loudness_db, baseline_db
+                    ):
+                        logger.info("Strict wakeword barge-in rejected as playback/context echo")
                         continue
 
                     logger.info(f"BARGE-IN: {text}")
@@ -2901,6 +2967,8 @@ class Assistant:
                     self.audio_capture.flush()
                     sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
                     sat.provisional_committed_onset = self._asr_onset.get("t", 0.0)
+                    sat.provisional_committed_text = re.sub(r"[^\w\s]", "", user_prompt.lower()).strip()
+                    sat.provisional_committed_at = time.monotonic()
                     logger.info(f"Committing early on soft endpoint: {user_prompt!r}")
 
                 # Snapshot the STT latency of the utterance that triggered this
@@ -2948,7 +3016,7 @@ class Assistant:
             return "thinking"
         return "idle"
 
-    def speak_proactive(self, text: str, alarm: bool = False) -> None:
+    def speak_proactive(self, text: str, alarm: bool = False, emit_event: bool = True) -> None:
         """Speak `text` through the cloned voice without a user turn.
 
         Waits for any in-progress voice turn (SLM + TTS) to fully complete
@@ -2983,21 +3051,26 @@ class Assistant:
             self._turn_local.tts_active_event = (
                 proactive_sat.tts_active if proactive_sat is not None else None
             )
+            session = TtsSession()
+            if proactive_sat is not None:
+                proactive_sat.active_session = session
             try:
-                session = TtsSession()
                 cleaned = clean_for_tts(text)
                 if not cleaned:
                     return
                 alarm_seconds = self._play_alarm_tone(session) if alarm else 0.0
-                self._emit_turn_event(
-                    "assistant",
-                    cleaned,
-                    "proactive",
-                    satellite_id=proactive_sat.id if proactive_sat is not None else None,
-                )
+                if emit_event:
+                    self._emit_turn_event(
+                        "assistant",
+                        cleaned,
+                        "proactive",
+                        satellite_id=proactive_sat.id if proactive_sat is not None else None,
+                    )
                 playback_end = self.speak_stream(cleaned, self.voice_clone_prompt, session=session)
                 playback_end += alarm_seconds
             finally:
+                if proactive_sat is not None:
+                    proactive_sat.active_session = None
                 for s in self.satellites.values():
                     s.transcribing = True
                 self._turn_local.sink = None

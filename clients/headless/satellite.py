@@ -186,18 +186,21 @@ class HeadlessSatellite:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Fulloch headless satellite client")
-    p.add_argument("-c", "--config", default="config.yml", help="path to config YAML")
+    p.add_argument("-c", "--config", default="config.yml", help="config YAML (relative to this script)")
     args = p.parse_args()
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        config_path = Path(__file__).resolve().parent / config_path
 
-    if not Path(args.config).exists():
+    if not config_path.exists():
         print(
-            f"Config file not found: {args.config}\n"
+            f"Config file not found: {config_path}\n"
             f"Create one based on clients/headless/example.config.yml",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    cfg = load_config(args.config)
+    cfg = load_config(config_path)
     client = HeadlessSatellite(cfg)
     try:
         asyncio.run(client.run())

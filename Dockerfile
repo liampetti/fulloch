@@ -13,14 +13,41 @@ RUN npm run build && zip fulloch-obsidian.zip manifest.json main.js
 FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV CMAKE_ARGS="-DGGML_CUDA=on"
-ENV FORCE_CMAKE=1
 # Cap flash-attn's parallel nvcc jobs so the build doesn't exhaust RAM on small
 # CI runners (each job needs a few GB). Override with --build-arg MAX_JOBS=N.
 ARG MAX_JOBS=4
 ENV MAX_JOBS=${MAX_JOBS}
+ARG HIGGS_TTS_REPO=https://github.com/liampetti/HiggsTTS.cpp.git
+ARG HIGGS_TTS_REF=061134ad8c3dc544ebf1362f12882fd26a879f8f
+ARG LLAMA_CPP_REF=e3546c7948e3af463d0b401e6421d5a4c2faf565
 
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git cmake && rm -rf /var/lib/apt/lists/*
+
+# HiggsTTS.cpp runs in its own process. Clone the Fulloch fork at an immutable
+# commit so images are reproducible without vendoring its ggml runtime.
+RUN git clone "${HIGGS_TTS_REPO}" /tmp/higgs-tts && \
+    git -C /tmp/higgs-tts checkout --detach "${HIGGS_TTS_REF}" && \
+    test "$(git -C /tmp/higgs-tts rev-parse HEAD)" = "${HIGGS_TTS_REF}" && \
+    cmake -S /tmp/higgs-tts -B /tmp/higgs-tts/build -DGGML_CUDA=ON && \
+    cmake --build /tmp/higgs-tts/build --target higgs_server -j "${MAX_JOBS}" && \
+    mkdir -p /opt/higgs-tts && \
+    cp /tmp/higgs-tts/build/bin/higgs_server /opt/higgs-tts/ && \
+    cp /tmp/higgs-tts/build/ggml/src/libggml.so.0.* /opt/higgs-tts/libggml.so.0 && \
+    cp /tmp/higgs-tts/build/ggml/src/libggml-base.so.0.* /opt/higgs-tts/libggml-base.so.0 && \
+    cp /tmp/higgs-tts/build/ggml/src/libggml-cpu.so.0.* /opt/higgs-tts/libggml-cpu.so.0 && \
+    cp /tmp/higgs-tts/build/ggml/src/ggml-cuda/libggml-cuda.so.0.* /opt/higgs-tts/libggml-cuda.so.0 && \
+    rm -rf /tmp/higgs-tts
+
+# All local GGUF models run through this matching upstream llama-server build.
+RUN git init /tmp/llama.cpp && \
+    git -C /tmp/llama.cpp remote add origin https://github.com/ggml-org/llama.cpp.git && \
+    git -C /tmp/llama.cpp fetch --depth 1 origin "${LLAMA_CPP_REF}" && \
+    git -C /tmp/llama.cpp checkout --detach FETCH_HEAD && \
+    cmake -S /tmp/llama.cpp -B /tmp/llama.cpp/build -DBUILD_SHARED_LIBS=OFF -DGGML_CUDA=ON && \
+    cmake --build /tmp/llama.cpp/build --target llama-server -j "${MAX_JOBS}" && \
+    mkdir -p /opt/llama-cpp && \
+    cp /tmp/llama.cpp/build/bin/llama-server /opt/llama-cpp/ && \
+    rm -rf /tmp/llama.cpp
 
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
@@ -32,6 +59,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
 FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
+ARG CRISPASR_RELEASE_TAG=v0.8.7
 
 WORKDIR /app
 
@@ -40,6 +68,10 @@ ENV HF_HOME=/app/data/models
 # wizard download, offline once models are cached) — not pinned here.
 # Image variant — the wizard offers all tiers on the GPU image.
 ENV FULLOCH_VARIANT=gpu
+# Native llama-server is separate from Python, so it does not receive PyTorch's
+# internal CUDA-library discovery. Make the CUDA wheels' shared libraries visible
+# to its dynamic linker as well.
+ENV LD_LIBRARY_PATH=/opt/conda/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/conda/lib/python3.11/site-packages/nvidia/nccl/lib:${LD_LIBRARY_PATH}
 
 # Install runtime system dependencies
 # - gcc: needed by Triton JIT for TTS kernels
@@ -60,12 +92,30 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# CrispASR publishes its Python glue and CUDA native runtime separately. Keep
+# the assembled runtime outside /app/data so setup only downloads model weights.
+RUN set -eux; \
+    curl -L "https://github.com/CrispStrobe/CrispASR/releases/download/${CRISPASR_RELEASE_TAG}/crispasr-python-linux-x86_64.tar.gz" -o /tmp/crispasr-python.tar.gz; \
+    curl -L "https://github.com/CrispStrobe/CrispASR/releases/download/${CRISPASR_RELEASE_TAG}/libcrispasr-linux-x86_64-cuda.tar.gz" -o /tmp/crispasr-cuda.tar.gz; \
+    tar -xzf /tmp/crispasr-python.tar.gz -C /tmp; \
+    mv /tmp/crispasr-python-linux-x86_64 /opt/crispasr-python-cuda; \
+    tar -xzf /tmp/crispasr-cuda.tar.gz -C /tmp; \
+    rm -f /opt/crispasr-python-cuda/crispasr/libcrispasr.so /opt/crispasr-python-cuda/crispasr/libggml*.so*; \
+    cp /tmp/libcrispasr-linux-x86_64-cuda/src/libcrispasr.so.0.8.7 /opt/crispasr-python-cuda/crispasr/libcrispasr.so; \
+    cp /tmp/libcrispasr-linux-x86_64-cuda/ggml/src/libggml.so.0.10.2 /opt/crispasr-python-cuda/crispasr/libggml.so.0; \
+    cp /tmp/libcrispasr-linux-x86_64-cuda/ggml/src/libggml-cpu.so.0.10.2 /opt/crispasr-python-cuda/crispasr/libggml-cpu.so.0; \
+    cp /tmp/libcrispasr-linux-x86_64-cuda/ggml/src/libggml-base.so.0.10.2 /opt/crispasr-python-cuda/crispasr/libggml-base.so.0; \
+    cp /tmp/libcrispasr-linux-x86_64-cuda/ggml/src/libggml-cuda.so.0.10.2 /opt/crispasr-python-cuda/crispasr/libggml-cuda.so.0; \
+    rm -rf /tmp/crispasr-python.tar.gz /tmp/crispasr-cuda.tar.gz /tmp/libcrispasr-linux-x86_64-cuda
+
 # Route ALSA's default device through PulseAudio so the host's selected
 # input/output devices and resampling are used automatically
 RUN printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/asound.conf
 
 # Copy Python environment with compiled packages from builder
 COPY --from=builder /opt/conda /opt/conda
+COPY --from=builder /opt/higgs-tts /opt/higgs-tts
+COPY --from=builder /opt/llama-cpp /opt/llama-cpp
 
 # Create non-root user
 RUN useradd -m -u 1000 -s /bin/bash appuser

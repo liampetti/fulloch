@@ -540,6 +540,7 @@ def create_app(
     history_lock = threading.Lock()
     subscribers: list[queue.Queue] = []
     subscribers_lock = threading.Lock()
+    startup_greeting_seeded = False
 
     def on_turn(event: dict) -> None:
         with history_lock:
@@ -556,9 +557,25 @@ def create_app(
             for q in dead:
                 subscribers.remove(q)
 
+    def _seed_startup_greeting(assistant) -> None:
+        """Add the warmed greeting once, even if dashboard attachment races boot."""
+        nonlocal startup_greeting_seeded
+        greeting = getattr(assistant, "greeting_text", "").strip() if assistant else ""
+        if not greeting:
+            return
+        with history_lock:
+            if startup_greeting_seeded:
+                return
+            startup_greeting_seeded = True
+        on_turn({"role": "assistant", "content": greeting, "ts": time.time(), "source": "startup"})
+
     # Register the SSE turn listener as soon as the assistant exists — now if
     # already attached, or later via context.set_assistant after setup.
-    context.on_attach(lambda a: a.register_turn_listener(on_turn))
+    def _attach_turn_listener(assistant) -> None:
+        assistant.register_turn_listener(on_turn)
+        _seed_startup_greeting(assistant)
+
+    context.on_attach(_attach_turn_listener)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -612,14 +629,19 @@ def create_app(
 
     @app.get("/history")
     def get_history() -> JSONResponse:
+        _seed_startup_greeting(context.assistant)
         with history_lock:
             return JSONResponse(list(history_log))
 
     @app.post("/reset")
     def reset_chat() -> dict:
+        nonlocal startup_greeting_seeded
         _require_ready()
         with history_lock:
             history_log.clear()
+            # Clearing chat is explicit; don't reinsert the startup line on a
+            # later history refresh.
+            startup_greeting_seeded = True
         context.assistant._history.clear()
         on_turn({"role": "reset", "ts": time.time()})
         return {"ok": True}
@@ -756,6 +778,19 @@ def create_app(
             raise HTTPException(status_code=400, detail="empty text")
         threading.Thread(
             target=context.assistant.speak_proactive, args=(text,), daemon=True
+        ).start()
+        return {"ok": True}
+
+    @app.post("/replay")
+    def replay(req: SpeakRequest) -> dict:
+        _require_ready()
+        text = (req.text or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="empty text")
+        threading.Thread(
+            target=context.assistant.speak_proactive,
+            kwargs={"text": text, "emit_event": False},
+            daemon=True,
         ).start()
         return {"ok": True}
 
@@ -969,7 +1004,10 @@ def create_app(
             models = tier.models
         if not models:
             raise HTTPException(status_code=422, detail="provide a tier or models block")
-        write_models(models, context.config_path)
+        try:
+            write_models(models, context.config_path)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
         return JSONResponse({"ok": True, "models": models})
 
     @app.post("/setup/plan")

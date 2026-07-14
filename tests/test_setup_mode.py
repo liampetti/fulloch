@@ -45,7 +45,14 @@ def test_existing_install_with_assets_present(tmp_path):
     models = tmp_path / "models"
     _mk_hub(models, "Qwen/Qwen3-ASR-1.7B")
     _mk_hub(models, "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-    config = {"general": {"wakeword": "hey atticus"}, "models": {"llm": {"backend": "none"}}}
+    config = {
+        "general": {"wakeword": "hey atticus"},
+        "models": {
+            "asr": {"backend": "qwen"},
+            "tts": {"backend": "qwen"},
+            "llm": {"backend": "none"},
+        },
+    }
     d = detect_setup_state(config, models_dir=str(models))
     assert not d.needs_setup
     assert d.missing_assets == []
@@ -106,7 +113,14 @@ def test_reset_marker_forces_setup(tmp_path):
     models = tmp_path / "models"
     _mk_hub(models, "Qwen/Qwen3-ASR-1.7B")
     _mk_hub(models, "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-    config = {"general": {"wakeword": "hey atticus"}, "models": {"llm": {"backend": "none"}}}
+    config = {
+        "general": {"wakeword": "hey atticus"},
+        "models": {
+            "asr": {"backend": "qwen"},
+            "tts": {"backend": "qwen"},
+            "llm": {"backend": "none"},
+        },
+    }
     marker = tmp_path / ".setup_pending"
 
     # No marker -> ready.
@@ -135,15 +149,54 @@ def test_remote_llm_needs_no_local_asset(tmp_path):
     assert d.missing_assets == []
 
 
-def test_missing_model_assets_needs_setup(tmp_path):
+def test_missing_model_assets_needs_setup(tmp_path, monkeypatch):
+    import core.setup as setup
+
+    monkeypatch.setattr(setup, "variant", lambda: "gpu")
     models = tmp_path / "models"
     models.mkdir()
-    config = {"general": {"wakeword": "hey atticus"}, "models": {"llm": {"backend": "none"}}}
+    config = {
+        "general": {"wakeword": "hey atticus"},
+        "models": {
+            "asr": {"backend": "qwen-gguf", "model": str(models / "asr.gguf")},
+            "tts": {"backend": "qwen-gguf", "model": str(models / "tts")},
+            "llm": {"backend": "none"},
+        },
+    }
     d = detect_setup_state(config, models_dir=str(models))
     assert d.needs_setup
-    # Both Qwen backends' hub dirs are absent.
+    # Both selected Qwen GGUF backend assets are absent.
     joined = " ".join(d.missing_assets)
-    assert "asr:qwen" in joined and "tts:qwen" in joined
+    assert "asr:qwen-gguf" in joined and "tts:qwen-gguf" in joined
+
+
+def test_compound_gguf_tts_requires_every_declared_file(tmp_path, monkeypatch):
+    import core.setup as setup
+
+    models = tmp_path / "models"
+    tts = models / "qwen3-tts-crispasr-gguf"
+    tts.mkdir(parents=True)
+    # An old Q8 talker + codec must not satisfy the F16 backend selection.
+    (tts / "qwen3-tts-12hz-1.7b-base-q8_0.gguf").write_text("old")
+    (tts / "qwen3-tts-tokenizer-12hz.gguf").write_text("codec")
+    asr = models / "qwen3-asr-1.7b-q4_k.gguf"
+    asr.write_text("asr")
+    config = {
+        "general": {"wakeword": "hey atticus"},
+        "models": {
+            "asr": {"backend": "qwen-gguf", "model": str(asr)},
+            "tts": {"backend": "qwen-gguf", "model": str(tts)},
+            "llm": {"backend": "none"},
+        },
+    }
+    monkeypatch.setattr(setup, "variant", lambda: "gpu")
+
+    missing = detect_setup_state(config, models_dir=str(models))
+    assert missing.needs_setup
+    assert any(asset.startswith("tts:qwen-gguf") for asset in missing.missing_assets)
+
+    (tts / "qwen3-tts-12hz-1.7b-base-f16.gguf").write_text("f16")
+    assert not detect_setup_state(config, models_dir=str(models)).needs_setup
 
 
 def test_llama_requires_gguf_and_grammar(tmp_path):

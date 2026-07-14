@@ -2,13 +2,9 @@
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core import slm  # noqa: E402
 from tools import thinking  # noqa: E402
 
 
@@ -34,73 +30,6 @@ class TestSummarizeThinkingTool:
         # The two sentinels must differ so _handle_wakeword can route them
         # separately. Catches accidental reuse if anyone renames either.
         assert thinking.SUMMARY_PREFIX != thinking.THINKING_PREFIX
-
-
-class TestGenerateSlmThinkingMode:
-    """Verify the /think directive is appended only when requested."""
-
-    @pytest.fixture
-    def fake_model(self):
-        """A stand-in for a Qwen-loaded Llama that records its messages."""
-        model = MagicMock()
-        # load_slm stamps this; the Qwen family uses the /think text directive.
-        model._fulloch_think_style = "qwen"
-        model.create_chat_completion.return_value = iter(
-            [{"choices": [{"delta": {"content": "ok"}}]}]
-        )
-        return model
-
-    def test_appends_think_directive_when_enabled(self, fake_model):
-        slm.generate_slm(
-            fake_model,
-            user_prompt="what should I do",
-            thinking_mode=True,
-        )
-        messages = fake_model.create_chat_completion.call_args.kwargs["messages"]
-        user_msg = messages[-1]
-        assert user_msg["role"] == "user"
-        assert user_msg["content"].endswith("/think")
-        assert "what should I do" in user_msg["content"]
-
-    def test_does_not_append_think_directive_by_default(self, fake_model):
-        slm.generate_slm(
-            fake_model,
-            user_prompt="what should I do",
-        )
-        messages = fake_model.create_chat_completion.call_args.kwargs["messages"]
-        user_msg = messages[-1]
-        assert user_msg["content"] == "what should I do"
-
-    def test_non_qwen_family_gets_no_directive(self, fake_model):
-        # Gemma (think_style "") has no working in-process /think handle, so the
-        # prompt is sent unchanged even in thinking_mode.
-        fake_model._fulloch_think_style = ""
-        slm.generate_slm(
-            fake_model,
-            user_prompt="what should I do",
-            thinking_mode=True,
-        )
-        messages = fake_model.create_chat_completion.call_args.kwargs["messages"]
-        assert messages[-1]["content"] == "what should I do"
-
-    def test_thinking_mode_with_history(self, fake_model):
-        history = [
-            {"role": "user", "content": "earlier"},
-            {"role": "assistant", "content": "reply"},
-        ]
-        slm.generate_slm(
-            fake_model,
-            user_prompt="now",
-            history=history,
-            thinking_mode=True,
-        )
-        messages = fake_model.create_chat_completion.call_args.kwargs["messages"]
-        # System + history (2) + new user (1) = 4
-        assert len(messages) == 4
-        # Only the new user message gets the directive, not the history
-        assert messages[1]["content"] == "earlier"
-        assert messages[2]["content"] == "reply"
-        assert messages[3]["content"].endswith("/think")
 
 
 class TestThinkingPromptStripping:

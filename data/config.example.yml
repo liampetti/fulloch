@@ -43,29 +43,39 @@ general:
 
 # === Models =================================================================
 # Omit the block to use the stack defaults. The wizard writes this block from
-# the chosen tier (Full GPU = qwen/qwen/llama; CPU tiers = qwen-onnx-small/
-# kokoro-onnx + llama|none|openai). Each domain takes a `backend` and an
-# optional `model` override.
+# the chosen tier. The language model is either `local` (a bundled GGUF) or
+# `external` (an OpenAI-compatible server).
 #
 # models:
 #   asr:
-#     backend: qwen              # qwen (GPU) | qwen-small (GPU) | qwen-onnx (CPU) | qwen-onnx-small (CPU) | moonshine (CPU) | moonshine-tiny (CPU)
+#     backend: qwen              # Qwen3 1.7B PyTorch (default GPU)
+#     # qwen-gguf                # Qwen3 1.7B GGUF (GPU)
+#     # qwen-gguf-small          # Qwen3 0.6B GGUF (GPU)
+#     # qwen-onnx                # Qwen3 1.7B ONNX (default CPU)
+#     # qwen-onnx-small          # Qwen3 0.6B ONNX (CPU)
+#     # qwen-small               # Qwen3 0.6B PyTorch (GPU)
+#     # moonshine                 # Moonshine Base (CPU)
+#     # moonshine-tiny            # Moonshine Tiny (CPU)
 #   tts:
-#     backend: qwen              # qwen (GPU) | qwen-small (GPU) | kokoro-onnx (CPU) | crispasr-qwen3-tts (CPU) | crispasr-qwen3-tts-0.6b (CPU)
+#     backend: qwen              # Qwen3 1.7B PyTorch (default GPU)
+#     # higgs-gguf               # Higgs TTS 3 Q4 GGUF (GPU, experimental)
+#     # qwen-gguf                # Qwen3 1.7B GGUF (GPU)
+#     # qwen-gguf-small          # Qwen3 0.6B GGUF (GPU)
+#     # qwen-small               # Qwen3 0.6B PyTorch (GPU)
+#     # kokoro-onnx              # Kokoro 82M (default CPU)
 #   llm:
-#     backend: llama             # llama (default) | gemma (GPU) | none (regex-only) | openai (remote)
-#     model: "./data/models/Qwen3.5-9B-UD-Q4_K_XL.gguf"
-#     n_context: 12288
+#     backend: local             # local | external
+#     local_model: qwen          # qwen (recommended) | gemma | custom
+#     # model: "/path/to/model.gguf"  # Required only when local_model: custom.
+#     # n_context: 12288         # Optional; larger contexts use more VRAM.
 #
-# Remote LLM (llama.cpp server / vLLM / Ollama / hosted API):
+# External LLM (llama.cpp server / vLLM / Ollama / hosted API):
 #   llm:
-#     backend: openai
+#     backend: external
 #     base_url: "http://localhost:8888/v1"
+#     model: ""                 # Optional; blank uses a single-model server's default.
 #     connect_timeout: 0.4
 #     read_timeout: 60
-#
-# backend: none runs regex-only — basic commands work; everything else gets a
-# spoken "basic commands only" reply and no SLM is loaded.
 
 # === Multi-satellite (/ws/satellite-v2) =====================================
 # Tokens accepted from non-browser /ws/satellite-v2 clients (any one in the

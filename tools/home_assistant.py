@@ -913,7 +913,9 @@ def volume_set(entity: str, volume: int) -> str:
         entity: Media player entity name or ID (e.g. 'living room tv').
         volume: Volume as a percentage 0-100.
     """
-    entity_id = _resolve_entity(entity, domain="media_player")
+    entity_id = _media_target(entity)
+    if entity_id is None:
+        return "I don't know which speakers to adjust."
     friendly = _friendly_for(entity_id)
 
     pct = max(0, min(100, int(volume)))
@@ -932,11 +934,10 @@ def volume_set(entity: str, volume: int) -> str:
     aliases=["louder", "volume_up", "increase_volume"],
 )
 def volume_up(entity: Optional[str] = None) -> str:
-    """Step the volume up on a media_player entity (default: AVR if configured, else TV)."""
-    target = entity or AVR_ENTITY or TV_ENTITY
-    if not target:
+    """Step the volume up on a media_player entity (default: Spotify, AVR, then TV)."""
+    entity_id = _media_target(entity)
+    if entity_id is None:
         return "I don't know which speakers to turn up."
-    entity_id = _resolve_entity(target, domain="media_player")
     friendly = _friendly_for(entity_id)
     return _call_service(
         "media_player",
@@ -952,11 +953,10 @@ def volume_up(entity: Optional[str] = None) -> str:
     aliases=["quieter", "volume_down", "decrease_volume"],
 )
 def volume_down(entity: Optional[str] = None) -> str:
-    """Step the volume down on a media_player entity (default: AVR if configured, else TV)."""
-    target = entity or AVR_ENTITY or TV_ENTITY
-    if not target:
+    """Step the volume down on a media_player entity (default: Spotify, AVR, then TV)."""
+    entity_id = _media_target(entity)
+    if entity_id is None:
         return "I don't know which speakers to turn down."
-    entity_id = _resolve_entity(target, domain="media_player")
     friendly = _friendly_for(entity_id)
     return _call_service(
         "media_player",
@@ -978,10 +978,9 @@ def select_source(source: str, entity: Optional[str] = None) -> str:
         source: The source name as configured in the AVR/TV (e.g. 'HDMI 1', 'TV', 'Spotify').
         entity: Optional media_player entity. Defaults to AVR if configured, else TV.
     """
-    target = entity or AVR_ENTITY or TV_ENTITY
-    if not target:
+    entity_id = _media_target(entity, prefer_spotify=False)
+    if entity_id is None:
         return "I don't know which device to switch."
-    entity_id = _resolve_entity(target, domain="media_player")
     friendly = _friendly_for(entity_id)
     return _call_service(
         "media_player",
@@ -992,9 +991,21 @@ def select_source(source: str, entity: Optional[str] = None) -> str:
     )
 
 
-def _media_target(entity: Optional[str]) -> Optional[str]:
-    """Resolve the media_player entity for a transport action."""
-    target = entity or SPOTIFY_ENTITY or AVR_ENTITY or TV_ENTITY
+def _media_target(entity: Optional[str], prefer_spotify: bool = True) -> Optional[str]:
+    """Resolve a media player entity or Home Assistant room target."""
+    _ensure_loaded()
+    if entity:
+        area_id = _resolve_area(entity)
+        if area_id is not None:
+            players = [
+                eid for eid in _area_entities(area_id, domain="media_player")
+                if eid not in _DENIED_ENTITIES
+            ]
+            if prefer_spotify and SPOTIFY_ENTITY in players:
+                return SPOTIFY_ENTITY
+            return players[0] if players else None
+        return _resolve_entity(entity, domain="media_player")
+    target = (SPOTIFY_ENTITY if prefer_spotify else None) or AVR_ENTITY or TV_ENTITY
     if not target:
         return None
     return _resolve_entity(target, domain="media_player")
@@ -1140,16 +1151,15 @@ def previous(entity: Optional[str] = None) -> str:
     aliases=["mute", "unmute", "mute_tv", "silence_tv"],
 )
 def ha_mute(entity: Optional[str] = None, muted: bool = True) -> str:
-    """Mute or unmute a media_player entity. Defaults to AVR if configured, else TV.
+    """Mute or unmute a media_player entity. Defaults to Spotify, AVR, then TV.
 
     Args:
-        entity: Media player entity name or ID. Omit to use the default AVR/TV.
+        entity: Media player name, ID, or HA room. Omit to use the default player.
         muted: True to mute (default), False to unmute.
     """
-    target = entity or AVR_ENTITY or TV_ENTITY
-    if not target:
+    entity_id = _media_target(entity)
+    if entity_id is None:
         return "I don't know which speakers to mute."
-    entity_id = _resolve_entity(target, domain="media_player")
     friendly = _friendly_for(entity_id)
     return _call_service(
         "media_player",

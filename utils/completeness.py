@@ -114,6 +114,21 @@ _CONTINUATION_WORDS: frozenset[str] = frozenset(
     }
 )
 
+# Request endings that need an object even though their final word is not a
+# conventional conjunction/preposition. This stays deliberately small so
+# concise commands such as "stop" and "what time" remain responsive.
+_INCOMPLETE_SUFFIXES: tuple[tuple[str, ...], ...] = (
+    ("can", "you"),
+    ("could", "you"),
+    ("would", "you"),
+    ("read",),
+    ("tell",),
+    ("show",),
+    ("bring",),
+    ("find",),
+    ("search",),
+)
+
 _WORD_RE = re.compile(r"[a-z0-9']+")
 
 
@@ -129,7 +144,12 @@ def is_complete(text: str, continuation_words: Iterable[str] = _CONTINUATION_WOR
     words = _WORD_RE.findall(text.lower())
     if not words:
         return False
-    return words[-1] not in set(continuation_words)
+    if words[-1] in set(continuation_words):
+        return False
+    return not any(
+        len(words) >= len(suffix) and tuple(words[-len(suffix) :]) == suffix
+        for suffix in _INCOMPLETE_SUFFIXES
+    )
 
 
 def should_commit_provisional(prompt: str, catch_result) -> bool:
@@ -141,9 +161,10 @@ def should_commit_provisional(prompt: str, catch_result) -> bool:
 
     - Regex-matched **unsafe** intent (`SPECULATION_UNSAFE_INTENTS`) → never
       commit early; wait for the hard endpoint.
-    - Regex-matched **safe** intent (lights, volume, time, …) → commit; the
-      anchored regex already implies a complete command (#1).
-    - No regex match (free-form) → commit only if syntactically complete (#2).
+    - Regex-matched **safe** intent (lights, volume, time, …) → commit only if
+      syntactically complete. This preserves quick commands but holds a broad
+      regex match on a mid-sentence request such as "can you read".
+    - No regex match (free-form) → commit only if syntactically complete.
 
     Kept here (not in `intent_catch`) so the policy table lives next to
     `SPECULATION_UNSAFE_INTENTS`; the caller passes the `catchAll` result so this
@@ -154,6 +175,6 @@ def should_commit_provisional(prompt: str, catch_result) -> bool:
         intents = {a.get("intent") for a in actions}
         if intents & SPECULATION_UNSAFE_INTENTS:
             return False
-        return True
+        return is_complete(prompt)
     # Free-form string → SLM. Only commit once the clause reads as finished.
     return is_complete(prompt)

@@ -42,3 +42,5 @@ sentence-transformers==5.1.2
 misaki[en]==0.9.4   # G2P for the Kokoro ONNX TTS backend
 wordninja==2.0.0   # split OOV run-on tokens ("partlycloudy") before Kokoro G2P
 librosa==0.11.0   # Qwen3-ASR ONNX backend (asr.backend: qwen-onnx) mel features
+sentencepiece==0.2.1  # Pocket TTS ONNX tokenizer
+scipy==1.15.3         # Pocket TTS WAV reference resampling

@@ -30,7 +30,7 @@ from typing import Optional
 
 from tools import notes
 from utils import intents
-from utils.intent_catch import catchAll
+from utils.intent_catch import catchAll, is_contextual_web_search_request
 from utils.intents import MAX_AGENT_CALLS_PER_TURN, StepKind, StepResult
 from utils.phrases import STALL_PHRASES
 from utils.prompts import get_agent_system_prompt, get_thinking_system_prompt
@@ -62,6 +62,16 @@ _PROMPT_STRIP_CHARS = " ,.!?;:"
 # alone imports `torch`).
 
 
+def _personality(host) -> Optional[str]:
+    """Get the configured personality without coupling test hosts to Assistant."""
+    getter = getattr(host, "_personality_for_prompt", None)
+    if getter is not None:
+        return getter()
+    if getattr(host, "personality", None) == "custom":
+        return getattr(host, "personality_custom", "").strip() or None
+    return getattr(host, "personality", None)
+
+
 def _normalise_search_query(args) -> Optional[str]:
     """Stable cache key for a web-search action's query.
 
@@ -88,6 +98,14 @@ def _normalise_search_query(args) -> Optional[str]:
         return None
     q = re.sub(r"\s+", " ", q).strip().lower().strip(_PROMPT_STRIP_CHARS)
     return q or "__default__"
+
+
+def _last_user_question(history: list) -> Optional[str]:
+    """Most recent non-empty user message, for a topic-less search follow-up."""
+    for message in reversed(history):
+        if message.get("role") == "user" and (content := message.get("content", "").strip()):
+            return content
+    return None
 
 
 class AgentLoop:
@@ -153,12 +171,19 @@ class AgentLoop:
         # conversations don't blow N_CONTEXT.
         host._compact_completed_turns()
 
-        host._history_for(self.satellite).append({"role": "user", "content": user_prompt})
+        history = host._history_for(self.satellite)
+        prior_question = _last_user_question(history)
+        history.append({"role": "user", "content": user_prompt})
         host._trim_history()
 
         # Regex fast-path: if it matches, use it as the first agent emission.
         caught = catchAll(user_prompt)
         first_emission = caught if isinstance(caught, dict) else None
+        if first_emission is None and prior_question and is_contextual_web_search_request(user_prompt):
+            first_emission = {
+                "actions": [{"intent": "external_information", "args": [prior_question]}]
+            }
+            logger.debug("Contextual web-search follow-up uses prior question: %r", prior_question)
         if first_emission is not None:
             logger.debug(f"Regex caught: {first_emission}")
             # A2 route stat: overwritten to "agent" below if an SLM call ever
@@ -258,15 +283,17 @@ class AgentLoop:
                                 satellite_area=(
                                     self.satellite.ha_area if self.satellite is not None else None
                                 ),
-                                higgs_personality=(
-                                    (
-                                        host.higgs_personality_custom.strip()
-                                        if host.higgs_personality == "custom"
-                                        else host.higgs_personality
-                                    )
-                                    if getattr(host, "_tts_backend", None) == "higgs-gguf"
-                                    else None
+                                personality=_personality(host),
+                                higgs_tts=getattr(host, "_tts_backend", None) == "higgs-gguf",
+                                conversation_mode=bool(
+                                    source == "voice"
+                                    and self.satellite is not None
+                                    and self.satellite.conversation_mode
                                 ),
+                                wakeword_barge_in=bool(
+                                    source == "voice" and getattr(host, "barge_in", None) == "wakeword"
+                                ),
+                                obsidian_edit_enabled=notes._obsidian_edit_allowed(),
                             ),
                             cancel_check=cancel_check,
                             history=host._history_for(self.satellite),
@@ -633,7 +660,10 @@ class AgentLoop:
                     ):
                         answer = host._generate_with_context_recovery(
                             user_prompt=query,
-                            system_prompt=get_thinking_system_prompt(host.wakeword_name),
+                            system_prompt=get_thinking_system_prompt(
+                                host.wakeword_name,
+                                personality=_personality(host),
+                            ),
                             cancel_check=cancel_check,
                             history=host._history_for(self.satellite),
                             thinking_mode=True,

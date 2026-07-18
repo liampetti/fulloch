@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y zip && rm -rf /var/lib/apt/lists/*
 COPY obsidian-plugin/package.json obsidian-plugin/package-lock.json ./
 RUN npm ci
 COPY obsidian-plugin/main.ts obsidian-plugin/manifest.json obsidian-plugin/esbuild.config.mjs obsidian-plugin/tsconfig.json ./
-RUN npm run build && zip fulloch-obsidian.zip manifest.json main.js
+RUN npm run build && zip fulloch.zip manifest.json main.js
 
 FROM python:3.11-slim
 
@@ -73,7 +73,7 @@ COPY --chown=appuser:appuser data/wav/ /app/seed/wav/
 
 # Obsidian plugin zip, built from source in the obsidian-plugin-builder stage
 # above — served by GET /api/obsidian/plugin.zip (server/dashboard.py).
-COPY --from=obsidian-plugin-builder --chown=appuser:appuser /plugin/fulloch-obsidian.zip /app/obsidian-plugin/fulloch-obsidian.zip
+COPY --from=obsidian-plugin-builder --chown=appuser:appuser /plugin/fulloch.zip /app/obsidian-plugin/fulloch.zip
 
 # Entrypoint chowns the data dir to appuser on every boot — needed because
 # Docker-named volumes start root-owned, and a fresh volume would otherwise
@@ -88,5 +88,5 @@ ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 # `docker compose ps` flips this to "healthy" the moment the UI is
 # reachable. Task 7a of docs/ease-of-use-tasks.md.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
-  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/ready', timeout=2).status == 200 else 1)"
+  CMD python -c "import ssl,urllib.request,sys; ctx=ssl._create_unverified_context(); sys.exit(0 if urllib.request.urlopen('https://127.0.0.1:8765/ready', context=ctx, timeout=2).status == 200 else 1)"
 CMD ["python", "app.py"]

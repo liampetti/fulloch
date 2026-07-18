@@ -362,12 +362,9 @@ def speak_stream(
     dashboard can show the TTS time without waiting for the voice to finish.
 
     Returns the estimated monotonic-clock time playback will finish on the
-    browser (playback start + total audio duration). Chunks are handed to
-    the satellite sink as fast as they're generated with no flow control, so
-    generation can finish well before the audio has actually played out —
-    callers that need to know "when did the user actually hear the reply
-    end" (e.g. arming the follow-up window) should use this return value
-    instead of the time `speak_stream` itself returns.
+    browser (playback start + total audio duration). Browser transport is
+    credit-limited, so this estimate remains the source of truth for follow-up
+    timing even when generation and playback overlap.
     """
     if session is None:
         session = TtsSession()
@@ -413,13 +410,8 @@ def speak_stream(
                     sink.put((item[0], None))
                     total_samples += len(item[0])
                 if cancelled_mid_stream:
-                    # Chunks are sent to the browser as fast as they're
-                    # generated with no flow control, so audio already queued
-                    # here is likely already playing client-side by the time
-                    # a barge-in is detected. "end" is a no-op on the client;
-                    # "cancel" tells it to actually stop already-scheduled
-                    # playback. Drop anything still sitting unsent first so
-                    # the cancel isn't stuck behind stale audio.
+                    # Drop queued audio before sending cancel so the browser
+                    # stops its short scheduled playback window immediately.
                     _drain_queue_nowait(sink)
                     sink.put(("cancel",))
                 else:

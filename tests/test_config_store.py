@@ -146,6 +146,13 @@ def test_settings_view_merges_values(tmp_path):
     assert asr["moonshine"]["experimental"] is True
 
 
+def test_settings_view_reads_legacy_higgs_personality(tmp_path):
+    path = _write(tmp_path, "general:\n  higgs_personality: wry\n")
+    by_path = {f["path"]: f for f in cs.settings_view(path)["fields"]}
+    assert by_path["general.personality"]["value"] == "wry"
+    assert by_path["general.personality"]["set"] is False
+
+
 
 def test_seeds_from_example_when_absent(tmp_path):
     example = tmp_path / "config.example.yml"

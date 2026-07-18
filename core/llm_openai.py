@@ -91,6 +91,7 @@ def _is_context_error(exc: Exception) -> bool:
             "context length",
             "context window",
             "maximum context",
+            "context size has been exceeded",
             "too long",
             "reduce the length",
         )
@@ -259,6 +260,8 @@ class OpenAIClient:
             # Degrade like an unreachable endpoint: keep any partial text, else
             # raise RemoteUnreachable so the agent loop speaks its fallback. Log
             # the concrete type so the cause is visible next time.
+            if _is_context_error(e):
+                raise ContextExhaustedError(str(e)) from e
             logger.warning("Remote LLM stream failed mid-response: %s: %s", type(e).__name__, e)
             if not full_text:
                 raise RemoteUnreachable(f"{type(e).__name__}: {e}") from e

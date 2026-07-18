@@ -91,13 +91,25 @@ def test_context_message_routes_to_assistant(ctx):
             json.dumps(
                 {
                     "type": "context",
-                    "file": {"path": "foo.md", "name": "foo", "tags": [], "links": [], "backlinks": []},
+                    "file": {
+                        "path": "foo.md",
+                        "name": "foo",
+                        "tags": [],
+                        "links": [],
+                        "backlinks": [],
+                        "selection": "selected words",
+                    },
                 }
             )
         )
         import time
         time.sleep(0.1)
     ctx.assistant.set_vault_context.assert_called()
+    context_call = next(
+        call for call in ctx.assistant.set_vault_context.call_args_list
+        if call.kwargs.get("current_file") is not None
+    )
+    assert context_call.kwargs["current_file"]["selection"] == "selected words"
 
 
 def test_file_changed_reindexes(ctx, tmp_path, monkeypatch):

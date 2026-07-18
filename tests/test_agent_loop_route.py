@@ -62,6 +62,34 @@ def test_route_is_no_llm_when_llm_disabled(monkeypatch):
     assert stats.route == "no_llm"
 
 
+def test_topicless_web_search_reuses_prior_question(monkeypatch):
+    import core.agent_loop as al
+
+    monkeypatch.setattr(al, "catchAll", lambda prompt: prompt)
+    captured = {}
+    monkeypatch.setattr(
+        al.AgentLoop,
+        "_run_without_llm",
+        lambda self, prompt, emission: captured.setdefault("emission", emission) or "searched",
+    )
+    history = [{"role": "user", "content": "did we ever find out what that supermarket staple is"}]
+    host = _host(
+        llm_enabled=False,
+        _history_for=lambda session: history,
+    )
+    loop = al.AgentLoop(host, session=None, source="text")
+    loop.run("can you search the internet")
+
+    assert captured["emission"] == {
+        "actions": [
+            {
+                "intent": "external_information",
+                "args": ["did we ever find out what that supermarket staple is"],
+            }
+        ]
+    }
+
+
 def test_route_is_agent_once_slm_call_starts(monkeypatch):
     import core.agent_loop as al
 

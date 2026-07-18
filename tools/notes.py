@@ -316,13 +316,29 @@ _index_init_lock = threading.Lock()
 
 # When the Obsidian plugin is connected, the dashboard sets this queue so
 # _after_write can tell the plugin to navigate to newly-written files.
-# Items: {"type": "open_file", "path": "<absolute-path>"}
+# Items include {"type": "open_file", "path": "<absolute-path>"}, plus
+# explicit active-editor operations initiated by the user.
 _obsidian_cmd_q: Optional[queue.Queue] = None
 
 
 def set_obsidian_cmd_q(q: "Optional[queue.Queue]") -> None:
     global _obsidian_cmd_q
     _obsidian_cmd_q = q
+
+
+def _send_obsidian_command(command: dict) -> bool:
+    """Queue an explicit editor action when the Obsidian bridge is connected."""
+    if _obsidian_cmd_q is None:
+        return False
+    try:
+        _obsidian_cmd_q.put_nowait(command)
+    except queue.Full:
+        return False
+    return True
+
+
+def _obsidian_edit_allowed() -> bool:
+    return bool((config.get("obsidian") or {}).get("allow_edit_delete", False))
 
 
 def _get_index():
@@ -360,6 +376,83 @@ def _after_write(path: Path) -> None:
             q.put_nowait({"type": "open_file", "path": str(path)})
         except Exception:
             pass
+
+
+@tool(
+    name="insert_at_obsidian_cursor",
+    description=(
+        "Insert explicit text at the cursor in the currently active Obsidian note. "
+        "Only use when the user explicitly asks to insert text at their cursor."
+    ),
+    aliases=["insert_at_cursor", "obsidian_insert"],
+)
+def insert_at_obsidian_cursor(text: str) -> str:
+    """Ask the connected Obsidian plugin to insert text at its active cursor."""
+    text = text.strip()
+    if not text:
+        return "What would you like me to insert?"
+    if not _obsidian_edit_allowed():
+        return "Obsidian editing is disabled in the dashboard for safety."
+    if not _send_obsidian_command({"type": "insert", "text": text}):
+        return "Obsidian isn't connected, so I can't insert text at its cursor."
+    return "Sent that text to the cursor in your active Obsidian note."
+
+
+@tool(
+    name="rename_active_obsidian_note",
+    description=(
+        "Rename the currently active note in Obsidian. Only use when the user "
+        "explicitly asks to rename the note they currently have open."
+    ),
+    aliases=["rename_active_note", "obsidian_rename"],
+)
+def rename_active_obsidian_note(title: str) -> str:
+    """Ask the connected Obsidian plugin to rename its active note."""
+    title = title.strip()
+    if not title:
+        return "What would you like to call the active note?"
+    if not _obsidian_edit_allowed():
+        return "Obsidian editing is disabled in the dashboard for safety."
+    if not _send_obsidian_command({"type": "rename_active", "title": title}):
+        return "Obsidian isn't connected, so I can't rename its active note."
+    return f"Sent a request to rename the active Obsidian note to '{title}'."
+
+
+@tool(
+    name="delete_active_obsidian_note",
+    description=(
+        "Delete the currently active Obsidian note. Only use after an explicit "
+        "user request, and only when Obsidian edit/delete access is enabled."
+    ),
+    aliases=["delete_active_note", "obsidian_delete"],
+)
+def delete_active_obsidian_note() -> str:
+    """Ask the connected Obsidian plugin to delete its active note."""
+    if not _obsidian_edit_allowed():
+        return "Obsidian editing is disabled in the dashboard for safety."
+    if not _send_obsidian_command({"type": "delete_active"}):
+        return "Obsidian isn't connected, so I can't delete its active note."
+    return "Sent a request to delete the active Obsidian note."
+
+
+@tool(
+    name="replace_selected_obsidian_text",
+    description=(
+        "Replace the text currently selected in Obsidian's active editor. Only "
+        "use for an explicit request to replace selected text when edit/delete access is enabled."
+    ),
+    aliases=["replace_selection", "obsidian_replace_selected"],
+)
+def replace_selected_obsidian_text(text: str) -> str:
+    """Ask the connected plugin to replace its active editor selection."""
+    text = text.strip()
+    if not text:
+        return "What should replace the selected text?"
+    if not _obsidian_edit_allowed():
+        return "Obsidian editing is disabled in the dashboard for safety."
+    if not _send_obsidian_command({"type": "replace_selection", "text": text}):
+        return "Obsidian isn't connected, so I can't replace selected text."
+    return "Sent a request to replace the selected text in Obsidian."
 
 
 def warm_index() -> bool:

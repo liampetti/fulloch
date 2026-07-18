@@ -91,7 +91,7 @@ ACK_PHRASES = [
 # A pure "stop" still stands down silently by design (see _is_pure_stop);
 # this only covers the redirect path, where the assistant is now listening.
 BARGE_ACK_PHRASES = [
-    "I'm listening.",
+    "Yes.",
 ]
 
 # Played on a satellite whose turn attempt lost the TurnArbiter (another
@@ -112,7 +112,7 @@ BUSY_PHRASES = [
 # not just re-acknowledging. Pre-rendered at warmup.
 REPLAN_STALL_PHRASES = [
     "Working through it.",
-    "Almost there.",
+    "Still working through it.",
     "Let me piece that together.",
     "One more moment.",
     "Bear with me.",
@@ -125,7 +125,7 @@ REPLAN_STALL_PHRASES = [
 THINKING_STALL_PHRASES = [
     "Still thinking on this.",
     "Working it through, give me a moment.",
-    "Almost there.",
+    "Still considering it.",
     "Just a little more thought needed.",
 ]
 

@@ -877,6 +877,26 @@ def test_list_entities_in_area_unknown_area_is_reactive():
     assert result.startswith("Reactive question:")
 
 
+def test_get_entities_in_area_state_filters_to_requested_state(monkeypatch):
+    import tools.home_assistant as ha
+
+    states = {
+        "light.office_main": {"state": "on", "attributes": {"friendly_name": "Office Main", "brightness": 128}},
+        "light.office_lamp": {"state": "off", "attributes": {"friendly_name": "Office Lamp"}},
+    }
+    with (
+        patch.object(ha, "HA_TOKEN", "tok"),
+        patch.object(ha, "_AREA_MAP", {"office": "Office"}),
+        patch.object(ha, "_DENIED_ENTITIES", frozenset()),
+        patch("tools.home_assistant._resolve_area", return_value="office"),
+        patch("tools.home_assistant._area_entities", return_value=list(states)),
+        patch("tools.home_assistant._get_state", side_effect=states.get),
+    ):
+        result = ha.get_entities_in_area_state("office", "light", "on")
+
+    assert result == "Office Main is on, brightness: 50%"
+
+
 # --- Spotify Connect fallback for transport controls (pause/resume/skip/previous) ---
 # Covers the Spotify-only-no-HA setup: no media_player entity resolves via
 # HA, so these fall back to direct Spotify Connect instead of a dead

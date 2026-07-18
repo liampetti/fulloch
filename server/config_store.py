@@ -298,10 +298,16 @@ def settings_view(path: str = DEFAULT_CONFIG_PATH) -> dict:
     """Schema + current values + presets — everything the console UI needs."""
     cfg = read_config(path)
     fields = []
+    legacy_names = {
+        "personality": "higgs_personality",
+        "personality_custom": "higgs_personality_custom",
+    }
     for spec in schema_as_dicts():
         section = cfg.get(spec["section"])
         present = isinstance(section, dict) and spec["name"] in section
         value = section.get(spec["name"]) if present else None
+        if not present and isinstance(section, dict) and (legacy := legacy_names.get(spec["name"])) in section:
+            value = section[legacy]
         fields.append({**spec, "value": value, "set": present})
     from core.backends import variant
 

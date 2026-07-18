@@ -64,6 +64,7 @@ def test_backends_are_implemented():
     assert b.get_spec("asr", "qwen").implemented is True
     assert b.get_spec("asr", "moonshine").implemented is True
     assert b.get_spec("tts", "kokoro-onnx").implemented is True
+    assert b.get_spec("tts", "pocket-tts-onnx").implemented is True
     assert b.get_loader("llm", "openai")  # resolves to load_openai
 
 
@@ -74,6 +75,7 @@ def test_gpu_only_flags():
     assert b.get_spec("llm", "gemma").gpu_only is True
     assert b.get_spec("asr", "moonshine").gpu_only is False
     assert b.get_spec("tts", "kokoro-onnx").gpu_only is False
+    assert b.get_spec("tts", "pocket-tts-onnx").gpu_only is False
     assert b.get_spec("llm", "openai").gpu_only is False
     assert b.get_spec("asr", "qwen-gguf").gpu_only is True
     assert b.get_spec("tts", "qwen-gguf").gpu_only is True
@@ -188,6 +190,7 @@ def test_asr_and_tts_options_have_stable_user_facing_order():
         "qwen",
         "qwen-small",
         "kokoro-onnx",
+        "pocket-tts-onnx",
     ]
     assert b.get_spec("asr", "qwen").display_name == "Qwen3 1.7B PyTorch (default GPU)"
 

@@ -94,6 +94,12 @@ class TestCheckBargeIn:
         assistant.satellites["sat-a"].last_spoken_text = "it is sunny"
         assert assistant._check_barge_in("sat-a", "atticus stop") is False
 
+    def test_conversation_mode_interrupts_natural_speech(self, assistant):
+        assistant.barge_in = "off"
+        assistant.satellites["sat-a"].conversation_mode = True
+        assistant.satellites["sat-a"].last_spoken_text = "it is sunny"
+        assert assistant._check_barge_in("sat-a", "actually check tomorrow") is True
+
 
 class TestStrictBargeVerification:
     def test_strict_wakeword_uses_unbiased_verification(self, assistant, monkeypatch):

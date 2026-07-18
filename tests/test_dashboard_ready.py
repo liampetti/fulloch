@@ -86,3 +86,10 @@ def test_ready_returns_200_in_error():
     r = _client(ERROR)
     body = r.get("/ready")
     assert body.status_code == 200
+
+
+def test_ready_is_exempt_from_dashboard_auth():
+    """Docker's unauthenticated liveness probe must work with a password set."""
+    from server.dashboard import _AUTH_EXEMPT_PATHS
+
+    assert "/ready" in _AUTH_EXEMPT_PATHS

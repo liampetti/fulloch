@@ -39,7 +39,7 @@ class SatelliteSession:
     chunk_q: Optional["queue.Queue"] = None
     tts_sink: Optional["queue.Queue"] = None
     recorder_thread: Optional[threading.Thread] = None
-    always_listen: bool = False
+    conversation_mode: bool = False
 
     # --- Turn / echo / follow-up / noise-baseline state ---------------------
     # A barge-in / follow-up / self-echo / noise-baseline decision for this

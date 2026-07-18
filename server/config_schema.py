@@ -127,7 +127,7 @@ SCHEMA: tuple = (
         "str",
         "Voice",
         "atticus",
-        "Voice. For Qwen TTS: a data/voices/<name> clone. For Kokoro: a "
+        "Voice. For Qwen or Pocket TTS: a data/voices/<name> clone. For Kokoro: a "
         "built-in voice name (e.g. af_heart).",
     ),
     Field(
@@ -137,26 +137,36 @@ SCHEMA: tuple = (
         "Voice",
         1.0,
         "Speech rate multiplier (>1 faster, <1 slower; ~0.5-2.0). Kokoro only "
-        "— Qwen TTS has no speed control; set its pace via the voice-clone "
+        "— Qwen and Pocket TTS have no speed control; set their pace via the voice-clone "
         "reference recording.",
         apply=HOT,
     ),
     Field(
         "general",
-        "higgs_personality",
+        "whisper_gain",
+        "float",
+        "Voice",
+        0.30,
+        "Output volume for explicit whisper/quiet requests (0.0 silent to 1.0 normal). "
+        "Default: 0.30.",
+        apply=HOT,
+    ),
+    Field(
+        "general",
+        "personality",
         "enum",
         "Voice",
         "balanced",
-        "Higgs delivery preference. Only used when Higgs TTS is selected.",
+        "Conversational personality for every language and TTS model.",
         choices=("balanced", "playful", "calm", "wry", "custom"),
     ),
     Field(
         "general",
-        "higgs_personality_custom",
+        "personality_custom",
         "str",
         "Voice",
         "",
-        "Custom Higgs delivery preference, used only when personality is custom.",
+        "Custom conversational personality, used only when personality is custom.",
     ),
     Field(
         "general",
@@ -166,6 +176,16 @@ SCHEMA: tuple = (
         "wakeword",
         "'off' (half-duplex) or 'wakeword' (interrupt mid-response).",
         choices=("off", "wakeword"),
+        apply=HOT,
+    ),
+    Field(
+        "general",
+        "conversation_mode_default",
+        "bool",
+        "Voice",
+        False,
+        "Let the first connected voice satellite enter exclusive Conversation mode. "
+        "It keeps the mic live during replies and skips the wakeword.",
         apply=HOT,
     ),
     Field(
@@ -362,6 +382,14 @@ SCHEMA: tuple = (
         "inside the container. README has a docker run template that "
         "includes the matching -v mount.",
     ),
+    Field(
+        "obsidian",
+        "allow_edit_delete",
+        "bool",
+        "Obsidian",
+        False,
+        "Allow explicit voice insertion, rename, and deletion of the active Obsidian note. Off by default.",
+    ),
     # --- Search ------------------------------------------------------------
     Field(
         "search",
@@ -451,7 +479,8 @@ class TierPreset:
 # Three ready-made stacks. The Full stack is GPU end-to-end — ASR, TTS, and
 # the 9B LLM all GPU-resident. It defaults to the 1.7B PyTorch ASR/TTS pair.
 # The two CPU-only stacks use the accurate 1.7B ONNX ASR with
-# Kokoro TTS. The two CPU stacks otherwise differ only in the LLM — a separate
+# Kokoro TTS by default; experimental Pocket TTS voice cloning is selectable
+# afterward. The CPU stacks otherwise differ only in the LLM — a separate
 # OpenAI-compatible server on your network, or regex-only/no LLM.
 # (A 4B "balanced" tier was dropped — at the quant needed to be reliable it
 # costs roughly the same VRAM as the 9B, so the 9B is the local minimum.)

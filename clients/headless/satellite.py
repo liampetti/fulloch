@@ -108,7 +108,7 @@ class HeadlessSatellite:
             "label": sat.get("room"),
             "ha_area": sat.get("ha_area"),
             "server_vad": sat.get("server_vad", True),
-            "always_listen": sat.get("always_listen", False),
+            "conversation_mode": sat.get("conversation_mode", False),
         })
 
     async def _send_audio(self, ws) -> None:

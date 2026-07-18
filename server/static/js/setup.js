@@ -1003,11 +1003,12 @@ function securityCard() {
         </div>
         <p class="help" id="sec-obs-vault-hint" style="margin-top:.4rem">Path to the folder that contains your <code>.obsidian/</code> subfolder. Auto-detect scans <code>~/Documents</code>, <code>~/Obsidian</code>, and <code>~/.config/obsidian</code>.</p>
 
-        <div class="group-title">Plugin</div>
-        <p class="help" style="margin:0 0 .5rem">The plugin ships in the repo. Until it's in the Obsidian community store, download the zip and extract it into <code>&lt;vault&gt;/.obsidian/plugins/fulloch/</code>, then enable it in <strong>Settings → Community plugins</strong>.</p>
-        <a class="obs-btn" href="/api/obsidian/plugin.zip" download>Download plugin.zip</a>
+         <div class="group-title">Plugin</div>
+         <p class="help" style="margin:0 0 .5rem">The plugin ships in the repo. Until it's in the Obsidian community store, download the zip and extract it into <code>&lt;vault&gt;/.obsidian/plugins/fulloch/</code>, then enable it in <strong>Settings → Community plugins</strong>.</p>
+         <a class="obs-btn" href="/api/obsidian/plugin.zip" download>Download plugin.zip</a>
+         <p class="help" style="margin:.7rem 0 0"><strong>HTTPS trust for Obsidian desktop:</strong> the plugin connects over secure WebSockets and cannot bypass a self-signed certificate warning. Create a private CA on the Fulloch host with <code>python scripts/create_local_ca.py --force --ip &lt;Fulloch-LAN-IP&gt;</code>, then on Linux install only <code>data/certs/fulloch-home-ca.crt</code> with <code>sudo cp data/certs/fulloch-home-ca.crt /usr/local/share/ca-certificates/ &amp;&amp; sudo update-ca-certificates</code>. Restart Fulloch and Obsidian afterwards. Use the HTTPS host/IP in plugin settings; never install or share <code>fulloch-home-ca.key</code>.</p>
 
-        <div class="group-title">Auth token</div>
+         <div class="group-title">Auth token</div>
         <div class="obs-token" style="margin-top:.35rem">
           <code id="sec-obs-token">—</code>
           <button class="obs-btn ghost" id="sec-obs-copy-token" type="button">Copy</button>
@@ -1022,7 +1023,7 @@ function securityCard() {
       <summary><span class="csname">🔒 HTTPS certificate</span><span class="cstatus" id="sec-cert-cstatus">${certEnabled ? 'enabled' : ''}</span></summary>
       <div class="cbody">
         <p style="font-size:.8rem;color:var(--text-muted);margin:0 0 .6rem">${certEnabled
-          ? 'Self-signed certificate used for LAN HTTPS (needed for mic access from phones and other devices). Regenerate it if your LAN IP changed and the old certificate no longer covers it. Every device that trusted the old one will see the browser warning again. Takes effect after a restart.'
+          ? 'Self-signed certificate used for LAN HTTPS (needed for mic access from phones and other devices). Obsidian desktop also needs the certificate trusted by its operating system; use the private-CA instructions in the Obsidian section above. Regenerate it if your LAN IP changed and the old certificate no longer covers it. Every device that trusted the old one will see the browser warning again. Takes effect after a restart.'
           : 'HTTPS isn\'t enabled for this install. Browsers refuse microphone access on plain HTTP for anything but localhost, so phones and other LAN devices can\'t use the mic without it. Generating a self-signed certificate fixes that — every browser shows a one-time "not private" warning on first visit, which is expected. Takes effect after a restart.'}</p>
         <button id="sec-cert-regen">${certEnabled ? 'Regenerate certificate…' : 'Enable HTTPS…'}</button>
         <span id="sec-cert-status" class="muted" style="margin-left:.75rem"></span>
@@ -1422,8 +1423,8 @@ function modelsCard() {
     const field = SCHEMA.fields.find(f => f.path === path);
     return field && field.value != null ? field.value : fallback;
   };
-  const higgsPersonality = String(fieldValue('general.higgs_personality', 'balanced'));
-  const higgsCustom = String(fieldValue('general.higgs_personality_custom', ''));
+  const personality = String(fieldValue('general.personality', 'balanced'));
+  const personalityCustom = String(fieldValue('general.personality_custom', ''));
   const optsFor = (domain) => {
     const cur = currentBackend(domain);
     return b[domain].filter(o => o.offerable).map(o =>
@@ -1434,20 +1435,18 @@ function modelsCard() {
     <p class="lead">Speech + language backends. <b>Model changes take effect after a restart.</b></p>
     <div class="grid2 model-speech-grid">
       <div><label>Speech-to-text</label><select id="sm-asr">${optsFor('asr')}</select></div>
-      <div><label>Text-to-speech</label><select id="sm-tts">${optsFor('tts')}</select>
-        <div id="sm-higgs-personality" style="display:none;margin-top:0.75rem">
-          <label>Higgs personality</label>
-          <select id="sm-higgs-personality-sel">
-            <option value="balanced"${higgsPersonality === 'balanced' ? ' selected' : ''}>Balanced</option>
-            <option value="playful"${higgsPersonality === 'playful' ? ' selected' : ''}>Playful</option>
-            <option value="calm"${higgsPersonality === 'calm' ? ' selected' : ''}>Calm</option>
-            <option value="wry"${higgsPersonality === 'wry' ? ' selected' : ''}>Wry</option>
-            <option value="custom"${higgsPersonality === 'custom' ? ' selected' : ''}>Custom</option>
-          </select>
-          <div id="sm-higgs-custom" style="display:none;margin-top:0.5rem">
-            <label>Custom delivery guidance</label>
-            <input type="text" id="sm-higgs-custom-text" placeholder="e.g. Warm and reassuring; use pauses sparingly." value="${higgsCustom.replace(/"/g,'&quot;')}">
-          </div>
+      <div><label>Text-to-speech</label><select id="sm-tts">${optsFor('tts')}</select></div>
+      <div><label>Personality</label>
+        <select id="sm-personality-sel">
+          <option value="balanced"${personality === 'balanced' ? ' selected' : ''}>Balanced</option>
+          <option value="playful"${personality === 'playful' ? ' selected' : ''}>Playful</option>
+          <option value="calm"${personality === 'calm' ? ' selected' : ''}>Calm</option>
+          <option value="wry"${personality === 'wry' ? ' selected' : ''}>Wry</option>
+          <option value="custom"${personality === 'custom' ? ' selected' : ''}>Custom</option>
+        </select>
+        <div id="sm-personality-custom" style="display:none;margin-top:0.5rem">
+          <label>Custom personality</label>
+          <input type="text" id="sm-personality-custom-text" placeholder="e.g. Warm and reassuring; use pauses sparingly." value="${personalityCustom.replace(/"/g,'&quot;')}">
         </div>
       </div>
     </div>
@@ -1506,14 +1505,11 @@ function modelsCard() {
 }
 
 function wireModelsCard() {
-  const toggleHiggsPersonality = () => {
-    const higgs = $('sm-tts').value === 'higgs-gguf';
-    $('sm-higgs-personality').style.display = higgs ? '' : 'none';
-    $('sm-higgs-custom').style.display = higgs && $('sm-higgs-personality-sel').value === 'custom' ? '' : 'none';
+  const togglePersonalityCustom = () => {
+    $('sm-personality-custom').style.display = $('sm-personality-sel').value === 'custom' ? '' : 'none';
   };
-  $('sm-tts').addEventListener('change', toggleHiggsPersonality);
-  $('sm-higgs-personality-sel').addEventListener('change', toggleHiggsPersonality);
-  toggleHiggsPersonality();
+  $('sm-personality-sel').addEventListener('change', togglePersonalityCustom);
+  togglePersonalityCustom();
   const toggleLlmModel = () => {
     const mode = $('sm-llama-sel').value;
     const isOpenai = mode === 'external';
@@ -1628,24 +1624,22 @@ async function saveModels() {
     note.innerHTML = `<div class="banner error">Save failed: ${JSON.stringify(e.detail || r.status)}</div>`;
     return;
   }
-  if (models.tts.backend === 'higgs-gguf') {
-    const personality = $('sm-higgs-personality-sel').value;
-    const custom = $('sm-higgs-custom-text').value.trim();
-    if (personality === 'custom' && !custom) {
-      note.innerHTML = `<div class="banner error">Enter custom Higgs delivery guidance, or choose a built-in personality.</div>`;
-      return;
-    }
-    const config = await putJSON('/config', {
-      updates: {
-        'general.higgs_personality': personality,
-        'general.higgs_personality_custom': personality === 'custom' ? custom : '',
-      },
-    });
-    if (!config.ok) {
-      const e = await config.json().catch(() => ({}));
-      note.innerHTML = `<div class="banner error">Saved model choice, but Higgs settings failed: ${JSON.stringify(e.detail || config.status)}</div>`;
-      return;
-    }
+  const personality = $('sm-personality-sel').value;
+  const custom = $('sm-personality-custom-text').value.trim();
+  if (personality === 'custom' && !custom) {
+    note.innerHTML = `<div class="banner error">Enter a custom personality, or choose a built-in personality.</div>`;
+    return;
+  }
+  const config = await putJSON('/config', {
+    updates: {
+      'general.personality': personality,
+      'general.personality_custom': personality === 'custom' ? custom : '',
+    },
+  });
+  if (!config.ok) {
+    const e = await config.json().catch(() => ({}));
+    note.innerHTML = `<div class="banner error">Saved model choice, but personality settings failed: ${JSON.stringify(e.detail || config.status)}</div>`;
+    return;
   }
   SCHEMA.models = models;
   note.innerHTML = `<div class="banner warn">Saved to config.yml. <b>Restart Fulloch</b> for the model change to take effect. If you switched to a backend whose model isn't downloaded yet, the restart re-opens the setup wizard to fetch it.
@@ -1666,11 +1660,11 @@ function autoWakePattern(wakeword) {
 }
 
 function fieldRow(f) {
-  if (f.path === 'general.higgs_personality' || f.path === 'general.higgs_personality_custom') return null;
+  if (f.path === 'general.personality' || f.path === 'general.personality_custom') return null;
   if (f.path === 'general.tts_speed' && currentBackend('tts') !== 'kokoro-onnx') return null;
   const id = 'cf-' + f.path.replace(/\W/g, '_');
   let needsRestart = f.apply === 'restart';
-  if (f.path === 'general.voice_clone' && currentBackend('tts') === 'kokoro-onnx') needsRestart = false;
+  if (f.path === 'general.voice_clone' && ['kokoro-onnx', 'pocket-tts-onnx'].includes(currentBackend('tts'))) needsRestart = false;
   const restart = needsRestart ? '<span class="restart">restart</span>' : '';
   const defRaw = (f.default === null || f.default === undefined) ? ''
     : (Array.isArray(f.default) ? f.default.join(', ') : String(f.default));

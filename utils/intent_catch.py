@@ -111,6 +111,38 @@ def list_timers(command: str) -> Optional[bool]:
     return True if _match("List Timers", _LIST_TIMERS_RE, command) else None
 
 
+_CONTEXTUAL_WEB_SEARCH_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?"
+    r"(?:search\s+(?:the\s+)?(?:web|internet|online)|look\s+(?:it|that)\s+up)"
+    r"\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_contextual_web_search_request(command: str) -> bool:
+    """Whether a topic-less web-search request must use conversation context."""
+    return bool(_match("Contextual web search", _CONTEXTUAL_WEB_SEARCH_RE, command))
+
+
+# A status question about all lights in an area needs live state reads, not the
+# inventory-only `list_entities_in_area` flow. Keep this narrow so open-ended
+# room questions still reach the agent.
+_AREA_LIGHT_STATE_RE = re.compile(
+    r"^\s*(?:what|which)\s+(?:of\s+(?:the\s+)?)?lights?\s+(?:are|is)\s+"
+    r"(?:currently\s+|right\s+now\s+)?(?P<state>on|off)\s+(?:in\s+)?"
+    r"(?P<area>.+?)\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def extract_area_light_state(command: str) -> Optional[tuple[str, str]]:
+    """Return `(area, state)` for 'which lights are on upstairs' queries."""
+    match = _match("Area light state", _AREA_LIGHT_STATE_RE, command)
+    if not match:
+        return None
+    return match.group("area").strip(), match.group("state").lower()
+
+
 # --- Light / switch / device control fast-path ----------------------------
 # Maps common smart-home commands straight to HA tool intents, skipping the
 # SLM agent call entirely (the example "set downstairs office lights to a
@@ -647,6 +679,10 @@ def extract_note_delete(command: str) -> Optional[bool]:
 _INTENT_RULES = [
     # Smart-home control first — these skip the SLM entirely (HA resolves the
     # entity; a miss replans into the agent), so let them win the common case.
+    (
+        extract_area_light_state,
+        lambda v: {"intent": "get_entities_in_area_state", "args": [v[0], "light", v[1]]},
+    ),
     (extract_light_brightness, lambda v: {"intent": "ha_set_brightness", "args": [v[0], v[1]]}),
     (extract_dim_brighten, lambda v: {"intent": "ha_set_brightness", "args": [v[0], v[1]]}),
     (extract_color, lambda v: {"intent": "ha_set_color", "args": [v[0], v[1]]}),

@@ -9,6 +9,7 @@ is its own or another satellite's.
 import queue
 from unittest.mock import MagicMock
 
+import numpy as np
 from fastapi.testclient import TestClient
 
 from server.dashboard import create_app
@@ -93,3 +94,17 @@ def test_missing_area_query_param_forwards_none():
         pass
 
     assert a.connect_satellite.call_args.kwargs["ha_area"] is None
+
+
+def test_tts_audio_waits_for_browser_playback_credit():
+    a = _stub_assistant()
+    client = TestClient(create_app(a))
+
+    with client.websocket_connect("/ws/satellite") as ws:
+        ws.receive_json()
+        tts_q = a.set_satellite_sink.call_args.args[1]
+        tts_q.put(("start", 24000))
+        assert ws.receive_json() == {"type": "tts_start", "sr": 24000}
+        tts_q.put((np.ones(2400, dtype=np.float32), None))
+        ws.send_json({"type": "tts_credit", "seconds": 0.1})
+        assert len(ws.receive_bytes()) == 2400 * 4

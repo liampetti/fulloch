@@ -39,6 +39,7 @@ def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(notes_root, "_override", None)
     monkeypatch.setattr(notes_root, "_migrated", False)
     monkeypatch.setattr(notes, "NOTES_DIR_LEGACY", (tmp_path / "data" / "notes").resolve())
+    monkeypatch.setitem(notes.config, "obsidian", {})
     return ctx
 
 
@@ -54,6 +55,15 @@ def test_status_returns_state(ctx):
     assert "connected" in body
     assert "vault_path" in body
     assert "indexing_progress" in body
+    assert body["allow_edit_delete"] is False
+
+
+def test_edit_capability_persists_and_returns_current_state(ctx):
+    client = _client(ctx)
+    r = client.post("/api/obsidian/edit-capability", json={"enabled": True})
+    assert r.status_code == 200
+    assert r.json() == {"allow_edit_delete": True}
+    assert client.get("/api/obsidian/status").json()["allow_edit_delete"] is True
 
 
 def test_status_does_not_leak_token(ctx):

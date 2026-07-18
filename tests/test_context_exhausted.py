@@ -62,6 +62,20 @@ def test_context_exhausted_reply_clears_history():
     assert fake._history == []
 
 
+def test_custom_llm_uses_its_filename_in_loading_status():
+    a = _import_assistant_module()
+    spec = SimpleNamespace(
+        default_model="./data/models/qwen3.5-9b-mtp/Qwen3.5-9B-UD-Q4_K_XL.gguf",
+        display_name="Qwen3.5 9B MTP (local)",
+    )
+    cfg = {
+        "backend": "llama",
+        "model": "./data/models/Qwen3.6-35B-A3B-UD-IQ4_NL.gguf",
+        "spec": spec,
+    }
+    assert a.Assistant._loading_display_name(cfg) == "Custom local model (Qwen3.6-35B-A3B-UD-IQ4_NL.gguf)"
+
+
 def test_both_slm_calls_guard_context_exhaustion():
     a = _import_assistant_module()
     src = inspect.getsource(a.AgentLoop._run)
@@ -123,9 +137,8 @@ def test_recovery_sheds_then_retries_instead_of_clearing(monkeypatch):
     assert 0 < len(fake._history) < 8  # tail preserved, not cleared
 
 
-def test_recovery_reraises_when_nothing_left_to_shed(monkeypatch):
-    """If even the recent floor overflows, the error propagates so the caller
-    falls back to the clear + apology."""
+def test_recovery_clears_history_and_retries_current_turn(monkeypatch):
+    """If the recent floor overflows, discard it and retry the current turn."""
     a = _import_assistant_module()
     fake = SimpleNamespace(
         slm_model=object(),
@@ -134,6 +147,26 @@ def test_recovery_reraises_when_nothing_left_to_shed(monkeypatch):
             {"role": "assistant", "content": "y"},
         ],
     )
+    fake._shed_oldest_history = lambda: a.Assistant._shed_oldest_history(fake)
+
+    calls = {"n": 0}
+
+    def overflow_then_succeed(_model, **_kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise a.ContextExhaustedError("nope")
+        return "ok"
+
+    monkeypatch.setattr(a, "generate_slm", overflow_then_succeed)
+    assert a.Assistant._generate_with_context_recovery(fake, history=fake._history) == "ok"
+    assert fake._history == [{"role": "user", "content": "x"}]
+    assert calls["n"] == 2
+
+
+def test_recovery_reraises_when_empty_context_overflows(monkeypatch):
+    """Only a request too large for an empty context reaches the apology path."""
+    a = _import_assistant_module()
+    fake = SimpleNamespace(slm_model=object(), _history=[])
     fake._shed_oldest_history = lambda: a.Assistant._shed_oldest_history(fake)
 
     def always_overflow(_model, **_kw):

@@ -2,14 +2,17 @@
 
 Covers the settings-console path that pushes changed config to the running
 assistant: `AudioCapture`'s live setters and `Assistant.apply_hot_config`,
-including the TTS-backend gating (voice/speed swap live on Kokoro, restart-only
-on Qwen).
+including the TTS-backend gating (voice swap live on Kokoro/Pocket,
+restart-only on Qwen).
 """
 
+import queue
 import sys
 import types
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -95,8 +98,10 @@ def _make_assistant(backend="kokoro-onnx"):
     obj.audio_capture = MagicMock()
     obj.audio_capture.set_use_vad.return_value = True
     obj.barge_in = "wakeword"
+    obj.conversation_mode_default = False
     obj.follow_up_seconds = 5.0
     obj.tts_speed = 1.0
+    obj.whisper_gain = 0.30
     obj.voice_clone = "af_heart"
     obj.voice_clone_prompt = "old-prompt"
     obj.llm_enabled = True
@@ -114,6 +119,7 @@ def test_hot_apply_endpointing_knobs():
         {"path": "general.vad_min_speech_ms", "value": 400},
         {"path": "general.barge_in_threshold_dbfs", "value": -40.0},
         {"path": "general.barge_in", "value": "off"},
+        {"path": "general.conversation_mode_default", "value": True},
         {"path": "general.follow_up_time", "value": "0s"},
     ]
     applied = obj.apply_hot_config(changes)
@@ -123,6 +129,7 @@ def test_hot_apply_endpointing_knobs():
     obj.audio_capture.set_vad_min_speech_ms.assert_called_once_with(400)
     obj.audio_capture.set_barge_in_threshold_dbfs.assert_called_once_with(-40.0)
     assert obj.barge_in == "off"
+    assert obj.conversation_mode_default is True
     assert obj.follow_up_seconds == 0  # parse_barge_time("0s")
 
 
@@ -166,6 +173,41 @@ def test_hot_apply_voice_restart_only_on_qwen():
     # (no-op) rather than nagging for one; set_speed must NOT be called.
     assert "general.tts_speed" in applied
     obj._tts_module.set_speed.assert_not_called()
+
+
+def test_hot_apply_voice_live_on_pocket_tts():
+    obj = _make_assistant(backend="pocket-tts-onnx")
+    obj._tts_module.set_voice.return_value = "new-prompt"
+    applied = obj.apply_hot_config([{"path": "general.voice_clone", "value": "atticus"}])
+    assert applied == {"general.voice_clone"}
+    obj._tts_module.set_voice.assert_called_once_with("atticus")
+    obj._rerender_phrase_caches.assert_called_once()
+
+
+def test_hot_apply_whisper_gain_clamps_to_valid_pcm_range():
+    obj = _make_assistant()
+    applied = obj.apply_hot_config([{"path": "general.whisper_gain", "value": 1.5}])
+    assert applied == {"general.whisper_gain"}
+    assert obj.whisper_gain == 1.0
+
+
+def test_whisper_gain_scales_all_pcm_sent_to_the_sink():
+    assistant = _import_assistant_module()
+    sink = queue.Queue()
+    assistant._GainSink(sink, 0.30).put((np.array([1.0, -0.5], dtype=np.float32), None))
+    chunk, _ = sink.get_nowait()
+    assert np.allclose(chunk, [0.30, -0.15])
+
+
+def test_whisper_request_uses_configured_gain_for_every_backend():
+    assistant = _import_assistant_module()
+    obj = assistant.Assistant.__new__(assistant.Assistant)
+    obj._tts_backend = "pocket-tts-onnx"
+    obj.whisper_gain = 0.30
+    satellite = types.SimpleNamespace(higgs_delivery="", tts_gain=1.0)
+
+    assert obj._prepare_delivery_request("Can you whisper that to me?", satellite) == "Can you whisper that to me?"
+    assert satellite.tts_gain == 0.30
 
 
 def test_hot_apply_ignores_restart_only_paths():

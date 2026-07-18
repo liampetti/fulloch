@@ -6,6 +6,7 @@ import {
     Setting,
     TFile,
     Notice,
+    normalizePath,
     WorkspaceLeaf,
 } from "obsidian";
 
@@ -16,7 +17,7 @@ interface FullochSettings {
 }
 
 const DEFAULT_SETTINGS: FullochSettings = {
-    host: "localhost",
+    host: "https://localhost",
     port: 8765,
     token: "",
 };
@@ -36,6 +37,7 @@ interface FileContext {
     links: string[];
     backlinks: string[];
     frontmatter: Record<string, unknown>;
+    selection: string;
 }
 
 export default class FullochPlugin extends Plugin {
@@ -43,6 +45,7 @@ export default class FullochPlugin extends Plugin {
     private ws: WebSocket | null = null;
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     private reconnectDelay = 3000;
+    private lastSelectionKey = "";
     private statusBarItem: HTMLElement;
     private intentionalClose = false;
 
@@ -98,6 +101,10 @@ export default class FullochPlugin extends Plugin {
                 if (file) this.sendFileContext(file);
             })
         );
+        // Obsidian does not expose a stable selection-change event across all
+        // supported editor versions. Poll only the tiny selection string and
+        // send context when it actually changes.
+        this.registerInterval(window.setInterval(() => this.syncActiveSelection(), 500));
 
         // Update vault metadata when files are created, renamed, or deleted.
         this.registerEvent(
@@ -235,6 +242,10 @@ export default class FullochPlugin extends Plugin {
         const tags = (cache?.tags ?? []).map((t) => t.tag);
         const links = (cache?.links ?? []).map((l) => l.link);
         const frontmatter = cache?.frontmatter ?? {};
+        const activeFile = this.app.workspace.getActiveFile();
+        const selection = activeFile?.path === file.path
+            ? (this.app.workspace.activeEditor?.editor?.getSelection() ?? "")
+            : "";
 
         // Resolved backlinks: which files link TO this file.
         const resolvedLinks = (this.app.metadataCache as MetadataCache & {
@@ -254,9 +265,20 @@ export default class FullochPlugin extends Plugin {
             links,
             backlinks,
             frontmatter,
+            selection,
         };
 
         this.send({ type: "context", file: ctx });
+    }
+
+    private syncActiveSelection() {
+        const file = this.app.workspace.getActiveFile();
+        if (!file) return;
+        const selection = this.app.workspace.activeEditor?.editor?.getSelection() ?? "";
+        const key = `${file.path}\0${selection}`;
+        if (key === this.lastSelectionKey) return;
+        this.lastSelectionKey = key;
+        this.sendFileContext(file);
     }
 
     sendFileChanged(file: TFile) {
@@ -277,6 +299,15 @@ export default class FullochPlugin extends Plugin {
                 break;
             case "insert":
                 this.insertText(cmd.text as string, cmd.file as string | undefined);
+                break;
+            case "rename_active":
+                this.renameActiveNote(cmd.title as string);
+                break;
+            case "delete_active":
+                this.deleteActiveNote();
+                break;
+            case "replace_selection":
+                this.replaceSelection(cmd.text as string);
                 break;
             case "vault_rejected":
                 const reason = cmd.reason as string;
@@ -322,6 +353,49 @@ export default class FullochPlugin extends Plugin {
             editor.replaceRange("\n" + text, cursor);
             new Notice("Fulloch: inserted text");
         }
+    }
+
+    private async renameActiveNote(title: string) {
+        const file = this.app.workspace.getActiveFile();
+        const cleanTitle = title.trim().replace(/[\\/:*?"<>|]/g, "-");
+        if (!file || !cleanTitle) {
+            new Notice("Fulloch: open a note before renaming it");
+            return;
+        }
+        const parent = file.parent?.path;
+        const targetPath = normalizePath(`${parent ? parent + "/" : ""}${cleanTitle}.md`);
+        if (targetPath === file.path) return;
+        try {
+            await this.app.vault.rename(file, targetPath);
+            this.sendFileContext(file);
+            new Notice(`Fulloch: renamed note to ${cleanTitle}`);
+        } catch {
+            new Notice("Fulloch: couldn't rename the active note");
+        }
+    }
+
+    private async deleteActiveNote() {
+        const file = this.app.workspace.getActiveFile();
+        if (!file) {
+            new Notice("Fulloch: open a note before deleting it");
+            return;
+        }
+        try {
+            await this.app.vault.trash(file, true);
+            new Notice("Fulloch: moved the active note to Obsidian trash");
+        } catch {
+            new Notice("Fulloch: couldn't delete the active note");
+        }
+    }
+
+    private replaceSelection(text: string) {
+        const editor = this.app.workspace.activeEditor?.editor;
+        if (!editor || !editor.getSelection()) {
+            new Notice("Fulloch: select text before asking me to replace it");
+            return;
+        }
+        editor.replaceSelection(text);
+        new Notice("Fulloch: replaced selected text");
     }
 
     // -------------------------------------------------------------------------
@@ -405,10 +479,10 @@ class FullochSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName("Fulloch host")
-            .setDesc("Hostname or IP address of your Fulloch instance")
+            .setDesc("HTTPS URL of your Fulloch instance (for example, https://localhost)")
             .addText((text) =>
                 text
-                    .setPlaceholder("localhost")
+                    .setPlaceholder("https://localhost")
                     .setValue(this.plugin.settings.host)
                     .onChange(async (value) => {
                         this.plugin.settings.host = value.trim();

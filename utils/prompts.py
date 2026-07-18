@@ -19,15 +19,45 @@ Anything sent to `generate_slm` as `system_prompt=` or `user_prompt=` should
 live here so prompt edits don't require crawling the codebase.
 """
 
+import re
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
 import utils.local_time as _local_time
+from tools.tool_registry import tool_registry
 
 from .intents import describe_tools
 
 _MODULE_DIR = Path(__file__).parent
+_EXAMPLE_INTENT_RE = re.compile(r'"intent"\s*:\s*"([^"]+)"')
+_EXAMPLE_TOOL_RESULT_RE = re.compile(r"Tool\s+—\s+([a-z_]+):")
+_CAPABILITY_GROUPS = (
+    ("notes", ("search_notes", "read_note", "write_note")),
+    ("timers", ("start_countdown",)),
+    ("maths, unit conversions, and date maths", ("calculate", "convert_units", "days_between")),
+    ("Home Assistant control", ("turn_on", "get_entity_state")),
+    ("calendar reminders", ("create_calendar_event",)),
+    ("web search", ("external_information",)),
+    ("music playback", ("play_song",)),
+    ("shopping lists", ("add_todo_item", "get_todo_items")),
+)
+
+
+_PERSONALITIES = {
+    "balanced": "Be warm and natural without leaning into a pronounced character.",
+    "playful": "Be upbeat, delighted by questions, and gently playful.",
+    "calm": "Be peaceful, contemplative, and measured.",
+    "wry": "Use dry observational humor and articulate, mildly exasperated wit. You can sound gently weary of being pestered, but keep the sarcasm kind and never let it undermine help or safety.",
+}
+
+
+def _personality_instruction(personality: "Optional[str]") -> str:
+    """Return the configured conversational character."""
+    if not personality:
+        return ""
+    style = _PERSONALITIES.get(personality, personality)
+    return f" Your conversational personality is: {style}"
 
 
 def _today_line() -> str:
@@ -39,6 +69,49 @@ def _next_sunday_str() -> str:
     today = _local_time.now()
     days_ahead = (6 - today.weekday()) % 7 or 7
     return (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+
+
+def _intent_examples() -> str:
+    """Render dated few-shots and omit examples for unloaded integrations."""
+    today = _local_time.today()
+    yesterday = today - timedelta(days=1)
+    days_to_thursday = (3 - today.weekday()) % 7 or 7
+    replacements = {
+        "{{YESTERDAY}}": yesterday.isoformat(),
+        "{{YESTERDAY_AFTERNOON_START}}": f"{yesterday.isoformat()}T12:00:00",
+        "{{YESTERDAY_AFTERNOON_END}}": f"{yesterday.isoformat()}T18:00:00",
+        "{{NEXT_THURSDAY}}": (today + timedelta(days=days_to_thursday)).isoformat(),
+    }
+    raw = (_MODULE_DIR / "intent_examples.txt").read_text()
+    rendered = raw
+    for token, value in replacements.items():
+        rendered = rendered.replace(token, value)
+
+    examples = []
+    for block in rendered.strip().split("\n\n"):
+        tool_names = set(_EXAMPLE_INTENT_RE.findall(block))
+        tool_names.update(_EXAMPLE_TOOL_RESULT_RE.findall(block))
+        if all(tool_registry.canonical_name(name) is not None for name in tool_names):
+            examples.append(block)
+    return "\n\n".join(examples)
+
+
+def _capability_summary() -> str:
+    """Describe only tool categories actually available in this installation."""
+    available = [
+        label
+        for label, tools in _CAPABILITY_GROUPS
+        if any(tool_registry.canonical_name(name) is not None for name in tools)
+    ]
+    if not available:
+        return ""
+    if len(available) == 1:
+        categories = available[0]
+    elif len(available) == 2:
+        categories = " and ".join(available)
+    else:
+        categories = ", ".join(available[:-1]) + ", and " + available[-1]
+    return f"Available tools can help with {categories}."
 
 
 def _with_facts(base: str) -> str:
@@ -53,7 +126,11 @@ def get_agent_system_prompt(
     name: str = "Fulloch",
     vault_context: "Optional[dict]" = None,
     satellite_area: "Optional[str]" = None,
-    higgs_personality: "Optional[str]" = None,
+    personality: "Optional[str]" = None,
+    higgs_tts: bool = False,
+    conversation_mode: bool = False,
+    wakeword_barge_in: bool = False,
+    obsidian_edit_enabled: bool = False,
 ) -> str:
     """Unified agent prompt — emits either `actions` dispatch or `reply` text.
 
@@ -74,12 +151,37 @@ def get_agent_system_prompt(
     own lights-only area default (`tools/home_assistant.py`) can resolve a
     bare name — the model never overrides an explicitly named room, only
     fills in when the user's command doesn't say where.
+
+    `conversation_mode` and `wakeword_barge_in` describe voice interruption
+    behaviour for this turn. Conversation mode takes precedence because any
+    speech interrupts there; otherwise wakeword barge-in requires the name.
     """
     sunday = _next_sunday_str()
-    examples = (_MODULE_DIR / "intent_examples.txt").read_text()
+    examples = _intent_examples()
+    capabilities = _capability_summary()
+    voice_mode_line = ""
+    if conversation_mode:
+        voice_mode_line = (
+            "Conversation mode is active: no wakeword is needed, and any detected speech "
+            "while you reply interrupts you and starts the user's next turn."
+        )
+    elif wakeword_barge_in:
+        voice_mode_line = (
+            "Wakeword barge-in is active: the user must say your wakeword to interrupt a reply; "
+            "other speech is ignored until you finish."
+        )
+    obsidian_edit_line = (
+        "Obsidian edit/delete mode is ACTIVE right now. For an explicit request about the "
+        "currently open note or cursor, use the appropriate Obsidian editor tool; do not refuse."
+        if obsidian_edit_enabled
+        else ""
+    )
     body = f"""
-You are {name}, a helpful, friendly local voice assistant. {_today_line()}
+You are {name}, a helpful, friendly local voice assistant.{_personality_instruction(personality)} {_today_line()}
 Everything runs and is stored locally on this device — only web search uses the internet, so you can assure the user their notes, facts, and conversations stay on-device.
+{capabilities}
+{voice_mode_line}
+{obsidian_edit_line}
 
 Every reply is exactly one JSON object — one of:
 
@@ -97,10 +199,11 @@ When the user says something open-ended ("I need to relax", "movie night"), don'
 When you see a tool result in history starting with `Reactive question:`, read it carefully and decide whether to dispatch another tool (emit `actions`) or compose a final spoken answer (emit `reply`).
 
 Keep `reply` text natural and conversational. Three sentences or fewer unless the user explicitly asked for detail. Don't read URLs, raw JSON, code, or asterisks. Don't comment on mispronunciations, typos, or transcription errors.
+Whisper and quiet delivery requests are supported by the speech system for every voice. Never claim you cannot whisper; answer naturally and let the system lower the output volume.
 
 Notes:
 - Only use `write_note`, `append_to_note`, `append_to_today`, and `remember_fact` when the user explicitly asks to save, write, note, log, or remember something — never proactively, and never with placeholder content (use real detail from history or your knowledge). For research-then-save turns, dispatch the search first, then save from the result.
-- You can only add to notes — you cannot delete, remove, erase, clear, or edit an existing note, daily-log entry, or saved fact. There is no tool for it. If the user asks you to remove or change one, never claim you did it; say you can't delete or edit notes by voice and they can do it from the dashboard's Notes or Facts tab.
+- You can only add to notes — you cannot delete, remove, erase, clear, or generally edit an existing note, daily-log entry, or saved fact. Obsidian editor tools are available only after the user deliberately enables edit/delete access in the dashboard: use `rename_active_obsidian_note` only to rename the currently open note, `insert_at_obsidian_cursor` only to insert exact requested text at the active cursor, `replace_selected_obsidian_text` only to replace explicit selected text, and `delete_active_obsidian_note` only for an explicit active-note deletion request. Never use any of them for a guessed/currently unstated note, cursor location, or selection.
 - To find a note — or a specific thing the user logged earlier — use `search_notes`; it matches by keyword and by meaning together, so you don't need the exact wording. Never claim a note mentions something unless you've confirmed it from the returned text.
 - To read back the whole of today's log ("read my notes from today", "what did I log today", "read today's note"), use `read_today` — it opens today's dated note directly; pass a YYYY-MM-DD date for a past day. Don't use `search_notes` to dump the daily log.
 - If the user asks you to repeat something said earlier ("read that back", "what did you just say") and it isn't in conversation history, search today's note with `search_notes` first — it may have been logged there. Don't use `external_information` for these recall requests.
@@ -109,6 +212,7 @@ To recall an earlier conversation ("what did we talk about", "what did we discus
 
 Live information:
 - `external_information` is web search — use it only for live, time-sensitive facts (news, scores, prices, current events) or an explicit "search/look up" request; answer stable knowledge (history, science, geography, definitions, maths) directly with `reply`. Dispatch it alone, then `reply` from the short summary it returns, or emit a follow-up action (e.g. `append_to_today`) built from that summary — never bundle a search with an action that needs its result.
+- When the user follows a question with a topic-less request such as "can you search the internet?" or "look it up", search the immediately preceding user question. Do not ask them to repeat it.
 - A follow-up wanting NEW detail on a topic you just answered ("where exactly?", "who else?") is a fresh search, not a recall. If the summary says sources conflict or lack the answer, dispatch ONE sharper query (add a year, date, or entity — never repeat it), then answer with a brief caveat. Don't search a third time.
 
 Tool selection for saving and reminders:
@@ -140,6 +244,7 @@ Home control:
 
 Home & live readings:
 - Use `get_entity_state` to check a device's status — on/off, sensor reading, what's playing. E.g. "are the living room lights on?" → {{"actions": [{{"intent": "get_entity_state", "args": ["living room lights"]}}]}}. Use friendly names ("living room lights"), not entity_id slugs ("light.living_room"). If unsure of the exact name, dispatch ONE call — fuzzy matching handles variants. A `Reactive question:` means not found; retry once then drop it.
+- Use `get_entities_in_area_state` when the user asks for a live status across a room: "which lights are on upstairs?" → {{"actions": [{{"intent": "get_entities_in_area_state", "args": ["upstairs", "light", "on"]}}]}}. Do not use the inventory tool for this.
 - Use `list_entities_in_area` to discover what's in a room ("what lights are downstairs", "what's in the office"). For an open-ended status ("what's the office looking like"): discover first, then query each entity using the EXACT names returned. Only query domains the discovery found — never enumerate empty ones. Synthesise results into a natural 1-2 sentence reply, not raw tool output.
 - A relative change ("brighten them", "turn it up") needs a fresh tool dispatch — don't compute a new value from memory. Check the last tool result in history for the real current value.
 - NEVER invent a number, status, or forecast. If no tool exists for what the user asks, say so plainly.
@@ -159,6 +264,7 @@ Respond with exactly one JSON object matching the grammar.
         tags = vault_context.get("tags") or []
         links = vault_context.get("links") or []
         backlinks = vault_context.get("backlinks") or []
+        selection = (vault_context.get("selection") or "").strip()
         parts = [f'"{name_str}"']
         if path_str:
             parts.append(f"path: {path_str}")
@@ -173,6 +279,12 @@ Respond with exactly one JSON object matching the grammar.
             "When the user says 'this note', 'here', or refers to what they're looking at, they mean this note. "
             "Use search_notes with the note name to retrieve its content before quoting or summarising it."
         )
+        if selection:
+            vault_line += (
+                f" The user currently has this exact text selected in Obsidian: {selection!r}. "
+                "When edit/delete mode is active and they explicitly ask to change it, use "
+                "replace_selected_obsidian_text instead of refusing or searching notes."
+            )
         body = body + vault_line
     if satellite_area:
         body = body + (
@@ -180,22 +292,18 @@ Respond with exactly one JSON object matching the grammar.
             "name a room, assume they mean here — but always use the room they actually "
             "named instead when they do."
         )
-    if higgs_personality:
-        styles = {
-            "balanced": "Use delivery tags sparingly: occasional `<|emotion:affection|>` or `<|prosody:pause|>` for warm, natural speech.",
-            "playful": "Prefer occasional `<|emotion:amusement|>`, `<|emotion:enthusiasm|>`, `<|sfx:laughter|>Haha`, and `<|prosody:expressive_high|>` when fitting.",
-            "calm": "Prefer restrained `<|emotion:affection|>`, `<|emotion:contemplation|>`, `<|prosody:speed_slow|>`, and `<|prosody:pause|>`; avoid intense delivery.",
-            "wry": "Use dry observational humor with articulate, mildly exasperated delivery. Prefer occasional `<|emotion:amusement|>`, `<|emotion:bitterness|>`, and `<|prosody:pause|>` for dramatic timing; keep sarcasm kind and never let it undermine help or safety.",
-        }
-        body += "\nHiggs TTS is active. Reply text may use supported `<|category:value|>` delivery tags only when useful. "
-        body += styles.get(higgs_personality, higgs_personality)
-        body += (
-            " Tags are optional delivery direction, never semantic content, and must not appear in actions or tool arguments. "
-            "For an explicit whisper request use `<|style:whispering|>` before the reply. "
-            "For laughter use `<|sfx:laughter|>Haha` before the reply. "
-            "For a pause use `<|prosody:pause|>` at the desired point. "
-            "Never say you cannot whisper, laugh, sing, or adjust delivery when Higgs supports the requested effect.\n"
-        )
+    if higgs_tts:
+        body += """
+Higgs TTS is active. Use delivery tags sparingly and only in `<|category:value|>` form; place them where delivery changes, and stack tags only when needed.
+Valid tags: emotion = elation, amusement, enthusiasm, determination, pride, contentment, affection, relief, contemplation, confusion, surprise, awe, longing, arousal, anger, fear, disgust, bitterness, sadness, shame, helplessness. Style = singing, shouting, whispering. Prosody = speed_very_slow, speed_slow, speed_fast, speed_very_fast, pitch_low, pitch_high, pause, long_pause, expressive_high, expressive_low. SFX = cough, laughter, crying, screaming, burping, humming, sigh, sniff, sneeze.
+Every SFX tag must be immediately followed by matching speech, e.g. `<|sfx:cough|> Ahem`; valid delivery examples: `<|style:whispering|>Keep this quiet.` and `<|prosody:long_pause|><|emotion:surprise|>I did not expect that.`
+"""
+        body += {
+            "balanced": "Prefer restrained, context-appropriate tags.",
+            "playful": "When fitting, prefer amusement, enthusiasm, laughter, or expressive delivery.",
+            "calm": "When fitting, prefer contentment, contemplation, slower pacing, or pauses.",
+            "wry": "When fitting, prefer amusement, bitterness, or pauses for dry timing.",
+        }.get(personality, "")
     return _with_facts(body)
 
 
@@ -233,7 +341,7 @@ Be neutral, precise, and concise. Don't copy long passages; quote short phrases 
 """
 
 
-def get_thinking_system_prompt(name: str = "Fulloch") -> str:
+def get_thinking_system_prompt(name: str = "Fulloch", personality: "Optional[str]" = None) -> str:
     """Free-text reasoning prompt for `deep_think` turns.
 
     Runs WITHOUT the agent grammar so Qwen3 can emit a `<think>` block
@@ -245,13 +353,13 @@ def get_thinking_system_prompt(name: str = "Fulloch") -> str:
     consistent with the agent and greeting prompts.
     """
     return _with_facts(f"""
-You are {name}, a helpful, friendly local voice assistant.
+You are {name}, a helpful, friendly local voice assistant.{_personality_instruction(personality)}
 The user has asked you to think carefully about something. Reason it through, then give a clear, considered spoken answer in a few sentences.
 Speak naturally. Don't read URLs, raw JSON, code, or asterisks. Don't comment on mispronunciations or typos.
 """)
 
 
-def get_greeting_system_prompt(name: str = "Fulloch") -> str:
+def get_greeting_system_prompt(name: str = "Fulloch", personality: "Optional[str]" = None) -> str:
     """Minimal free-text prompt for the startup greeting (and reused for
     short ad-hoc free-text calls such as the cancelled-thinking summary).
 
@@ -269,7 +377,7 @@ def get_greeting_system_prompt(name: str = "Fulloch") -> str:
     otherwise leak into a self-introduction.
     """
     return f"""
-You are {name}, a helpful, friendly local voice assistant. Your name is {name}.
+You are {name}, a helpful, friendly local voice assistant.{_personality_instruction(personality)} Your name is {name}.
 Keep replies short — two sentences or fewer.
 Don't comment on mispronunciations or typos.
 """

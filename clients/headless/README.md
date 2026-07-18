@@ -36,7 +36,9 @@ Ctrl+C to stop. Reconnects automatically on connection loss.
 | `server.token` | (none) | `satellite_tokens` entry from server config |
 | `satellite.room` | (none) | Label for the busy banner |
 | `satellite.ha_area` | (none) | HA area_id for bare light commands |
-| `satellite.always_listen` | `false` | No wakeword required |
+| `satellite.conversation_mode` | `false` | Exclusive full-duplex mode without a wakeword |
 | `satellite.server_vad` | `true` | Server handles endpointing |
 | `audio.mic_device` | default | sounddevice input device name/index |
 | `audio.speaker_device` | default | sounddevice output device name/index |
+
+Hardware switches can send `{"type":"conversation_mode.set","enabled":true|false}` on the active satellite-v2 socket.

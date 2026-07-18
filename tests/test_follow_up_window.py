@@ -2,10 +2,8 @@
 
 `_mark_turn_end` used to stamp `_last_turn_end` at `time.monotonic()` the
 instant TTS finished *generating and queuing* audio — not when the browser
-actually finished *playing* it. Chunks are handed to the satellite sink as
-fast as they're generated with no flow control, so for a long reply,
-generation (and thus the old `_last_turn_end`) could land tens of seconds
-before the audio actually stopped playing — silently expiring the 5s
+actually finished *playing* it. For a long reply, generation can finish
+before the audio actually stops playing — silently expiring the 5s
 follow-up window while the user was still listening, then reporting a huge
 "gap" once they replied the instant the voice actually stopped.
 
@@ -62,15 +60,15 @@ class _StubAudioCapture:
         self.armed_window = seconds
 
 
-def _make_stub_assistant(follow_up_seconds=5.0, always_listen=False):
+def _make_stub_assistant(follow_up_seconds=5.0, conversation_mode=False):
     from core.satellite import SatelliteSession
 
     assistant = _import_assistant_module()
     self = assistant.Assistant.__new__(assistant.Assistant)
     self.audio_capture = _StubAudioCapture()
     self.follow_up_seconds = follow_up_seconds
-    self._satellite_always_listen = always_listen
     sat = SatelliteSession(id="sat-a", chunk_q=None)
+    sat.conversation_mode = conversation_mode
     self.satellites = {"sat-a": sat}
     return self, assistant, sat
 

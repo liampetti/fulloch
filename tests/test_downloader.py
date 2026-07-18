@@ -130,6 +130,15 @@ def test_plan_downloads_compound_crispasr_tts_model_to_one_directory(tmp_path):
     assert len({asset.dest for asset in tts}) == 1
 
 
+def test_plan_downloads_pocket_tts_english_bundle_only():
+    resolved = resolve_models(
+        {"asr": {"backend": "moonshine"}, "tts": {"backend": "pocket-tts-onnx"}, "llm": {"backend": "none"}}
+    )
+    pocket = next(a for a in dl.plan_assets(resolved) if a.key == "tts:pocket-tts-onnx")
+    assert pocket.kind == "dir_snapshot"
+    assert pocket.allow == ["pocket_tts_onnx.py", "onnx/english_2026-04/*"]
+
+
 def test_plan_downloads_compound_small_crispasr_tts_model(tmp_path):
     resolved = resolve_models(
         {

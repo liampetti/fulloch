@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.intent_catch import (
     catchAll,
     extract_after_play,
+    extract_area_light_state,
     extract_color,
     extract_cover,
     extract_deep_think,
@@ -33,6 +34,7 @@ from utils.intent_catch import (
     extract_volume_up_target,
     has_default_weather_forecast,
     has_time_query,
+    is_contextual_web_search_request,
     list_timers,
 )
 
@@ -89,6 +91,32 @@ class TestExtractAfterPlay:
         # the SLM (returned unchanged) instead of emitting a play_song action.
         msg = "search the web for the best new ps5 games that i can play with my daughter"
         assert catchAll(msg) == msg
+
+
+class TestAreaLightState:
+    def test_extracts_area_and_requested_state(self):
+        assert extract_area_light_state("what lights are on upstairs") == ("upstairs", "on")
+        assert extract_area_light_state("Which lights are currently off in the office?") == ("the office", "off")
+
+    def test_routes_status_question_to_area_state_tool(self):
+        assert catchAll("what lights are on upstairs") == {
+            "actions": [
+                {
+                    "intent": "get_entities_in_area_state",
+                    "args": ["upstairs", "light", "on"],
+                }
+            ]
+        }
+
+    def test_inventory_question_still_reaches_agent(self):
+        assert catchAll("what lights are upstairs") == "what lights are upstairs"
+
+
+class TestContextualWebSearch:
+    def test_matches_only_topicless_search_requests(self):
+        assert is_contextual_web_search_request("can you search the internet")
+        assert is_contextual_web_search_request("look it up")
+        assert not is_contextual_web_search_request("search the internet for contaminated food")
 
 
 class TestExtractStop:

@@ -12,7 +12,7 @@ server:
 satellite:
   room: "kitchen"               # label shown in the busy banner on other satellites
   ha_area: "kitchen"            # Home Assistant area_id for bare light commands
-  # always_listen: false        # true = no wakeword required
+  # conversation_mode: false    # true = exclusive full-duplex, no-wakeword mode
   # server_vad: true            # false = this client endpoints locally and sends audio.flush
 
 audio:

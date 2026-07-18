@@ -5,6 +5,7 @@ fixture monkeypatches `notes.NOTES_DIR` (and `notes.DAILY_SUBDIR`) onto a
 fresh tmp_path per test rather than re-importing the module.
 """
 
+import queue
 import sys
 from pathlib import Path
 
@@ -58,6 +59,46 @@ def notes_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(notes, "_get_index", lambda: _StubIndex())
     (base / "daily").mkdir()
     return base
+
+
+def test_insert_at_obsidian_cursor_queues_explicit_text(monkeypatch):
+    commands = queue.Queue()
+    monkeypatch.setattr(notes, "_obsidian_cmd_q", commands)
+    monkeypatch.setitem(notes.config, "obsidian", {"allow_edit_delete": True})
+
+    assert notes.insert_at_obsidian_cursor("## Liam's daily tasks") == (
+        "Sent that text to the cursor in your active Obsidian note."
+    )
+    assert commands.get_nowait() == {"type": "insert", "text": "## Liam's daily tasks"}
+
+
+def test_rename_active_obsidian_note_requires_a_connected_plugin(monkeypatch):
+    monkeypatch.setattr(notes, "_obsidian_cmd_q", None)
+    monkeypatch.setitem(notes.config, "obsidian", {"allow_edit_delete": True})
+
+    assert notes.rename_active_obsidian_note("Liam's daily tasks") == (
+        "Obsidian isn't connected, so I can't rename its active note."
+    )
+
+
+def test_replace_selected_obsidian_text_queues_replacement(monkeypatch):
+    commands = queue.Queue()
+    monkeypatch.setattr(notes, "_obsidian_cmd_q", commands)
+    monkeypatch.setitem(notes.config, "obsidian", {"allow_edit_delete": True})
+
+    assert notes.replace_selected_obsidian_text("Liam's notes") == (
+        "Sent a request to replace the selected text in Obsidian."
+    )
+    assert commands.get_nowait() == {"type": "replace_selection", "text": "Liam's notes"}
+
+
+def test_replace_selected_obsidian_text_is_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(notes, "_obsidian_cmd_q", queue.Queue())
+    monkeypatch.setitem(notes.config, "obsidian", {"allow_edit_delete": False})
+
+    assert notes.replace_selected_obsidian_text("Liam's notes") == (
+        "Obsidian editing is disabled in the dashboard for safety."
+    )
 
 
 class TestSlugify:

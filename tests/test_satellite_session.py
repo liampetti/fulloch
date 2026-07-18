@@ -14,6 +14,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 from core.audio import AudioCapture
 from core.satellite import SatelliteSession
@@ -82,6 +83,34 @@ class TestConnectSatellite:
         a.connect_satellite("my-id")
         assert a.satellites["my-id"].id == "my-id"
         a.disconnect_satellite("my-id")
+
+    def test_conversation_mode_is_exclusive(self):
+        from core.assistant import ConversationModeUnavailable
+
+        a = _make_assistant()
+        a.audio_capture.satellite_recorder_thread = _blocking_recorder
+        a.connect_satellite("sat-a", conversation_mode=True)
+
+        assert a.conversation_owner_id == "sat-a"
+        assert a.satellites["sat-a"].conversation_mode is True
+        with pytest.raises(ConversationModeUnavailable):
+            a.connect_satellite("sat-b")
+
+        a.disconnect_satellite("sat-a")
+        assert a.conversation_owner_id is None
+
+    def test_conversation_mode_requires_the_only_voice_satellite(self):
+        a = _make_assistant()
+        a.audio_capture.satellite_recorder_thread = _blocking_recorder
+        a.connect_satellite("sat-a")
+        a.connect_satellite("sat-b")
+
+        enabled, _ = a.set_satellite_conversation_mode("sat-a", True)
+
+        assert enabled is False
+        assert a.conversation_owner_id is None
+        a.disconnect_satellite("sat-a")
+        a.disconnect_satellite("sat-b")
 
 
 class TestDisconnectSatellite:
@@ -170,7 +199,7 @@ def test_satellite_session_defaults():
     s = SatelliteSession(id="x", chunk_q=queue.Queue())
     assert s.tts_sink is None
     assert s.recorder_thread is None
-    assert s.always_listen is False
+    assert s.conversation_mode is False
     assert s.label is None
     assert s.ha_area is None
     assert s.server_vad is True

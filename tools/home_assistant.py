@@ -1243,6 +1243,35 @@ def get_temperature(entity: str) -> str:
     return f"{friendly} is {round(temp)} {unit}"
 
 
+def _format_entity_state(entity_id: str, state: dict) -> str:
+    """Format an HA state response for a spoken live-status reply."""
+    entity_state = state.get("state", "unknown")
+    friendly_name = state.get("attributes", {}).get("friendly_name", entity_id)
+
+    attrs = state.get("attributes", {})
+    details = [f"{friendly_name} is {entity_state}"]
+
+    if "brightness" in attrs and attrs["brightness"] is not None:
+        brightness_pct = int((attrs["brightness"] / 255) * 100)
+        details.append(f"brightness: {brightness_pct}%")
+    if "temperature" in attrs:
+        details.append(f"temperature: {attrs['temperature']}°")
+    if "current_temperature" in attrs:
+        details.append(f"current temperature: {attrs['current_temperature']}°")
+    if "hvac_action" in attrs:
+        details.append(f"hvac action: {attrs['hvac_action']}")
+    if "humidity" in attrs:
+        details.append(f"humidity: {attrs['humidity']}%")
+    if "current_position" in attrs:
+        details.append(f"position: {attrs['current_position']}% open")
+    if "current_valve_position" in attrs:
+        details.append(f"position: {attrs['current_valve_position']}% open")
+    if "battery_level" in attrs:
+        details.append(f"battery: {attrs['battery_level']}%")
+
+    return ", ".join(details)
+
+
 @tool(
     name="get_entity_state",
     description="Get the current state of a Home Assistant entity (on/off, sensor reading, etc.)",
@@ -1267,32 +1296,7 @@ def get_entity_state(entity: str) -> str:
             f"{_friendly_for(entity_id)!r}. Try a different name or be more specific."
         )
 
-    entity_state = state.get("state", "unknown")
-    friendly_name = state.get("attributes", {}).get("friendly_name", entity_id)
-
-    # Include relevant attributes
-    attrs = state.get("attributes", {})
-    details = [f"{friendly_name} is {entity_state}"]
-
-    if "brightness" in attrs and attrs["brightness"] is not None:
-        brightness_pct = int((attrs["brightness"] / 255) * 100)
-        details.append(f"brightness: {brightness_pct}%")
-    if "temperature" in attrs:
-        details.append(f"temperature: {attrs['temperature']}°")
-    if "current_temperature" in attrs:
-        details.append(f"current temperature: {attrs['current_temperature']}°")
-    if "hvac_action" in attrs:
-        details.append(f"hvac action: {attrs['hvac_action']}")
-    if "humidity" in attrs:
-        details.append(f"humidity: {attrs['humidity']}%")
-    if "current_position" in attrs:
-        details.append(f"position: {attrs['current_position']}% open")
-    if "current_valve_position" in attrs:
-        details.append(f"position: {attrs['current_valve_position']}% open")
-    if "battery_level" in attrs:
-        details.append(f"battery: {attrs['battery_level']}%")
-
-    return ", ".join(details)
+    return _format_entity_state(entity_id, state)
 
 
 def _area_entities(area_id: str, domain: Optional[str] = None) -> list[str]:
@@ -1354,6 +1358,60 @@ def list_entities_in_area(area: str, domain: Optional[str] = None) -> str:
 
     names = sorted({_friendly_for(eid) for eid in entity_ids}, key=str.lower)
     return f"{area_name} has: " + ", ".join(names)
+
+
+@tool(
+    name="get_entities_in_area_state",
+    description=(
+        "Get current states for entities in a room/area/zone, optionally limited "
+        "to a domain and an on/off state. Use for status questions such as "
+        "'which lights are on upstairs', not for discovering what devices exist."
+    ),
+    aliases=["get_area_states", "which_are_on", "area_status"],
+)
+def get_entities_in_area_state(
+    area: str, domain: Optional[str] = None, only_state: Optional[str] = None
+) -> str:
+    """Get current state for every voice-enabled entity in an HA area."""
+    if not HA_TOKEN:
+        return "Home Assistant isn't set up."
+
+    area_id = _resolve_area(area)
+    if area_id is None:
+        return (
+            f"Reactive question: Couldn't find an area matching {area!r}. "
+            "Try a different room name or be more specific."
+        )
+
+    entity_ids = [
+        entity_id
+        for entity_id in _area_entities(area_id, domain)
+        if entity_id not in _DENIED_ENTITIES
+    ]
+    area_name = _AREA_MAP.get(area_id, area)
+    if not entity_ids:
+        scoped = f"{domain} " if domain else ""
+        return f"I don't see any {scoped}entities in {area_name}."
+
+    state_filter = (only_state or "").lower().strip()
+    if state_filter not in ("", "on", "off"):
+        return "The state filter must be 'on' or 'off'."
+
+    details = []
+    for entity_id in entity_ids:
+        state = _get_state(entity_id)
+        if state is None:
+            continue
+        if state_filter and state.get("state") != state_filter:
+            continue
+        details.append(_format_entity_state(entity_id, state))
+
+    if not details and state_filter:
+        scoped = f"{domain}s" if domain else "entities"
+        return f"No {scoped} are {state_filter} in {area_name}."
+    if not details:
+        return f"I couldn't read any entity states in {area_name}."
+    return "; ".join(details)
 
 
 @tool(

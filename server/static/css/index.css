@@ -360,6 +360,8 @@ nav.tabs {
 }
 .tab:hover { color: var(--text); background: var(--surface-2); }
 .tab.active { color: var(--primary); background: var(--surface-2); }
+.obsidian-tab { display: inline-flex; align-items: center; gap: 6px; }
+#obs-edit-alert { width: 7px; height: 7px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 0 rgba(239, 68, 68, .7); animation: obs-edit-pulse 1.4s ease-out infinite; }
 
 /* Remote-LLM-unreachable banner (Fulloch degraded to regex/fast-path only) */
 .llm-banner {
@@ -662,6 +664,9 @@ nav.tabs {
 .obs-progress .bar { flex: 1; height: 6px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
 .obs-progress .bar > i { display: block; height: 100%; width: 0; background: var(--primary); transition: width .3s; }
 .obs-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.obs-edit-mode { color: #ef4444; font-size: .78rem; font-weight: 700; display: flex; align-items: center; gap: 6px; }
+.obs-edit-mode i { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 0 rgba(239, 68, 68, .7); animation: obs-edit-pulse 1.4s ease-out infinite; }
+@keyframes obs-edit-pulse { 70% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
 .obs-btn {
   display: inline-flex; align-items: center; gap: 0.35rem;
   padding: 8px 14px; border-radius: 8px;
@@ -1354,10 +1359,7 @@ button.satellite.active svg, button.satellite.always-on svg { transform: none; }
   50%      { box-shadow: 0 0 0 7px rgba(16,185,129,0); }
 }
 
-/* Always-listen (no-wakeword) toggle — a separate, always-clickable control
-   rather than hidden behind a right-click, which doesn't exist on touch
-   devices. Independent of connection state: toggling before connecting
-   sets the mode used on connect; toggling while connected updates it live. */
+/* Conversation mode toggle. It is exclusive to one connected voice satellite. */
 button.sat-toggle {
   flex-shrink: 0;
   width: 34px; height: 34px;

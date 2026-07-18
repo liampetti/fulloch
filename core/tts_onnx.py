@@ -610,14 +610,8 @@ def speak_stream(
                     sink.put((item[0], None))
                     total_samples += len(item[0])
                 if cancelled_mid_stream:
-                    # Chunks are sent to the browser as fast as they're
-                    # generated with no flow control, so audio already
-                    # queued here is likely already playing client-side by
-                    # the time a barge-in is detected. "end" is a no-op on
-                    # the client; "cancel" tells it to actually stop
-                    # already-scheduled playback. Drop anything still
-                    # sitting unsent first so the cancel isn't stuck behind
-                    # stale audio.
+                    # Drop queued audio before sending cancel so the browser
+                    # stops its short scheduled playback window immediately.
                     _drain_queue_nowait(sink)
                     sink.put(("cancel",))
                 else:

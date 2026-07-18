@@ -4,7 +4,7 @@
 
 - User: "What time did the downstairs lights turn off last night"
   Output:
-  {"actions": [{"intent": "get_entity_history", "args": ["downstairs lights", "2026-06-02"]}]}
+  {"actions": [{"intent": "get_entity_history", "args": ["downstairs lights", "{{YESTERDAY}}"]}]}
 
 - Conversation context:
     User: "Turn on the kitchen lights"
@@ -15,7 +15,7 @@
 
 - User: "What did we talk about yesterday afternoon?"
   Output:
-  {"actions": [{"intent": "get_conversation_history", "args": ["2026-06-02T12:00:00", "2026-06-02T18:00:00"]}]}
+  {"actions": [{"intent": "get_conversation_history", "args": ["{{YESTERDAY_AFTERNOON_START}}", "{{YESTERDAY_AFTERNOON_END}}"]}]}
 
 - Conversation context:
     User: "What did we talk about around 3pm yesterday?"
@@ -23,21 +23,13 @@
   Output:
   {"reply": "Around 3pm you were asking about the Formula 1 at Monaco — the top three finishers, and whether Hadjar picked up any penalties."}
 
-- User: "Are the living room lights on?"
-  Output:
-  {"actions": [{"intent": "get_entity_state", "args": ["living room lights"]}]}
-
 - User: "What other lights do we have downstairs?"
   Output:
   {"actions": [{"intent": "list_entities_in_area", "args": ["downstairs", "light"]}]}
 
-- User: "What's the weather forecast"
+- User: "What lights are on upstairs?"
   Output:
-  {"actions": [{"intent": "get_weather_forecast", "args": []}]}
-
-- User: "What's on today"
-  Output:
-  {"actions": [{"intent": "whats_on", "args": ["today"]}]}
+  {"actions": [{"intent": "get_entities_in_area_state", "args": ["upstairs", "light", "on"]}]}
 
 - User: "Who is the current US president"
   Output:
@@ -52,6 +44,18 @@
 - User: "What's the capital of France"
   Output:
   {"reply": "Paris is the capital of France."}
+
+- User: "What is 15 percent of 340?"
+  Output:
+  {"actions": [{"intent": "calculate", "args": ["15% of 340"]}]}
+
+- User: "Convert 5 miles to kilometres"
+  Output:
+  {"actions": [{"intent": "convert_units", "args": [5, "miles", "kilometres"]}]}
+
+- User: "What date is next Tuesday?"
+  Output:
+  {"actions": [{"intent": "date_of", "args": ["Tuesday", "next"]}]}
 
 - User: "Can you order pizza"
   Output:
@@ -96,6 +100,10 @@
 - User: "Add eggs to the shopping list"
   Output:
   {"actions": [{"intent": "add_todo_item", "args": ["eggs"]}]}
+
+- User: "What's on my shopping list?"
+  Output:
+  {"actions": [{"intent": "get_todo_items", "args": []}]}
 
 - User: "I already picked up the eggs, take them off the list"
   Output:
@@ -162,13 +170,13 @@
 
 - User: "Remind me to put the bins out every Thursday at 8pm"
   Output:
-  {"actions": [{"intent": "create_calendar_event", "args": ["Bin night", "2026-06-04", "20:00", null, "weekly"]}]}
+  {"actions": [{"intent": "create_calendar_event", "args": ["Bin night", "{{NEXT_THURSDAY}}", "20:00", null, "weekly"]}]}
 
 - Conversation context:
     Assistant: "Want me to save that as a note, or set up a weekly calendar reminder for Thursday evenings?"
   User: "calendar reminder"
   Output:
-  {"actions": [{"intent": "create_calendar_event", "args": ["Bin night", "2026-06-04", null, null, "weekly"]}]}
+  {"actions": [{"intent": "create_calendar_event", "args": ["Bin night", "{{NEXT_THURSDAY}}", null, null, "weekly"]}]}
 
 - User: "Think about whether I should switch to solar"
   Output:
@@ -200,25 +208,6 @@
     Tool — get_entity_state: "office pendant is on"
   Output:
   {"reply": "The downstairs office has two lights on — the main one at 75 percent and the pendant fully on."}
-
-- Conversation context:
-    User: "What's the kitchen like"
-    Tool — list_entities_in_area: "Kitchen has: kitchen ceiling, kitchen counter, kitchen thermostat"
-  Output:
-  {"actions": [
-    {"intent": "get_entity_state", "args": ["kitchen ceiling"]},
-    {"intent": "get_entity_state", "args": ["kitchen counter"]},
-    {"intent": "get_temperature", "args": ["kitchen"]}
-  ]}
-
-- Conversation context:
-    User: "What's the kitchen like"
-    Tool — list_entities_in_area: "Kitchen has: kitchen ceiling, kitchen counter, kitchen thermostat"
-    Tool — get_entity_state: "kitchen ceiling is on"
-    Tool — get_entity_state: "kitchen counter is off"
-    Tool — get_temperature: "kitchen is 22 degrees"
-  Output:
-  {"reply": "The kitchen light is on, the counter light is off, and it's 22 degrees in there."}
 
 - User: "How's the temperature in the office"
   Output:

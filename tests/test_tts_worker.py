@@ -183,9 +183,8 @@ def test_repeated_barge_ins_keep_worker_alive():
 
 def test_speak_stream_returns_estimated_playback_end():
     """speak_stream must return playback-start + audio-duration, not just
-    "now" — chunks are handed to the satellite sink as fast as they're
-    generated with no flow control, so generation finishing doesn't mean the
-    audio has actually finished playing on the browser. Regression coverage
+    "now" — generation finishing doesn't mean the audio has actually finished
+    playing on the browser. Regression coverage
     for the follow-up-window bug: arming the window at generation-finish
     time let it silently expire while a long reply was still playing."""
     tts = _import_tts()

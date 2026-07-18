@@ -50,6 +50,8 @@ sentence-transformers==5.1.2
 # above; Kokoro TTS needs its own package (+ espeak-ng system dep for G2P).
 misaki[en]==0.9.4   # G2P for the Kokoro ONNX TTS backend (pulls spacy en_core_web_sm)
 librosa==0.11.0   # Qwen3-ASR ONNX backend (asr.backend: qwen-onnx) mel features
+sentencepiece==0.2.1  # Pocket TTS ONNX tokenizer
+scipy==1.15.3         # Pocket TTS WAV reference resampling
 
 # These packages require special install flags - see Dockerfile
 # qwen-tts: pip install --no-deps git+https://github.com/liampetti/Qwen3-TTS-streaming.git@97da215

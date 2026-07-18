@@ -134,7 +134,9 @@ _ASSISTANT_OPTION_KEYS = (
     "wakeword_pattern",
     "voice_clone",
     "tts_speed",
+    "whisper_gain",
     "barge_in",
+    "conversation_mode_default",
     "barge_in_threshold_dbfs",
     "follow_up_time",
     "asr_language",
@@ -145,6 +147,8 @@ _ASSISTANT_OPTION_KEYS = (
     "vad_endpoint_silence_ms",
     "vad_min_speech_ms",
     "vad_soft_endpoint_silence_ms",
+    "personality",
+    "personality_custom",
 )
 
 from core.assistant import Assistant
@@ -170,6 +174,11 @@ def _assistant_args(cfg):
     """Extract the Assistant constructor args from a fresh config dict."""
     general = cfg.get("general") or {}
     options = {k: general[k] for k in _ASSISTANT_OPTION_KEYS if general.get(k) is not None}
+    # Preserve the former Higgs-only setting for existing installations.
+    if "personality" not in options and general.get("higgs_personality") is not None:
+        options["personality"] = general["higgs_personality"]
+    if "personality_custom" not in options and general.get("higgs_personality_custom") is not None:
+        options["personality_custom"] = general["higgs_personality_custom"]
     return general.get("wakeword"), cfg.get("models"), options
 
 

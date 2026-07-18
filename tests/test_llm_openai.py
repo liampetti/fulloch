@@ -13,7 +13,7 @@ pytest.importorskip("httpx")
 import httpx  # noqa: E402
 
 from core import llm_openai  # noqa: E402
-from core.slm import RemoteUnreachable, generate_slm  # noqa: E402
+from core.slm import ContextExhaustedError, RemoteUnreachable, generate_slm  # noqa: E402
 from core.turn_stats import TurnStats  # noqa: E402
 
 # --- fakes ------------------------------------------------------------------
@@ -158,6 +158,13 @@ def test_midstream_failure_with_no_text_raises_remote_unreachable():
         c.generate(user_prompt="hi")
 
 
+def test_500_context_error_raises_context_exhausted():
+    """llama.cpp reports a decode context overflow as an HTTP 500."""
+    c, _ = _make_client(lambda k: (_ for _ in ()).throw(Exception("Context size has been exceeded")))
+    with pytest.raises(ContextExhaustedError):
+        c.generate(user_prompt="hi")
+
+
 def test_midstream_failure_after_partial_returns_partial():
     # If we already streamed some content, keep it instead of discarding the turn.
     def gen(k):
@@ -210,6 +217,7 @@ def test_malformed_json_still_attempts_repair():
 def test_is_context_error_mapping():
     assert llm_openai._is_context_error(Exception("maximum context length exceeded"))
     assert llm_openai._is_context_error(Exception("This model's context window is 4096"))
+    assert llm_openai._is_context_error(Exception("decode() failed: Context size has been exceeded."))
     assert not llm_openai._is_context_error(Exception("rate limit reached"))
 
 

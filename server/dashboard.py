@@ -289,12 +289,13 @@ SUBSCRIBER_IDLE_KEEPALIVE_S = 15
 _SETTABLE_CREDENTIALS = frozenset({"ha_token", "llm_api_key", "obsidian_token"})
 
 # Session-cookie auth gate. When dashboard_password is set in credentials.json,
-# every route except the login page and static assets requires a valid session
-# cookie obtained via POST /auth/login. Unset = no auth (zero-config local-only).
+# every route except the login page, static assets, and the liveness probe
+# requires a valid session cookie obtained via POST /auth/login. Unset = no auth (zero-config local-only).
 # See README "Exposing the dashboard".
 _AUTH_EXEMPT_PATHS = frozenset({
     "/login", "/auth/login", "/auth/logout",
     "/logo.png", "/parloch.png", "/favicon.ico",
+    "/ready",
 })
 
 _LOGIN_HTML = """<!DOCTYPE html>
@@ -613,8 +614,7 @@ def create_app(
 
     @app.get("/voice/sample")
     def voice_sample(name: str) -> FileResponse:
-        """Preview clip for a selectable voice. Both Kokoro built-ins and Qwen
-        clones have a data/voices/<name>.wav (bundled sample / clone reference)."""
+        """Preview a bundled sample or a Qwen/Pocket clone reference WAV."""
         if not name or not all(c.isalnum() or c in "_-" for c in name):
             raise HTTPException(status_code=400, detail="invalid voice name")
         path = _VOICES_DIR / f"{name}.wav"
@@ -1507,7 +1507,8 @@ def create_app(
           {"type":"tts_start","sr":<int>}  — TTS beginning; note sample rate
           <binary Float32 chunk>            — audio data
           {"type":"tts_end"}               — TTS utterance complete
-        Browser → server text: {"type":"wakeword_toggle","bypass":<bool>}
+        Browser → server text: {"type":"conversation_mode.set","enabled":<bool>}
+        Browser → server text: {"type":"tts_credit","seconds":<float>}
         """
         # Session-cookie auth for WebSocket (cookies are sent on the upgrade request).
         pw_hash = context.dashboard_password_hash
@@ -1524,13 +1525,18 @@ def create_app(
 
         await ws.accept()
 
+        playback_credit: asyncio.Queue[float] = asyncio.Queue()
+
         # Minted here, not inside connect_satellite: this handler needs the id
         # synchronously (to key set_satellite_sink/disconnect_satellite below,
         # and — from Phase 4 — to tell the browser its own id for the busy
         # banner), so the caller owns id generation rather than the callee.
         satellite_id = uuid.uuid4().hex
         tts_q: queue.Queue = queue.Queue(maxsize=200)
-        wakeword_bypass = ws.query_params.get("bypass", "0") == "1"
+        requested_conversation_mode = ws.query_params.get("conversation")
+        conversation_mode = (
+            None if requested_conversation_mode is None else requested_conversation_mode == "1"
+        )
         # 6b: the user's one-time area-picker choice (persisted client-side in
         # localStorage), sent as ?area=<area_id> on connect. Blank/absent —
         # e.g. HA not configured, or the user skipped the picker — leaves the
@@ -1540,25 +1546,36 @@ def create_app(
         # can show a "location" pill without the server re-resolving area_id
         # -> name itself — see SatelliteSession.ha_area_name.
         ha_area_name = ws.query_params.get("area_name", "").strip() or None
-        chunk_q = context.assistant.connect_satellite(
-            satellite_id,
-            wakeword_bypass=wakeword_bypass,
-            ha_area=ha_area,
-            ha_area_name=ha_area_name,
-        )
+        from core.assistant import ConversationModeUnavailable
+
+        try:
+            chunk_q = context.assistant.connect_satellite(
+                satellite_id,
+                conversation_mode=conversation_mode,
+                ha_area=ha_area,
+                ha_area_name=ha_area_name,
+            )
+        except ConversationModeUnavailable as e:
+            await ws.send_json({"type": "error", "code": "conversation_mode_active", "message": str(e)})
+            await ws.close(code=1008)
+            return
         context.assistant.set_satellite_sink(satellite_id, tts_q)
         # Tell the browser its own id so it can tell (via /status's
         # active_owner_id) whether a busy turn belongs to it or another
         # satellite. Shape-aligned with the satellite-v2 protocol's
         # session.started frame (Phase 5) — same identity handshake, just
         # not yet worth a second message type for the browser path.
+        session = context.assistant.satellites.get(satellite_id)
+        in_conversation_mode = bool(getattr(session, "conversation_mode", False))
         await ws.send_json(
             {
                 "type": "session",
                 "satellite_id": satellite_id,
-                # Browser satellites release the microphone during speech by
-                # default. Wakeword barge-in deliberately keeps it live.
-                "half_duplex": context.assistant.barge_in != "wakeword",
+                "conversation_mode": in_conversation_mode,
+                "half_duplex": (
+                    context.assistant.barge_in != "wakeword"
+                    and not in_conversation_mode
+                ),
             }
         )
         # The opening greeting was synthesised during startup, before any
@@ -1581,16 +1598,34 @@ def create_app(
                     elif "text" in msg and msg["text"]:
                         try:
                             data = json.loads(msg["text"])
-                            if data.get("type") == "wakeword_toggle":
-                                context.assistant.set_satellite_wakeword(
-                                    bool(data.get("bypass", False))
+                            if data.get("type") == "conversation_mode.set":
+                                enabled, reason = context.assistant.set_satellite_conversation_mode(
+                                    satellite_id, bool(data.get("enabled", False))
                                 )
+                                session = context.assistant.satellites.get(satellite_id)
+                                await ws.send_json(
+                                    {
+                                        "type": "conversation_mode.result",
+                                        "enabled": enabled and bool(getattr(session, "conversation_mode", False)),
+                                        "half_duplex": not (
+                                            context.assistant.barge_in == "wakeword"
+                                            or bool(getattr(session, "conversation_mode", False))
+                                        ),
+                                        "message": reason,
+                                    }
+                                )
+                            elif data.get("type") == "tts_credit":
+                                seconds = data.get("seconds", 0)
+                                if isinstance(seconds, (int, float)) and seconds > 0:
+                                    playback_credit.put_nowait(float(seconds))
                         except (json.JSONDecodeError, Exception):
                             pass
-            except WebSocketDisconnect:
+            except (WebSocketDisconnect, RuntimeError):
                 return
 
         async def _send():
+            sample_rate = 0
+            credit_seconds = 0.0
             while True:
                 try:
                     item = await asyncio.to_thread(lambda: tts_q.get(timeout=0.5))
@@ -1601,17 +1636,25 @@ def create_app(
                     return
                 try:
                     if isinstance(kind, str) and kind == "start":
+                        sample_rate = item[1]
+                        credit_seconds = 0.0
                         await ws.send_json({"type": "tts_start", "sr": item[1]})
                     elif isinstance(kind, str) and kind == "end":
                         await ws.send_json({"type": "tts_end"})
                     elif isinstance(kind, str) and kind == "cancel":
-                        # Barge-in: audio already sent may already be playing
-                        # client-side (no flow control on this queue), so
-                        # tell the browser to stop already-scheduled
-                        # playback instead of letting it run to completion.
+                        # Stop the browser's short scheduled playback window.
                         await ws.send_json({"type": "tts_cancel"})
                     else:
-                        await ws.send_bytes(kind.astype(np.float32).tobytes())
+                        if sample_rate <= 0:
+                            continue
+                        frame_samples = max(1, int(sample_rate * 0.1))
+                        for start in range(0, len(kind), frame_samples):
+                            frame = kind[start : start + frame_samples]
+                            frame_seconds = len(frame) / sample_rate
+                            while credit_seconds + 1e-9 < frame_seconds:
+                                credit_seconds += await playback_credit.get()
+                            credit_seconds -= frame_seconds
+                            await ws.send_bytes(frame.astype(np.float32).tobytes())
                 except Exception:
                     return
 
@@ -1641,13 +1684,13 @@ def create_app(
 
         client → server  session.start   {auth_token?, label?, ha_area?,
                                            server_vad? (default true),
-                                           always_listen? (default false)}
+                                            conversation_mode? (default config)}
         server → client  session.started {satellite_id}
         client → server  audio.frame     binary Float32 PCM (primary) OR
                                           {"type":"audio.frame","data":<base64>}
         client → server  audio.flush     force an utterance boundary
                                           (only meaningful if server_vad=false)
-        client → server  wake_word.disable / wake_word.enable
+        client → server  conversation_mode.set {enabled}
         client → server  session.stop    graceful end
         server → client  turn.tts_start  {sample_rate}
         server → client  turn.tts_frame  binary Float32 PCM
@@ -1696,17 +1739,30 @@ def create_app(
 
         satellite_id = uuid.uuid4().hex
         tts_q: queue.Queue = queue.Queue(maxsize=200)
-        always_listen = bool(first.get("always_listen", False))
-        chunk_q = context.assistant.connect_satellite(
-            satellite_id,
-            wakeword_bypass=always_listen,
-            label=first.get("label"),
-            ha_area=first.get("ha_area"),
-            server_vad=bool(first.get("server_vad", True)),
-            auth_token=auth_token,
-        )
+        from core.assistant import ConversationModeUnavailable
+
+        try:
+            chunk_q = context.assistant.connect_satellite(
+                satellite_id,
+                conversation_mode=first.get("conversation_mode"),
+                label=first.get("label"),
+                ha_area=first.get("ha_area"),
+                server_vad=bool(first.get("server_vad", True)),
+                auth_token=auth_token,
+            )
+        except ConversationModeUnavailable as e:
+            await ws.send_json({"type": "error", "code": "conversation_mode_active", "message": str(e)})
+            await ws.close(code=1008)
+            return
         context.assistant.set_satellite_sink(satellite_id, tts_q)
-        await ws.send_json({"type": "session.started", "satellite_id": satellite_id})
+        session = context.assistant.satellites.get(satellite_id)
+        await ws.send_json(
+            {
+                "type": "session.started",
+                "satellite_id": satellite_id,
+                "conversation_mode": bool(getattr(session, "conversation_mode", False)),
+            }
+        )
 
         async def _receive():
             from core.audio import FLUSH
@@ -1744,10 +1800,22 @@ def create_app(
                                 chunk_q.put_nowait(FLUSH)
                             except queue.Full:
                                 pass
-                        elif mtype == "wake_word.disable":
-                            context.assistant.set_satellite_wakeword(True)
-                        elif mtype == "wake_word.enable":
-                            context.assistant.set_satellite_wakeword(False)
+                        elif mtype == "conversation_mode.set":
+                            enabled, reason = context.assistant.set_satellite_conversation_mode(
+                                satellite_id, bool(data.get("enabled", False))
+                            )
+                            session = context.assistant.satellites.get(satellite_id)
+                            await ws.send_json(
+                                {
+                                    "type": "conversation_mode.result",
+                                    "enabled": enabled and bool(getattr(session, "conversation_mode", False)),
+                                    "half_duplex": not (
+                                        context.assistant.barge_in == "wakeword"
+                                        or bool(getattr(session, "conversation_mode", False))
+                                    ),
+                                    "message": reason,
+                                }
+                            )
                         elif mtype == "session.stop":
                             return
             except WebSocketDisconnect:
@@ -1949,7 +2017,25 @@ def create_app(
     @app.get("/api/obsidian/status")
     def obsidian_status() -> dict:
         state = dict(context.obsidian_vault_state)
+        from .config_store import read_config
+        state["allow_edit_delete"] = bool(
+            (read_config(context.config_path).get("obsidian") or {}).get("allow_edit_delete", False)
+        )
         return state
+
+    @app.post("/api/obsidian/edit-capability")
+    def obsidian_edit_capability(req: dict) -> dict:
+        """Persist and live-apply the explicit active-note edit/delete opt-in."""
+        enabled = (req or {}).get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail="enabled must be a boolean")
+        from tools._config import config as tools_config
+
+        from .config_store import update_config
+
+        update_config({"obsidian.allow_edit_delete": enabled}, context.config_path)
+        tools_config.setdefault("obsidian", {})["allow_edit_delete"] = enabled
+        return {"allow_edit_delete": enabled}
 
     @app.post("/api/obsidian/regenerate-token")
     def obsidian_regenerate_token() -> dict:
@@ -2063,18 +2149,18 @@ def create_app(
 
     @app.get("/api/obsidian/plugin.zip")
     def obsidian_plugin_zip() -> FileResponse:
-        """Serve the pre-built plugin zip from obsidian-plugin/fulloch-obsidian.zip.
+        """Serve the pre-built plugin zip from obsidian-plugin/fulloch.zip.
 
         The zip is committed in the repo so a fresh install has it available
         immediately, no release download required.
         """
-        zip_path = _SERVER_DIR.parent / "obsidian-plugin" / "fulloch-obsidian.zip"
+        zip_path = _SERVER_DIR.parent / "obsidian-plugin" / "fulloch.zip"
         if not zip_path.is_file():
             raise HTTPException(status_code=404, detail="plugin zip not built yet")
         return FileResponse(
             str(zip_path),
             media_type="application/zip",
-            filename="fulloch-obsidian.zip",
+            filename="fulloch.zip",
         )
 
     return app

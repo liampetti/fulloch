@@ -971,6 +971,7 @@
   const obsModalBody = document.getElementById('obs-modal-body');
   const obsModalClose = document.getElementById('obs-modal-close');
   const obsPluginDownload = document.getElementById('obs-plugin-download');
+  const obsEditAlert = document.getElementById('obs-edit-alert');
   let obsState = null;
   let obsMigrationChecked = false;
   let obsTokenValue = null;
@@ -999,6 +1000,7 @@
 
   const renderObsidian = (state) => {
     obsState = state || {};
+    obsEditAlert.hidden = !obsState.allow_edit_delete;
     const err = state.last_error;
     const connected = !!state.connected;
     const vaultPath = state.vault_path;
@@ -1076,6 +1078,28 @@
       });
       obsActions.appendChild(revealBtn);
     }
+    if (connected) {
+      const enabled = !!obsState.allow_edit_delete;
+      if (enabled) {
+        const indicator = document.createElement('span');
+        indicator.className = 'obs-edit-mode';
+        indicator.innerHTML = '<i></i>Edit/delete mode active';
+        obsActions.appendChild(indicator);
+      }
+      const editBtn = document.createElement('button');
+      editBtn.className = 'obs-btn danger';
+      editBtn.type = 'button';
+      editBtn.textContent = enabled ? 'Disable edit/delete' : 'Enable edit/delete';
+      editBtn.addEventListener('click', async () => {
+        if (!enabled && !confirm('Enable voice insertion, rename, and deletion for the active Obsidian note? This can modify or remove notes.')) return;
+        const result = await obsJson('/api/obsidian/edit-capability', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !enabled }),
+        });
+        if (result.ok) loadObsidian();
+      });
+      obsActions.appendChild(editBtn);
+    }
   };
 
   const loadObsidian = async (forceMigrationCheck = false) => {
@@ -1084,7 +1108,7 @@
       if (status.ok) {
         renderObsidian(status.body);
         await ensureObsToken();
-        const shouldAskMigration = forceMigrationCheck || !obsMigrationChecked;
+        const shouldAskMigration = !views.obsidian.hidden && (forceMigrationCheck || !obsMigrationChecked);
         if (status.body.connected && shouldAskMigration && !status.body.last_error) {
           await maybePromptMigration();
           obsMigrationChecked = true;
@@ -1127,7 +1151,7 @@
 
   const quoteShell = (p) => {
     const os = detectOs();
-    if (os === 'windows') return `"\${USERPROFILE}\\Downloads\\fulloch-obsidian.zip"`;
+    if (os === 'windows') return `"\${USERPROFILE}\\Downloads\\fulloch.zip"`;
     return `'${p.replace(/'/g, "'\\''")}'`;
   };
 
@@ -1135,9 +1159,9 @@
     const os = detectOs();
     const target = `${vaultPath}/.obsidian/plugins/fulloch`.replace(/\/+$/, '');
     if (os === 'windows') {
-      return `Expand-Archive -Path "$env:USERPROFILE\\Downloads\\fulloch-obsidian.zip" -DestinationPath "${target}" -Force`;
+      return `Expand-Archive -Path "$env:USERPROFILE\\Downloads\\fulloch.zip" -DestinationPath "${target}" -Force`;
     }
-    return `unzip -o ~/Downloads/fulloch-obsidian.zip -d ${quoteShell(target)}`;
+    return `unzip -o ~/Downloads/fulloch.zip -d ${quoteShell(target)}`;
   };
 
   // Pre-submission: zip is the only install path. Once the plugin is accepted
@@ -1461,49 +1485,46 @@
   });
   if (document.visibilityState === "visible") startStatusPolling();
 
-  // Obsidian state: poll slowly and refresh the tab if it's currently visible.
-  // Avoids hammering /api/obsidian/status when the user never opens the tab.
-  const refreshObsidianIfVisible = () => {
-    if (!views.obsidian || views.obsidian.hidden) return;
-    loadObsidian();
-  };
-  setInterval(refreshObsidianIfVisible, 5000);
+  // Poll globally so the destructive-edit indicator stays accurate beside the
+  // Obsidian tab even while the user is chatting.
+  loadObsidian();
+  setInterval(loadObsidian, 5000);
 
   // ---- Browser satellite (push-to-talk via WebSocket) ---------------------
   // satellite-btn:    connect / disconnect the mic+speaker link.
-  // sat-always-toggle: toggle "always-listen" (no wakeword required) — works
-  //   whether or not the satellite is connected (sets the mode used on the
-  //   next connect); live-updates the server when already connected.
+  // conversation-mode-toggle: toggle exclusive full-duplex Conversation mode.
   // Protocol (binary = Float32 PCM; text = JSON control):
   //   browser → server:  Float32 chunks at 16 kHz mono
-  //   browser → server:  {"type":"wakeword_toggle","bypass":<bool>}
+  //   browser → server:  {"type":"conversation_mode.set","enabled":<bool>}
   //   server  → browser: {"type":"session","satellite_id":<str>} — sent once,
   //                      right after connect; lets this tab tell (via
   //                      /status's active_owner_id) whether a busy turn is
   //                      its own or another satellite's
   //   server  → browser: {"type":"tts_start","sr":<int>}
   //                      <binary Float32 chunks>
+  //   browser → server:  {"type":"tts_credit","seconds":<float>}
   //                      {"type":"tts_end"} — all chunks sent; browser
   //                      playback may continue until `satPlayAt`
   //                      {"type":"tts_cancel"}  — barge-in: stop already-
-  //                      scheduled playback immediately (chunks are sent
-  //                      as fast as they're generated with no flow control,
-  //                      so audio can already be scheduled/playing here by
-  //                      the time a barge-in is detected server-side)
+  //                      scheduled playback immediately
 
   const satBtn = document.getElementById('satellite-btn');
-  const satAlwaysBtn = document.getElementById('sat-always-toggle');
+  const conversationModeBtn = document.getElementById('conversation-mode-toggle');
   let satWs = null;
+  let satConnecting = false;
+  let satPendingConversationMode = null;
   let satAudioCtx = null;
   let satMicStream = null;
   let satWorkletNode = null;
   let satPlayAt = 0;        // AudioContext scheduled-end time for TTS chunks
   let satTtsSr = 24000;     // sample rate announced by server in tts_start
   let satScheduledSources = [];  // AudioBufferSourceNodes pending/playing, so tts_cancel can stop them
+  let satPlaybackGeneration = 0;
   let satMicMuted = false;  // true during TTS playback — stops mic data to prevent echo
   let satMicResumeTimer = null;  // setTimeout handle for delayed unmute after satPlayAt
-  let satHalfDuplex = true; // false in wakeword-barge-in mode (mic stays live)
-  let satAlwaysListen = localStorage.getItem('sat_always_listen') === '1';
+  let satHalfDuplex = true; // false when barge-in or Conversation mode keeps the mic live
+  let conversationModeOverride = localStorage.getItem('conversation_mode');
+  let conversationMode = conversationModeOverride === '1';
   let satPlaybackOnly = false; // replay speaker connection; no microphone stream
   let mySatelliteId = null; // this tab's own id, from the "session" frame
 
@@ -1551,17 +1572,17 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     } else if (satPlaybackOnly) {
       satBtn.classList.remove('active', 'always-on');
       satBtn.setAttribute('aria-label', 'Speaker connected for replay; click to disconnect');
-    } else if (satAlwaysListen) {
+    } else if (conversationMode) {
       satBtn.classList.remove('active');
       satBtn.classList.add('always-on');
-      satBtn.setAttribute('aria-label', 'Voice mode — always listening');
+      satBtn.setAttribute('aria-label', 'Voice mode — Conversation mode active');
     } else {
       satBtn.classList.remove('always-on');
       satBtn.classList.add('active');
       satBtn.setAttribute('aria-label', 'Voice mode — listening for the wakeword');
     }
-    satAlwaysBtn.classList.toggle('active', satAlwaysListen);
-    satAlwaysBtn.setAttribute('aria-pressed', satAlwaysListen ? 'true' : 'false');
+    conversationModeBtn.classList.toggle('active', conversationMode);
+    conversationModeBtn.setAttribute('aria-pressed', conversationMode ? 'true' : 'false');
   };
 
   const satScheduleChunk = (f32) => {
@@ -1580,12 +1601,27 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     satScheduledSources.push(src);
     src.start(start);
     satPlayAt = start + buf.duration;
+    const generation = satPlaybackGeneration;
+    const creditDelay = Math.max(0, (start + buf.duration - satAudioCtx.currentTime - 0.15) * 1000);
+    setTimeout(() => {
+      if (generation === satPlaybackGeneration && satWs?.readyState === WebSocket.OPEN) {
+        satWs.send(JSON.stringify({ type: 'tts_credit', seconds: buf.duration }));
+      }
+    }, creditDelay);
+  };
+
+  const satSetAudioProcessing = (enabled) => {
+    if (!satMicStream) return;
+    for (const track of satMicStream.getAudioTracks()) {
+      track.applyConstraints({ echoCancellation: enabled, noiseSuppression: enabled }).catch(() => {});
+    }
   };
 
   // Barge-in: stop everything already scheduled/playing and reset playback
   // timing so the next turn's audio starts fresh instead of queuing behind
   // the cut-off reply.
   const satCancelPlayback = () => {
+    satPlaybackGeneration += 1;
     for (const src of satScheduledSources) {
       try { src.stop(); } catch (_) { /* already ended */ }
     }
@@ -1629,10 +1665,14 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     satHalfDuplex = true;
     satPlaybackOnly = false;
     mySatelliteId = null;
+    satPendingConversationMode = null;
     syncSatBtn();
   };
 
   const satConnect = async (playbackOnly = false) => {
+    // getUserMedia is asynchronous, so two quick Voice/Conversation taps used
+    // to create competing streams and sockets. Keep one activation path.
+    if (satConnecting) return false;
     if (satWs) {
       if (!playbackOnly && satPlaybackOnly) {
         // Replay leaves a speaker-only socket open. Upgrade it directly when
@@ -1657,10 +1697,18 @@ registerProcessor('fulloch-resample', ResampleTo16k);
       satDisconnect();
       return false;
     }
+    satConnecting = true;
     satPlaybackOnly = playbackOnly;
     if (!playbackOnly) {
+      // Safari only reliably unlocks an AudioContext when resume() is called
+      // synchronously from the button gesture. Do this before awaiting the mic
+      // permission prompt, otherwise iOS can leave audio suspended or routed to
+      // its call/earpiece path until a later interaction.
+      satAudioCtx = new AudioContext({ latencyHint: 'interactive' });
+      const resumeAudio = satAudioCtx.resume().catch(() => {});
       try {
-        // Pin the mic stream: mono, 16 kHz, and disable WebRTC audio processing.
+        // Pin the mic stream to mono and 16 kHz. Conversation mode enables the
+        // browser's echo/noise processing; normal mode keeps the raw mic path.
         // Defaults (audio: true) work on macOS/Windows but on Linux/Chrome,
         // PulseAudio/PipeWire's webrtc-audio-processing is rougher than Core
         // Audio and introduces audible dropouts / AGC pumping. We run Silero
@@ -1677,8 +1725,8 @@ registerProcessor('fulloch-resample', ResampleTo16k);
           audio: {
             channelCount: 1,
             sampleRate: 16000,
-            echoCancellation: false,
-            noiseSuppression: false,
+            echoCancellation: conversationMode,
+            noiseSuppression: conversationMode,
             autoGainControl: false,
           },
           video: false,
@@ -1686,10 +1734,17 @@ registerProcessor('fulloch-resample', ResampleTo16k);
       } catch (e) {
         console.error('Satellite: mic access denied', e);
         alert('Microphone access denied — check browser permissions.');
+        try { await satAudioCtx.close(); } catch (_) {}
+        satAudioCtx = null;
+        satConnecting = false;
         return false;
       }
+      await resumeAudio;
+    } else {
+      satAudioCtx = new AudioContext({ latencyHint: 'interactive' });
+      // Replay is also user-initiated; unlock playback before opening the socket.
+      await satAudioCtx.resume().catch(() => {});
     }
-    satAudioCtx = new AudioContext({ latencyHint: 'interactive' });
     satPlayAt = 0;
 
     if (!playbackOnly) {
@@ -1708,14 +1763,14 @@ registerProcessor('fulloch-resample', ResampleTo16k);
 
     // Open WebSocket
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const bypass = satAlwaysListen ? '1' : '0';
+    const conversation = conversationModeOverride === null ? '' : `conversation=${conversationMode ? '1' : '0'}`;
     const area = satHaArea ? `&area=${encodeURIComponent(satHaArea)}` : '';
     // area_name carries the human-readable room name (already resolved client-side
     // from /ha/areas) so the server can show it as a location pill on this
     // satellite's turns — the server only knows the HA area_id otherwise, and
     // resolving it back to a display name isn't worth a second HA round-trip.
     const areaName = satHaArea && satAreaName ? `&area_name=${encodeURIComponent(satAreaName)}` : '';
-    const url = `${proto}://${location.host}/ws/satellite?bypass=${bypass}${area}${areaName}`;
+    const url = `${proto}://${location.host}/ws/satellite?${conversation}${area}${areaName}`;
     const ws = new WebSocket(url);
     satWs = ws;
     ws.binaryType = 'arraybuffer';
@@ -1733,6 +1788,10 @@ registerProcessor('fulloch-resample', ResampleTo16k);
         };
       }
       syncSatBtn();
+      if (satPendingConversationMode !== null) {
+        ws.send(JSON.stringify({ type: 'conversation_mode.set', enabled: satPendingConversationMode }));
+        satPendingConversationMode = null;
+      }
       resolveConnected(true);
     };
 
@@ -1743,9 +1802,31 @@ registerProcessor('fulloch-resample', ResampleTo16k);
           if (msg.type === 'session') {
             mySatelliteId = msg.satellite_id || null;
             satHalfDuplex = msg.half_duplex !== false;
+            conversationMode = !!msg.conversation_mode;
+            satSetAudioProcessing(conversationMode);
+            syncSatBtn();
+          } else if (msg.type === 'conversation_mode.result') {
+            if (msg.enabled) {
+              conversationMode = true;
+              localStorage.setItem('conversation_mode', '1');
+              conversationModeOverride = '1';
+            } else if (!msg.message) {
+              conversationMode = false;
+              localStorage.setItem('conversation_mode', '0');
+              conversationModeOverride = '0';
+            } else {
+              alert(msg.message);
+            }
+            satHalfDuplex = msg.half_duplex !== false;
+            satSetAudioProcessing(conversationMode);
+            syncSatBtn();
+          } else if (msg.type === 'error') {
+            alert(msg.message || 'Voice connection unavailable.');
           } else if (msg.type === 'tts_start') {
             satTtsSr = msg.sr || 24000;
             satPlayAt = satAudioCtx ? Math.max(satPlayAt, satAudioCtx.currentTime) : 0;
+            satPlaybackGeneration += 1;
+            satWs?.send(JSON.stringify({ type: 'tts_credit', seconds: 0.5 }));
             satMuteMicForPlayback();
           } else if (msg.type === 'tts_end' || msg.type === 'tts_cancel') {
             if (msg.type === 'tts_cancel') satCancelPlayback();
@@ -1766,16 +1847,30 @@ registerProcessor('fulloch-resample', ResampleTo16k);
       if (satWs === ws) satDisconnect();
     };
     syncSatBtn();
-    return connected;
+    try {
+      return await connected;
+    } finally {
+      satConnecting = false;
+    }
   };
 
-  const satToggleAlwaysListen = () => {
-    satAlwaysListen = !satAlwaysListen;
-    localStorage.setItem('sat_always_listen', satAlwaysListen ? '1' : '0');
+  const toggleConversationMode = async () => {
+    const enabled = !conversationMode;
     if (satWs && satWs.readyState === WebSocket.OPEN) {
-      satWs.send(JSON.stringify({ type: 'wakeword_toggle', bypass: satAlwaysListen }));
+      satWs.send(JSON.stringify({ type: 'conversation_mode.set', enabled }));
+      return;
     }
+    conversationMode = enabled;
+    localStorage.setItem('conversation_mode', conversationMode ? '1' : '0');
+    conversationModeOverride = conversationMode ? '1' : '0';
     syncSatBtn();
+    if (satWs && satWs.readyState === WebSocket.CONNECTING) {
+      satPendingConversationMode = enabled;
+      return;
+    }
+    // Conversation mode is a voice mode, not a dormant preference. Starting
+    // it from a cold page must request the microphone in this same gesture.
+    await satConnect();
   };
 
   const syncSatAreaPill = () => {
@@ -1865,7 +1960,7 @@ registerProcessor('fulloch-resample', ResampleTo16k);
   });
 
   satBtn.addEventListener('click', () => { satConnect(); });
-  satAlwaysBtn.addEventListener('click', satToggleAlwaysListen);
+  conversationModeBtn.addEventListener('click', toggleConversationMode);
 
   syncSatBtn();
 

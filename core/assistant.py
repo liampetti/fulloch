@@ -11,9 +11,12 @@ import random
 import re
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
+
+from tools import notes
 
 # Sentinels returned by the thinking tools — kept as module-level
 # constants so renames only happen in one place.
@@ -44,6 +47,10 @@ from .turn_arbiter import TurnArbiter
 from .turn_stats import TurnStats, set_model_labels
 
 logger = logging.getLogger(__name__)
+
+
+class ConversationModeUnavailable(RuntimeError):
+    """Raised when an exclusive Conversation mode session cannot be opened."""
 
 # Names accepted by general.log_level, for the settings-console hot-apply
 # (mirrors the map in app.py; the root logger level is the live handle).
@@ -229,9 +236,8 @@ CHAT_SESSION_TIMEOUT_S = 600.0
 # _compact_completed_turns.
 COMPACTED_TOOL_TRACE_MAX_CHARS = 160
 
-# Spoken only when a turn overflows the context window AND even the recent
-# history floor won't fit (a single oversized message) — the rare case where we
-# do clear. Normal overflow now sheds the oldest history and retries silently.
+# Spoken only when the current request cannot fit an otherwise empty context.
+# Normal overflow sheds old history, then clears it and retries silently.
 CONTEXT_EXHAUSTED_REPLY = (
     "Sorry, that was too much for me to hold in mind. "
     "I've cleared our conversation — what would you like to do?"
@@ -285,6 +291,15 @@ class _GainSink:
         return getattr(self._sink, name)
 
 
+def _whisper_gain(value) -> float:
+    """Normalise the configured PCM gain for explicit quiet delivery."""
+    try:
+        return min(max(float(value), 0.0), 1.0)
+    except (TypeError, ValueError):
+        logger.warning("Invalid whisper_gain %r; using 0.30", value)
+        return 0.30
+
+
 class Assistant:
     """Owns the audio capture and runs the wakeword → intent → TTS loop."""
 
@@ -294,9 +309,11 @@ class Assistant:
         wakeword_pattern: Optional[str] = None,
         voice_clone: Optional[str] = None,
         tts_speed: Optional[float] = None,
-        higgs_personality: str = "balanced",
-        higgs_personality_custom: str = "",
+        whisper_gain: float = 0.30,
+        personality: str = "balanced",
+        personality_custom: str = "",
         barge_in: str = "off",
+        conversation_mode_default: bool = False,
         barge_in_threshold_dbfs: Optional[float] = None,
         follow_up_time: str = "0s",
         asr_language: Optional[str] = None,
@@ -324,7 +341,11 @@ class Assistant:
                 pair used to clone the speaking voice. The Base Qwen3-TTS
                 model conditions every generation on this clone, so the
                 speaker stays consistent across turns.
+            whisper_gain: PCM amplitude used for explicit whisper/quiet requests,
+                from 0.0 (silent) to 1.0 (normal volume).
             barge_in: "off" (half-duplex) or "wakeword" (interrupt with wakeword)
+            conversation_mode_default: Let the first connected satellite enter
+                exclusive Conversation mode automatically.
             barge_in_threshold_dbfs: Silence floor while TTS plays, in dBFS
                 (the unit transcription volume is logged in). An interrupting
                 voice must exceed it to be captured — lower = easier to barge
@@ -366,8 +387,9 @@ class Assistant:
         )
         self.voice_clone = voice_clone
         self.tts_speed = tts_speed
-        self.higgs_personality = higgs_personality
-        self.higgs_personality_custom = higgs_personality_custom
+        self.whisper_gain = _whisper_gain(whisper_gain)
+        self.personality = personality
+        self.personality_custom = personality_custom
         self.asr_language = asr_language
         self.asr_context_hint = asr_context_hint
         self.asr_context_terms = asr_context_terms or []
@@ -409,6 +431,7 @@ class Assistant:
             logger.warning(f"Invalid barge_in: {barge_in!r}; defaulting to 'off'")
             barge_in = "off"
         self.barge_in = barge_in
+        self.conversation_mode_default = bool(conversation_mode_default)
         self.follow_up_seconds = parse_barge_time(follow_up_time)
         self.tts_start_time = 0.0
         # Written by the ASR stream generator with the speech-onset time of
@@ -541,13 +564,10 @@ class Assistant:
         # a barge-in / follow-up / self-echo decision for satellite B is judged
         # purely against B's own history, never A's.
         self.satellites: dict[str, SatelliteSession] = {}
-        # Still a single flag shared by every connected satellite — unlike
-        # turn/echo/follow-up state, always-listen wasn't moved onto
-        # SatelliteSession in this phase (a per-browser toggle today, via
-        # localStorage + a WS message; known pre-existing limitation with 2+
-        # satellites, not made worse here — revisit separately if it matters).
-        # When True, the wakeword check is bypassed entirely.
-        self._satellite_always_listen: bool = False
+        # Conversation mode is intentionally exclusive. Full-duplex audio from
+        # more than one room would make turn attribution and echo control unsafe.
+        self._conversation_lock = threading.Lock()
+        self._conversation_owner_id: Optional[str] = None
         # Dashboard text turns (`handle_text_turn`) aren't a satellite at all,
         # but need the same per-turn state (active_session, last_turn_end for
         # the history-timeout check, etc.) as a real one — a reserved,
@@ -815,7 +835,7 @@ class Assistant:
         if self.llm_enabled:
             self._loading_backend = llm_cfg["spec"]
             self._set_loading_detail(LLM, llm_cfg)
-            logger.info(f"Using {llm_cfg['spec'].display_name}")
+            logger.info("Using %s", self._loading_display_name(llm_cfg))
             backend = llm_cfg["backend"]
             if backend == "openai":
                 from .llm_openai import load_openai
@@ -830,7 +850,9 @@ class Assistant:
                 if llm_cfg["n_context"]:
                     load_kwargs["n_ctx"] = llm_cfg["n_context"]
                 self.grammar, self.slm_model = load_slm(**load_kwargs, **llm_cfg["opts"])
-            self.greeting_prompt = get_greeting_system_prompt(self.wakeword_name)
+            self.greeting_prompt = get_greeting_system_prompt(
+                self.wakeword_name, self._personality_for_prompt()
+            )
             self.web_summary_prompt = get_web_summary_system_prompt()
         else:
             logger.info("No LLM backend — running regex-only (basic commands)")
@@ -860,10 +882,18 @@ class Assistant:
         if self.lifecycle is None:
             return
         estimate = _MODEL_LOAD_ESTIMATES.get((domain, cfg["backend"]))
-        detail = f"loading {cfg['spec'].display_name}"
+        detail = f"loading {self._loading_display_name(cfg)}"
         if estimate:
             detail += f" ({estimate})"
         self.lifecycle.set("LOADING", detail)
+
+    @staticmethod
+    def _loading_display_name(cfg: dict) -> str:
+        """Name a configured custom LLM rather than its shared runtime backend."""
+        spec = cfg["spec"]
+        if cfg.get("model") != spec.default_model and cfg.get("backend") in {"llama", "gemma"}:
+            return f"Custom local model ({Path(cfg['model']).name})"
+        return spec.display_name
 
     def _note_llm_remote_status(self, ok: bool, error: str = "") -> None:
         """Record the last-known reachability of the remote LLM endpoint.
@@ -900,6 +930,12 @@ class Assistant:
         if not ok:
             logger.warning("Remote LLM probe failed (%s) — regex/fast-path only", error)
 
+    def _personality_for_prompt(self) -> str | None:
+        """Return the configured conversational personality."""
+        if self.personality == "custom":
+            return self.personality_custom.strip() or None
+        return self.personality
+
     def _warm_and_announce(self):
         """Prime every cache, then speak the opening greeting.
 
@@ -927,7 +963,12 @@ class Assistant:
                         self.slm_model,
                         user_prompt=CACHE_PRIMING_USER_PROMPT,
                         grammar=self.grammar,
-                        system_prompt=get_agent_system_prompt(self.wakeword_name),
+                        system_prompt=get_agent_system_prompt(
+                            self.wakeword_name,
+                            personality=self._personality_for_prompt(),
+                            higgs_tts=self._tts_backend == "higgs-gguf",
+                            obsidian_edit_enabled=notes._obsidian_edit_allowed(),
+                        ),
                     )
                 except RemoteUnreachable:
                     logger.warning("Remote LLM unreachable at startup — skipping cache prime")
@@ -1182,15 +1223,30 @@ class Assistant:
 
         On `ContextExhaustedError`, sheds the oldest history (preserving the
         in-flight turn) and retries, so a long conversation loses its tail end
-        instead of being wiped. Re-raises only when even the recent floor won't
-        fit — the caller then apologises + clears as a last resort.
+        instead of being wiped. If the recent floor still cannot fit, clears
+        history and retries the current request once. Re-raises only if that
+        request cannot fit an otherwise empty conversation.
         """
+        cleared_history = False
         while True:
             try:
                 return generate_slm(self.slm_model, **kwargs)
             except ContextExhaustedError:
-                if not self._shed_oldest_history():
+                if self._shed_oldest_history():
+                    continue
+                if cleared_history:
                     raise
+                logger.warning("Context overflow persists at history floor; clearing history and retrying turn")
+                # Agent calls carry the current question in history (rather
+                # than `user_prompt`), so retain it while dropping prior turns.
+                current_user = next(
+                    (message.copy() for message in reversed(self._history) if message.get("role") == "user"),
+                    None,
+                )
+                self._history.clear()
+                if current_user is not None:
+                    self._history.append(current_user)
+                cleared_history = True
 
     def register_turn_listener(self, callback) -> None:
         """Subscribe a callable to per-turn user/assistant events.
@@ -1337,7 +1393,7 @@ class Assistant:
     def connect_satellite(
         self,
         satellite_id: str,
-        wakeword_bypass: bool = False,
+        conversation_mode: Optional[bool] = None,
         *,
         label: Optional[str] = None,
         ha_area: Optional[str] = None,
@@ -1353,10 +1409,9 @@ class Assistant:
         `set_satellite_sink`/`disconnect_satellite` and, from Phase 4, to
         tell the browser its own id). The WebSocket handler feeds float32
         16 kHz mono chunks into the returned queue; the satellite_recorder_thread
-        drains it and pushes utterances to the ASR pipeline. `wakeword_bypass=True`
-        enables always-listen mode (no wakeword required); False keeps normal
-        wakeword-after-follow-up behaviour but opens a 60 s grace window so the
-        first utterance needs no wakeword.
+        drains it and pushes utterances to the ASR pipeline. Conversation mode is
+        exclusive and bypasses the wakeword; a None request uses the configured
+        default. Normal mode opens a 60 s initial wakeword-free grace window.
 
         `label`/`server_vad`/`auth_token` are the satellite-v2 forward-compat
         fields (#12/#13) — the browser path leaves them at their defaults
@@ -1369,12 +1424,13 @@ class Assistant:
         `_emit_agent_event` — never for area-scoping logic, which always goes
         through `ha_area`'s id.
         """
-        self._satellite_always_listen = wakeword_bypass
+        with self._conversation_lock:
+            if self._conversation_owner_id is not None:
+                raise ConversationModeUnavailable("Conversation mode is active on another device.")
         chunk_q: "queue.Queue" = queue.Queue(maxsize=100)
         session = SatelliteSession(
             id=satellite_id,
             chunk_q=chunk_q,
-            always_listen=wakeword_bypass,
             label=label,
             ha_area=ha_area,
             ha_area_name=ha_area_name,
@@ -1382,6 +1438,12 @@ class Assistant:
             auth_token=auth_token,
         )
         self.satellites[satellite_id] = session
+        requested_mode = self.conversation_mode_default if conversation_mode is None else conversation_mode
+        if requested_mode:
+            enabled, reason = self.set_satellite_conversation_mode(satellite_id, True)
+            if not enabled:
+                self.satellites.pop(satellite_id, None)
+                raise ConversationModeUnavailable(reason)
         self._last_connected_satellite_id = satellite_id
         session.recorder_thread = threading.Thread(
             target=self.audio_capture.satellite_recorder_thread,
@@ -1392,10 +1454,10 @@ class Assistant:
         session.recorder_thread.start()
         # Open a generous initial window so the user can speak immediately
         # without having to say the wakeword after clicking the button.
-        if not wakeword_bypass:
+        if not session.conversation_mode:
             session.last_turn_end = time.monotonic()
             self.audio_capture.arm_follow_up(session, 60)
-        logger.info("Satellite %s connected (always_listen=%s)", satellite_id, wakeword_bypass)
+        logger.info("Satellite %s connected (conversation_mode=%s)", satellite_id, session.conversation_mode)
         return chunk_q
 
     def disconnect_satellite(self, satellite_id: str) -> None:
@@ -1404,30 +1466,43 @@ class Assistant:
         Only touches `satellite_id`'s own session — a second connected
         satellite's queue/sink/recorder thread is untouched.
         """
+        self.set_satellite_conversation_mode(satellite_id, False)
         session = self.satellites.pop(satellite_id, None)
         if session is not None:
             session.chunk_q.put(None)  # sentinel → satellite_recorder_thread exits
-        self._satellite_always_listen = False
         # A mid-turn disconnect must release the arbiter like a stop would —
         # otherwise a satellite that vanished mid-reply would wedge every
         # other satellite's turns behind a lock nobody will ever release.
         self._turn_arbiter.release(satellite_id)
         logger.info("Satellite %s disconnected", satellite_id)
 
-    def set_satellite_wakeword(self, bypass: bool) -> None:
-        """Toggle always-listen mode, broadcast to every connected satellite.
+    @property
+    def conversation_owner_id(self) -> Optional[str]:
+        with self._conversation_lock:
+            return self._conversation_owner_id
 
-        `_satellite_always_listen` is still a single shared flag (see its
-        docstring in `__init__`) rather than per-`SatelliteSession` — arming
-        every satellite's follow-up window here matches that existing
-        broadcast behaviour rather than only the one browser that sent the
-        toggle.
-        """
-        self._satellite_always_listen = bypass
-        if bypass:
-            for session in self.satellites.values():
-                self.audio_capture.arm_follow_up(session, 3600)
-        logger.info("Satellite always_listen=%s", bypass)
+    def set_satellite_conversation_mode(self, satellite_id: str, enabled: bool) -> tuple[bool, str]:
+        """Enable or disable exclusive Conversation mode for one satellite."""
+        with self._conversation_lock:
+            session = self.satellites.get(satellite_id)
+            if session is None:
+                return False, "Satellite is no longer connected."
+            if not enabled:
+                session.conversation_mode = False
+                if self._conversation_owner_id == satellite_id:
+                    self._conversation_owner_id = None
+                self.audio_capture.clear_follow_up(session)
+                return True, ""
+            if self._conversation_owner_id not in (None, satellite_id):
+                return False, "Conversation mode is active on another device."
+            others = [sid for sid in self.satellites if sid not in ("dashboard-text", satellite_id)]
+            if others:
+                return False, "Disconnect other voice satellites before enabling Conversation mode."
+            self._conversation_owner_id = satellite_id
+            session.conversation_mode = True
+            self.audio_capture.arm_follow_up(session, 3600)
+            logger.info("Conversation mode enabled for satellite %s", satellite_id)
+            return True, ""
 
     def set_satellite_sink(self, satellite_id: str, q: Optional["queue.Queue"]) -> None:
         """Route TTS output to `satellite_id`'s WebSocket queue (or None to clear it)."""
@@ -1463,6 +1538,9 @@ class Assistant:
             sink = getattr(self._turn_local, "sink", None)
         if tts_active_event is None:
             tts_active_event = getattr(self._turn_local, "tts_active_event", None)
+        gain = getattr(self._turn_local, "tts_gain", 1.0)
+        if sink is not None and gain != 1.0:
+            sink = _GainSink(sink, gain)
         return self._tts_module.play_chunks(
             chunks,
             sample_rate,
@@ -1501,7 +1579,7 @@ class Assistant:
         """Extract delivery controls and retain the cross-backend quiet setting."""
         previous = sat.higgs_delivery if self._tts_backend == "higgs-gguf" else ""
         agent_prompt, delivery = extract_delivery_request(user_prompt, previous)
-        sat.tts_gain = 0.5 if delivery == "<|style:whispering|>" else 1.0
+        sat.tts_gain = self.whisper_gain if delivery == "<|style:whispering|>" else 1.0
 
         if self._tts_backend == "higgs-gguf":
             sat.higgs_delivery = delivery
@@ -1571,14 +1649,16 @@ class Assistant:
         if vault_path is not None:
             self._vault_path = vault_path
 
-    # Config paths the running assistant can apply without a restart. Two are
-    # conditional on the TTS backend (Kokoro only) — see apply_hot_config.
+    # Config paths the running assistant can apply without a restart. Voice
+    # options are conditional on the active TTS backend — see apply_hot_config.
     _HOT_CONFIG_PATHS = frozenset(
         {
             "general.log_level",
             "general.barge_in",
+            "general.conversation_mode_default",
             "general.follow_up_time",
             "general.tts_speed",
+            "general.whisper_gain",
             "general.voice_clone",
             "general.use_vad",
             "general.barge_in_threshold_dbfs",
@@ -1621,7 +1701,7 @@ class Assistant:
         one failure doesn't block the others.
         """
         applied: set = set()
-        kokoro = self._tts_backend == "kokoro-onnx"
+        live_voice = self._tts_backend in {"kokoro-onnx", "pocket-tts-onnx"}
         for ch in changes:
             path, value = ch["path"], ch["value"]
             if path not in self._HOT_CONFIG_PATHS:
@@ -1634,18 +1714,22 @@ class Assistant:
                     logging.getLogger().setLevel(lvl)
                 elif path == "general.barge_in":
                     self.barge_in = value
+                elif path == "general.conversation_mode_default":
+                    self.conversation_mode_default = bool(value)
                 elif path == "general.follow_up_time":
                     self.follow_up_seconds = parse_barge_time(value)
                 elif path == "general.tts_speed":
-                    # Qwen has no speed knob — the change is a no-op there, so a
-                    # restart wouldn't help either: report applied (don't nag).
-                    if kokoro and hasattr(self._tts_module, "set_speed"):
+                    # Qwen and Pocket TTS have no speed knob — the change is a
+                    # no-op there, so a restart would not help either.
+                    if live_voice and hasattr(self._tts_module, "set_speed"):
                         self._tts_module.set_speed(value)
                         self.tts_speed = value
+                elif path == "general.whisper_gain":
+                    self.whisper_gain = _whisper_gain(value)
                 elif path == "general.voice_clone":
-                    # Kokoro swaps the voice instantly; Qwen needs a clone warmup
-                    # + phrase-cache re-render, so leave it restart-only.
-                    if not kokoro:
+                    # Kokoro and Pocket TTS can swap their cached voice prompt
+                    # immediately; Qwen needs a clone warmup, so leave it restart-only.
+                    if not live_voice:
                         continue
                     self.voice_clone_prompt = self._tts_module.set_voice(value)
                     self.voice_clone = value
@@ -2388,9 +2472,9 @@ class Assistant:
 
         `playback_end` is the estimated monotonic-clock time the TTS audio
         actually finishes playing on the browser (`speak_stream`'s return
-        value) — chunks are handed to the satellite sink as fast as they're
-        generated with no flow control, so generation can finish well before
-        playback does. Without this, the follow-up window was armed (and
+        value). Generation can finish before playback does, so the follow-up
+        window is armed from that estimate rather than generation completion.
+        Without this, the follow-up window was armed (and
         could silently expire) while the reply was still audibly playing, so
         a user who replied the instant the voice stopped could still land
         outside the window. Falls back to now() when no estimate is available
@@ -2407,7 +2491,7 @@ class Assistant:
             return
         now = time.monotonic()
         sat.last_turn_end = max(now, playback_end) if playback_end is not None else now
-        window = 3600.0 if self._satellite_always_listen else self.follow_up_seconds
+        window = 3600.0 if sat.conversation_mode else self.follow_up_seconds
         if window > 0:
             self.audio_capture.arm_follow_up(sat, window)
 
@@ -2573,9 +2657,14 @@ class Assistant:
     def _check_barge_in(self, satellite_id: Optional[str], text_lower: str) -> bool:
         """Return True if `text_lower` should interrupt `satellite_id`'s own
         active turn."""
-        if not self._is_speaking(satellite_id) or self.barge_in == "off":
+        if not self._is_speaking(satellite_id):
             return False
         if self._is_self_echo(satellite_id, text_lower):
+            return False
+        sat = self.satellites.get(satellite_id)
+        if sat is not None and sat.conversation_mode:
+            return bool(re.search(r"\w", text_lower))
+        if self.barge_in == "off":
             return False
         return (
             self._barge_re.search(text_lower) is not None
@@ -2708,7 +2797,9 @@ class Assistant:
                 # the real hard endpoint stays authoritative. Mid-turn a partial
                 # is ignored outright — barge-in waits for the hard endpoint.
                 provisional = self._asr_provisional.get("flag", False)
-                if provisional and sat.turn_active:
+                if provisional and sat.turn_active and not (
+                    sat.conversation_mode or self.barge_in == "wakeword"
+                ):
                     logger.debug(f"Ignoring provisional during active turn: {text!r}")
                     continue
 
@@ -2799,7 +2890,7 @@ class Assistant:
                         self.follow_up_seconds > 0
                         and sat.last_turn_end > 0
                         and 0 <= onset_gap < self.follow_up_seconds
-                    ) or self._satellite_always_listen
+                    ) or sat.conversation_mode
                     if not in_follow_up:
                         # Genuine background: non-wakeword, not an accepted
                         # follow-up, and not mid-turn (that path is handled by

@@ -17,9 +17,13 @@ general:
   # timezone: "Australia/Sydney"  # IANA name; auto-detected from the browser
 
   # === Voice ================================================================
-  voice_clone: "atticus"         # Qwen: data/voices/<name> clone. Kokoro: built-in name.
-  tts_speed: 1.0                 # Kokoro only; Qwen pace comes from the reference clip.
+  voice_clone: "atticus"         # Qwen/Pocket: data/voices/<name> clone. Kokoro: built-in name.
+  tts_speed: 1.0                 # Kokoro only; Qwen/Pocket pace comes from the reference clip.
+  whisper_gain: 0.30             # Volume for explicit whisper/quiet requests (0.0-1.0; applies to every TTS backend).
+  personality: "balanced"       # balanced | playful | calm | wry | custom; applies to every model.
+  # personality_custom: "Warm and reassuring; use pauses sparingly."  # Used when personality: custom.
   barge_in: "wakeword"           # off | wakeword — interrupt mid-response
+  conversation_mode_default: false # exclusive full-duplex, no-wakeword voice session.
   follow_up_time: "5s"           # wakeword-free reply window after TTS; "0s" disables.
 
   # === Endpointing ==========================================================
@@ -40,6 +44,14 @@ general:
   # through to the TLS listener — one port handles both schemes.
   # dashboard_ssl_certfile: "./data/certs/dashboard.crt"
   # dashboard_ssl_keyfile:  "./data/certs/dashboard.key"
+  # Obsidian desktop connects over WSS and requires an OS-trusted certificate;
+  # accepting a browser warning is not enough. On the Fulloch host, create a
+  # private CA-signed leaf with its LAN IP/name, then install ONLY the public
+  # data/certs/fulloch-home-ca.crt on every Obsidian computer:
+  #   python scripts/create_local_ca.py --force --ip 192.168.1.50
+  #   Linux: sudo cp data/certs/fulloch-home-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates
+  # Restart Fulloch and Obsidian afterwards. Never copy or install
+  # data/certs/fulloch-home-ca.key.
 
 # === Models =================================================================
 # Omit the block to use the stack defaults. The wizard writes this block from
@@ -63,6 +75,7 @@ general:
 #     # qwen-gguf-small          # Qwen3 0.6B GGUF (GPU)
 #     # qwen-small               # Qwen3 0.6B PyTorch (GPU)
 #     # kokoro-onnx              # Kokoro 82M (default CPU)
+#     # pocket-tts-onnx          # Pocket TTS ONNX (experimental CPU one-shot WAV voice clone)
 #   llm:
 #     backend: local             # local | external
 #     local_model: qwen          # qwen (recommended) | gemma | custom
@@ -117,6 +130,9 @@ general:
 # obsidian:
 #   path_translation:
 #     "/Users/you/Documents/MyVault": "/vault"
+#   allow_edit_delete: false       # Explicit active-note cursor insert, selected-text replacement, rename, or delete via plugin; keep off unless needed.
+# The plugin's host setting must use the HTTPS dashboard address, for example
+# https://192.168.1.50 (port 8765), not a bare host or http:// URL.
 
 # === Search (SearXNG) ======================================================
 search:

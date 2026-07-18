@@ -21,7 +21,8 @@ Fulloch is your fully private, local voice assistant running on your own PC or M
 - **Music search & play** - *"play the Beatles"*, *"play jazz in the kitchen"*, *"play music everywhere"* - smart search on Spotify directly and hand playback off to Home Assistant
 - **Calendar reminders** - creates events on a dedicated HA calendar and speaks them at the right time
 - **Barge-in** - interrupt mid-sentence with the wakeword
-- **Cloned voice** *(GPU override)* - speaks in a voice cloned from a few seconds of reference audio; the default CPU stack uses fast built-in named voices (Kokoro) instead
+- **Voice options** - the GPU stack clones from reference audio; CPU users can choose fast built-in Kokoro voices or experimental Pocket TTS one-shot cloning
+- **Quiet delivery** - ask it to whisper or speak quietly; every TTS backend lowers output volume to 30% by default
 
 > **Higgs TTS 3:** The optional Higgs GPU backend is available only under Boson AI's Research and Non-Commercial License, not Fulloch's MIT license. It requires explicit consent for every voice reference. See [Model Sources and Licenses](docs/model-sources.md#higgs-tts-3-license).
 
@@ -99,7 +100,8 @@ nothing in the timeline surprises you:
    simple / full GPU / remote LLM), pick a name and voice, optionally
    connect Home Assistant and SearXNG, optionally connect Obsidian.
 4. **Models download.** This is the long bit. The CPU stack pulls
-    roughly 5 GB (Qwen3 1.7B ONNX + Kokoro 82M); the GPU
+    roughly 5 GB (Qwen3 1.7B ONNX + Kokoro 82M); choosing Pocket TTS instead
+    adds its roughly 250 MB English ONNX voice-cloning bundle. The GPU
     stack pulls roughly 13 GB (Qwen3 1.7B PyTorch ASR + Qwen3 1.7B PyTorch TTS + the
    9B language model).
 5. **Startup** Once models are downloaded the assistant can go through startup, this will happen everytime you stop and restart Fulloch. This should only take about a minute or two with the Qwen3 TTS taking the longest to warm-up. Once everything is loaded you are presented with the chat screen. You can type text or click to activate voice mode, if you also select "Always Listen" you do not need the wakeword anymore (default is 'Hey Atticus').
@@ -185,9 +187,13 @@ Connect your Obsidian vault so Fulloch reads, writes, appends, and searches your
 
 1. **In the Fulloch setup wizard**, the "Connect Obsidian" step lets you auto-detect your vault or paste its path. Click **Save and continue**, or **Skip** to do it later.
 2. **Open the dashboard's Obsidian tab** and click **Show install instructions** to get a download link and your auth token.
-3. **In Obsidian**, extract the downloaded `plugin.zip` into `<your-vault>/.obsidian/plugins/fulloch/`, then enable the Fulloch plugin in **Settings → Community plugins** and paste the token.
+3. **In Obsidian**, extract the downloaded `fulloch.zip` into `<your-vault>/.obsidian/plugins/fulloch/`, then enable the Fulloch plugin in **Settings → Community plugins** and paste the token.
+
+   In the plugin settings, use the HTTPS dashboard URL (for example, `https://localhost` with port `8765`). A plain `localhost` value creates an insecure `ws://` connection, which Fulloch redirects and WebSockets cannot follow. The default self-signed dashboard certificate must be trusted on the computer running Obsidian; use the private-CA instructions above for a permanent trust setup.
 
 That's it. Once the plugin connects, the dashboard flips to **Connected** and voice notes go straight to your vault. Closing Obsidian doesn't break anything, Fulloch remembers the vault and voice keeps working.
+
+By default, voice can only create and append notes. While the plugin is connected, the Obsidian tab has an explicit **Enable edit/delete** control for active-editor actions: insert at the live cursor, replace currently selected text, rename the active note, or move it to Obsidian trash. The dashboard tab pulses red while this mode is enabled; disable it again when you are finished.
 
 To point Fulloch at a different vault later, use the **Switch vault** section on the Obsidian tab.
 
@@ -240,6 +246,8 @@ Voices in `data/voices/`:
 - **`atticus` / `tulloch`** - generated with [Qwen3-TTS-12Hz-1.7B-VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) (Apache-2.0) from text descriptions; synthetic, not clones of real people
 - **`cori`** - sample from [Piper](https://github.com/rhasspy/piper) `en_GB/cori/high` by Bryce Beattie, trained on LibriVox recordings (MIT / public domain)
 - **`All Kokoro voices`** - generated with [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) (Apache-2.0)
+
+Pocket TTS uses a selected `data/voices/<name>.wav` reference for one-shot cloning; use only voices you have permission to reproduce.
 
 ## License
 

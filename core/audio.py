@@ -48,11 +48,11 @@ BARGE_IN_THRESHOLD_DBFS = -48.0
 # 20s of narration) holds the buffer until playback ends, so the
 # wakeword the user spoke mid-TTS only surfaces as ASR text after the
 # assistant has already finished speaking — too late to barge in.
-TTS_MAX_UTTERANCE_MS = 2000
+TTS_MAX_UTTERANCE_MS = 500
 # When force-flushing during TTS, retain this much of the tail as the
 # start of the next buffer so the wakeword can't fall on a chunk
 # boundary and get split between two ASR results.
-TTS_OVERLAP_MS = 1000
+TTS_OVERLAP_MS = 250
 # Shorter min during TTS so a brief wakeword utterance ("Atticus.") is
 # still long enough to enqueue when it's force-flushed.
 TTS_MIN_UTTERANCE_MS = 500
@@ -645,7 +645,14 @@ class AudioCapture:
                 ):
                     onset = speech_onset_t if speech_onset_t is not None else time.monotonic()
                     self.audio_queue.put(
-                        (buf, onset, rms_to_dbfs(_buf_rms(buf)), False, session.id, time.monotonic())
+                        (
+                            buf,
+                            onset,
+                            rms_to_dbfs(_buf_rms(buf)),
+                            tts_active and hit_max,
+                            session.id,
+                            time.monotonic(),
+                        )
                     )
                     logger.debug("Satellite: enqueued %.2fs for transcription", buf.size / self.sample_rate)
 

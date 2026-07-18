@@ -26,6 +26,7 @@ def _stub_assistant():
     a = MagicMock()
     a.connect_satellite.return_value = queue.Queue()
     a.satellites = {}
+    a.set_satellite_conversation_mode.return_value = (True, "")
     return a
 
 
@@ -51,14 +52,14 @@ def test_connect_satellite_receives_the_session_start_fields():
                 "label": "kitchen",
                 "ha_area": "kitchen",
                 "server_vad": False,
-                "always_listen": True,
+                "conversation_mode": True,
             }
         )
         msg = ws.receive_json()
 
     args, kwargs = a.connect_satellite.call_args
     assert args[0] == msg["satellite_id"]
-    assert kwargs["wakeword_bypass"] is True
+    assert kwargs["conversation_mode"] is True
     assert kwargs["label"] == "kitchen"
     assert kwargs["ha_area"] == "kitchen"
     assert kwargs["server_vad"] is False
@@ -198,16 +199,19 @@ def test_audio_flush_pushes_the_flush_sentinel():
     assert chunk_q.get_nowait() is FLUSH
 
 
-def test_wake_word_toggle_calls_set_satellite_wakeword():
+def test_conversation_mode_toggle_calls_satellite_mode_control():
     a = _stub_assistant()
     with _client(a).websocket_connect("/ws/satellite-v2") as ws:
         ws.send_json({"type": "session.start"})
         ws.receive_json()
-        ws.send_json({"type": "wake_word.disable"})
-        ws.send_json({"type": "wake_word.enable"})
+        ws.send_json({"type": "conversation_mode.set", "enabled": True})
+        ws.receive_json()
+        ws.send_json({"type": "conversation_mode.set", "enabled": False})
+        ws.receive_json()
 
-    a.set_satellite_wakeword.assert_any_call(True)
-    a.set_satellite_wakeword.assert_any_call(False)
+    satellite_id = a.connect_satellite.call_args.args[0]
+    a.set_satellite_conversation_mode.assert_any_call(satellite_id, True)
+    a.set_satellite_conversation_mode.assert_any_call(satellite_id, False)
 
 
 def test_session_stop_ends_the_connection_cleanly():

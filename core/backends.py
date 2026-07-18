@@ -353,6 +353,33 @@ _register(
     )
 )
 
+# Pocket TTS is a small CPU voice-cloning model.  The maintained ONNX export
+# has separate language bundles; fetch only the compact English bundle rather
+# than its full ~12 GB multilingual snapshot.
+_register(
+    BackendSpec(
+        domain=TTS,
+        backend="pocket-tts-onnx",
+        cpu_ok=True,
+        experimental=True,
+        display_name="Pocket TTS ONNX (CPU voice clone)",
+        loader="core.tts_pocket_onnx:load_tts",
+        default_model="./data/models/pocket-tts-onnx",
+        hf_repo="KevinAHM/pocket-tts-onnx",
+        hf_allow=(
+            "pocket_tts_onnx.py",
+            "onnx/english_2026-04/*",
+        ),
+        download_size_gb=0.25,
+        vram_gb=0.0,
+        ram_gb=0.7,
+        deps=("onnxruntime", "sentencepiece", "scipy"),
+        notes="Experimental CPU INT8 ONNX export. One-shot voice cloning from "
+        "data/voices/<name>.wav; the accompanying transcript is validated but "
+        "Pocket TTS conditions on audio only.",
+    )
+)
+
 _register(
     BackendSpec(
         domain=TTS,
@@ -493,7 +520,10 @@ def list_backends(domain: str) -> list[BackendSpec]:
             "moonshine",
             "moonshine-tiny",
         ),
-        TTS: ("higgs-gguf", "qwen-gguf", "qwen-gguf-small", "qwen", "qwen-small", "kokoro-onnx"),
+        TTS: (
+            "higgs-gguf", "qwen-gguf", "qwen-gguf-small", "qwen", "qwen-small",
+            "kokoro-onnx", "pocket-tts-onnx",
+        ),
     }.get(domain, ())
     rank = {backend: index for index, backend in enumerate(order)}
     return sorted(

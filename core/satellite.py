@@ -57,6 +57,11 @@ class SatelliteSession:
     tts_gain: float = 1.0  # per-turn output gain for explicit quiet/whisper requests
     skip_followup_self_echo: bool = False
     drop_results_until: float = 0.0
+    # Conversation mode waits briefly for competing speech to settle before
+    # dispatching. Each new transcript replaces the pending request.
+    pending_conversation_turn: Optional[threading.Timer] = None
+    conversation_turn_generation: int = 0
+    conversation_turn_lock: threading.Lock = field(default_factory=threading.Lock)
     follow_up_deadline: float = 0.0  # monotonic; 0.0 = window closed
     noise_baseline: BackgroundNoiseBaseline = field(default_factory=BackgroundNoiseBaseline)
     # Per-satellite half-duplex self-mute (muted while *this* satellite's own

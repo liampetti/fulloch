@@ -22,7 +22,7 @@ class QwenASRPipelineWrapper:
         self.model = model
         self.language = language
         # Wall time of the most recent transcribe() call — read by the
-        # transcriber thread to seed a turn's STT stat. Measured here (not at
+        # transcriber thread to seed a turn's ASR stat. Measured here (not at
         # the consumer loop) so it excludes idle waiting on the audio queue.
         self.last_transcribe_seconds = None
         # Optional system-prompt context injected into every transcribe() call.

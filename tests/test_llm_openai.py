@@ -374,3 +374,30 @@ def test_agent_loop_degrades_to_regex_on_remote_unreachable():
     assert calls["no_ai_fallback"] == 0
     # The unreachable endpoint was recorded as down (drives the dashboard banner).
     assert calls["remote_status"] == [False]
+
+
+def test_remote_outage_voice_notice_is_once_per_outage_episode():
+    import threading
+
+    from core.assistant import Assistant
+
+    assistant = Assistant.__new__(Assistant)
+    assistant.llm_backend = "openai"
+    assistant._llm_remote_ok = None
+    assistant._llm_remote_error = ""
+    assistant._llm_remote_retry_at = 0.0
+    assistant._llm_remote_outage_announced = False
+    assistant._llm_remote_lock = threading.Lock()
+    assistant._speak_llm_error_fallback = lambda *args, **kwargs: "REMOTE UNAVAILABLE"
+
+    assistant._note_llm_remote_status(False, "connection refused")
+    assert assistant._remote_llm_retry_blocked() is True
+    assert assistant._remote_llm_unavailable_fallback(None, "voice") == "REMOTE UNAVAILABLE"
+    assert assistant._remote_llm_unavailable_fallback(None, "voice") == ""
+    # Text remains visible and does not consume the voice notice.
+    assert assistant._remote_llm_unavailable_fallback(None, "text") == "REMOTE UNAVAILABLE"
+
+    assistant._note_llm_remote_status(True)
+    assert assistant._remote_llm_retry_blocked() is False
+    assistant._note_llm_remote_status(False, "connection refused")
+    assert assistant._remote_llm_unavailable_fallback(None, "voice") == "REMOTE UNAVAILABLE"

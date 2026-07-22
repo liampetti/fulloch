@@ -18,11 +18,8 @@
   const sendBtn = document.getElementById('send');
   const statusDot = document.getElementById('status-dot');
   const statusText = document.getElementById('status-text');
-  const resetBtn = document.getElementById('reset-btn');
-  const detailToggle = document.getElementById('detail-toggle');
-  const themeSwitcher = document.getElementById('appearance-switcher');
   // When on, every turn's trace group + stats panel start expanded.
-  let alwaysDetail = localStorage.getItem('fulloch_detail') === '1';
+  let alwaysDetail = !!window.FULLOCH_DASHBOARD_PREFS.show_turn_details;
 
   let typingEl = null;
   let waiting = false;       // this page's text turn is in flight
@@ -176,7 +173,7 @@
       div.innerHTML = `
         <div class="logo-lg"><img src="/logo.png" alt=""></div>
         <p class="wake-hint" id="wake-hint" hidden></p>
-        <p>Ask me to turn off the lights, set a timer, or just chat — by voice or right here.</p>`;
+        <p>Use <b>Conversation</b> for hands-free chat without a wakeword. If rooms are available, choose this device's room when prompted so home commands target the right place.</p>`;
       chat.prepend(div);
       loadWakeHint();
     }
@@ -189,8 +186,8 @@
     syncButton();
   };
 
-  // Show the wakeword prompt in the empty state, pulled from config so it
-  // tracks whatever `general.wakeword` is set to.
+  // Show the Voice-mode instruction in the empty state, with the configured
+  // wakeword so the onboarding remains accurate after a settings change.
   const loadWakeHint = async () => {
     const hint = document.getElementById('wake-hint');
     if (!hint) return;
@@ -198,7 +195,7 @@
       const r = await fetch('/config');
       const { wakeword } = await r.json();
       if (!wakeword) return;
-      hint.innerHTML = `Just say <b>“${escapeHtml(wakeword)}”</b> to talk to your personal assistant.`;
+      hint.innerHTML = `Click <b>Voice</b>, then say <b>“${escapeHtml(wakeword)}”</b> to use the wakeword.`;
       hint.hidden = false;
     } catch (e) {
       console.warn('config load failed', e);
@@ -328,7 +325,7 @@
     const L = ['Inference Stats', '-'.repeat(50)];
     L.push(`Total Response Time : ${fmtSecs(s.total)}`);
     if (s.stt)
-      L.push(`↳ Audio Input (STT) : ${fmtSecs(s.stt.seconds)} (${s.stt.model})`);
+      L.push(`↳ Audio Input (ASR) : ${fmtSecs(s.stt.seconds)} (${s.stt.model})`);
     if (s.retrieval) {
       const c = s.retrieval.chunks != null ? ` / ${s.retrieval.chunks} chunks` : '';
       L.push(`↳ Context Retrieval : ${fmtSecs(s.retrieval.seconds)} (${s.retrieval.model}${c})`);
@@ -587,7 +584,6 @@
   const views = {
     chat: document.getElementById('chat'),
     facts: document.getElementById('facts'),
-    notes: document.getElementById('notes'),
     entities: document.getElementById('entities'),
     obsidian: document.getElementById('obsidian'),
   };
@@ -596,6 +592,7 @@
   const factsForm = document.getElementById('facts-form');
   const factInput = document.getElementById('fact-input');
   const addFactBtn = document.getElementById('add-fact');
+  const factsPath = document.getElementById('facts-path');
 
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -726,125 +723,6 @@
     }
   });
 
-  // ---- Notes viewer ----
-  const notesList = document.getElementById('notes-list');
-  const notesHint = document.getElementById('notes-hint');
-  const noteDetail = document.getElementById('note-detail');
-  const noteTitle = document.getElementById('note-title');
-  const noteContent = document.getElementById('note-content');
-  const noteEditor = document.getElementById('note-editor');
-  const noteBack = document.getElementById('note-back');
-  const noteEdit = document.getElementById('note-edit');
-  const noteSave = document.getElementById('note-save');
-  const noteCancel = document.getElementById('note-cancel');
-
-  let currentNote = null; // { name, content }
-
-  const showNotesList = () => {
-    currentNote = null;
-    noteDetail.hidden = true;
-    notesList.hidden = false;
-    notesHint.hidden = false;
-  };
-
-  const renderNotesList = (notes) => {
-    notesList.innerHTML = '';
-    if (!notes.length) {
-      const e = document.createElement('div');
-      e.className = 'facts-empty';
-      e.textContent = 'No notes saved yet. Ask Fulloch to "make a note" to create one.';
-      notesList.appendChild(e);
-      return;
-    }
-    for (const n of notes) {
-      const row = document.createElement('button');
-      row.className = 'note-row';
-      row.type = 'button';
-      const name = document.createElement('span');
-      name.className = 'note-name';
-      name.textContent = n.title;
-      const chev = document.createElement('span');
-      chev.className = 'chev';
-      chev.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8.6 16.6 13.2 12 8.6 7.4 10 6l6 6-6 6z"/></svg>';
-      row.append(name, chev);
-      row.addEventListener('click', () => openNote(n));
-      notesList.appendChild(row);
-    }
-  };
-
-  const setEditMode = (editing) => {
-    noteContent.hidden = editing;
-    noteEditor.hidden = !editing;
-    noteEdit.hidden = editing;
-    noteSave.hidden = !editing;
-    noteCancel.hidden = !editing;
-    if (editing) {
-      noteEditor.value = currentNote.content;
-      noteEditor.focus();
-    }
-  };
-
-  const openNote = async (n) => {
-    try {
-      const r = await fetch(`/notes/${encodeURI(n.name)}`);
-      if (!r.ok) throw new Error(`status ${r.status}`);
-      const data = await r.json();
-      currentNote = { name: n.name, content: data.content || '' };
-      noteTitle.textContent = n.title;
-      noteContent.textContent = currentNote.content;
-      setEditMode(false);
-      notesList.hidden = true;
-      notesHint.hidden = true;
-      noteDetail.hidden = false;
-      views.notes.scrollTop = 0;
-    } catch (e) {
-      console.error('note open failed', e);
-    }
-  };
-
-  const saveNote = async () => {
-    if (!currentNote) return;
-    const content = noteEditor.value;
-    noteSave.disabled = true;
-    try {
-      const r = await fetch(`/notes/${encodeURI(currentNote.name)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content }),
-      });
-      if (!r.ok) throw new Error(`status ${r.status}`);
-      const data = await r.json();
-      currentNote.content = data.content || '';
-      noteContent.textContent = currentNote.content;
-      setEditMode(false);
-    } catch (e) {
-      console.error('note save failed', e);
-    } finally {
-      noteSave.disabled = false;
-    }
-  };
-
-  const loadNotes = async () => {
-    showNotesList();
-    try {
-      const r = await fetch('/notes');
-      const data = await r.json();
-      renderNotesList(data.notes || []);
-    } catch (e) {
-      console.warn('notes load failed', e);
-      notesList.innerHTML = '<div class="facts-empty">Couldn\'t load notes.</div>';
-    }
-  };
-
-  noteBack.addEventListener('click', showNotesList);
-  noteEdit.addEventListener('click', () => setEditMode(true));
-  noteSave.addEventListener('click', saveNote);
-  noteCancel.addEventListener('click', () => setEditMode(false));
-  noteEditor.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveNote(); }
-    else if (e.key === 'Escape') setEditMode(false);
-  });
-
   // ---- Entities viewer ----
   const entitiesList = document.getElementById('entities-list');
   const entitiesHint = document.getElementById('entities-hint');
@@ -960,21 +838,9 @@
   const obsProgressBar = document.getElementById('obs-progress-bar');
   const obsProgressText = document.getElementById('obs-progress-text');
   const obsActions = document.getElementById('obs-actions');
-  const obsTokenRow = document.getElementById('obs-token-row');
-  const obsTokenEl = document.getElementById('obs-token');
-  const obsCopyBtn = document.getElementById('obs-copy-token');
-  const obsRegenBtn = document.getElementById('obs-regen-token');
-  const obsSwitchPath = document.getElementById('obs-switch-path');
-  const obsSwitchBtn = document.getElementById('obs-switch-btn');
-  const obsSwitchStatus = document.getElementById('obs-switch-status');
-  const obsModal = document.getElementById('obs-modal');
-  const obsModalBody = document.getElementById('obs-modal-body');
-  const obsModalClose = document.getElementById('obs-modal-close');
-  const obsPluginDownload = document.getElementById('obs-plugin-download');
+  const obsidianHint = document.getElementById('obsidian-hint');
   const obsEditAlert = document.getElementById('obs-edit-alert');
   let obsState = null;
-  let obsMigrationChecked = false;
-  let obsTokenValue = null;
 
   const escapeObs = (s) => escapeHtml(s || '');
 
@@ -986,24 +852,13 @@
     return { ok: r.ok, status: r.status, body };
   };
 
-  const obsOpenModal = (title, body) => {
-    document.getElementById('obs-modal-title').textContent = title;
-    obsModalBody.innerHTML = body;
-    obsModal.hidden = false;
-  };
-  const obsCloseModal = () => { obsModal.hidden = true; obsModalBody.innerHTML = ''; };
-  obsModalClose.addEventListener('click', obsCloseModal);
-  obsModal.addEventListener('click', (e) => { if (e.target === obsModal) obsCloseModal(); });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !obsModal.hidden) obsCloseModal();
-  });
-
   const renderObsidian = (state) => {
     obsState = state || {};
-    obsEditAlert.hidden = !obsState.allow_edit_delete;
     const err = state.last_error;
     const connected = !!state.connected;
+    obsEditAlert.hidden = !(connected && obsState.allow_edit_delete);
     const vaultPath = state.vault_path;
+    if (factsPath) factsPath.textContent = `${state.notes_path || './data/notes'}/fulloch_facts.md`;
     const lastConn = state.last_connected_at;
     obsPill.className = 'obs-pill';
     obsError.hidden = true;
@@ -1019,7 +874,7 @@
       obsError.textContent = msg;
       obsError.hidden = false;
       obsStatusDetail.innerHTML = vaultPath ? `Last vault: <code>${escapeObs(vaultPath)}</code>` : '';
-      renderObsActions({ hasVault: !!vaultPath, connected: false, errored: true });
+      renderObsActions(connected);
     } else if (connected) {
       obsPill.textContent = 'Connected';
       obsPill.classList.add('connected');
@@ -1030,95 +885,51 @@
         obsProgressBar.style.width = (pct * 100).toFixed(0) + '%';
         obsProgressText.textContent = `Indexing ${(pct * 100).toFixed(0)}%`;
       }
-      renderObsActions({ hasVault: true, connected: true });
+      renderObsActions(connected);
     } else if (vaultPath) {
       obsPill.textContent = 'Disconnected';
       obsPill.classList.add('disconnected');
       const last = lastConn ? new Date(lastConn * 1000).toLocaleString() : '';
       obsStatusDetail.innerHTML = `Last vault: <code>${escapeObs(vaultPath)}</code>` +
         (last ? ` <span class="obs-help">— last seen ${escapeObs(last)}</span>` : '');
-      renderObsActions({ hasVault: true, connected: false });
+      renderObsActions(connected);
     } else {
       obsPill.textContent = 'Not configured';
       obsPill.classList.add('idle');
       obsStatusDetail.textContent = 'Fulloch hasn\'t connected to an Obsidian vault yet.';
-      renderObsActions({ hasVault: false, connected: false });
+      renderObsActions(connected);
     }
   };
 
-  const renderObsActions = ({ hasVault, connected, errored }) => {
+  const renderObsActions = (connected) => {
     obsActions.innerHTML = '';
-    if (hasVault || errored) {
-      const copyBtn = document.createElement('button');
-      copyBtn.className = 'obs-btn';
-      copyBtn.type = 'button';
-      copyBtn.textContent = 'Copy path';
-      copyBtn.addEventListener('click', () => {
-        const p = obsState.vault_path || '';
-        if (p) navigator.clipboard.writeText(p).catch(() => {});
-      });
-      obsActions.appendChild(copyBtn);
+    const settingsBtn = document.createElement('button');
+    settingsBtn.className = 'obs-btn';
+    settingsBtn.type = 'button';
+    settingsBtn.textContent = 'Configure notes & Obsidian';
+    settingsBtn.addEventListener('click', () => { location.href = '/setup'; });
+    obsActions.appendChild(settingsBtn);
+    if (connected && obsState.allow_edit_delete) {
+      const indicator = document.createElement('span');
+      indicator.className = 'obs-edit-mode';
+      indicator.innerHTML = '<i></i>Edit/delete mode active';
+      obsActions.appendChild(indicator);
     }
-    if (!connected && !errored) {
-      const connectBtn = document.createElement('button');
-      connectBtn.className = 'obs-btn';
-      connectBtn.type = 'button';
-      connectBtn.textContent = hasVault ? 'Show install instructions' : 'Connect Obsidian';
-      connectBtn.addEventListener('click', openObsidianSetup);
-      obsActions.appendChild(connectBtn);
-    }
-    if (hasVault) {
-      const revealBtn = document.createElement('button');
-      revealBtn.className = 'obs-btn ghost';
-      revealBtn.type = 'button';
-      revealBtn.textContent = 'Reveal path';
-      revealBtn.addEventListener('click', () => {
-        const p = obsState.vault_path || '';
-        if (p) navigator.clipboard.writeText(p).catch(() => {});
-      });
-      obsActions.appendChild(revealBtn);
-    }
-    if (connected) {
-      const enabled = !!obsState.allow_edit_delete;
-      if (enabled) {
-        const indicator = document.createElement('span');
-        indicator.className = 'obs-edit-mode';
-        indicator.innerHTML = '<i></i>Edit/delete mode active';
-        obsActions.appendChild(indicator);
-      }
-      const editBtn = document.createElement('button');
-      editBtn.className = 'obs-btn danger';
-      editBtn.type = 'button';
-      editBtn.textContent = enabled ? 'Disable edit/delete' : 'Enable edit/delete';
-      editBtn.addEventListener('click', async () => {
-        if (!enabled && !confirm('Enable voice insertion, rename, and deletion for the active Obsidian note? This can modify or remove notes.')) return;
-        const result = await obsJson('/api/obsidian/edit-capability', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: !enabled }),
-        });
-        if (result.ok) loadObsidian();
-      });
-      obsActions.appendChild(editBtn);
-    }
+    obsidianHint.innerHTML = connected
+      ? 'The plugin supplies the active note and selected text. With edit/delete enabled in Settings, Fulloch can insert at the cursor, replace selected text, rename, and delete the active note.'
+      : 'Fulloch still creates, appends, reads, and searches Markdown notes directly in the notes location above. Connect the plugin in Settings for active-note and selected-text context.';
   };
 
-  const loadObsidian = async (forceMigrationCheck = false) => {
+  const loadObsidian = async () => {
     try {
       const status = await obsJson('/api/obsidian/status');
-      if (status.ok) {
-        renderObsidian(status.body);
-        await ensureObsToken();
-        const shouldAskMigration = !views.obsidian.hidden && (forceMigrationCheck || !obsMigrationChecked);
-        if (status.body.connected && shouldAskMigration && !status.body.last_error) {
-          await maybePromptMigration();
-          obsMigrationChecked = true;
-        }
-      }
+      if (status.ok) renderObsidian(status.body);
     } catch (e) {
       console.warn('obsidian status load failed', e);
     }
   };
 
+  if (false) { // Legacy setup controls now live exclusively in Settings.
   const ensureObsToken = async () => {
     try {
       const r = await obsJson('/api/obsidian/show-token', { method: 'POST' });
@@ -1272,6 +1083,9 @@
     });
   };
 
+  const obsCopyBtn = { addEventListener() {} };
+  const obsRegenBtn = { addEventListener() {} };
+  const obsSwitchBtn = { addEventListener() {} };
   obsCopyBtn.addEventListener('click', () => {
     if (obsTokenValue) navigator.clipboard.writeText(obsTokenValue).catch(() => {});
   });
@@ -1308,6 +1122,8 @@
     }
   });
 
+  }
+
   const setTab = (name) => {
     tabs.forEach((t) => {
       const on = t.dataset.tab === name;
@@ -1317,40 +1133,21 @@
     for (const [k, el] of Object.entries(views)) el.hidden = k !== name;
     chatFooter.hidden = name !== 'chat';
     if (name === 'facts') loadFacts();
-    if (name === 'notes') loadNotes();
     if (name === 'entities') loadEntities();
     if (name === 'obsidian') loadObsidian();
   };
 
   tabs.forEach((t) => t.addEventListener('click', () => setTab(t.dataset.tab)));
 
-  resetBtn.addEventListener('click', async () => {
-    try {
-      await fetch('/reset', { method: 'POST' });
-      resetUI();
-    } catch (e) {
-      console.error('reset failed', e);
-    }
-  });
-
-  // Reflect the always-detail preference onto the button and every
-  // already-rendered turn (so flipping it updates the whole transcript).
+  // Reflect the configured preference onto every rendered turn.
   const applyDetailPref = () => {
-    detailToggle.classList.toggle('active', alwaysDetail);
-    detailToggle.setAttribute('aria-pressed', alwaysDetail ? 'true' : 'false');
     document.querySelectorAll('.trace-group').forEach(g => { g.open = alwaysDetail; });
     document.querySelectorAll('.stats-panel').forEach(p =>
       p.classList.toggle('hidden', !alwaysDetail));
   };
-  detailToggle.addEventListener('click', () => {
-    alwaysDetail = !alwaysDetail;
-    localStorage.setItem('fulloch_detail', alwaysDetail ? '1' : '0');
-    applyDetailPref();
-  });
   applyDetailPref();
 
-  // ---- Light/dark appearance switcher (Blowfish-style) ----
-  // The early head script already applied the class; here we wire the toggle.
+  // Keep Auto in sync with the browser or OS while this dashboard is open.
   const themeMeta = document.querySelector('meta[name="theme-color"]');
   const darkMql = window.matchMedia('(prefers-color-scheme: dark)');
   const syncThemeMeta = () => {
@@ -1360,21 +1157,8 @@
     }
   };
   syncThemeMeta();
-  themeSwitcher.addEventListener('click', () => {
-    const dark = document.documentElement.classList.toggle('dark');
-    localStorage.setItem('appearance', dark ? 'dark' : 'light');
-    syncThemeMeta();
-  });
-  // Right-click clears the manual choice and follows the OS again.
-  themeSwitcher.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    localStorage.removeItem('appearance');
-    document.documentElement.classList.toggle('dark', darkMql.matches);
-    syncThemeMeta();
-  });
-  // Track OS changes while the user hasn't pinned a preference.
   darkMql.addEventListener('change', (e) => {
-    if (localStorage.getItem('appearance') === null) {
+    if (window.FULLOCH_DASHBOARD_PREFS.theme === 'auto') {
       document.documentElement.classList.toggle('dark', e.matches);
       syncThemeMeta();
     }
@@ -1389,12 +1173,6 @@
   // Poll the agent's state so the stop button appears for voice turns (and any
   // work this page didn't start), and clears once playback finishes. Text turns
   // this page started are tracked locally via `waiting` for snappier feedback.
-  const logoutBtn = document.getElementById('logout-btn');
-  logoutBtn?.addEventListener('click', async () => {
-    await fetch('/auth/logout', { method: 'POST' });
-    location.href = '/login';
-  });
-
   const pollStatus = async () => {
     try {
       const r = await fetch('/status');
@@ -1410,7 +1188,6 @@
       if (busy !== voiceBusy) { voiceBusy = busy; syncButton(); }
       applyBranding(!!s.remote_llm);
       setLlmUnreachable(!!s.llm_unreachable);
-      if (logoutBtn) logoutBtn.hidden = !s.auth_enabled;
       setSatelliteBusy(s.active_owner_id, s.active_owner_label);
     } catch (e) { /* transient; next tick retries */ }
   };
@@ -1965,14 +1742,10 @@ registerProcessor('fulloch-resample', ResampleTo16k);
   syncSatBtn();
 
   syncButton();
-  loadWakeHint();
   syncSatAreaPill();
-  // Load history first so the area-picker bubble (if shown) always lands
-  // after existing conversation history rather than racing /history's fetch
-  // — otherwise on a second device with prior turns, the picker could render
-  // before history finishes loading and end up above scrollback the user has
-  // to scroll up past to find it.
-  loadHistory().then(() => {
+  // Show the initial Voice/Conversation guidance before the startup greeting
+  // replaces the empty state. On a later reset, resetUI restores it instead.
+  loadWakeHint().finally(() => loadHistory()).then(() => {
     startStream();
     maybeShowAreaPicker();
   });

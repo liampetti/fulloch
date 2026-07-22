@@ -124,3 +124,39 @@ def test_route_stays_none_without_a_stats_object():
     host = _host(llm_enabled=False, _speak_no_ai_fallback=lambda *a, **k: "NO_AI")
     loop = al.AgentLoop(host, session=None, source="text", stats=None)
     assert loop.run("tell me a joke") == "NO_AI"
+
+
+def test_remote_cooldown_skips_generation_and_uses_outage_fallback(monkeypatch):
+    import core.agent_loop as al
+
+    monkeypatch.setattr(al, "catchAll", lambda prompt: None)
+    calls = {"generate": 0, "fallback": 0}
+    host = _host(
+        _remote_llm_retry_blocked=lambda: True,
+        _remote_llm_unavailable_fallback=lambda *args, **kwargs: (
+            calls.__setitem__("fallback", calls["fallback"] + 1) or "REMOTE UNAVAILABLE"
+        ),
+        _generate_with_context_recovery=lambda **kwargs: (
+            calls.__setitem__("generate", calls["generate"] + 1)
+            or (_ for _ in ()).throw(AssertionError("cooldown must skip generation"))
+        ),
+    )
+
+    out = al.AgentLoop(host, session=None, source="voice").run("tell me a story")
+
+    assert out == "REMOTE UNAVAILABLE"
+    assert calls == {"generate": 0, "fallback": 1}
+
+
+def test_remote_cooldown_keeps_regex_reply_available(monkeypatch):
+    import core.agent_loop as al
+
+    monkeypatch.setattr(al, "catchAll", lambda prompt: {"reply": "The time is noon."})
+    host = _host(
+        _remote_llm_retry_blocked=lambda: True,
+        _remote_llm_unavailable_fallback=lambda *args, **kwargs: "REMOTE UNAVAILABLE",
+    )
+
+    out = al.AgentLoop(host, session=None, source="voice").run("what time is it")
+
+    assert out == "The time is noon."

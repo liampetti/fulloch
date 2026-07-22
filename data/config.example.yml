@@ -35,6 +35,8 @@ general:
   vad_soft_endpoint_silence_ms: 500  # early-commit pause; 0 disables. Locks/media/timers always wait for the hard endpoint.
 
   # === Dashboard ============================================================
+  dashboard_theme: "auto"       # auto | dark | light; auto follows the browser/OS preference.
+  dashboard_show_turn_details: false # expand agent-loop and inference details for every dashboard turn.
   dashboard_port: 8765
   dashboard_host: "127.0.0.1"    # 0.0.0.0 to expose to LAN (set a dashboard password first).
   # HTTPS — both paths required, or TLS is skipped. Under Docker the files
@@ -120,7 +122,7 @@ general:
 
 # === Notes (local markdown store) ===========================================
 # notes:
-#   path: "./data/notes"          # or point at an Obsidian vault
+#   path: "./data/notes"          # all normal notes and fulloch_facts.md; can point at an Obsidian vault
 #   daily_subdir: "daily"         # daily-journal notes land in <path>/<daily_subdir>/
 
 # === Obsidian plugin bridge (Docker only) ==================================

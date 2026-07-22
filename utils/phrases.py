@@ -144,7 +144,7 @@ NO_AI_PHRASES = [
 # only when the backend is openai but RemoteUnreachable was raised. Pre-rendered
 # to `llm_error_cache` in `_warm_and_announce`; played via `_speak_llm_error_fallback`.
 LLM_ERROR_PHRASES = [
-    "Couldn't reach the AI server, please try again.",
+    "I can't reach the AI server right now. Basic commands still work.",
 ]
 
 # Spoken when the agent invokes a tool that isn't loaded (a hallucinated tool

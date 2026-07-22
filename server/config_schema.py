@@ -261,6 +261,25 @@ SCHEMA: tuple = (
     # --- Dashboard ---------------------------------------------------------
     Field(
         "general",
+        "dashboard_theme",
+        "enum",
+        "Dashboard",
+        "auto",
+        "Dashboard colour scheme. 'auto' follows the browser or operating system preference.",
+        choices=("auto", "dark", "light"),
+        apply=HOT,
+    ),
+    Field(
+        "general",
+        "dashboard_show_turn_details",
+        "bool",
+        "Dashboard",
+        False,
+        "Expand agent-loop and inference details for every dashboard turn by default.",
+        apply=HOT,
+    ),
+    Field(
+        "general",
         "dashboard_port",
         "int",
         "Dashboard",
@@ -356,7 +375,7 @@ SCHEMA: tuple = (
         "str",
         "Notes",
         "./data/notes",
-        "Where markdown notes are stored (or point at an Obsidian vault).",
+        "Where Fulloch stores normal Markdown notes and fulloch_facts.md. This can be an Obsidian vault; it remains the notes location when the plugin is disconnected.",
     ),
     Field(
         "notes",

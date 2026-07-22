@@ -7,15 +7,12 @@
 <title>Fulloch — Setup</title>
 <link rel="icon" href="/logo.png" type="image/png">
 <script>
-  // Apply the stored appearance (or the OS default) before first paint so the
-  // page never flashes the wrong theme. Mirrors Blowfish's class-based system:
-  // a `dark` class on <html>, localStorage["appearance"] = "light"|"dark", with
-  // the OS preference as the default when the user hasn't picked one.
+  // Use the saved dashboard preference when available; setup defaults to Auto.
   (() => {
-    const stored = localStorage.getItem('appearance');
+    const theme = window.FULLOCH_DASHBOARD_PREFS?.theme || 'auto';
     const prefersDark = window.matchMedia &&
       window.matchMedia('(prefers-color-scheme: dark)').matches;
-    if (stored === 'dark' || (stored === null && prefersDark)) {
+    if (theme === 'dark' || (theme === 'auto' && prefersDark)) {
       document.documentElement.classList.add('dark');
     }
   })();

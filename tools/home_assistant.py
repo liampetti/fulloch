@@ -2483,6 +2483,13 @@ def get_weather_forecast(
         location: Optional weather entity name. Defaults to the first
             `weather.*` entity in HA (or `weather.home` if none found).
     """
+    # Remote, grammar-less models occasionally label positional values (for
+    # example, `"days", "1"`). Treat an invalid count as the documented default
+    # rather than raising before Home Assistant can answer the request.
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 2
     days = max(1, min(days, 7))
     today = _dt.date.today()
     if start_date:

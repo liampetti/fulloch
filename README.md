@@ -240,7 +240,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add tools and submit changes.
 
 ## Credits
 
-Model download sources and licensing notes are listed in [docs/model-sources.md](docs/model-sources.md).
+Model download sources and licensing notes are listed in [MODELS.md](MODELS.md).
 
 Voices in `data/voices/`:
 - **`atticus` / `tulloch`** - generated with [Qwen3-TTS-12Hz-1.7B-VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) (Apache-2.0) from text descriptions; synthetic, not clones of real people

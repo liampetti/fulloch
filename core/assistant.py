@@ -238,10 +238,7 @@ COMPACTED_TOOL_TRACE_MAX_CHARS = 160
 
 # Spoken only when the current request cannot fit an otherwise empty context.
 # Normal overflow sheds old history, then clears it and retries silently.
-CONTEXT_EXHAUSTED_REPLY = (
-    "Sorry, that was too much for me to hold in mind. "
-    "I've cleared our conversation — what would you like to do?"
-)
+CONTEXT_EXHAUSTED_REPLY = "I've lost some conversation context. Could you ask that again?"
 
 # Time window after a barge-in cancel during which incoming ASR results
 # are discarded. ASR inference is ~200ms on this GPU, so 500ms reliably
@@ -249,6 +246,14 @@ CONTEXT_EXHAUSTED_REPLY = (
 # user reply takes ≥1.5s (silence detection + min utterance) to be
 # enqueued by the recorder, so it lands well clear of this window.
 DROP_AFTER_CANCEL_S = 0.5
+
+# A failed remote endpoint should not be retried for every utterance in a
+# noisy room. The next ordinary request after this delay probes for recovery.
+REMOTE_LLM_RETRY_COOLDOWN_S = 30.0
+
+# Conversation mode is permissive by design, so give overlapping speakers a
+# brief chance to finish before sending only the latest request to the agent.
+CONVERSATION_TURN_SETTLE_S = 0.75
 
 # A bare wakeword (no command following) is the shape the ASR decoder most
 # readily fabricates from voiced non-speech: the `asr_context_hint` prompt primes
@@ -500,6 +505,9 @@ class Assistant:
         # Parloch, just degraded to regex/fast-path only.
         self._llm_remote_ok: bool | None = None
         self._llm_remote_error: str = ""
+        self._llm_remote_retry_at = 0.0
+        self._llm_remote_outage_announced = False
+        self._llm_remote_lock = threading.Lock()
         # Optional startup-lifecycle handle (server.lifecycle.Lifecycle). When
         # present, `_load_models` advances it LOADING -> READY so the dashboard
         # can show a loading screen and hand off to the assistant when the
@@ -904,8 +912,38 @@ class Assistant:
         """
         if self.llm_backend != "openai":
             return
-        self._llm_remote_ok = ok
-        self._llm_remote_error = "" if ok else (error or "unreachable")
+        with self._llm_remote_lock:
+            self._llm_remote_ok = ok
+            self._llm_remote_error = "" if ok else (error or "unreachable")
+            if ok:
+                self._llm_remote_retry_at = 0.0
+                self._llm_remote_outage_announced = False
+            else:
+                self._llm_remote_retry_at = time.monotonic() + REMOTE_LLM_RETRY_COOLDOWN_S
+
+    def _remote_llm_retry_blocked(self) -> bool:
+        """Whether a recent remote failure is still in its retry cooldown."""
+        if self.llm_backend != "openai":
+            return False
+        with self._llm_remote_lock:
+            return self._llm_remote_ok is False and time.monotonic() < self._llm_remote_retry_at
+
+    def _remote_llm_unavailable_fallback(
+        self, session: Optional[TtsSession], source: str, satellite_id: Optional[str] = None
+    ) -> str:
+        """Announce a remote outage once per voice outage episode.
+
+        The dashboard remains visibly degraded through `_llm_remote_ok`. Voice
+        requests after the first notice stay quiet until a later request probes
+        and restores the endpoint; text callers still receive a visible reply.
+        """
+        if source != "voice":
+            return self._speak_llm_error_fallback(session, source, satellite_id=satellite_id)
+        with self._llm_remote_lock:
+            if self._llm_remote_outage_announced:
+                return ""
+            self._llm_remote_outage_announced = True
+        return self._speak_llm_error_fallback(session, source, satellite_id=satellite_id)
 
     @property
     def remote_llm_unreachable(self) -> bool:
@@ -1489,6 +1527,7 @@ class Assistant:
                 return False, "Satellite is no longer connected."
             if not enabled:
                 session.conversation_mode = False
+                self._clear_pending_conversation_turn(session)
                 if self._conversation_owner_id == satellite_id:
                     self._conversation_owner_id = None
                 self.audio_capture.clear_follow_up(session)
@@ -1802,7 +1841,7 @@ class Assistant:
         text_session.active_session = session
         try:
             self._maybe_reset_session()
-            stats = TurnStats()  # text turns have no STT/TTS
+            stats = TurnStats()  # text turns have no ASR/TTS
             answer = self._handle_wakeword(
                 prompt, session=session, source="text", stats=stats, satellite_id="dashboard-text"
             )
@@ -2256,6 +2295,54 @@ class Assistant:
         )
         sat.turn_thread.start()
 
+    def _clear_pending_conversation_turn(self, sat: SatelliteSession) -> None:
+        """Cancel an unstarted conversation-mode request for `sat`."""
+        with sat.conversation_turn_lock:
+            sat.conversation_turn_generation += 1
+            if sat.pending_conversation_turn is not None:
+                sat.pending_conversation_turn.cancel()
+                sat.pending_conversation_turn = None
+
+    def _queue_conversation_turn(
+        self,
+        user_prompt: str,
+        satellite_id: str,
+        stt_seconds=None,
+        endpoint_wait_seconds=None,
+        endpoint_kind=None,
+    ) -> None:
+        """Dispatch only the latest conversation transcript after a short settle."""
+        sat = self.satellites.get(satellite_id)
+        if sat is None:
+            return
+        with sat.conversation_turn_lock:
+            sat.conversation_turn_generation += 1
+            generation = sat.conversation_turn_generation
+            if sat.pending_conversation_turn is not None:
+                sat.pending_conversation_turn.cancel()
+
+            def dispatch() -> None:
+                with sat.conversation_turn_lock:
+                    if (
+                        generation != sat.conversation_turn_generation
+                        or not sat.conversation_mode
+                    ):
+                        return
+                    sat.pending_conversation_turn = None
+                self._start_turn(
+                    user_prompt,
+                    satellite_id=satellite_id,
+                    stt_seconds=stt_seconds,
+                    endpoint_wait_seconds=endpoint_wait_seconds,
+                    endpoint_kind=endpoint_kind,
+                )
+
+            timer = threading.Timer(CONVERSATION_TURN_SETTLE_S, dispatch)
+            timer.daemon = True
+            sat.pending_conversation_turn = timer
+            timer.start()
+        logger.info("Conversation request queued for %.2fs settle: %r", CONVERSATION_TURN_SETTLE_S, user_prompt)
+
     def _run_turn(
         self,
         user_prompt: str,
@@ -2435,8 +2522,15 @@ class Assistant:
                 (sid for sid, sat in self.satellites.items() if sat.active_session is not None),
                 None,
             )
+        if target is None:
+            # A conversation request may still be settling and therefore not
+            # own the arbiter or expose an active session yet.
+            for sat in self.satellites.values():
+                self._clear_pending_conversation_turn(sat)
         if target is not None:
             sat = self.satellites.get(target)
+            if sat is not None:
+                self._clear_pending_conversation_turn(sat)
             if sat is not None and sat.active_session is not None:
                 sat.active_session.stop()
                 # On fast (GPU) hardware, generation can outrun playback
@@ -2934,45 +3028,14 @@ class Assistant:
                         # audio has been force-cancelled — same as
                         # `request_stop()`.
                         sat.last_turn_end = 0.0
+                        self._clear_pending_conversation_turn(sat)
                         self.audio_capture.clear_follow_up(sat)
                         logger.info("Barge-in (pure stop) — standing down")
                         continue
-                    # Redirect barge-in ("stop — actually do X"): TTS has
-                    # stopped. Open the follow-up window so the user can speak
-                    # their full query without re-saying the wakeword. Discard
-                    # the partial chunk that triggered the barge-in — silence
-                    # detection may have cut the sentence short, so the content
-                    # here is unreliable.
-                    self._mark_turn_end(turn_satellite_id)
-                    sat.skip_followup_self_echo = True
-                    # Audible sign the cancellation actually happened. Without
-                    # this, a false trigger (cough, TV, an ASR hallucination
-                    # that happens to contain the wakeword) silently kills the
-                    # in-flight turn with nothing telling the user anything
-                    # occurred — if they don't happen to keep talking, the
-                    # follow-up window just times out and the original request
-                    # is gone with no trace. Backgrounded so it doesn't block
-                    # the transcriber loop; overlaps fine with the user's next
-                    # utterance since `skip_followup_self_echo` above already
-                    # exempts it from self-echo suppression.
-                    #
-                    # Not wrapped in a turn (_run_turn/_run_half_duplex), so
-                    # play_chunks' usual self._turn_local resolution doesn't
-                    # apply here — resolve explicitly against the satellite
-                    # that sent *this* barge-in utterance.
-                    self._turn_local.sink = sat.tts_sink
-                    self._turn_local.tts_active_event = sat.tts_active
-                    threading.Thread(
-                        target=self._play_random_ack,
-                        kwargs={
-                            "cache": self.barge_ack_cache,
-                            "sink": sat.tts_sink,
-                            "tts_active_event": sat.tts_active,
-                        },
-                        daemon=True,
-                    ).start()
-                    logger.info("Barge-in — follow-up window open")
-                    continue
+                    # A completed non-stop barge-in is the user's replacement
+                    # request. Keep processing its transcript below rather than
+                    # making them repeat it in a follow-up window.
+                    logger.info("Barge-in — dispatching replacement request")
 
                 # Pure stop in the follow-up window: cease, don't issue a new
                 # command. Stand down silently and close the window (wakeword
@@ -2984,6 +3047,7 @@ class Assistant:
                     if provisional:
                         continue
                     sat.last_turn_end = 0.0
+                    self._clear_pending_conversation_turn(sat)
                     self.audio_capture.clear_follow_up(sat)
                     logger.info("Pure stop in follow-up — standing down")
                     continue
@@ -3062,7 +3126,7 @@ class Assistant:
                     sat.provisional_committed_at = time.monotonic()
                     logger.info(f"Committing early on soft endpoint: {user_prompt!r}")
 
-                # Snapshot the STT latency of the utterance that triggered this
+                # Snapshot the ASR latency of the utterance that triggered this
                 # turn before later (echo/cross-talk) transcriptions overwrite it.
                 stt_seconds = getattr(self.asr_pipe, "last_transcribe_seconds", None)
                 # A2: how long the utterance sat queued after the recorder
@@ -3072,7 +3136,15 @@ class Assistant:
                 # same reason as stt_seconds above.
                 endpoint_wait_seconds = self._asr_endpoint_wait.get("s")
                 endpoint_kind = "soft" if provisional else "hard"
-                if self.barge_in == "off":
+                if sat.conversation_mode:
+                    self._queue_conversation_turn(
+                        user_prompt,
+                        turn_satellite_id,
+                        stt_seconds=stt_seconds,
+                        endpoint_wait_seconds=endpoint_wait_seconds,
+                        endpoint_kind=endpoint_kind,
+                    )
+                elif self.barge_in == "off":
                     self._run_half_duplex(
                         user_prompt,
                         satellite_id=turn_satellite_id,

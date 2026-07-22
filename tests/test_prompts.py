@@ -42,7 +42,7 @@ class TestAgentPromptFactsInjection:
         assert "Fulloch" in prompt or "voice assistant" in prompt
 
     def test_facts_block_skipped_for_header_only(self, notes_dir):
-        (notes_dir / "facts.md").write_text("# Long-term facts\n\n")
+        (notes_dir / "fulloch_facts.md").write_text("# Long-term facts\n\n")
         prompt = prompts.get_agent_system_prompt()
         assert "Known facts" not in prompt
 
@@ -74,6 +74,10 @@ class TestAgentPromptShape:
     def test_prompt_confirms_whisper_delivery_is_supported(self, notes_dir):
         prompt = prompts.get_agent_system_prompt()
         assert "Never claim you cannot whisper" in prompt
+
+    def test_prompt_keeps_recent_weather_forecasts_in_conversation_context(self, notes_dir):
+        prompt = prompts.get_agent_system_prompt()
+        assert "answer from that forecast in conversation history" in prompt
 
     def test_conversation_mode_prompt_explains_wakeword_free_interruptions(self, notes_dir):
         prompt = prompts.get_agent_system_prompt(conversation_mode=True, wakeword_barge_in=True)

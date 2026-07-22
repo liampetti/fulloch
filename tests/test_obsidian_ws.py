@@ -70,16 +70,17 @@ def test_token_mismatch_rejects(ctx):
             pass
 
 
-def test_vault_metadata_adopts_path_as_sticky_override(ctx, tmp_path):
+def test_vault_metadata_records_editor_path_without_redirecting_notes(ctx, tmp_path):
     client = _client_for(ctx)
     vault = tmp_path / "some-vault"
     vault.mkdir()
     (vault / ".obsidian").mkdir()
+    notes_root_before = notes_root.get_notes_root()
     with _connect(client, ctx.obsidian_token) as ws:
         ws.send_text(json.dumps({"type": "vault_metadata", "vault_path": str(vault), "files": []}))
         import time
         time.sleep(0.1)
-    assert notes_root.get_notes_root() == vault.resolve()
+    assert notes_root.get_notes_root() == notes_root_before
     assert ctx.obsidian_vault_state["connected"] is False  # cleared on disconnect
     assert ctx.obsidian_vault_state["vault_path"] == str(vault.resolve())
 

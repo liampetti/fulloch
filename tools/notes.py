@@ -52,7 +52,7 @@ SEMANTIC_TOP_K = 5
 SEMANTIC_MIN_SCORE = 0.25
 # Total hits the hybrid search surfaces after fusing keyword + semantic lists.
 MAX_HYBRID_MATCHES = 5
-FACTS_NOTE = "facts"
+FACTS_NOTE = "fulloch_facts"
 INDEX_BASENAME = "notes_index"
 
 # Lightweight hand-off for the dashboard stats panel: the semantic-search paths
@@ -845,7 +845,7 @@ def _facts_path() -> Path:
 
 
 def list_facts() -> list[dict]:
-    """Return parsed facts in file order. Empty list if facts.md is missing."""
+    """Return parsed facts in file order. Empty list if fulloch_facts.md is missing."""
     path = _facts_path()
     if not path.exists():
         return []
@@ -943,7 +943,7 @@ def delete_fact(index: int) -> bool:
 # markdown. Notes are addressed by `name` — the path relative to NOTES_DIR
 # without the `.md` suffix (so a daily note is `daily/2026-05-28`).
 # `_resolve_note_file` guards against path traversal so a crafted name can't
-# escape NOTES_DIR. `facts.md` is excluded — it has its own dashboard tab and
+# escape NOTES_DIR. `fulloch_facts.md` is excluded — it has its own dashboard tab and
 # its `- [DATE] text` structure would break under free-form editing.
 # ---------------------------------------------------------------------------
 

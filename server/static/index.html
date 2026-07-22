@@ -8,15 +8,13 @@
 <link rel="icon" href="/logo.png" type="image/png">
 <link rel="apple-touch-icon" href="/logo.png">
 <script>
-  // Apply the stored appearance (or the OS default) before first paint so the
-  // page never flashes the wrong theme. Mirrors Blowfish's class-based system:
-  // a `dark` class on <html>, localStorage["appearance"] = "light"|"dark", with
-  // the OS preference as the default when the user hasn't picked one.
+  // Apply the configured appearance before first paint so the page never
+  // flashes the wrong theme. Auto follows the browser or OS preference.
   (() => {
-    const stored = localStorage.getItem('appearance');
+    const theme = window.FULLOCH_DASHBOARD_PREFS.theme;
     const prefersDark = window.matchMedia &&
       window.matchMedia('(prefers-color-scheme: dark)').matches;
-    if (stored === 'dark' || (stored === null && prefersDark)) {
+    if (theme === 'dark' || (theme === 'auto' && prefersDark)) {
       document.documentElement.classList.add('dark');
     }
   })();
@@ -32,21 +30,8 @@
       <div class="name" id="brand-name">Fulloch</div>
       <div class="sub" id="brand-sub">fully-local home assistant</div>
     </div>
-    <button id="appearance-switcher" type="button" aria-label="Toggle light or dark theme" title="Toggle light/dark — right-click to follow your system">
-      <span class="icon-moon" aria-hidden="true"><svg viewBox="0 0 512 512"><path fill="currentColor" d="M32 256c0-123.8 100.3-224 223.8-224c11.36 0 29.7 1.668 40.9 3.746c9.616 1.777 11.75 14.63 3.279 19.44C245 86.5 211.2 144.6 211.2 207.8c0 109.7 99.71 193 208.3 172.3c9.561-1.805 16.28 9.324 10.11 16.95C387.9 448.6 324.8 480 255.8 480C132.1 480 32 379.6 32 256z"/></svg></span>
-      <span class="icon-sun" aria-hidden="true"><svg viewBox="0 0 512 512"><path fill="currentColor" d="M256 159.1c-53.02 0-95.1 42.98-95.1 95.1S202.1 351.1 256 351.1s95.1-42.98 95.1-95.1S309 159.1 256 159.1zM509.3 347L446.1 255.1l63.15-91.01c6.332-9.125 1.104-21.74-9.826-23.72l-109-19.7l-19.7-109c-1.975-10.93-14.59-16.16-23.72-9.824L256 65.89L164.1 2.736c-9.125-6.332-21.74-1.107-23.72 9.824L121.6 121.6L12.56 141.3C1.633 143.2-3.596 155.9 2.736 164.1L65.89 256l-63.15 91.01c-6.332 9.125-1.105 21.74 9.824 23.72l109 19.7l19.7 109c1.975 10.93 14.59 16.16 23.72 9.824L256 446.1l91.01 63.15c9.127 6.334 21.75 1.107 23.72-9.822l19.7-109l109-19.7C510.4 368.8 515.6 356.1 509.3 347zM256 383.1c-70.69 0-127.1-57.31-127.1-127.1c0-70.69 57.31-127.1 127.1-127.1s127.1 57.3 127.1 127.1C383.1 326.7 326.7 383.1 256 383.1z"/></svg></span>
-    </button>
-    <button id="detail-toggle" type="button" aria-pressed="false" aria-label="Always show turn details" title="Always show turn details (agent loop + stats)">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h3v7H4v-7zm6.5-5h3v12h-3V8zM17 3h3v17h-3V3z"/></svg>
-    </button>
-    <button id="reset-btn" type="button" aria-label="Clear conversation" title="Clear conversation">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-    </button>
     <button id="settings-btn" type="button" aria-label="Settings" title="Settings &amp; configuration" onclick="location.href='/setup'">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54A.484.484 0 0 0 14 2h-4c-.24 0-.44.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.25 8.47a.49.49 0 0 0 .12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.03.24.23.41.47.41h4c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.01-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>
-    </button>
-    <button id="logout-btn" type="button" aria-label="Log out" title="Log out" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5-5-5zm-14 5a2 2 0 0 0 2 2h6v-2H5V5h6V3H5a2 2 0 0 0-2 2v12z"/></svg>
     </button>
     <div id="status" aria-live="polite">
       <span id="status-dot"></span>
@@ -70,7 +55,6 @@
   <nav class="tabs" role="tablist">
     <button class="tab active" data-tab="chat" role="tab" aria-selected="true">Chat</button>
     <button class="tab" data-tab="facts" role="tab" aria-selected="false">Facts</button>
-    <button class="tab" data-tab="notes" role="tab" aria-selected="false">Notes</button>
     <button class="tab" data-tab="entities" role="tab" aria-selected="false">Entities</button>
     <button class="tab obsidian-tab" data-tab="obsidian" role="tab" aria-selected="false">Obsidian<span id="obs-edit-alert" hidden aria-label="Edit/delete mode active" title="Obsidian edit/delete mode active"></span></button>
     <button id="llm-alert" type="button" hidden aria-label="Remote language model unreachable"
@@ -84,7 +68,7 @@
       <div class="empty" id="empty">
         <div class="logo-lg"><img src="/logo.png" alt=""></div>
         <p class="wake-hint" id="wake-hint" hidden></p>
-        <p>Ask me to turn off the lights, set a timer, or just chat — by voice or right here.</p>
+        <p>Use <b>Conversation</b> for hands-free chat without a wakeword. If rooms are available, choose this device's room when prompted so home commands target the right place.</p>
       </div>
     </section>
 
@@ -94,27 +78,7 @@
         <button class="add-fact" id="add-fact" type="submit">Add</button>
       </form>
       <div id="facts-list" class="facts-list"></div>
-      <p class="facts-hint">Facts the assistant carries between sessions — visible on every turn.</p>
-    </section>
-
-    <section id="notes" class="view" hidden>
-      <div id="notes-list" class="notes-list"></div>
-
-      <div id="note-detail" class="note-detail" hidden>
-        <div class="note-detail-head">
-          <button class="note-back" id="note-back" type="button">← Notes</button>
-          <div class="note-detail-actions">
-            <button class="note-action" id="note-edit" type="button">Edit</button>
-            <button class="note-action primary" id="note-save" type="button" hidden>Save</button>
-            <button class="note-action" id="note-cancel" type="button" hidden>Cancel</button>
-          </div>
-        </div>
-        <div class="note-title" id="note-title"></div>
-        <pre class="note-content" id="note-content"></pre>
-        <textarea class="note-editor" id="note-editor" hidden spellcheck="false"></textarea>
-      </div>
-
-      <p class="facts-hint" id="notes-hint">Markdown notes Fulloch keeps locally — tap one to read or edit.</p>
+      <p class="facts-hint">Personal facts Fulloch carries between sessions, stored in <code id="facts-path">fulloch_facts.md</code>.</p>
     </section>
 
     <section id="entities" class="view" hidden>
@@ -137,53 +101,10 @@
       </div>
 
       <div class="obs-actions" id="obs-actions"></div>
-
-      <div class="obs-token-row" id="obs-token-row" hidden>
-        <div class="obs-token-label">Plugin auth token</div>
-        <div class="obs-token">
-          <code id="obs-token">—</code>
-          <button class="obs-btn" id="obs-copy-token" type="button">Copy</button>
-          <button class="obs-btn ghost" id="obs-regen-token" type="button">Regenerate</button>
-        </div>
-        <p class="obs-help">Paste this into the Fulloch plugin's settings in Obsidian. Rotating it drops the plugin connection within 10 seconds.</p>
-      </div>
-
-      <details class="obs-section" id="obs-vault-section">
-        <summary>Switch vault</summary>
-        <p class="obs-help">Point Fulloch at a different Obsidian vault. Voice notes will go to whichever vault you choose. The plugin reports the active vault automatically when it connects — use this only if you're changing manually.</p>
-        <div class="obs-switch">
-          <input type="text" id="obs-switch-path" placeholder="/home/you/Documents/OtherVault">
-          <button class="obs-btn" id="obs-switch-btn" type="button">Switch</button>
-        </div>
-        <div id="obs-switch-status" class="obs-help"></div>
-      </details>
-
-      <details class="obs-section" id="obs-plugin-section">
-        <summary>Download plugin</summary>
-        <p class="obs-help">The plugin ships in the repo. If Obsidian can't find the Fulloch plugin in the community store, download the zip and extract it to <code>&lt;vault&gt;/.obsidian/plugins/fulloch/</code>.</p>
-        <a class="obs-btn" id="obs-plugin-download" href="/api/obsidian/plugin.zip" download>Download plugin.zip</a>
-      </details>
-
-      <details class="obs-section">
-        <summary>Trust HTTPS for Obsidian desktop</summary>
-        <p class="obs-help">The plugin uses secure WebSockets, so its computer must trust Fulloch's certificate. Browser warning bypasses do not apply to Obsidian. For a permanent local setup, create a private CA on the Fulloch host, install only its public certificate on this computer, then restart Fulloch and Obsidian.</p>
-        <pre class="obs-help">python scripts/create_local_ca.py --force --ip &lt;Fulloch-LAN-IP&gt;
-        <p class="obs-help">Use the dashboard's HTTPS host/IP in the plugin settings, for example <code>https://192.168.1.50</code>. Never copy or install <code>fulloch-home-ca.key</code>.</p>
-      </details>
-
-      <p class="facts-hint" id="obsidian-hint">Fulloch talks to Obsidian via a tiny plugin that reports your vault path, active note, and selected text. Voice reads/writes the vault directly; Remotely Save handles encrypted cloud sync independently.</p>
+      <p class="facts-hint" id="obsidian-hint"></p>
     </section>
   </main>
 
-  <div id="obs-modal" class="obs-modal" hidden>
-    <div class="obs-modal-card" role="dialog" aria-modal="true" aria-labelledby="obs-modal-title">
-      <div class="obs-modal-head">
-        <h2 id="obs-modal-title">Connect Obsidian</h2>
-        <button class="obs-btn ghost" id="obs-modal-close" type="button" aria-label="Close">✕</button>
-      </div>
-      <div id="obs-modal-body" class="obs-modal-body"></div>
-    </div>
-  </div>
 
   <footer id="chat-footer">
     <form id="form">

@@ -24,7 +24,7 @@ If you discover a security vulnerability, please report it responsibly:
 
 - `data/config.yml` contains configuration choices (no secrets) — safe but still excluded from git
 - `data/credentials.json` contains all secrets (tokens, passwords) — never committed
-- `data/notes/` holds user-volunteered notes — including `facts.md` (long-term personal facts auto-injected into the chat prompt) and any daily journal entries
+- `data/notes/` holds user-volunteered notes — including `fulloch_facts.md` (long-term personal facts auto-injected into the chat prompt) and any daily journal entries
 - All of the above are excluded from git via `.gitignore`
 
 ### Network Services

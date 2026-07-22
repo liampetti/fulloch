@@ -102,6 +102,24 @@ def test_humanize_condition_maps_ha_slugs_to_speech():
     assert _humanize_condition("some-new-state") == "some new state"
 
 
+def test_weather_forecast_uses_default_days_for_invalid_count(monkeypatch):
+    """A malformed model argument must not prevent the current forecast."""
+    import tools.home_assistant as ha
+
+    monkeypatch.setattr(ha, "HA_TOKEN", "token")
+    monkeypatch.setattr(ha, "_DEFAULT_WEATHER_ENTITY", "weather.home")
+    monkeypatch.setattr(
+        ha,
+        "_get_state",
+        lambda _entity: {"state": "cloudy", "attributes": {"temperature": 8}},
+    )
+    monkeypatch.setattr(ha.requests, "post", lambda *args, **kwargs: (_ for _ in ()).throw(Exception()))
+
+    result = ha.get_weather_forecast(days="days")
+
+    assert "currently cloudy at 8 degrees Celsius" in result
+
+
 def test_calendar_window_today_is_midnight_to_midnight():
     from tools.home_assistant import _calendar_window
 

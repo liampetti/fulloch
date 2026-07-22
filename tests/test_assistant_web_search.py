@@ -103,6 +103,7 @@ def test_agent_generation_wrapped_in_progress_watchdog():
     gen_pos = src.index("_generate_with_context_recovery(")
     assert wd_pos < gen_pos, "watchdog must wrap the agent generation call"
     assert "replan_stall_cache" in src[wd_pos:gen_pos], "watchdog should use replan stalls"
+    assert "max_stalls=1 if iteration == 0 else 0" in src[wd_pos:gen_pos]
 
 
 def test_is_web_search_importable():

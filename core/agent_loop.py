@@ -199,6 +199,15 @@ class AgentLoop:
                 stats.route = "no_llm"
             return self._run_without_llm(user_prompt, first_emission)
 
+        def remote_fallback() -> str:
+            return self._remote_llm_unavailable_fallback(host)
+
+        if getattr(host, "_remote_llm_retry_blocked", lambda: False)():
+            logger.info("Remote LLM retry cooldown active; using regex-only path")
+            return self._run_without_llm(
+                user_prompt, first_emission, unavailable_fallback=remote_fallback
+            )
+
         slm_started = False
         # Holds the most recent web-search summary produced this turn.
         # Persists across replan iterations so a follow-up action (e.g. a
@@ -273,6 +282,9 @@ class AgentLoop:
                         session or host.tts_session,
                         sink=getattr(host._turn_local, "sink", None),
                         tts_active_event=getattr(host._turn_local, "tts_active_event", None),
+                        # A replan already plays one immediate acknowledgement.
+                        # Do not repeat it while a slow remote server is stalled.
+                        max_stalls=1 if iteration == 0 else 0,
                     ):
                         emission_text = host._generate_with_context_recovery(
                             user_prompt=None,
@@ -305,10 +317,14 @@ class AgentLoop:
                     logger.warning("Remote LLM unreachable; regex-only this turn")
                     host._note_llm_remote_status(False, str(e))
                     if first_emission is None:
-                        return host._speak_llm_error_fallback(
-                            self.session, self.source, satellite_id=self.satellite_id
-                        )
-                    return self._run_without_llm(user_prompt, first_emission)
+                        return remote_fallback()
+                    # A replan failure occurs after the regex action has already
+                    # run; never dispatch it a second time just to degrade.
+                    if iteration > 0:
+                        return remote_fallback()
+                    return self._run_without_llm(
+                        user_prompt, first_emission, unavailable_fallback=remote_fallback
+                    )
                 host._note_llm_remote_status(True)
                 logger.debug(f"Agent emission: {emission_text}")
 
@@ -739,7 +755,13 @@ class AgentLoop:
                 return spoken
         return "Sorry, I couldn't finish that."
 
-    def _run_without_llm(self, user_prompt: str, first_emission) -> str:
+    def _remote_llm_unavailable_fallback(self, host) -> str:
+        fallback = getattr(host, "_remote_llm_unavailable_fallback", None)
+        if fallback is not None:
+            return fallback(self.session, self.source, satellite_id=self.satellite_id)
+        return host._speak_llm_error_fallback(self.session, self.source, satellite_id=self.satellite_id)
+
+    def _run_without_llm(self, user_prompt: str, first_emission, unavailable_fallback=None) -> str:
         """Regex-only turn for `llm.backend: none` — never calls the SLM.
 
         A `catchAll` match dispatches its action(s) and speaks the joined
@@ -747,14 +769,19 @@ class AgentLoop:
         directly). Anything that would normally replan into the SLM — an
         unresolved-entity / error `Reactive question:` sentinel, a web search,
         or `deep_think` — can't proceed without a model, so it (and an outright
-        miss) falls back to a spoken "basic commands only" phrase.
+        miss) uses the caller's configured unavailable-model fallback.
         """
         host = self.host
         session = self.session
         source = self.source
 
-        if first_emission is None:
+        def fallback() -> str:
+            if unavailable_fallback is not None:
+                return unavailable_fallback()
             return host._speak_no_ai_fallback(session, source, satellite_id=self.satellite_id)
+
+        if first_emission is None:
+            return fallback()
 
         host._history_for(self.satellite).append({"role": "assistant", "content": json.dumps(first_emission)})
         host._trim_history()
@@ -762,11 +789,11 @@ class AgentLoop:
 
         if "reply" in first_emission:
             reply = (first_emission.get("reply") or "").strip()
-            return reply or host._speak_no_ai_fallback(session, source, satellite_id=self.satellite_id)
+            return reply or fallback()
 
         actions = first_emission.get("actions") or []
         if not actions:
-            return host._speak_no_ai_fallback(session, source, satellite_id=self.satellite_id)
+            return fallback()
 
         result_strs: list = []
         for action in actions[:3]:
@@ -807,7 +834,7 @@ class AgentLoop:
                     spoken = intents.reactive_to_speech(step.text)
                     host._record_spoken(spoken)
                     return spoken
-                return host._speak_no_ai_fallback(session, source, satellite_id=self.satellite_id)
+                return fallback()
             if step.in_output:
                 result_strs.append(step.text)
         host._trim_history()

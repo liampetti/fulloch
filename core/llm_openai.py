@@ -67,7 +67,7 @@ DEFAULT_BASE_URL = "http://localhost:8888/v1"  # 8080 would clash with SearXNG
 # real name.
 DEFAULT_MODEL = "default"
 DEFAULT_CONNECT_TIMEOUT = 0.4  # seconds — fail fast when the endpoint is down
-DEFAULT_READ_TIMEOUT = 60.0  # seconds — generous; a too-tight value false-trips
+DEFAULT_READ_TIMEOUT = 30.0  # seconds — enough for queued local inference without a minute of dead air
 
 # Hard output ceilings for the remote path. The local llama.cpp backend is bound
 # by the GBNF grammar (it stops at a short JSON emission), so callers pass a huge

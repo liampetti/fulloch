@@ -138,7 +138,6 @@ _BACKUP_FILES = (
     "config.yml",
     "credentials.json",
     ".env",
-    "notes_root_override.json",
     "voice_denylist.json",
 )
 _BACKUP_DIRS = (
@@ -589,11 +588,32 @@ def create_app(
         # screen redirects here and gets the dashboard.
         ready = context.assistant is not None and lifecycle.is_ready()
         page = "index.html" if ready else "setup.html"
-        return (_STATIC_DIR / page).read_text(encoding="utf-8")
+        html = (_STATIC_DIR / page).read_text(encoding="utf-8")
+        if ready:
+            from .config_store import read_config
+
+            general = read_config(context.config_path).get("general") or {}
+            prefs = {
+                "theme": general.get("dashboard_theme", "auto"),
+                "show_turn_details": general.get("dashboard_show_turn_details", False),
+            }
+            html = html.replace(
+                "<script>\n  // Apply the configured appearance",
+                f"<script>window.FULLOCH_DASHBOARD_PREFS = {json.dumps(prefs)};</script>\n<script>\n  // Apply the configured appearance",
+            )
+        return html
 
     @app.get("/setup", response_class=HTMLResponse)
     def setup_page() -> str:
-        return (_STATIC_DIR / "setup.html").read_text(encoding="utf-8")
+        from .config_store import read_config
+
+        general = read_config(context.config_path).get("general") or {}
+        prefs = {"theme": general.get("dashboard_theme", "auto")}
+        html = (_STATIC_DIR / "setup.html").read_text(encoding="utf-8")
+        return html.replace(
+            "<script>\n  // Use the saved dashboard preference",
+            f"<script>window.FULLOCH_DASHBOARD_PREFS = {json.dumps(prefs)};</script>\n<script>\n  // Use the saved dashboard preference",
+        )
 
     def _is_remote_llm() -> bool:
         """True when the language model runs off-device (a remote OpenAI endpoint)."""
@@ -763,7 +783,7 @@ def create_app(
                     (owner_sat.label or owner_sat.ha_area_name) if owner_sat is not None else None
                 ),
                 # A2: the last completed turn's latency breakdown (endpoint-wait,
-                # STT/LLM/TTS seconds, route, endpoint kind) — None until the
+                # ASR/LLM/TTS seconds, route, endpoint kind) — None until the
                 # first turn finishes. Seeds the deferred turn-trace dashboard.
                 "last_turn_stats": context.assistant._last_turn_stats,
             }
@@ -859,32 +879,6 @@ def create_app(
         if not delete_fact(idx):
             raise HTTPException(status_code=404, detail="fact not found")
         return JSONResponse({"facts": list_facts()})
-
-    @app.get("/notes")
-    def notes_list() -> JSONResponse:
-        _require_ready()
-        from tools.notes import list_note_files
-
-        return JSONResponse({"notes": list_note_files()})
-
-    @app.get("/notes/{name:path}")
-    def notes_read(name: str) -> JSONResponse:
-        _require_ready()
-        from tools.notes import read_note_file
-
-        content = read_note_file(name)
-        if content is None:
-            raise HTTPException(status_code=404, detail="note not found")
-        return JSONResponse({"name": name, "content": content})
-
-    @app.put("/notes/{name:path}")
-    def notes_save(name: str, req: NoteRequest) -> JSONResponse:
-        _require_ready()
-        from tools.notes import read_note_file, save_note_file
-
-        if not save_note_file(name, req.content):
-            raise HTTPException(status_code=404, detail="note not found")
-        return JSONResponse({"name": name, "content": read_note_file(name)})
 
     @app.get("/entities")
     def entities_list() -> JSONResponse:
@@ -982,6 +976,16 @@ def create_app(
                 hot = context.assistant.apply_hot_config(applied)
             except Exception as e:  # noqa: BLE001 — never fail the save on hot-apply
                 logger.warning("Hot-apply failed: %s", e)
+        if any(a["path"] == "notes.path" for a in applied):
+            from tools.notes_root import refresh_notes_root
+
+            refresh_notes_root()
+        # Dashboard preferences are read when the dashboard page is served;
+        # they do not need an assistant reload to take effect.
+        hot.update({
+            a["path"] for a in applied
+            if a["path"] in {"general.dashboard_theme", "general.dashboard_show_turn_details"}
+        })
         restart = any(a["path"] not in hot for a in applied)
         # Drop the coerced value from the response (may not be JSON-trivial; the
         # UI only needs path + whether a restart is still required).
@@ -1895,7 +1899,6 @@ def create_app(
         context.obsidian_cmd_q = cmd_q
 
         import tools.notes as _notes_module
-        from tools import notes_root as _notes_root
         from tools.notes import set_obsidian_cmd_q
 
         set_obsidian_cmd_q(cmd_q)
@@ -1947,7 +1950,6 @@ def create_app(
                                 return
                             context.obsidian_vault_state["last_error"] = "unreadable"
                             continue
-                        _notes_root.set_notes_root(resolved)
                         context.obsidian_vault_state["connected"] = True
                         context.obsidian_vault_state["vault_path"] = str(resolved)
                         context.obsidian_vault_state["vault_resolved_path"] = str(resolved)
@@ -1965,8 +1967,16 @@ def create_app(
                         if not rel:
                             continue
                         try:
-                            full = _notes_root.get_notes_root() / rel
-                            if full.is_file():
+                            # Notes storage stays configured through notes.path;
+                            # metadata is editor state only. Fall back to that
+                            # root when a plugin sends a change before metadata.
+                            vault = context.obsidian_vault_state.get("vault_resolved_path")
+                            if not vault:
+                                from tools.notes_root import get_notes_root
+
+                                vault = get_notes_root()
+                            full = Path(vault) / rel if vault else None
+                            if full and full.is_file():
                                 import threading as _th
                                 _th.Thread(
                                     target=_safe_reindex,
@@ -1977,7 +1987,7 @@ def create_app(
                             logger.error("file_changed reindex failed: %s", e)
                     elif kind == "pong":
                         pass
-            except WebSocketDisconnect:
+            except (WebSocketDisconnect, RuntimeError):
                 return
 
         async def _send():
@@ -2017,7 +2027,10 @@ def create_app(
     @app.get("/api/obsidian/status")
     def obsidian_status() -> dict:
         state = dict(context.obsidian_vault_state)
+        from tools.notes_root import get_notes_root
+
         from .config_store import read_config
+        state["notes_path"] = str(get_notes_root())
         state["allow_edit_delete"] = bool(
             (read_config(context.config_path).get("obsidian") or {}).get("allow_edit_delete", False)
         )
@@ -2060,18 +2073,6 @@ def create_app(
             os.environ["OBSIDIAN_TOKEN"] = existing
         return {"token": existing}
 
-    @app.get("/api/obsidian/migration-candidate")
-    def obsidian_migration_candidate() -> dict:
-        """Return whether ./data/notes has files that aren't in the vault yet."""
-        from tools.notes import NOTES_DIR_LEGACY
-        legacy = NOTES_DIR_LEGACY
-        if not legacy.is_dir():
-            return {"has_legacy_notes": False, "legacy_count": 0}
-        files = list(legacy.rglob("*.md"))
-        if not files:
-            return {"has_legacy_notes": False, "legacy_count": 0}
-        return {"has_legacy_notes": True, "legacy_count": len(files)}
-
     @app.post("/api/setup/detect-obsidian-vaults")
     def detect_obsidian_vaults() -> dict:
         """Best-effort scan for Obsidian vaults on the local filesystem."""
@@ -2080,8 +2081,7 @@ def create_app(
 
     @app.post("/api/setup/obsidian-vault")
     def setup_obsidian_vault(req: dict) -> dict:
-        """Persist the wizard's vault path and auto-generate the obsidian token."""
-        from tools import notes_root as _notes_root
+        """Use a validated vault as the configured notes location."""
         from tools.notes_root import translate_vault_path
 
         from .credentials_store import set_credential
@@ -2095,57 +2095,18 @@ def create_app(
         resolved = translated.expanduser().resolve()
         if not (resolved / ".obsidian").is_dir():
             raise HTTPException(status_code=400, detail="not a vault (no .obsidian/ folder)")
-        _notes_root.set_notes_root(resolved)
+        from tools.notes_root import refresh_notes_root
+
+        from .config_store import update_config
+
+        update_config({"notes.path": str(resolved)}, context.config_path)
+        refresh_notes_root()
         existing = os.environ.get("OBSIDIAN_TOKEN", "").strip()
         if not existing:
             new_token = secrets.token_hex(32)
             set_credential("obsidian_token", new_token)
             os.environ["OBSIDIAN_TOKEN"] = new_token
         return {"vault_path": str(resolved)}
-
-    @app.post("/api/obsidian/switch-vault")
-    def obsidian_switch_vault(req: dict) -> dict:
-        from tools import notes_root as _notes_root
-        from tools.notes_root import translate_vault_path
-        raw = (req or {}).get("path", "").strip()
-        if not raw:
-            raise HTTPException(status_code=400, detail="missing path")
-        translated = translate_vault_path(raw)
-        resolved = translated.expanduser().resolve()
-        if not (resolved / ".obsidian").is_dir():
-            raise HTTPException(status_code=400, detail="not a vault (no .obsidian/ folder)")
-        _notes_root.set_notes_root(resolved)
-        context.obsidian_vault_state["vault_path"] = str(resolved)
-        context.obsidian_vault_state["vault_resolved_path"] = str(resolved)
-        context.obsidian_vault_state["last_error"] = None
-        return {"vault_path": str(resolved)}
-
-    @app.post("/api/obsidian/migration-decision")
-    def obsidian_migration_decision(req: dict) -> dict:
-        from tools import notes_root as _notes_root
-        from tools.notes import NOTES_DIR_LEGACY
-        action = (req or {}).get("action", "").strip()
-        if action not in ("copy", "skip", "dismiss"):
-            raise HTTPException(status_code=400, detail="action must be copy|skip|dismiss")
-        if action == "copy":
-            legacy = NOTES_DIR_LEGACY
-            target = _notes_root.get_notes_root() / "Inbox" / "fulloch-import"
-            target.mkdir(parents=True, exist_ok=True)
-            copied = 0
-            if legacy.is_dir():
-                import shutil
-                for src in legacy.rglob("*.md"):
-                    rel = src.relative_to(legacy)
-                    dest = target / rel
-                    if dest.exists():
-                        continue
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dest)
-                    copied += 1
-            _notes_root.set_migrated(True)
-            return {"copied": copied, "target": str(target)}
-        _notes_root.set_migrated(True)
-        return {"action": action}
 
     @app.get("/api/obsidian/plugin.zip")
     def obsidian_plugin_zip() -> FileResponse:

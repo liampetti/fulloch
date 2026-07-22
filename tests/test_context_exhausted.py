@@ -59,6 +59,7 @@ def test_context_exhausted_reply_clears_history():
     )
     result = a.Assistant._context_exhausted_reply(fake)
     assert result == a.CONTEXT_EXHAUSTED_REPLY
+    assert result == "I've lost some conversation context. Could you ask that again?"
     assert fake._history == []
 
 

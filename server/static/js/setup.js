@@ -357,7 +357,7 @@ function renderBackendCfg() {
     return `<div><label>${label}</label><select id="be-${domain}">${opts}</select></div>`;
   };
   box.innerHTML = `<p class="help">Overrides the mode selected above.</p>
-    <div class="grid2">${mk('asr','Speech-to-text')}${mk('tts','Text-to-speech')}${mk('llm','Language model')}</div>`;
+    <div class="grid2">${mk('asr','ASR')}${mk('tts','TTS')}${mk('llm','Language model')}</div>`;
   const syncCustom = () => {
     sel.tier = 'custom';
     const llmMode = $('be-llm').value;
@@ -616,7 +616,7 @@ async function stepObsidian() {
     const hint = $('obsidian-hint');
     if (!path) {
       hint.textContent = 'Enter a vault path or click Skip.';
-      return;
+      return false;
     }
     const status = $('obsidian-status'); status.textContent = 'Saving…'; status.style.color = '';
     const r = await postJSON('/api/setup/obsidian-vault', { path });
@@ -875,12 +875,12 @@ function stepFinish() {
     if (pw && pw !== pw2) {
       errEl.textContent = 'Passwords do not match.';
       errEl.style.display = '';
-      return;
+      return false;
     }
     if (pw && pw.length < 8) {
       errEl.textContent = 'Password must be at least 8 characters.';
       errEl.style.display = '';
-      return;
+      return false;
     }
 
     $('finish-btn').disabled = true;
@@ -889,7 +889,7 @@ function stepFinish() {
       errEl.textContent = 'Could not save — try again.';
       errEl.style.display = '';
       $('finish-btn').disabled = false;
-      return;
+      return false;
     }
     // A password was set → must log in; otherwise go straight to the dashboard.
     location.href = pw ? '/login' : '/';
@@ -915,41 +915,87 @@ async function openSettings() {
     if (vn) screen().appendChild(vn);
   }
 
-  // Integrations card (quick access to HA/Notes/Search with test buttons)
-  screen().appendChild(integrationsCard());
-  wireIntegrationsCard();
-
-  // Models card (speech + language backends)
-  screen().appendChild(modelsCard());
-  wireModelsCard();
-
-  // Security card (password change + obsidian token)
-  screen().appendChild(securityCard());
-  wireSecurityCard();
-
-  // Full config console
-  const byGroup = {};
-  SCHEMA.fields.forEach(f => { (byGroup[f.group] = byGroup[f.group] || []).push(f); });
-  const c = el(`<div class="card"><h2>Configuration</h2>
-    <p class="lead">Every <code>config.yml</code> value is editable here. Hover the <span class="info">i</span> on any field for help. Restart-flagged changes need a restart.</p>
-    <div id="cfg-form"></div>
+  // Every setting belongs to one user-facing domain. This intentionally differs
+  // from the storage schema, whose groups are optimized for config.yml.
+  const config = el(`<div id="settings-config"><p class="lead settings-lead">Expand a section to configure it. Every change is saved to <code>config.yml</code>.</p></div>`);
+  const categories = [
+    { name: 'Dashboard', icon: '▣', fields: f => f.group === 'Dashboard' },
+    { name: 'Voice', icon: '◉', fields: f => f.group === 'Voice' || f.group === 'Endpointing' || ['general.wakeword', 'general.wakeword_pattern', 'general.asr_language', 'general.asr_context_hint', 'general.asr_context_terms'].includes(f.path) },
+    { name: 'Notes', icon: '✎', fields: f => f.group === 'Notes' || f.group === 'Obsidian' },
+    { name: 'Home Assistant', icon: '⌂', fields: f => f.group === 'Home Assistant' },
+    { name: 'Search', icon: '⌕', fields: f => f.group === 'Search' },
+    { name: 'Advanced', icon: '⚙', fields: f => !['Dashboard', 'Voice', 'Endpointing', 'Notes', 'Obsidian', 'Home Assistant', 'Search'].includes(f.group) && !['general.wakeword', 'general.wakeword_pattern', 'general.asr_language', 'general.asr_context_hint', 'general.asr_context_terms'].includes(f.path) },
+  ];
+  const categoryCards = {};
+  categories.forEach(category => {
+    const sourceFields = SCHEMA.fields.filter(category.fields);
+    const fields = sourceFields.map(fieldRow).filter(Boolean);
+    if (!fields.length) return;
+    const configured = sourceFields.some(f => f.set && String(f.value) !== String(f.default));
+    const status = configured ? 'customised' : 'defaults';
+    const card = el(`<details class="connect-section settings-card"><summary><span class="csname"><span class="settings-icon">${category.icon}</span>${category.name}</span><span class="cstatus">${status}</span></summary><div class="cbody"><div class="settings-common"></div></div></details>`);
+    fields.forEach(node => card.querySelector('.settings-common').appendChild(node));
+    config.appendChild(card);
+    categoryCards[category.name] = card;
+  });
+  screen().appendChild(config);
+  const saveCard = el(`<div class="card settings-save">
     <div id="save-note"></div>
     <div class="actions"><button class="back" id="cfg-back">Back to dashboard</button><button class="primary" id="save-cfg">Save changes</button></div>
     </div>`);
-  screen().appendChild(c);
+  screen().appendChild(saveCard);
   $('cfg-back').addEventListener('click', () => location.href = '/');
-  const form = $('cfg-form');
-  SCHEMA.groups.forEach(g => {
-    if (!byGroup[g]) return;
-    form.appendChild(el(`<div class="group-title">${g}</div>`));
-    byGroup[g].forEach(f => { const n = fieldRow(f); if (n) form.appendChild(n); });
+  const wakewordPreset = $('wakeword-preset');
+  if (wakewordPreset) wakewordPreset.addEventListener('change', () => {
+    const customFields = $('wakeword-custom-fields');
+    const custom = wakewordPreset.value === 'custom';
+    customFields.hidden = !custom;
+    if (!custom) {
+      const preset = (SCHEMA.wakeword_presets || []).find(p => p.wakeword === wakewordPreset.value);
+      if (preset) {
+        $('cf-general_wakeword').value = preset.wakeword;
+        $('cf-general_wakeword_pattern').value = preset.pattern;
+      }
+    }
   });
-  $('save-cfg').addEventListener('click', saveSettings);
+  $('save-cfg').addEventListener('click', saveAllSettings);
   CFG_INITIAL = {};
-  document.querySelectorAll('#cfg-form [data-path]').forEach(node => {
+  document.querySelectorAll('#settings-config [data-path]').forEach(node => {
     CFG_INITIAL[node.dataset.path] = node.dataset.ghost === '1' ? '' : node.value;
   });
   populateVoiceField();
+
+  // Move action-oriented controls into their matching domain rather than
+  // presenting duplicate top-level cards.
+  const appendCardBody = (card, target) => {
+    const body = card.querySelector('.cbody');
+    while (body.firstChild) target.appendChild(body.firstChild);
+  };
+  appendCardBody(dashboardPreferencesCard(), categoryCards.Dashboard.querySelector('.cbody'));
+  appendCardBody(homeAssistantAccessCard(), categoryCards['Home Assistant'].querySelector('.cbody'));
+  const models = modelsCard();
+  appendCardBody(models, categoryCards.Voice.querySelector('.cbody'));
+  const agentCard = el(`<details class="connect-section settings-card"><summary><span class="csname"><span class="settings-icon">◫</span>AI Agent</span><span class="cstatus">configured</span></summary><div class="cbody"><p class="help">Personality and the language model that plans and answers requests.</p></div></details>`);
+  const agentBody = agentCard.querySelector('.cbody');
+  const speechGrid = categoryCards.Voice.querySelector('.model-speech-grid');
+  agentBody.appendChild(speechGrid.children[2]);
+  const llmSelect = categoryCards.Voice.querySelector('#sm-llama-sel');
+  agentBody.appendChild(llmSelect.previousElementSibling);
+  agentBody.appendChild(llmSelect);
+  agentBody.appendChild(categoryCards.Voice.querySelector('#sm-openai'));
+  agentBody.appendChild(categoryCards.Voice.querySelector('#sm-llama'));
+  agentBody.appendChild(categoryCards.Voice.querySelector('#models-note'));
+  agentBody.appendChild(categoryCards.Voice.querySelector('#save-models').parentElement);
+  categoryCards.Voice.after(agentCard);
+  const security = securityCard();
+  categoryCards.Dashboard.querySelector('.cbody').appendChild(security.querySelector('#sec-pw-section'));
+  categoryCards.Dashboard.querySelector('.cbody').appendChild(security.querySelector('#sec-cert-section'));
+  categoryCards.Notes.querySelector('.cbody').appendChild(security.querySelector('#sec-obs-section'));
+  wireDashboardPreferencesCard();
+  wireHomeAssistantAccessCard();
+  wireModelsCard();
+  MODEL_INITIAL = modelSettingsSignature();
+  wireSecurityCard();
 
   const dz = el(`<div class="card">
     <h2>Re-run setup</h2>
@@ -963,6 +1009,96 @@ async function openSettings() {
   loadBackupList();
 }
 
+function homeAssistantAccessCard() {
+  const tokenSet = SCHEMA.credentials && SCHEMA.credentials.ha_token;
+  return el(`<details class="connect-section settings-card"><summary><span class="csname"><span class="settings-icon">⌂</span>Home Assistant access</span><span class="cstatus">${tokenSet ? 'configured' : 'token needed'}</span></summary><div class="cbody">
+    <p class="help">Set the long-lived access token used with the Home Assistant URL above.</p>
+    <label for="ha-access-token">Long-lived access token</label>
+    <input type="text" id="ha-access-token" placeholder="${credPlaceholder(tokenSet, 'create one in HA → Profile → Security')}">
+    <div id="ha-access-note"></div>
+    <div class="actions"><span></span><button class="primary" id="save-ha-access">Save token</button></div>
+  </div></details>`);
+}
+
+function wireHomeAssistantAccessCard() {
+  $('save-ha-access').addEventListener('click', async () => {
+    const token = $('ha-access-token').value.trim();
+    const note = $('ha-access-note');
+    if (!token) { note.innerHTML = '<div class="banner error">Enter a token to save it.</div>'; return; }
+    const r = await postJSON('/setup/credential', { key: 'ha_token', value: token });
+    if (r.ok) {
+      $('ha-access-token').value = '';
+      note.innerHTML = '<div class="banner saved">Token saved.</div>';
+    } else {
+      note.innerHTML = '<div class="banner error">Could not save the token.</div>';
+    }
+  });
+}
+
+function dashboardPreferencesCard() {
+  const field = path => (SCHEMA.fields || []).find(f => f.path === path) || {};
+  const theme = field('general.dashboard_theme').value || 'auto';
+  const showDetails = !!field('general.dashboard_show_turn_details').value;
+  const status = theme === 'auto' && !showDetails ? 'defaults' : 'customised';
+  return el(`<details class="connect-section settings-card dashboard-preferences"><summary><span class="csname"><span class="settings-icon">▣</span>Dashboard</span><span class="cstatus">${status}</span></summary><div class="cbody">
+    <p class="help">Choose how this browser displays the dashboard.</p>
+    <fieldset>
+      <legend>Colour scheme</legend>
+      <label><input type="radio" name="dashboard-theme" value="auto"${theme === 'auto' ? ' checked' : ''}> Auto</label>
+      <label><input type="radio" name="dashboard-theme" value="dark"${theme === 'dark' ? ' checked' : ''}> Dark</label>
+      <label><input type="radio" name="dashboard-theme" value="light"${theme === 'light' ? ' checked' : ''}> Light</label>
+    </fieldset>
+    <label class="checkbox-row"><input id="dashboard-show-details" type="checkbox"${showDetails ? ' checked' : ''}> Always show turn details</label>
+    <p class="help">Turn details include the agent loop and inference statistics.</p>
+    <div id="dashboard-pref-note"></div>
+    <div class="actions"><span></span><button class="primary" id="save-dashboard-preferences">Save dashboard preferences</button></div>
+    <div class="dashboard-actions">
+      <button class="danger" id="delete-conversation" type="button">Delete conversation</button>
+      <button class="danger" id="dashboard-logout" type="button" hidden>Log out</button>
+    </div>
+  </div></details>`);
+}
+
+function wireDashboardPreferencesCard() {
+  const applyTheme = theme => {
+    const dark = theme === 'dark' || (theme === 'auto' &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.classList.toggle('dark', dark);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.content = getComputedStyle(document.documentElement).backgroundColor;
+  };
+  $('save-dashboard-preferences').addEventListener('click', async () => {
+    const theme = document.querySelector('input[name="dashboard-theme"]:checked').value;
+    const showDetails = $('dashboard-show-details').checked;
+    const note = $('dashboard-pref-note');
+    const r = await putJSON('/config', { updates: {
+      'general.dashboard_theme': theme,
+      'general.dashboard_show_turn_details': showDetails,
+    } });
+    if (!r.ok) {
+      note.innerHTML = '<div class="banner error">Could not save dashboard preferences.</div>';
+      return;
+    }
+    applyTheme(theme);
+    note.innerHTML = '<div class="banner saved">Saved. The dashboard will use these preferences on your next visit.</div>';
+  });
+  document.querySelectorAll('input[name="dashboard-theme"]').forEach(input => {
+    input.addEventListener('change', () => applyTheme(input.value));
+  });
+  $('delete-conversation').addEventListener('click', async () => {
+    if (!confirm('Delete this conversation? This cannot be undone.')) return;
+    const r = await fetch('/reset', { method: 'POST' });
+    if (r.ok) $('dashboard-pref-note').innerHTML = '<div class="banner saved">Conversation deleted.</div>';
+  });
+  getJSON('/status').then(status => {
+    $('dashboard-logout').hidden = !status.auth_enabled;
+  }).catch(() => {});
+  $('dashboard-logout').addEventListener('click', async () => {
+    await fetch('/auth/logout', { method: 'POST' });
+    location.href = '/login';
+  });
+}
+
 // Security card — password change + Obsidian linkage + HTTPS cert
 function securityCard() {
   const certField = SCHEMA.fields.find(f => f.section === 'general' && f.name === 'dashboard_ssl_certfile');
@@ -970,8 +1106,8 @@ function securityCard() {
   return el(`<div class="card"><h2>Security &amp; Access</h2>
     <p class="lead">Manage the dashboard password, Obsidian plugin token, and HTTPS certificate.</p>
 
-    <details class="connect-section" id="sec-pw-section">
-      <summary><span class="csname">🔑 Dashboard password</span></summary>
+    <section class="connect-section exposed-section" id="sec-pw-section">
+      <div class="connect-heading"><span class="csname">🔑 Dashboard password</span></div>
       <div class="cbody">
         <label>New password</label><input type="password" id="sec-pw" placeholder="min 8 characters" autocomplete="new-password">
         <label style="margin-top:.4rem">Confirm password</label><input type="password" id="sec-pw2" placeholder="repeat password" autocomplete="new-password" style="margin-top:.4rem">
@@ -979,12 +1115,12 @@ function securityCard() {
         <button id="sec-pw-save" style="margin-top:.75rem">Update password</button>
         <span id="sec-pw-status" class="muted" style="margin-left:.75rem"></span>
       </div>
-    </details>
+    </section>
 
-    <details class="connect-section" id="sec-obs-section" style="margin-top:.75rem">
-      <summary><span class="csname">📓 Obsidian</span><span class="cstatus" id="sec-obs-cstatus">loading…</span></summary>
+    <section class="connect-section exposed-section" id="sec-obs-section" style="margin-top:.75rem">
+      <div class="connect-heading"><span class="csname">📓 Obsidian</span><span class="cstatus" id="sec-obs-cstatus">loading…</span></div>
       <div class="cbody">
-        <p class="help" style="margin:0 0 .65rem">Connect Fulloch to an Obsidian vault for voice read/write. The plugin reports your vault and any open note. Cloud sync (Remotely Save, etc.) is unchanged — Fulloch only sees the local vault.</p>
+        <p class="help" style="margin:0 0 .65rem">Configure the Obsidian plugin and choose a vault as Fulloch's notes location. Fulloch keeps writing Markdown notes and <code>fulloch_facts.md</code> there even when Obsidian is closed.</p>
 
         <div class="obs-status-row" style="margin-bottom: .75rem">
           <span class="obs-pill" id="sec-obs-pill">—</span>
@@ -992,7 +1128,7 @@ function securityCard() {
         </div>
 
         <div class="group-title" style="margin-top: 0">Vault</div>
-        <label for="sec-obs-vault-path">Obsidian vault path</label>
+        <label for="sec-obs-vault-path">Use this Obsidian vault for notes</label>
         <div class="obs-switch" style="margin-top:.35rem">
           <input type="text" id="sec-obs-vault-path" placeholder="/home/you/Documents/MyVault">
         </div>
@@ -1001,7 +1137,7 @@ function securityCard() {
           <button class="primary" id="sec-obs-save-vault" type="button">Save</button>
           <span id="sec-obs-vault-status" class="muted"></span>
         </div>
-        <p class="help" id="sec-obs-vault-hint" style="margin-top:.4rem">Path to the folder that contains your <code>.obsidian/</code> subfolder. Auto-detect scans <code>~/Documents</code>, <code>~/Obsidian</code>, and <code>~/.config/obsidian</code>.</p>
+        <p class="help" id="sec-obs-vault-hint" style="margin-top:.4rem">This saves <code>notes.path</code> in config.yml. Path must contain a <code>.obsidian/</code> subfolder. Auto-detect scans <code>~/Documents</code>, <code>~/Obsidian</code>, and <code>~/.config/obsidian</code>.</p>
 
          <div class="group-title">Plugin</div>
          <p class="help" style="margin:0 0 .5rem">The plugin ships in the repo. Until it's in the Obsidian community store, download the zip and extract it into <code>&lt;vault&gt;/.obsidian/plugins/fulloch/</code>, then enable it in <strong>Settings → Community plugins</strong>.</p>
@@ -1017,10 +1153,10 @@ function securityCard() {
         <p class="help" style="margin-top:.4rem">Paste this into the Fulloch plugin settings. Rotating the token drops the plugin connection within 10 seconds.</p>
         <span id="sec-obs-status" class="muted" style="display:block;margin-top:.35rem"></span>
       </div>
-    </details>
+    </section>
 
-    <details class="connect-section" id="sec-cert-section" style="margin-top:.75rem">
-      <summary><span class="csname">🔒 HTTPS certificate</span><span class="cstatus" id="sec-cert-cstatus">${certEnabled ? 'enabled' : ''}</span></summary>
+    <section class="connect-section exposed-section" id="sec-cert-section" style="margin-top:.75rem">
+      <div class="connect-heading"><span class="csname">🔒 HTTPS certificate</span><span class="cstatus" id="sec-cert-cstatus">${certEnabled ? 'enabled' : ''}</span></div>
       <div class="cbody">
         <p style="font-size:.8rem;color:var(--text-muted);margin:0 0 .6rem">${certEnabled
           ? 'Self-signed certificate used for LAN HTTPS (needed for mic access from phones and other devices). Obsidian desktop also needs the certificate trusted by its operating system; use the private-CA instructions in the Obsidian section above. Regenerate it if your LAN IP changed and the old certificate no longer covers it. Every device that trusted the old one will see the browser warning again. Takes effect after a restart.'
@@ -1028,7 +1164,7 @@ function securityCard() {
         <button id="sec-cert-regen">${certEnabled ? 'Regenerate certificate…' : 'Enable HTTPS…'}</button>
         <span id="sec-cert-status" class="muted" style="margin-left:.75rem"></span>
       </div>
-    </details>
+    </section>
     <div id="security-note"></div>
   </div>`);
 }
@@ -1276,7 +1412,7 @@ function wireIntegrationsCard() {
       if (!rc.ok) {
         const e = await rc.json().catch(() => ({}));
         note.innerHTML = `<div class="banner error">Could not save token: ${JSON.stringify(e.detail || rc.status)}</div>`;
-        return;
+        return false;
       }
     }
 
@@ -1323,13 +1459,13 @@ async function resetSetup() {
   if ((phrase || '').trim().toUpperCase() !== 'RE-RUN') {
     const note = $('reset-note');
     if (note) note.innerHTML = `<div class="banner" style="border:1px solid var(--text-muted);color:var(--text-muted)">Cancelled — nothing was changed.</div>`;
-    return;
+    return false;
   }
   const note = $('reset-note');
   const r = await postJSON('/setup/reset');
   if (!r.ok) {
     note.innerHTML = `<div class="banner error">Reset failed: ${r.status}</div>`;
-    return;
+    return false;
   }
   const d = await r.json();
   note.innerHTML = `<div class="banner warn">Setup reset armed${d.backup ? ` — backup saved as <code>backups/${d.backup}</code>` : ''}. <b>Restart Fulloch</b> to run the wizard.
@@ -1346,7 +1482,7 @@ async function loadBackupList() {
   const backups = (data && data.backups) || [];
   if (backups.length === 0) {
     wrap.innerHTML = `<p class="help" style="margin-top:1rem">No backups yet. Backups appear here after the first time you re-run setup.</p>`;
-    return;
+    return false;
   }
   const fmtSize = (n) => {
     if (n < 1024) return `${n} B`;
@@ -1384,7 +1520,7 @@ async function restoreBackup(name) {
 }
 
 async function populateVoiceField() {
-  const sel = document.querySelector('#cfg-form select[data-voices="qwen"]');
+  const sel = document.querySelector('#settings-config select[data-voices="qwen"]');
   if (!sel) return;
   const cur = sel.value;
   try {
@@ -1407,6 +1543,15 @@ function currentBackend(domain) {
 
 const DEFAULT_LLAMA_FILE = 'Qwen3.5-9B-UD-Q4_K_XL.gguf';
 let CFG_INITIAL = {};
+let MODEL_INITIAL = '';
+
+function modelSettingsSignature() {
+  return [
+    'sm-asr', 'sm-asr-model', 'sm-tts', 'sm-tts-model', 'sm-personality-sel',
+    'sm-personality-custom-text', 'sm-llama-sel', 'sm-local-model', 'sm-llama-model',
+    'sm-llama-ctx', 'sm-oai-url', 'sm-oai-model', 'sm-oai-key',
+  ].map(id => ($(id) || {}).value || '').join('\u0000');
+}
 
 function modelsCard() {
   const b = SCHEMA.backends;
@@ -1425,17 +1570,20 @@ function modelsCard() {
   };
   const personality = String(fieldValue('general.personality', 'balanced'));
   const personalityCustom = String(fieldValue('general.personality_custom', ''));
-  const optsFor = (domain) => {
+  const optsFor = (domain, customPath) => {
     const cur = currentBackend(domain);
     return b[domain].filter(o => o.offerable).map(o =>
       `<option value="${o.backend}"${o.backend === cur ? ' selected' : ''}>${o.display_name}</option>`
-    ).join('');
+    ).join('') + `<option value="custom"${customPath ? ' selected' : ''}>Custom model path</option>`;
   };
-  return el(`<div class="card"><h2>Models</h2>
-    <p class="lead">Speech + language backends. <b>Model changes take effect after a restart.</b></p>
+  const modelStatus = (SCHEMA.models && Object.keys(SCHEMA.models).length) ? 'configured' : 'defaults';
+  return el(`<details class="connect-section settings-card"><summary><span class="csname"><span class="settings-icon">◫</span>Models</span><span class="cstatus">${modelStatus}</span></summary><div class="cbody">
+    <p class="help">ASR, TTS, and language-model backends. Model changes take effect after a restart.</p>
     <div class="grid2 model-speech-grid">
-      <div><label>Speech-to-text</label><select id="sm-asr">${optsFor('asr')}</select></div>
-      <div><label>Text-to-speech</label><select id="sm-tts">${optsFor('tts')}</select></div>
+      <div><label>ASR</label><select id="sm-asr">${optsFor('asr', asrPath)}</select>
+        <div id="sm-asr-custom" style="display:${asrPath ? '' : 'none'};margin-top:0.5rem"><label>Path to the ASR model</label><input type="text" id="sm-asr-model" placeholder="/abs/path/asr-model-dir  (or ./data/models/x)" value="${asrPath.replace(/"/g,'&quot;')}"><div class="help">Use an ASR model already on disk.</div></div></div>
+      <div><label>TTS</label><select id="sm-tts">${optsFor('tts', ttsPath)}</select>
+        <div id="sm-tts-custom" style="display:${ttsPath ? '' : 'none'};margin-top:0.5rem"><label>Path to the TTS model</label><input type="text" id="sm-tts-model" placeholder="/abs/path/tts-model-dir  (or ./data/models/x)" value="${ttsPath.replace(/"/g,'&quot;')}"><div class="help">Use a TTS model already on disk.</div></div></div>
       <div><label>Personality</label>
         <select id="sm-personality-sel">
           <option value="balanced"${personality === 'balanced' ? ' selected' : ''}>Balanced</option>
@@ -1450,18 +1598,6 @@ function modelsCard() {
         </div>
       </div>
     </div>
-    <details class="advanced" id="sm-asr-custom"${asrPath ? ' open' : ''}>
-      <summary>Speech-to-text: use a model I already have</summary>
-      <label>Path to the ASR model folder</label>
-      <input type="text" id="sm-asr-model" placeholder="/abs/path/asr-model-dir  (or ./data/models/x)" value="${asrPath.replace(/"/g,'&quot;')}">
-      <div class="help">Load an ASR model already on disk from here instead of the default. Blank = default.</div>
-    </details>
-    <details class="advanced" id="sm-tts-custom"${ttsPath ? ' open' : ''}>
-      <summary>Text-to-speech: use a model I already have</summary>
-      <label>Path to the TTS model folder</label>
-      <input type="text" id="sm-tts-model" placeholder="/abs/path/tts-model-dir  (or ./data/models/x)" value="${ttsPath.replace(/"/g,'&quot;')}">
-      <div class="help">Load a TTS model already on disk from here instead of the default. Blank = default.</div>
-    </details>
     <label>Language model</label>
     <select id="sm-llama-sel">
       <option value="local"${llmMode === 'local' ? ' selected' : ''}>Local</option>
@@ -1501,7 +1637,7 @@ function modelsCard() {
     </div>
     <div id="models-note"></div>
     <div class="actions"><span></span><button class="primary" id="save-models">Save models</button></div>
-    </div>`);
+    </div></details>`);
 }
 
 function wireModelsCard() {
@@ -1510,6 +1646,13 @@ function wireModelsCard() {
   };
   $('sm-personality-sel').addEventListener('change', togglePersonalityCustom);
   togglePersonalityCustom();
+  const toggleCustomModel = (domain) => {
+    $(`sm-${domain}-custom`).style.display = $(`sm-${domain}`).value === 'custom' ? '' : 'none';
+  };
+  ['asr', 'tts'].forEach(domain => {
+    $(`sm-${domain}`).addEventListener('change', () => toggleCustomModel(domain));
+    toggleCustomModel(domain);
+  });
   const toggleLlmModel = () => {
     const mode = $('sm-llama-sel').value;
     const isOpenai = mode === 'external';
@@ -1589,7 +1732,7 @@ async function saveModels() {
     if ($('sm-oai-url').value.trim() && llm.base_url !== $('sm-oai-url').value.trim()) $('sm-oai-url').value = llm.base_url;
     if (!llm.base_url) {
       $('models-note').innerHTML = `<div class="banner error">OpenAI needs a base URL.</div>`;
-      return;
+      return false;
     }
   } else {
     const localModel = $('sm-local-model').value;
@@ -1598,18 +1741,22 @@ async function saveModels() {
       const m = $('sm-llama-model').value.trim();
       if (!m) {
         $('models-note').innerHTML = `<div class="banner error">Enter the path to your .gguf file, or pick Default.</div>`;
-        return;
+        return false;
       }
       if (!m.toLowerCase().endsWith('.gguf')) {
         $('models-note').innerHTML = `<div class="banner error">That doesn't look like a .gguf model file.</div>`;
-        return;
+        return false;
       }
       llm.model = m;
     }
     const ctx = $('sm-llama-ctx').value.trim();
     if (ctx) llm.n_context = parseInt(ctx, 10);
   }
-  const models = { asr: { backend: $('sm-asr').value }, tts: { backend: $('sm-tts').value }, llm };
+  const models = {
+    asr: { backend: $('sm-asr').value === 'custom' ? currentBackend('asr') : $('sm-asr').value },
+    tts: { backend: $('sm-tts').value === 'custom' ? currentBackend('tts') : $('sm-tts').value },
+    llm,
+  };
   const asrModel = $('sm-asr-model').value.trim();
   const ttsModel = $('sm-tts-model').value.trim();
   if (asrModel) models.asr.model = asrModel;
@@ -1622,13 +1769,13 @@ async function saveModels() {
   if (!r.ok) {
     const e = await r.json().catch(() => ({}));
     note.innerHTML = `<div class="banner error">Save failed: ${JSON.stringify(e.detail || r.status)}</div>`;
-    return;
+    return false;
   }
   const personality = $('sm-personality-sel').value;
   const custom = $('sm-personality-custom-text').value.trim();
   if (personality === 'custom' && !custom) {
     note.innerHTML = `<div class="banner error">Enter a custom personality, or choose a built-in personality.</div>`;
-    return;
+    return false;
   }
   const config = await putJSON('/config', {
     updates: {
@@ -1639,12 +1786,13 @@ async function saveModels() {
   if (!config.ok) {
     const e = await config.json().catch(() => ({}));
     note.innerHTML = `<div class="banner error">Saved model choice, but personality settings failed: ${JSON.stringify(e.detail || config.status)}</div>`;
-    return;
+    return false;
   }
   SCHEMA.models = models;
   note.innerHTML = `<div class="banner warn">Saved to config.yml. <b>Restart Fulloch</b> for the model change to take effect. If you switched to a backend whose model isn't downloaded yet, the restart re-opens the setup wizard to fetch it.
     <button id="do-restart-models" class="primary" style="margin-left:0.5rem;padding:0.3rem 0.8rem">Restart now</button></div>`;
   $('do-restart-models').addEventListener('click', doRestart);
+  return true;
 }
 
 function autoWakePattern(wakeword) {
@@ -1660,7 +1808,9 @@ function autoWakePattern(wakeword) {
 }
 
 function fieldRow(f) {
-  if (f.path === 'general.personality' || f.path === 'general.personality_custom') return null;
+  if (['general.personality', 'general.personality_custom', 'general.dashboard_theme',
+    'general.dashboard_show_turn_details', 'general.wakeword_pattern', 'notes.path',
+    'general.dashboard_ssl_certfile', 'general.dashboard_ssl_keyfile'].includes(f.path)) return null;
   if (f.path === 'general.tts_speed' && currentBackend('tts') !== 'kokoro-onnx') return null;
   const id = 'cf-' + f.path.replace(/\W/g, '_');
   let needsRestart = f.apply === 'restart';
@@ -1672,6 +1822,23 @@ function fieldRow(f) {
   const defPh = defRaw !== '' ? ` placeholder="${defRaw.replace(/"/g, '&quot;')}"` : '';
   let input;
   const val = f.value === null || f.value === undefined ? '' : f.value;
+  if (f.path === 'general.wakeword') {
+    const patternField = (SCHEMA.fields || []).find(x => x.path === 'general.wakeword_pattern') || {};
+    const pattern = String(patternField.value || '');
+    const presets = SCHEMA.wakeword_presets || [];
+    const preset = presets.find(p => p.wakeword === val && p.pattern === pattern);
+    const options = presets.map(p => `<option value="${p.wakeword.replace(/"/g, '&quot;')}"${preset === p ? ' selected' : ''}>${p.label}</option>`).join('');
+    const custom = !preset;
+    return el(`<div class="field"><div class="lbl"><label style="margin:0">Wakeword</label>
+      <span class="info" title="Choose a tested wakeword preset, or enter a custom wakeword and optional regex.">i</span> ${restart}</div>
+      <select id="wakeword-preset"><option value="custom"${custom ? ' selected' : ''}>Custom</option>${options}</select>
+      <div id="wakeword-custom-fields"${custom ? '' : ' hidden'}>
+        <label for="cf-general_wakeword">Custom wakeword</label>
+        <input type="text" id="cf-general_wakeword" data-path="general.wakeword" data-type="str" value="${String(val).replace(/"/g, '&quot;')}">
+        <label for="cf-general_wakeword_pattern">Wakeword regex (optional)</label>
+        <input type="text" id="cf-general_wakeword_pattern" data-path="general.wakeword_pattern" data-type="str" value="${pattern.replace(/"/g, '&quot;')}" placeholder="${autoWakePattern(val).replace(/"/g, '&quot;')}">
+      </div></div>`);
+  }
   if (f.path === 'general.wakeword_pattern') {
     const wkInput = document.getElementById('cf-general_wakeword');
     const wkF = (SCHEMA.fields || []).find(x => x.path === 'general.wakeword');
@@ -1723,9 +1890,9 @@ function fieldRow(f) {
     <span class="info" title="${titleAttr}">i</span> ${restart}</div>${input}</div>`);
 }
 
-async function saveSettings() {
+async function saveSettings(silentIfEmpty = false) {
   const updates = {};
-  document.querySelectorAll('#cfg-form [data-path]').forEach(node => {
+  document.querySelectorAll('#settings-config [data-path]').forEach(node => {
     const v = node.dataset.ghost === '1' ? '' : node.value;
     if (!(node.dataset.path in CFG_INITIAL) || v !== CFG_INITIAL[node.dataset.path]) {
       updates[node.dataset.path] = v;
@@ -1733,14 +1900,14 @@ async function saveSettings() {
   });
   const note = $('save-note');
   if (Object.keys(updates).length === 0) {
-    note.innerHTML = `<div class="banner" style="border:1px solid var(--primary);color:var(--primary)">No changes to save.</div>`;
-    return;
+    if (!silentIfEmpty) note.innerHTML = `<div class="banner" style="border:1px solid var(--primary);color:var(--primary)">No changes to save.</div>`;
+    return false;
   }
   const r = await putJSON('/config', { updates });
   if (!r.ok) {
     const e = await r.json().catch(() => ({}));
     note.innerHTML = `<div class="banner error">Save failed: ${JSON.stringify(e.detail || r.status)}</div>`;
-    return;
+    return false;
   }
   const { restart_required } = await r.json();
   Object.assign(CFG_INITIAL, updates);
@@ -1750,6 +1917,23 @@ async function saveSettings() {
     $('do-restart').addEventListener('click', doRestart);
   } else {
     note.innerHTML = `<div class="banner" style="border:1px solid var(--primary);color:var(--primary)">Saved and applied live — no restart needed.</div>`;
+  }
+  return true;
+}
+
+async function saveAllSettings() {
+  const modelsChanged = modelSettingsSignature() !== MODEL_INITIAL;
+  const settingsSaved = await saveSettings(modelsChanged);
+  if (modelsChanged) {
+    const modelsSaved = await saveModels();
+    if (modelsSaved) {
+      MODEL_INITIAL = modelSettingsSignature();
+      if (!settingsSaved) {
+        $('save-note').innerHTML = `<div class="banner warn">Model settings saved. <b>Restart Fulloch</b> for the change to take effect.
+          <button id="do-restart-global-models" class="primary" style="margin-left:0.5rem;padding:0.3rem 0.8rem">Restart now</button></div>`;
+        $('do-restart-global-models').addEventListener('click', doRestart);
+      }
+    }
   }
 }
 

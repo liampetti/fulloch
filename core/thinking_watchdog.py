@@ -39,6 +39,8 @@ class ThinkingWatchdog:
         interval: seconds between stalls. First stall fires after one
             interval (not immediately) — the user just asked for thinking
             and expects a brief delay before any vocal feedback.
+        max_stalls: optional cap on phrases played. `None` repeats until the
+            guarded operation completes or is cancelled.
     """
 
     def __init__(
@@ -49,6 +51,7 @@ class ThinkingWatchdog:
         sink: Optional["queue.Queue"] = None,
         tts_active_event: Optional[threading.Event] = None,
         interval: float = DEFAULT_INTERVAL_SECONDS,
+        max_stalls: Optional[int] = None,
     ):
         self._stall_cache = stall_cache or []
         self._play = play_chunks
@@ -56,6 +59,7 @@ class ThinkingWatchdog:
         self._sink = sink
         self._tts_active_event = tts_active_event
         self._interval = interval
+        self._max_stalls = max_stalls
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -63,7 +67,7 @@ class ThinkingWatchdog:
         # If no stall phrases are cached (warmup hasn't run or failed),
         # the watchdog still acts as a no-op context — keeps the call
         # site simple regardless of cache state.
-        if self._stall_cache:
+        if self._stall_cache and self._max_stalls != 0:
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
         return self
@@ -77,12 +81,16 @@ class ThinkingWatchdog:
     def _run(self) -> None:
         # wait() returns False after a timeout, True when stop is set.
         # Looping until stop fires means we stall every `interval` seconds.
+        stalls = 0
         while not self._stop.wait(self._interval):
+            if self._max_stalls is not None and stalls >= self._max_stalls:
+                return
             if self._session is not None and getattr(self._session, "cancelled", False):
                 return
             try:
                 chunks, sample_rate = random.choice(self._stall_cache)
                 self._play(chunks, sample_rate, session=self._session, sink=self._sink, tts_active_event=self._tts_active_event)
+                stalls += 1
             except Exception as e:
                 # A failed stall must not break the SLM call — log and let
                 # the watchdog tick again on the next interval.

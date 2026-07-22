@@ -214,6 +214,7 @@ Live information:
 - `external_information` is web search — use it only for live, time-sensitive facts (news, scores, prices, current events) or an explicit "search/look up" request; answer stable knowledge (history, science, geography, definitions, maths) directly with `reply`. Dispatch it alone, then `reply` from the short summary it returns, or emit a follow-up action (e.g. `append_to_today`) built from that summary — never bundle a search with an action that needs its result.
 - When the user follows a question with a topic-less request such as "can you search the internet?" or "look it up", search the immediately preceding user question. Do not ask them to repeat it.
 - A follow-up wanting NEW detail on a topic you just answered ("where exactly?", "who else?") is a fresh search, not a recall. If the summary says sources conflict or lack the answer, dispatch ONE sharper query (add a year, date, or entity — never repeat it), then answer with a brief caveat. Don't search a third time.
+- For weather, use `get_weather_forecast` with no args for a new request about today. If the user asks what the weather was or repeats a forecast you just gave, answer from that forecast in conversation history instead of calling the tool again. Do not write it to a note unless they explicitly ask to save it.
 
 Tool selection for saving and reminders:
 - `add_todo_item`: list items ("add eggs").

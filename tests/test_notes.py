@@ -384,7 +384,7 @@ class TestRememberFact:
     def test_remembers_with_date_stamp(self, notes_dir):
         result = notes.remember_fact("The boiler is a Vaillant ecoTEC")
         assert "remember" in result.lower()
-        facts = (notes_dir / "facts.md").read_text()
+        facts = (notes_dir / "fulloch_facts.md").read_text()
         assert "Vaillant ecoTEC" in facts
         # Date stamp in [YYYY-MM-DD] form
         import re
@@ -394,7 +394,7 @@ class TestRememberFact:
     def test_appends_multiple_facts(self, notes_dir):
         notes.remember_fact("fact one")
         notes.remember_fact("fact two")
-        facts = (notes_dir / "facts.md").read_text()
+        facts = (notes_dir / "fulloch_facts.md").read_text()
         assert "fact one" in facts
         assert "fact two" in facts
 
@@ -417,7 +417,7 @@ class TestRecallFacts:
         assert notes.recall_facts() == ""
 
     def test_returns_empty_when_only_header_present(self, notes_dir):
-        (notes_dir / "facts.md").write_text("# Long-term facts\n\n")
+        (notes_dir / "fulloch_facts.md").write_text("# Long-term facts\n\n")
         assert notes.recall_facts() == ""
 
     def test_returns_known_facts_block_when_populated(self, notes_dir):
@@ -431,7 +431,7 @@ class TestRecallFacts:
         assert "# Long-term facts" not in block
 
     def test_skips_blank_lines(self, notes_dir):
-        (notes_dir / "facts.md").write_text("# Long-term facts\n\n\n- [2026-05-20] fact one\n\n\n")
+        (notes_dir / "fulloch_facts.md").write_text("# Long-term facts\n\n\n- [2026-05-20] fact one\n\n\n")
         block = notes.recall_facts()
         assert "fact one" in block
         # No empty lines between the block header and the bullet
@@ -457,7 +457,7 @@ class TestFactsCrud:
         assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", facts[0]["date"])
 
     def test_list_facts_skips_non_bullet_lines(self, notes_dir):
-        (notes_dir / "facts.md").write_text(
+        (notes_dir / "fulloch_facts.md").write_text(
             "# Long-term facts\n\nsome stray prose\n- [2026-05-20] real fact\n"
         )
         facts = notes.list_facts()
@@ -501,7 +501,7 @@ class TestFactsCrud:
     def test_delete_fact_preserves_header(self, notes_dir):
         notes.remember_fact("fact one")
         notes.delete_fact(0)
-        body = (notes_dir / "facts.md").read_text()
+        body = (notes_dir / "fulloch_facts.md").read_text()
         # Header line still present after a delete
         assert body.startswith("# Long-term facts")
 
@@ -599,7 +599,7 @@ class TestNoteFilesCrud:
     def test_save_note_file_refuses_facts(self, notes_dir):
         notes.remember_fact("a secret fact")
         assert notes.save_note_file("facts", "wiped") is False
-        assert "secret fact" in (notes_dir / "facts.md").read_text()
+        assert "secret fact" in (notes_dir / "fulloch_facts.md").read_text()
 
     def test_save_note_file_rejects_path_traversal(self, notes_dir, tmp_path):
         outside = tmp_path / "outside.md"

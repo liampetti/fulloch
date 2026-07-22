@@ -82,25 +82,6 @@ def test_regenerate_token_writes_new_value(ctx):
     assert on_disk == new_token
 
 
-def test_switch_vault_sets_override(ctx, tmp_path):
-    new_vault = tmp_path / "switched-vault"
-    new_vault.mkdir()
-    (new_vault / ".obsidian").mkdir()
-    client = _client(ctx)
-    r = client.post("/api/obsidian/switch-vault", json={"path": str(new_vault)})
-    assert r.status_code == 200
-    assert notes_root.get_notes_root() == new_vault.resolve()
-
-
-def test_switch_vault_rejects_non_vault(ctx, tmp_path):
-    bad = tmp_path / "not-a-vault"
-    bad.mkdir()
-    client = _client(ctx)
-    r = client.post("/api/obsidian/switch-vault", json={"path": str(bad)})
-    assert r.status_code == 400
-    assert "not_a_vault" in r.text or "vault" in r.text.lower()
-
-
 def test_switch_vault_translates_host_path(ctx, tmp_path, monkeypatch):
     """Docker: the user pastes a host path; the server must remap to the
     in-container path before validating the .obsidian/ folder exists."""
@@ -119,45 +100,6 @@ def test_switch_vault_translates_host_path(ctx, tmp_path, monkeypatch):
     monkeypatch.setattr(notes_root, "_CONFIG_PATH", tmp_path / "data" / "config.yml")
     notes_root.reload_translation_map()
     client = _client(ctx)
-    r = client.post("/api/obsidian/switch-vault", json={"path": "/Users/jane/MyVault"})
+    r = client.post("/api/setup/obsidian-vault", json={"path": "/Users/jane/MyVault"})
     assert r.status_code == 200
     assert notes_root.get_notes_root() == container_vault.resolve()
-
-
-def test_migration_decision_copy(ctx, tmp_path):
-    src = tmp_path / "data" / "notes"
-    src.mkdir(parents=True)
-    (src / "thing.md").write_text("hello", encoding="utf-8")
-    vault = tmp_path / "vault"
-    vault.mkdir()
-    (vault / ".obsidian").mkdir()
-    notes_root.set_notes_root(vault, persist=False)
-
-    client = _client(ctx)
-    r = client.post("/api/obsidian/migration-decision", json={"action": "copy"})
-    assert r.status_code == 200
-    assert (vault / "Inbox" / "fulloch-import" / "thing.md").exists()
-
-
-def test_migration_decision_skip_marks_dismissed(ctx, tmp_path):
-    vault = tmp_path / "vault"
-    vault.mkdir()
-    (vault / ".obsidian").mkdir()
-    notes_root.set_notes_root(vault, persist=False)
-
-    client = _client(ctx)
-    r = client.post("/api/obsidian/migration-decision", json={"action": "skip"})
-    assert r.status_code == 200
-    assert notes_root.get_migrated() is True
-
-
-def test_migration_decision_dismiss_never_asks_again(ctx, tmp_path):
-    vault = tmp_path / "vault"
-    vault.mkdir()
-    (vault / ".obsidian").mkdir()
-    notes_root.set_notes_root(vault, persist=False)
-
-    client = _client(ctx)
-    r = client.post("/api/obsidian/migration-decision", json={"action": "dismiss"})
-    assert r.status_code == 200
-    assert notes_root.get_migrated() is True

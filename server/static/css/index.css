@@ -225,7 +225,7 @@ header .sub  {
   text-overflow: ellipsis;
 }
 
-#reset-btn, #settings-btn, #logout-btn {
+#settings-btn {
   width: 34px;
   height: 34px;
   border-radius: 9px;
@@ -239,55 +239,8 @@ header .sub  {
   transition: color 0.15s, background 0.15s, border-color 0.15s;
   margin-right: 6px;
 }
-#reset-btn:hover { color: #ef4444; border-color: #ef4444; background: var(--surface-2); }
 #settings-btn:hover { color: var(--primary); border-color: var(--primary); background: var(--surface-2); }
-#logout-btn:hover { color: #ef4444; border-color: #ef4444; background: var(--surface-2); }
-#reset-btn svg, #settings-btn svg, #logout-btn svg { width: 16px; height: 16px; fill: currentColor; }
-
-/* Always-show-details toggle: when active, every turn's trace group and
-   inference-stats panel start expanded (persisted in localStorage). */
-#detail-toggle {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
-  margin-right: 2px;
-}
-#detail-toggle:hover { color: var(--text); background: var(--surface-2); }
-
-/* Light/dark switcher: moon in light mode (click → dark), sun in dark mode. */
-#appearance-switcher {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
-  margin-right: 2px;
-}
-#appearance-switcher:hover { color: var(--primary); background: var(--surface-2); }
-#appearance-switcher svg { width: 17px; height: 17px; display: block; }
-#appearance-switcher .icon-sun { display: none; }
-html.dark #appearance-switcher .icon-moon { display: none; }
-html.dark #appearance-switcher .icon-sun { display: block; }
-#detail-toggle.active {
-  color: var(--primary);
-  border-color: var(--primary);
-  background: var(--surface-2);
-}
-#detail-toggle svg { width: 16px; height: 16px; fill: currentColor; }
+#settings-btn svg { width: 16px; height: 16px; fill: currentColor; }
 
 #status {
   display: flex;

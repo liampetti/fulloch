@@ -41,6 +41,13 @@ class TestStartStop:
         # Should have played at least twice within the window.
         assert play.call_count >= 2
 
+    def test_max_stalls_limits_progress_phrases(self, stall_cache):
+        play = MagicMock()
+        session = _FakeSession()
+        with ThinkingWatchdog(stall_cache, play, session, interval=0.03, max_stalls=1):
+            time.sleep(0.12)
+        assert play.call_count == 1
+
     def test_clean_shutdown_on_context_exit(self, stall_cache):
         play = MagicMock()
         session = _FakeSession()

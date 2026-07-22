@@ -71,13 +71,27 @@ input[type=text], input[type=number], select, textarea {
   border: 1px solid var(--border); background: var(--bg); color: var(--text); }
 textarea { resize: vertical; min-height: 4rem; }
 .help { font-size: 0.78rem; color: var(--text-muted); margin-top: 0.2rem; }
+.dashboard-preferences fieldset { border: 0; margin: 0; padding: 0; }
+.dashboard-preferences legend { font-size: 0.85rem; font-weight: 600; margin-bottom: 0.3rem; }
+.dashboard-preferences fieldset label, .checkbox-row { display: inline-flex; align-items: center;
+  gap: 0.35rem; margin: 0.2rem 1rem 0.2rem 0; font-weight: 400; cursor: pointer; }
+.dashboard-preferences input { accent-color: var(--primary); }
+.dashboard-preferences .checkbox-row { display: flex; margin-top: 0.9rem; font-weight: 600; }
+.dashboard-actions { display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1rem;
+  padding-top: 1rem; border-top: 1px solid var(--border); }
+.banner.saved { border: 1px solid var(--primary); color: var(--primary); }
+.settings-lead { margin: 0 0 1rem; }
+.settings-card { margin-bottom: 1rem; }
+.settings-icon { display: inline-grid; place-items: center; width: 1.4rem; color: var(--primary); font-size: 1rem; }
+.settings-card .field:first-child { margin-top: 0; }
+.settings-save { margin-bottom: 1rem; }
 input.ghost { color: var(--text-muted); font-style: italic; }
 .muted { color: var(--text-muted); }
 details.advanced { padding-bottom: 0.75rem; }
 details.advanced summary { cursor: pointer; font-size: 0.85rem; color: var(--text-muted); }
 /* Connect-section: expandable card for optional integrations */
 .connect-section { border: 1px solid var(--border); border-radius: 12px; padding: 0.75rem 1rem;
-  margin-bottom: 0.5rem; }
+  margin-bottom: 0.5rem; background: var(--surface); }
 .connect-section summary { cursor: pointer; display: flex; align-items: center; gap: 0.5rem;
   list-style: none; user-select: none; }
 .connect-section summary::-webkit-details-marker { display: none; }
@@ -87,6 +101,9 @@ details.advanced summary { cursor: pointer; font-size: 0.85rem; color: var(--tex
 .connect-section summary .csname { font-weight: 600; flex: 1; }
 .connect-section .cbody { padding-top: 0.5rem; }
 .connect-section summary .cstatus { font-size: 0.78rem; color: var(--text-muted); }
+.connect-heading { display: flex; align-items: center; gap: 0.5rem; }
+.connect-heading .csname { font-weight: 600; flex: 1; }
+.connect-heading .cstatus { font-size: 0.78rem; color: var(--text-muted); }
 /* CPU/GPU variant notice */
 .variant-notice { border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
   background: color-mix(in srgb, var(--warn) 8%, var(--surface)); border-radius: 12px;

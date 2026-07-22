@@ -101,6 +101,97 @@ class TestCheckBargeIn:
         assert assistant._check_barge_in("sat-a", "actually check tomorrow") is True
 
 
+class TestBargeInTranscriptDispatch:
+    """A non-stop interruption must become the next request, not be discarded."""
+
+    @staticmethod
+    def _run_transcript(a, text):
+        def stream_generator(
+            _queue,
+            onset_sink,
+            loudness_sink,
+            provisional_sink,
+            audio_sink,
+            satellite_id_sink,
+            endpoint_wait_sink,
+        ):
+            onset_sink["t"] = 1.0
+            loudness_sink["db"] = -30.0
+            provisional_sink["flag"] = False
+            audio_sink["buf"] = object()
+            satellite_id_sink["id"] = "sat-a"
+            endpoint_wait_sink["s"] = 0.0
+            yield object()
+
+        def asr_pipe(stream, **_kwargs):
+            next(stream)
+            return iter([{"text": text}])
+
+        a.asr_stream_generator = stream_generator
+        a.asr_pipe = asr_pipe
+        a._run_transcriber_loop()
+
+    def test_wakeword_barge_in_dispatches_its_command(self, assistant):
+        assistant._cancel_turn = MagicMock()
+        assistant._start_turn = MagicMock()
+        assistant._verify_strict_barge_wakeword = MagicMock(return_value=True)
+
+        self._run_transcript(assistant, "atticus, tell me more about that thing")
+
+        assistant._cancel_turn.assert_called_once_with("sat-a")
+        assistant._start_turn.assert_called_once()
+        assert assistant._start_turn.call_args.args[0] == "tell me more about that thing"
+
+    def test_conversation_barge_in_dispatches_its_command(self, assistant, monkeypatch):
+        import time
+
+        monkeypatch.setattr("core.assistant.CONVERSATION_TURN_SETTLE_S", 0.01)
+        assistant.barge_in = "off"
+        assistant.satellites["sat-a"].conversation_mode = True
+        assistant._cancel_turn = MagicMock()
+        assistant._start_turn = MagicMock()
+        assistant._run_half_duplex = MagicMock()
+
+        self._run_transcript(assistant, "tell me more about that thing")
+        time.sleep(0.05)
+
+        assistant._cancel_turn.assert_called_once_with("sat-a")
+        assistant._start_turn.assert_called_once()
+        assert assistant._start_turn.call_args.args[0] == "tell me more about that thing"
+        assistant._run_half_duplex.assert_not_called()
+
+
+class TestConversationTurnSettle:
+    def test_only_latest_rapid_request_starts_a_turn(self, assistant, monkeypatch):
+        import time
+
+        monkeypatch.setattr("core.assistant.CONVERSATION_TURN_SETTLE_S", 0.01)
+        assistant.satellites["sat-a"].conversation_mode = True
+        assistant._start_turn = MagicMock()
+
+        assistant._queue_conversation_turn("first", "sat-a")
+        assistant._queue_conversation_turn("second", "sat-a")
+        assistant._queue_conversation_turn("last", "sat-a")
+        time.sleep(0.05)
+
+        assistant._start_turn.assert_called_once()
+        assert assistant._start_turn.call_args.args[0] == "last"
+
+    def test_stop_cancels_an_unstarted_request(self, assistant, monkeypatch):
+        import time
+
+        monkeypatch.setattr("core.assistant.CONVERSATION_TURN_SETTLE_S", 0.05)
+        sat = assistant.satellites["sat-a"]
+        sat.conversation_mode = True
+        assistant._start_turn = MagicMock()
+
+        assistant._queue_conversation_turn("do not run", "sat-a")
+        assistant._clear_pending_conversation_turn(sat)
+        time.sleep(0.1)
+
+        assistant._start_turn.assert_not_called()
+
+
 class TestStrictBargeVerification:
     def test_strict_wakeword_uses_unbiased_verification(self, assistant, monkeypatch):
         verified = []

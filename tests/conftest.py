@@ -40,18 +40,6 @@ os.environ.setdefault("FULLOCH_HA_ALIAS_RETRIES", "0")
 _REPO_ROOT = Path(__file__).parent.parent
 os.environ.setdefault("FULLOCH_CONFIG_PATH", str(_REPO_ROOT / "data" / "config.example.yml"))
 
-# Point tools.notes_root at a scratch override file instead of the real
-# data/notes_root_override.json. The real one is a *sticky* pointer to
-# whatever vault the Obsidian plugin last connected — often a Docker-only
-# mount path (e.g. /vault/...) that doesn't exist on the native machine
-# running pytest, which crashed tools/notes.py's import-time mkdir(). Must
-# be set BEFORE any test module imports tools.notes/notes_root (conftest
-# is loaded first).
-os.environ.setdefault(
-    "FULLOCH_NOTES_ROOT_OVERRIDE_PATH",
-    str(Path(tempfile.gettempdir()) / "fulloch_test_notes_root_override.json"),
-)
-
 # Same reasoning for server.auth's persisted dashboard sessions: point at a
 # scratch file instead of the real data/dashboard_sessions.json so tests that
 # construct an AppContext (which loads sessions at init) don't read/write

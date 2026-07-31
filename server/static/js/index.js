@@ -154,8 +154,9 @@
   };
 
   const fmtTime = (ts) => {
+    if (!Number.isFinite(ts)) return '';
     const d = new Date(ts * 1000);
-    return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   };
 
   const clearEmpty = () => empty?.remove();

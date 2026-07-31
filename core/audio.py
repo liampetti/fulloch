@@ -509,7 +509,11 @@ class AudioCapture:
                 tts_active = session.tts_active.is_set()
                 endpointer = session.vad_endpointer if self._use_vad_enabled else None
 
-                if endpointer is not None and not tts_active:
+                # A soft endpoint can commit a fast command and start TTS before
+                # this same utterance reaches its hard endpoint. Keep that
+                # in-flight VAD segment on the VAD path so its original onset
+                # survives for the transcriber's duplicate-endpoint guard.
+                if endpointer is not None and (not tts_active or endpointer.speech_started):
                     endpointer.process(sat_buf[-1])
                     buffer_samples = sum(c.size for c in sat_buf)
 
@@ -534,10 +538,13 @@ class AudioCapture:
                         and endpointer.speech_started
                     ):
                         if not session.soft_probe_emitted:
-                            min_required = (
-                                self.follow_up_min_utterance_samples
-                                if self._follow_up_open(session)
-                                else self.min_utterance_samples
+                            # A wake phrase is commonly shorter than the normal
+                            # utterance floor. Probe it after the soft pause so
+                            # the satellite can enter listening while the same
+                            # buffer continues toward its hard endpoint.
+                            min_required = min(
+                                self.follow_up_min_utterance_samples,
+                                self.min_utterance_samples,
                             )
                             if buffer_samples >= min_required:
                                 buf = np.concatenate(list(sat_buf), axis=0)
@@ -557,8 +564,13 @@ class AudioCapture:
                                     session.id,
                                 )
                     elif not endpointer.soft_endpointed:
-                        # Speech resumed (or never paused) — re-arm the probe.
-                        session.soft_probe_emitted = False
+                        # Once a provisional has committed, its recorder buffer
+                        # remains live only to produce the matching hard endpoint.
+                        # Speaker residue can otherwise look like resumed speech
+                        # and re-arm the soft probe, dispatching the same request
+                        # repeatedly before that hard endpoint arrives.
+                        if session.provisional_committed_onset == 0:
+                            session.soft_probe_emitted = False
 
                     hit_silence = endpointer.endpointed
                     hit_max = buffer_samples >= self.max_utterance_samples

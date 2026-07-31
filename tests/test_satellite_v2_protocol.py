@@ -1,10 +1,8 @@
-"""`/ws/satellite-v2` — a documented WebSocket protocol for a non-browser client,
-translating the same internal TTS-sink-tuple contract `/ws/satellite` uses into
-the v2 JSON/binary frame shapes. Pins the exact frame shapes so any drift
-fails CI.
-"""
+"""Wire-contract tests for the ESP32 satellite-v2 endpoint."""
 
+import json
 import queue
+import time
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -16,209 +14,185 @@ from server.dashboard import create_app
 
 @pytest.fixture(autouse=True)
 def _empty_satellite_token_config(monkeypatch):
-    """Keep protocol defaults independent of a developer's data/config.yml."""
     import server.config_store as config_store
 
     monkeypatch.setattr(config_store, "read_config", lambda *a, **k: {})
 
 
 def _stub_assistant():
-    a = MagicMock()
-    a.connect_satellite.return_value = queue.Queue()
-    a.satellites = {}
-    a.set_satellite_conversation_mode.return_value = (True, "")
-    return a
+    assistant = MagicMock()
+    assistant.connect_satellite.return_value = queue.Queue()
+    assistant.satellites = {}
+    return assistant
 
 
-def _client(a):
-    return TestClient(create_app(a))
+def _hello(**overrides):
+    message = {
+        "type": "satellite.hello",
+        "token": "device-token",
+        "protocol": {"name": "satellite-v2", "major": 2, "minor": 1},
+        "device": {"id": "kitchen-01", "name": "Kitchen"},
+        "capabilities": {"audio_input": True, "audio_output": True},
+    }
+    message.update(overrides)
+    return message
 
 
-def test_session_start_returns_session_started_with_satellite_id():
-    a = _stub_assistant()
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json({"type": "session.start"})
-        msg = ws.receive_json()
-    assert msg["type"] == "session.started"
-    assert isinstance(msg["satellite_id"], str) and msg["satellite_id"]
+def _client(assistant):
+    return TestClient(create_app(assistant))
 
 
-def test_connect_satellite_receives_the_session_start_fields():
-    a = _stub_assistant()
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json(
-            {
-                "type": "session.start",
-                "label": "kitchen",
-                "ha_area": "kitchen",
-                "server_vad": False,
-                "conversation_mode": True,
-            }
-        )
-        msg = ws.receive_json()
+def test_hello_returns_exact_welcome_audio_contract():
+    assistant = _stub_assistant()
+    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
+        welcome = ws.receive_json()
 
-    args, kwargs = a.connect_satellite.call_args
-    assert args[0] == msg["satellite_id"]
-    assert kwargs["conversation_mode"] is True
-    assert kwargs["label"] == "kitchen"
-    assert kwargs["ha_area"] == "kitchen"
-    assert kwargs["server_vad"] is False
+    assert welcome == {
+        "type": "satellite.welcome",
+        "session_id": welcome["session_id"],
+        "protocol": {"major": 2, "minor": 1},
+        "audio": {
+            "uplink": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1, "frame_duration_ms": 20},
+            "downlink": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1},
+        },
+        "heartbeat_interval_ms": 15000,
+    }
+    assert welcome["session_id"]
+    assert assistant.connect_satellite.call_args.kwargs["device_id"] == "kitchen-01"
 
 
-def test_non_session_start_first_message_is_rejected():
-    a = _stub_assistant()
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json({"type": "audio.frame"})
-        msg = ws.receive_json()
-        assert msg["type"] == "error"
-        assert msg["code"] == "protocol"
+@pytest.mark.parametrize("message", [
+    {"type": "audio.frame"},
+    _hello(protocol={"name": "satellite-v2", "major": 1, "minor": 1}),
+])
+def test_invalid_initial_protocol_is_rejected(message):
+    with _client(_stub_assistant()).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(message)
+        assert ws.receive_json()["type"] == "error"
 
 
-def test_no_tokens_configured_accepts_unauthenticated(monkeypatch):
+def test_invalid_token_is_rejected(monkeypatch):
     import server.config_store as config_store
 
-    monkeypatch.setattr(config_store, "read_config", lambda *a, **k: {})
-    a = _stub_assistant()
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json({"type": "session.start"})
-        msg = ws.receive_json()
-    assert msg["type"] == "session.started"
+    monkeypatch.setattr(config_store, "read_config", lambda *a, **k: {"satellite_tokens": ["right-token"]})
+    with _client(_stub_assistant()).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello(token="wrong-token"))
+        assert ws.receive_json()["code"] == "auth"
 
 
-def test_auth_rejects_wrong_token(monkeypatch):
-    import server.config_store as config_store
-
-    monkeypatch.setattr(
-        config_store, "read_config", lambda *a, **k: {"satellite_tokens": ["right-token"]}
-    )
-    a = _stub_assistant()
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json({"type": "session.start", "auth_token": "wrong-token"})
-        msg = ws.receive_json()
-        assert msg["type"] == "error"
-        assert msg["code"] == "auth"
-
-
-def test_auth_rejects_missing_token_when_tokens_configured(monkeypatch):
-    import server.config_store as config_store
-
-    monkeypatch.setattr(
-        config_store, "read_config", lambda *a, **k: {"satellite_tokens": ["right-token"]}
-    )
-    a = _stub_assistant()
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json({"type": "session.start"})
-        msg = ws.receive_json()
-        assert msg["type"] == "error"
-        assert msg["code"] == "auth"
-
-
-def test_auth_accepts_right_token(monkeypatch):
-    import server.config_store as config_store
-
-    monkeypatch.setattr(
-        config_store, "read_config", lambda *a, **k: {"satellite_tokens": ["right-token"]}
-    )
-    a = _stub_assistant()
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json({"type": "session.start", "auth_token": "right-token"})
-        msg = ws.receive_json()
-    assert msg["type"] == "session.started"
-
-
-def test_tts_sink_tuples_translate_to_v2_frame_sequence():
-    a = _stub_assistant()
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json({"type": "session.start"})
-        ws.receive_json()  # session.started
-
-        tts_q = a.set_satellite_sink.call_args[0][1]
-        tts_q.put(("start", 24000))
-        assert ws.receive_json() == {"type": "turn.tts_start", "sample_rate": 24000}
-
-        chunk = np.array([0.1, -0.2, 0.3], dtype=np.float32)
-        tts_q.put((chunk, None))
-        raw = ws.receive_bytes()
-        assert np.allclose(np.frombuffer(raw, dtype=np.float32), chunk)
-
-        tts_q.put(("end",))
-        assert ws.receive_json() == {"type": "turn.tts_end"}
-
-
-def test_cancel_sink_tuple_translates_to_turn_tts_cancel():
-    a = _stub_assistant()
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json({"type": "session.start"})
+def test_only_640_byte_s16le_uplink_frames_are_accepted():
+    assistant = _stub_assistant()
+    chunk_q = assistant.connect_satellite.return_value
+    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
         ws.receive_json()
+        samples = np.array([1000, -1000] * 160, dtype="<i2")
+        ws.send_bytes(samples.tobytes())
 
-        tts_q = a.set_satellite_sink.call_args[0][1]
-        tts_q.put(("start", 24000))
+    pushed = chunk_q.get_nowait()
+    assert np.allclose(pushed[:2], [1000 / 32768, -1000 / 32768])
+
+
+def test_bad_binary_frame_and_oversized_control_are_rejected():
+    with _client(_stub_assistant()).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
         ws.receive_json()
+        ws.send_bytes(b"bad")
+        assert ws.receive_json()["code"] == "protocol"
+
+    with _client(_stub_assistant()).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
+        ws.receive_json()
+        ws.send_text(json.dumps({"type": "satellite.health", "padding": "x" * 2048}))
+        assert ws.receive_json()["code"] == "protocol"
+
+
+def test_health_report_receives_a_heartbeat_acknowledgement():
+    assistant = _stub_assistant()
+    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
+        ws.receive_json()
+        ws.send_json({
+            "type": "satellite.health",
+            "dropped_uplink_frames": 0,
+            "dropped_downlink_frames": 0,
+            "capture_overruns": 0,
+            "playback_underruns": 0,
+        })
+        assert ws.receive_json() == {"type": "satellite.heartbeat"}
+
+
+def test_tts_is_s16le_bounded_and_cancelled_with_turn_id():
+    assistant = _stub_assistant()
+    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
+        ws.receive_json()
+        tts_q = assistant.set_satellite_sink.call_args.args[1]
+        tts_q.put(("start", 22050))
+        speaking = ws.receive_json()
+        assert speaking["type"] == "assistant.state"
+        assert speaking["state"] == "speaking"
+        tts_q.put((np.ones(3000, dtype=np.float32), None))
+        assert len(ws.receive_bytes()) <= 4096
+        assert len(ws.receive_bytes()) <= 4096
         tts_q.put(("cancel",))
-        assert ws.receive_json() == {"type": "turn.tts_cancel"}
+        assert ws.receive_json() == {"type": "tts.cancel", "turn_id": speaking["turn_id"]}
 
 
-def test_binary_audio_frame_is_pushed_to_chunk_q():
-    a = _stub_assistant()
-    chunk_q = a.connect_satellite.return_value
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json({"type": "session.start"})
+def test_tts_paces_existing_downlink_frames_after_initial_buffer(monkeypatch):
+    import server.satellite_v2 as satellite_v2
+
+    # Keep the test short while proving the sender leaves the initial burst and
+    # begins rate-limiting its unchanged 4 KiB PCM frames.
+    monkeypatch.setattr(satellite_v2, "SATELLITE_V2_DOWNLINK_INITIAL_BUFFER_SECONDS", 0.1)
+    assistant = _stub_assistant()
+    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
         ws.receive_json()
-        pcm = np.array([0.1, -0.2, 0.3], dtype=np.float32)
-        ws.send_bytes(pcm.tobytes())
-
-    pushed = chunk_q.get_nowait()
-    assert np.allclose(pushed, pcm)
-
-
-def test_debug_json_audio_frame_is_pushed_to_chunk_q():
-    import base64
-
-    a = _stub_assistant()
-    chunk_q = a.connect_satellite.return_value
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json({"type": "session.start"})
+        tts_q = assistant.set_satellite_sink.call_args.args[1]
+        tts_q.put(("start", 22050))
         ws.receive_json()
-        pcm = np.array([0.1, -0.2, 0.3], dtype=np.float32)
-        ws.send_json({"type": "audio.frame", "data": base64.b64encode(pcm.tobytes()).decode()})
+        # Three existing 4 KiB wire frames. The first contains 128 ms of audio
+        # and is sent immediately; later frames are paced at their playout rate.
+        tts_q.put((np.ones(6144, dtype=np.float32), None))
+        assert len(ws.receive_bytes()) == 4096
+        assert len(ws.receive_bytes()) == 4096
+        started_waiting = time.monotonic()
+        assert len(ws.receive_bytes()) == 724
 
-    pushed = chunk_q.get_nowait()
-    assert np.allclose(pushed, pcm)
+    assert time.monotonic() - started_waiting >= 0.05
 
 
-def test_audio_flush_pushes_the_flush_sentinel():
-    from core.audio import FLUSH
-
-    a = _stub_assistant()
-    chunk_q = a.connect_satellite.return_value
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json({"type": "session.start", "server_vad": False})
+def test_authoritative_lifecycle_events_are_forwarded_without_tts_queue_delay():
+    assistant = _stub_assistant()
+    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
         ws.receive_json()
-        ws.send_json({"type": "audio.flush"})
+        listener = assistant.register_turn_listener.call_args.args[0]
 
-    assert chunk_q.get_nowait() is FLUSH
+        listener({
+            "type": "assistant.state", "satellite_id": assistant.connect_satellite.call_args.args[0],
+            "state": "wake_detected", "turn_id": "turn-123",
+        })
+        listener({
+            "type": "assistant.state", "satellite_id": assistant.connect_satellite.call_args.args[0],
+            "state": "listening", "turn_id": "turn-123",
+        })
+
+        assert ws.receive_json() == {
+            "type": "assistant.state", "state": "wake_detected", "turn_id": "turn-123"
+        }
+        assert ws.receive_json() == {
+            "type": "assistant.state", "state": "listening", "turn_id": "turn-123"
+        }
 
 
-def test_conversation_mode_toggle_calls_satellite_mode_control():
-    a = _stub_assistant()
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json({"type": "session.start"})
+def test_satellite_stop_requests_an_immediate_server_stop():
+    assistant = _stub_assistant()
+    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
         ws.receive_json()
-        ws.send_json({"type": "conversation_mode.set", "enabled": True})
-        ws.receive_json()
-        ws.send_json({"type": "conversation_mode.set", "enabled": False})
-        ws.receive_json()
+        ws.send_json({"type": "satellite.stop"})
 
-    satellite_id = a.connect_satellite.call_args.args[0]
-    a.set_satellite_conversation_mode.assert_any_call(satellite_id, True)
-    a.set_satellite_conversation_mode.assert_any_call(satellite_id, False)
-
-
-def test_session_stop_ends_the_connection_cleanly():
-    a = _stub_assistant()
-    with _client(a).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json({"type": "session.start"})
-        satellite_id = ws.receive_json()["satellite_id"]
-        ws.send_json({"type": "session.stop"})
-
-    a.disconnect_satellite.assert_called_once_with(satellite_id)
+    assistant.request_stop.assert_called_once()

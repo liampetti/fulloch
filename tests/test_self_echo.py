@@ -142,6 +142,19 @@ class TestBargeInTranscriptDispatch:
         assistant._start_turn.assert_called_once()
         assert assistant._start_turn.call_args.args[0] == "tell me more about that thing"
 
+    def test_bare_barge_wakeword_stops_tts_and_waits_for_the_tail_command(self, assistant):
+        assistant._cancel_turn = MagicMock()
+        assistant._mark_turn_end = MagicMock()
+        assistant._start_turn = MagicMock()
+        assistant._verify_strict_barge_wakeword = MagicMock(return_value=True)
+
+        self._run_transcript(assistant, "atticus")
+
+        assistant._cancel_turn.assert_called_once_with("sat-a")
+        assistant._mark_turn_end.assert_called_once_with("sat-a")
+        assistant.audio_capture.flush.assert_not_called()
+        assistant._start_turn.assert_not_called()
+
     def test_conversation_barge_in_dispatches_its_command(self, assistant, monkeypatch):
         import time
 

@@ -30,6 +30,13 @@ def test_mtp_server_command_can_disable_flash_attention(monkeypatch):
     assert command[command.index("--flash-attn") + 1] == "off"
 
 
+def test_blackwell_disables_mtp_and_flash_attention(monkeypatch):
+    monkeypatch.setattr(slm, "_blackwell_gpu", lambda: True)
+
+    assert slm._mtp_supported() is False
+    assert slm._flash_attn_supported() is False
+
+
 def test_mtp_server_requires_native_binary(monkeypatch):
     monkeypatch.setattr(slm, "_local_server_binary", lambda: "")
 
@@ -44,4 +51,3 @@ def test_standard_server_command_omits_mtp_flags(monkeypatch):
 
     assert "--spec-type" not in command
     assert "--spec-draft-n-max" not in command
-

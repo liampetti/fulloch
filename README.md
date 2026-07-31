@@ -59,6 +59,11 @@ docker run -d \
   ghcr.io/liampetti/fulloch:latest
 ```
 
+> **RTX 50-series:** Native MTP speculative decoding and llama.cpp's built-in
+> FlashAttention are disabled on Blackwell because llama.cpp can fault on
+> longer agent prompts. This does not affect the Python FlashAttention 2
+> dependency used by the GPU speech models.
+
 > The commented-out `-v` line exposes your Obsidian vault to Fulloch so voice notes can read/write it. Uncomment it, edit the host path, and add a matching `obsidian.path_translation` entry in `data/config.yml`, see the Obsidian section below.
 >
 > **Named volumes** (e.g. `-v fulloch-data:/app/data:rw` in compose) work too, the image's entrypoint chowns the volume to the container's user on first boot, so no separate `chown` init container is needed. The bind mount above (the default in this README) inherits the host's UID and is even simpler.

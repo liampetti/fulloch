@@ -19,7 +19,8 @@ ARG MAX_JOBS=4
 ENV MAX_JOBS=${MAX_JOBS}
 ARG HIGGS_TTS_REPO=https://github.com/liampetti/HiggsTTS.cpp.git
 ARG HIGGS_TTS_REF=061134ad8c3dc544ebf1362f12882fd26a879f8f
-ARG LLAMA_CPP_REF=e3546c7948e3af463d0b401e6421d5a4c2faf565
+# llama.cpp b10199: validated MTP support on NVIDIA Blackwell.
+ARG LLAMA_CPP_REF=b4ca032ae3729516943884786de4ae39fba0bbca
 
 RUN apt-get update && apt-get install -y git cmake && rm -rf /var/lib/apt/lists/*
 

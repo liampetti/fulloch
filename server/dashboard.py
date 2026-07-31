@@ -7,7 +7,6 @@ and `_turn_lock` so the two inputs never race on the SLM.
 """
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -19,11 +18,9 @@ import socket
 import sys
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import (
@@ -44,6 +41,7 @@ from .lifecycle import (
     AppContext,
     Lifecycle,
 )
+from .satellite_protocols import register_satellite_routes
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +101,6 @@ _PARLOCH_PATH = _SERVER_DIR.parent / "parloch.png"
 _VOICES_DIR = _SERVER_DIR.parent / "data" / "voices"
 
 HISTORY_LIMIT = 200
-
 
 def _schedule_restart(delay: float = 0.5) -> None:
     """Re-exec the process shortly, so a fresh start re-reads config.yml.
@@ -474,6 +471,8 @@ def create_app(
 
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR), check_dir=False), name="static")
 
+    register_satellite_routes(app, context, lifecycle)
+
     # Split CSS / JS assets live under /static/. Mounted last so the explicit
     # /logo.png and /voice/sample routes above still take precedence on those
     # exact paths (StaticFiles only matches prefixes that have no explicit
@@ -543,6 +542,11 @@ def create_app(
     startup_greeting_seeded = False
 
     def on_turn(event: dict) -> None:
+        # Native satellite lifecycle events share the assistant listener but
+        # are delivered directly to `/ws/satellite-v2`; they are not chat
+        # messages and have no dashboard timestamp/content fields.
+        if event.get("type") == "assistant.state":
+            return
         with history_lock:
             history_log.append(event)
             if len(history_log) > HISTORY_LIMIT:
@@ -1502,366 +1506,6 @@ def create_app(
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    @app.websocket("/ws/satellite")
-    async def satellite_ws(ws: WebSocket):
-        """Browser satellite: bidirectional audio over WebSocket.
-
-        Browser → server: binary Float32 PCM frames at 16 kHz mono.
-        Server → browser: JSON control frames + binary Float32 PCM from TTS.
-          {"type":"tts_start","sr":<int>}  — TTS beginning; note sample rate
-          <binary Float32 chunk>            — audio data
-          {"type":"tts_end"}               — TTS utterance complete
-        Browser → server text: {"type":"conversation_mode.set","enabled":<bool>}
-        Browser → server text: {"type":"tts_credit","seconds":<float>}
-        """
-        # Session-cookie auth for WebSocket (cookies are sent on the upgrade request).
-        pw_hash = context.dashboard_password_hash
-        if pw_hash:
-            from .auth import SESSION_COOKIE
-            sid = ws.cookies.get(SESSION_COOKIE, "")
-            if not sid or sid not in context.sessions:
-                await ws.close(code=1008)
-                return
-
-        if context.assistant is None or not lifecycle.is_ready():
-            await ws.close(code=1013)
-            return
-
-        await ws.accept()
-
-        playback_credit: asyncio.Queue[float] = asyncio.Queue()
-
-        # Minted here, not inside connect_satellite: this handler needs the id
-        # synchronously (to key set_satellite_sink/disconnect_satellite below,
-        # and — from Phase 4 — to tell the browser its own id for the busy
-        # banner), so the caller owns id generation rather than the callee.
-        satellite_id = uuid.uuid4().hex
-        tts_q: queue.Queue = queue.Queue(maxsize=200)
-        requested_conversation_mode = ws.query_params.get("conversation")
-        conversation_mode = (
-            None if requested_conversation_mode is None else requested_conversation_mode == "1"
-        )
-        # 6b: the user's one-time area-picker choice (persisted client-side in
-        # localStorage), sent as ?area=<area_id> on connect. Blank/absent —
-        # e.g. HA not configured, or the user skipped the picker — leaves the
-        # satellite with no area default, same as before this field existed.
-        ha_area = ws.query_params.get("area", "").strip() or None
-        # Display name for the same choice (?area_name=), so completed turns
-        # can show a "location" pill without the server re-resolving area_id
-        # -> name itself — see SatelliteSession.ha_area_name.
-        ha_area_name = ws.query_params.get("area_name", "").strip() or None
-        from core.assistant import ConversationModeUnavailable
-
-        try:
-            chunk_q = context.assistant.connect_satellite(
-                satellite_id,
-                conversation_mode=conversation_mode,
-                ha_area=ha_area,
-                ha_area_name=ha_area_name,
-            )
-        except ConversationModeUnavailable as e:
-            await ws.send_json({"type": "error", "code": "conversation_mode_active", "message": str(e)})
-            await ws.close(code=1008)
-            return
-        context.assistant.set_satellite_sink(satellite_id, tts_q)
-        # Tell the browser its own id so it can tell (via /status's
-        # active_owner_id) whether a busy turn belongs to it or another
-        # satellite. Shape-aligned with the satellite-v2 protocol's
-        # session.started frame (Phase 5) — same identity handshake, just
-        # not yet worth a second message type for the browser path.
-        session = context.assistant.satellites.get(satellite_id)
-        in_conversation_mode = bool(getattr(session, "conversation_mode", False))
-        await ws.send_json(
-            {
-                "type": "session",
-                "satellite_id": satellite_id,
-                "conversation_mode": in_conversation_mode,
-                "half_duplex": (
-                    context.assistant.barge_in != "wakeword"
-                    and not in_conversation_mode
-                ),
-            }
-        )
-        # The opening greeting was synthesised during startup, before any
-        # satellite could possibly be connected — replay it once, now that
-        # one actually is. No-op on every later reconnect.
-        context.assistant.replay_greeting(satellite_id)
-
-        async def _receive():
-            try:
-                while True:
-                    msg = await ws.receive()
-                    if msg.get("type") == "websocket.disconnect":
-                        return
-                    if "bytes" in msg and msg["bytes"]:
-                        arr = np.frombuffer(msg["bytes"], dtype=np.float32).copy()
-                        try:
-                            chunk_q.put_nowait(arr)
-                        except queue.Full:
-                            pass
-                    elif "text" in msg and msg["text"]:
-                        try:
-                            data = json.loads(msg["text"])
-                            if data.get("type") == "conversation_mode.set":
-                                enabled, reason = context.assistant.set_satellite_conversation_mode(
-                                    satellite_id, bool(data.get("enabled", False))
-                                )
-                                session = context.assistant.satellites.get(satellite_id)
-                                await ws.send_json(
-                                    {
-                                        "type": "conversation_mode.result",
-                                        "enabled": enabled and bool(getattr(session, "conversation_mode", False)),
-                                        "half_duplex": not (
-                                            context.assistant.barge_in == "wakeword"
-                                            or bool(getattr(session, "conversation_mode", False))
-                                        ),
-                                        "message": reason,
-                                    }
-                                )
-                            elif data.get("type") == "tts_credit":
-                                seconds = data.get("seconds", 0)
-                                if isinstance(seconds, (int, float)) and seconds > 0:
-                                    playback_credit.put_nowait(float(seconds))
-                        except (json.JSONDecodeError, Exception):
-                            pass
-            except (WebSocketDisconnect, RuntimeError):
-                return
-
-        async def _send():
-            sample_rate = 0
-            credit_seconds = 0.0
-            while True:
-                try:
-                    item = await asyncio.to_thread(lambda: tts_q.get(timeout=0.5))
-                except Exception:
-                    continue
-                kind = item[0]
-                if isinstance(kind, str) and kind == "stop":
-                    return
-                try:
-                    if isinstance(kind, str) and kind == "start":
-                        sample_rate = item[1]
-                        credit_seconds = 0.0
-                        await ws.send_json({"type": "tts_start", "sr": item[1]})
-                    elif isinstance(kind, str) and kind == "end":
-                        await ws.send_json({"type": "tts_end"})
-                    elif isinstance(kind, str) and kind == "cancel":
-                        # Stop the browser's short scheduled playback window.
-                        await ws.send_json({"type": "tts_cancel"})
-                    else:
-                        if sample_rate <= 0:
-                            continue
-                        frame_samples = max(1, int(sample_rate * 0.1))
-                        for start in range(0, len(kind), frame_samples):
-                            frame = kind[start : start + frame_samples]
-                            frame_seconds = len(frame) / sample_rate
-                            while credit_seconds + 1e-9 < frame_seconds:
-                                credit_seconds += await playback_credit.get()
-                            credit_seconds -= frame_seconds
-                            await ws.send_bytes(frame.astype(np.float32).tobytes())
-                except Exception:
-                    return
-
-        recv_task = asyncio.create_task(_receive())
-        send_task = asyncio.create_task(_send())
-        try:
-            _done, pending = await asyncio.wait(
-                [recv_task, send_task], return_when=asyncio.FIRST_COMPLETED
-            )
-            for t in pending:
-                t.cancel()
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception):
-                    pass
-        finally:
-            context.assistant.disconnect_satellite(satellite_id)
-            context.assistant.set_satellite_sink(satellite_id, None)
-
-    @app.websocket("/ws/satellite-v2")
-    async def satellite_ws_v2(ws: WebSocket):
-        """Generic (non-browser) satellite protocol — a documented WebSocket
-        API for a headless client (native app, ESP32/Pi satellite box, CI
-        smoke test) instead of the browser-optimised `/ws/satellite`. JSON
-        control frames both directions; audio is binary Float32 PCM (primary)
-        or base64-JSON (debug path).
-
-        client → server  session.start   {auth_token?, label?, ha_area?,
-                                           server_vad? (default true),
-                                            conversation_mode? (default config)}
-        server → client  session.started {satellite_id}
-        client → server  audio.frame     binary Float32 PCM (primary) OR
-                                          {"type":"audio.frame","data":<base64>}
-        client → server  audio.flush     force an utterance boundary
-                                          (only meaningful if server_vad=false)
-        client → server  conversation_mode.set {enabled}
-        client → server  session.stop    graceful end
-        server → client  turn.tts_start  {sample_rate}
-        server → client  turn.tts_frame  binary Float32 PCM
-        server → client  turn.tts_end
-        server → client  turn.tts_cancel
-        server → client  error           {code, message}
-
-        Reuses the exact `Assistant.connect_satellite`/sink-tuple contract
-        `/ws/satellite` does — this handler is a pure edge-translator, not a
-        second plumbing implementation (see the plan's Phase 1 note on the
-        sink tuple contract being declared stable for this reason).
-        """
-        if context.assistant is None or not lifecycle.is_ready():
-            await ws.close(code=1013)
-            return
-
-        await ws.accept()
-
-        try:
-            first = await ws.receive_json()
-        except Exception:
-            await ws.close(code=1002)
-            return
-        if not isinstance(first, dict) or first.get("type") != "session.start":
-            await ws.send_json(
-                {"type": "error", "code": "protocol", "message": "expected session.start"}
-            )
-            await ws.close(code=1002)
-            return
-
-        # Local-network trust model by default (same as /ws/satellite) —
-        # only gated when satellite_tokens is actually configured, so
-        # existing/no-token setups keep working unauthenticated.
-        from .config_store import read_config
-
-        auth_token = first.get("auth_token")
-        tokens = read_config().get("satellite_tokens") or []
-        if tokens and not any(
-            auth_token and secrets.compare_digest(str(auth_token), str(t)) for t in tokens
-        ):
-            await ws.send_json(
-                {"type": "error", "code": "auth", "message": "invalid or missing auth_token"}
-            )
-            await ws.close(code=1008)
-            return
-
-        satellite_id = uuid.uuid4().hex
-        tts_q: queue.Queue = queue.Queue(maxsize=200)
-        from core.assistant import ConversationModeUnavailable
-
-        try:
-            chunk_q = context.assistant.connect_satellite(
-                satellite_id,
-                conversation_mode=first.get("conversation_mode"),
-                label=first.get("label"),
-                ha_area=first.get("ha_area"),
-                server_vad=bool(first.get("server_vad", True)),
-                auth_token=auth_token,
-            )
-        except ConversationModeUnavailable as e:
-            await ws.send_json({"type": "error", "code": "conversation_mode_active", "message": str(e)})
-            await ws.close(code=1008)
-            return
-        context.assistant.set_satellite_sink(satellite_id, tts_q)
-        session = context.assistant.satellites.get(satellite_id)
-        await ws.send_json(
-            {
-                "type": "session.started",
-                "satellite_id": satellite_id,
-                "conversation_mode": bool(getattr(session, "conversation_mode", False)),
-            }
-        )
-
-        async def _receive():
-            from core.audio import FLUSH
-
-            try:
-                while True:
-                    msg = await ws.receive()
-                    if msg.get("type") == "websocket.disconnect":
-                        return
-                    if "bytes" in msg and msg["bytes"]:
-                        arr = np.frombuffer(msg["bytes"], dtype=np.float32).copy()
-                        try:
-                            chunk_q.put_nowait(arr)
-                        except queue.Full:
-                            pass
-                    elif "text" in msg and msg["text"]:
-                        try:
-                            data = json.loads(msg["text"])
-                        except json.JSONDecodeError:
-                            continue
-                        mtype = data.get("type") if isinstance(data, dict) else None
-                        if mtype == "audio.frame":
-                            # Debug path — binary frames are primary.
-                            b64 = data.get("data")
-                            if b64:
-                                try:
-                                    arr = np.frombuffer(
-                                        base64.b64decode(b64), dtype=np.float32
-                                    ).copy()
-                                    chunk_q.put_nowait(arr)
-                                except (ValueError, queue.Full):
-                                    pass
-                        elif mtype == "audio.flush":
-                            try:
-                                chunk_q.put_nowait(FLUSH)
-                            except queue.Full:
-                                pass
-                        elif mtype == "conversation_mode.set":
-                            enabled, reason = context.assistant.set_satellite_conversation_mode(
-                                satellite_id, bool(data.get("enabled", False))
-                            )
-                            session = context.assistant.satellites.get(satellite_id)
-                            await ws.send_json(
-                                {
-                                    "type": "conversation_mode.result",
-                                    "enabled": enabled and bool(getattr(session, "conversation_mode", False)),
-                                    "half_duplex": not (
-                                        context.assistant.barge_in == "wakeword"
-                                        or bool(getattr(session, "conversation_mode", False))
-                                    ),
-                                    "message": reason,
-                                }
-                            )
-                        elif mtype == "session.stop":
-                            return
-            except WebSocketDisconnect:
-                return
-
-        async def _send():
-            while True:
-                try:
-                    item = await asyncio.to_thread(lambda: tts_q.get(timeout=0.5))
-                except Exception:
-                    continue
-                kind = item[0]
-                if isinstance(kind, str) and kind == "stop":
-                    return
-                try:
-                    if isinstance(kind, str) and kind == "start":
-                        await ws.send_json({"type": "turn.tts_start", "sample_rate": item[1]})
-                    elif isinstance(kind, str) and kind == "end":
-                        await ws.send_json({"type": "turn.tts_end"})
-                    elif isinstance(kind, str) and kind == "cancel":
-                        await ws.send_json({"type": "turn.tts_cancel"})
-                    else:
-                        await ws.send_bytes(kind.astype(np.float32).tobytes())
-                except Exception:
-                    return
-
-        recv_task = asyncio.create_task(_receive())
-        send_task = asyncio.create_task(_send())
-        try:
-            _done, pending = await asyncio.wait(
-                [recv_task, send_task], return_when=asyncio.FIRST_COMPLETED
-            )
-            for t in pending:
-                t.cancel()
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception):
-                    pass
-        finally:
-            context.assistant.disconnect_satellite(satellite_id)
-            context.assistant.set_satellite_sink(satellite_id, None)
-
     @app.websocket("/ws/obsidian")
     async def obsidian_ws(ws: WebSocket):
         """Obsidian plugin bridge.
@@ -2198,6 +1842,9 @@ def start_dashboard(
             port=backend_port,
             log_level="warning",
             access_log=False,
+            # ESP32 WebSocket clients use the satellite protocol heartbeat for
+            # liveness; Uvicorn's transport ping timeout disconnects them.
+            ws_ping_interval=None,
             **ssl_kwargs,
         )
         uvicorn_server = uvicorn.Server(uvicorn_config)
@@ -2231,6 +1878,7 @@ def start_dashboard(
         port=port,
         log_level="warning",
         access_log=False,
+        ws_ping_interval=None,
     )
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True, name="dashboard-uvicorn")

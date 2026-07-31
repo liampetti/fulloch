@@ -91,6 +91,7 @@ def test_tls_enabled_when_both_files_exist(monkeypatch, tmp_path):
     cfg = captured[0]
     assert cfg.get("ssl_certfile") == str(cert)
     assert cfg.get("ssl_keyfile") == str(key)
+    assert cfg.get("ws_ping_interval") is None
     # uvicorn is bound on 127.0.0.1 (the dispatcher fronts the public port).
     assert cfg.get("host") == "127.0.0.1"
 
@@ -115,6 +116,7 @@ def test_tls_skipped_when_only_one_key_set(monkeypatch, tmp_path):
     # No TLS → bound on the public port directly.
     assert captured[0].get("host") == "0.0.0.0"
     assert captured[0].get("port") == 8765
+    assert captured[0].get("ws_ping_interval") is None
 
 
 def test_tls_skipped_when_files_missing(monkeypatch, tmp_path):

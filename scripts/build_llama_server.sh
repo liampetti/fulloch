@@ -2,7 +2,8 @@
 # Build the exact llama.cpp revision used by the MTP local-LLM backend.
 set -euo pipefail
 
-ref="e3546c7948e3af463d0b401e6421d5a4c2faf565"
+# llama.cpp b10199: validated MTP support on NVIDIA Blackwell.
+ref="b4ca032ae3729516943884786de4ae39fba0bbca"
 root="$(git rev-parse --show-toplevel)"
 source_dir="$root/.cache/llama-cpp/source"
 build_dir="$source_dir/build"

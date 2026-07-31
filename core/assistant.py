@@ -11,6 +11,7 @@ import random
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -1301,6 +1302,14 @@ class Assistant:
         with self._turn_listeners_lock:
             self._turn_listeners.append(callback)
 
+    def unregister_turn_listener(self, callback) -> None:
+        """Remove a short-lived protocol listener when its satellite disconnects."""
+        with self._turn_listeners_lock:
+            try:
+                self._turn_listeners.remove(callback)
+            except ValueError:
+                pass
+
     def _emit_turn_event(
         self,
         role: str,
@@ -1404,6 +1413,88 @@ class Assistant:
             except Exception as e:
                 logger.warning(f"Turn listener failed: {e}")
 
+    def _emit_satellite_state(self, satellite_id: str, state: str, **extra) -> None:
+        """Publish an authoritative lifecycle transition for a native satellite."""
+        event = {
+            "type": "assistant.state",
+            "state": state,
+            "satellite_id": satellite_id,
+            **extra,
+        }
+        dispatch = getattr(self, "_dispatch_event", None)
+        if dispatch is not None:
+            dispatch(event)
+
+    def _begin_satellite_turn(self, sat: SatelliteSession) -> None:
+        """Establish a new native-satellite turn when its wakeword is accepted."""
+        sat.protocol_state_generation += 1
+        if sat.protocol_follow_up_timer is not None:
+            sat.protocol_follow_up_timer.cancel()
+            sat.protocol_follow_up_timer = None
+        sat.protocol_turn_id = uuid.uuid4().hex
+        self._emit_satellite_state(sat.id, "wake_detected", turn_id=sat.protocol_turn_id)
+        self._emit_satellite_state(sat.id, "listening", turn_id=sat.protocol_turn_id)
+
+    def _begin_satellite_follow_up_turn(self, sat: SatelliteSession) -> None:
+        """Replace an expiring follow-up window with the spoken continuation."""
+        sat.protocol_state_generation += 1
+        if sat.protocol_follow_up_timer is not None:
+            sat.protocol_follow_up_timer.cancel()
+            sat.protocol_follow_up_timer = None
+        sat.protocol_turn_id = uuid.uuid4().hex
+        self._emit_satellite_state(sat.id, "listening", turn_id=sat.protocol_turn_id)
+
+    def _reject_pending_satellite_wake(self, sat: SatelliteSession) -> None:
+        """Close a turn opened by a soft transcript that the final ASR rejected."""
+        if sat.protocol_wake_pending:
+            sat.protocol_wake_pending = False
+            self._satellite_idle(sat)
+
+    def _satellite_thinking(self, sat: SatelliteSession) -> None:
+        """The recorder endpoint was accepted and processing is about to begin."""
+        if sat.protocol_turn_id is not None:
+            self._emit_satellite_state(sat.id, "thinking", turn_id=sat.protocol_turn_id)
+
+    def _schedule_satellite_follow_up(self, sat: SatelliteSession, playback_end: float, window: float) -> None:
+        """Publish follow-up only once the last scheduled PCM should be silent."""
+        sat.protocol_state_generation += 1
+        generation = sat.protocol_state_generation
+        if sat.protocol_follow_up_timer is not None:
+            sat.protocol_follow_up_timer.cancel()
+
+        def open_window() -> None:
+            if sat.protocol_state_generation != generation or sat.protocol_turn_id is None:
+                return
+            expires_at_ms = int((time.time() + window) * 1000)
+            self._emit_satellite_state(
+                sat.id, "follow_up", turn_id=sat.protocol_turn_id, expires_at_ms=expires_at_ms
+            )
+
+            def expire() -> None:
+                if sat.protocol_state_generation != generation:
+                    return
+                sat.protocol_turn_id = None
+                self._emit_satellite_state(sat.id, "idle", turn_id=None)
+
+            expiry = threading.Timer(window, expire)
+            expiry.daemon = True
+            sat.protocol_follow_up_timer = expiry
+            expiry.start()
+
+        timer = threading.Timer(max(0.0, playback_end - time.monotonic()), open_window)
+        timer.daemon = True
+        sat.protocol_follow_up_timer = timer
+        timer.start()
+
+    def _satellite_idle(self, sat: SatelliteSession) -> None:
+        sat.protocol_state_generation += 1
+        if sat.protocol_follow_up_timer is not None:
+            sat.protocol_follow_up_timer.cancel()
+            sat.protocol_follow_up_timer = None
+        sat.protocol_turn_id = None
+        sat.protocol_wake_pending = False
+        self._emit_satellite_state(sat.id, "idle", turn_id=None)
+
     def set_llm_model(self, model: str) -> dict:
         """Hot-swap the remote LLM model on the live handle — no restart.
 
@@ -1438,6 +1529,7 @@ class Assistant:
         ha_area_name: Optional[str] = None,
         server_vad: bool = True,
         auth_token: Optional[str] = None,
+        device_id: Optional[str] = None,
     ) -> "queue.Queue":
         """Start a satellite session (browser `/ws/satellite` or a
         `/ws/satellite-v2` client). Returns the audio chunk queue.
@@ -1451,9 +1543,9 @@ class Assistant:
         exclusive and bypasses the wakeword; a None request uses the configured
         default. Normal mode opens a 60 s initial wakeword-free grace window.
 
-        `label`/`server_vad`/`auth_token` are the satellite-v2 forward-compat
+        `label`/`server_vad`/`auth_token`/`device_id` are the satellite-v2 forward-compat
         fields (#12/#13) — the browser path leaves them at their defaults
-        (`None`/`True`/`None`); only the `/ws/satellite-v2` handler passes
+        (`None`/`True`/`None`/`None`); only the `/ws/satellite-v2` handler passes
         real values. `ha_area` (#14, 6b) IS set by the browser path too, from
         the `?area=` query param on `/ws/satellite` — the user's one-time
         room picker choice, persisted client-side in `localStorage`.
@@ -1462,6 +1554,18 @@ class Assistant:
         `_emit_agent_event` — never for area-scoping logic, which always goes
         through `ha_area`'s id.
         """
+        # A reboot can establish a new WebSocket before the previous TCP
+        # connection is declared dead. A native device ID has one active
+        # session, so stop the old recorder and sender before replacing it.
+        if device_id:
+            prior_ids = [
+                sid for sid, existing in self.satellites.items()
+                if existing.device_id == device_id
+            ]
+            for prior_id in prior_ids:
+                logger.info("Replacing existing satellite session %s for device %s", prior_id, device_id)
+                self.disconnect_satellite(prior_id)
+
         with self._conversation_lock:
             if self._conversation_owner_id is not None:
                 raise ConversationModeUnavailable("Conversation mode is active on another device.")
@@ -1474,6 +1578,7 @@ class Assistant:
             ha_area_name=ha_area_name,
             server_vad=server_vad,
             auth_token=auth_token,
+            device_id=device_id,
         )
         self.satellites[satellite_id] = session
         requested_mode = self.conversation_mode_default if conversation_mode is None else conversation_mode
@@ -1507,6 +1612,12 @@ class Assistant:
         self.set_satellite_conversation_mode(satellite_id, False)
         session = self.satellites.pop(satellite_id, None)
         if session is not None:
+            self._satellite_idle(session)
+            if session.tts_sink is not None:
+                try:
+                    session.tts_sink.put_nowait(("stop",))
+                except queue.Full:
+                    pass
             session.chunk_q.put(None)  # sentinel → satellite_recorder_thread exits
         # A mid-turn disconnect must release the arbiter like a stop would —
         # otherwise a satellite that vanished mid-reply would wedge every
@@ -1531,6 +1642,7 @@ class Assistant:
                 if self._conversation_owner_id == satellite_id:
                     self._conversation_owner_id = None
                 self.audio_capture.clear_follow_up(session)
+                self._satellite_idle(session)
                 return True, ""
             if self._conversation_owner_id not in (None, satellite_id):
                 return False, "Conversation mode is active on another device."
@@ -2551,6 +2663,7 @@ class Assistant:
                 # A stop means stand down — no wakeword-free follow-up window.
                 sat.last_turn_end = 0.0
                 self.audio_capture.clear_follow_up(sat)
+                self._satellite_idle(sat)
             self._turn_arbiter.release(target)
         # Belt-and-suspenders for any out-of-band playback on the shared
         # session (greeting replay / warmup — not a satellite's own turn).
@@ -2588,6 +2701,9 @@ class Assistant:
         window = 3600.0 if sat.conversation_mode else self.follow_up_seconds
         if window > 0:
             self.audio_capture.arm_follow_up(sat, window)
+            self._schedule_satellite_follow_up(sat, sat.last_turn_end, window)
+        else:
+            self._satellite_idle(sat)
 
     def _is_context_echo(self, command: str) -> bool:
         """True if `command` is built solely from ASR context-bias tokens.
@@ -2765,6 +2881,11 @@ class Assistant:
             or _BARGE_STOP_RE.search(text_lower) is not None
         )
 
+    def _is_bare_barge_wakeword(self, text_lower: str) -> bool:
+        """True when a barge-in contains only the assistant's name."""
+        stripped = text_lower.strip(_PROMPT_STRIP_CHARS)
+        return _BARGE_STOP_RE.search(stripped) is None and self._barge_re.fullmatch(stripped) is not None
+
     def _verify_strict_barge_wakeword(
         self, text_lower: str, loudness_db, baseline_db: float
     ) -> bool:
@@ -2839,9 +2960,6 @@ class Assistant:
         ):
             try:
                 text = result.get("text", "").strip()
-                if not text:
-                    continue
-
                 # Which satellite recorded this utterance — set by the ASR
                 # stream generator just before yielding it, so it's still
                 # correct for this exact result. Resolved up front since
@@ -2860,6 +2978,12 @@ class Assistant:
                     )
                     continue
 
+                provisional = self._asr_provisional.get("flag", False)
+                if not text:
+                    if not provisional:
+                        self._reject_pending_satellite_wake(sat)
+                    continue
+
                 if time.monotonic() < sat.drop_results_until:
                     logger.debug(f"Dropping post-cancel ASR result: {text}")
                     continue
@@ -2871,6 +2995,8 @@ class Assistant:
                 # so "Yeah." and "yeah" both hit.
                 _text_bare = re.sub(r"[^\w\s]", "", text.lower()).strip()
                 if _text_bare in _ASR_NOISE_TOKENS:
+                    if not provisional:
+                        self._reject_pending_satellite_wake(sat)
                     logger.debug(f"Dropped noise token: {text!r}")
                     continue
 
@@ -2881,6 +3007,8 @@ class Assistant:
                 # the bare-wakeword guard catches it — but the leading marker is
                 # an unambiguous tell a user never utters. Drop the whole result.
                 if self._context_prompt_marker and self._context_prompt_marker in text.lower():
+                    if not provisional:
+                        self._reject_pending_satellite_wake(sat)
                     logger.debug(f"Dropped context-prompt echo: {text!r}")
                     continue
 
@@ -2890,7 +3018,6 @@ class Assistant:
                 # open, baseline feed) all guard on `provisional` and drop it so
                 # the real hard endpoint stays authoritative. Mid-turn a partial
                 # is ignored outright — barge-in waits for the hard endpoint.
-                provisional = self._asr_provisional.get("flag", False)
                 if provisional and sat.turn_active and not (
                     sat.conversation_mode or self.barge_in == "wakeword"
                 ):
@@ -2927,7 +3054,9 @@ class Assistant:
                 text_lower = text.lower()
                 wakeword_match = self._wakeword_re.search(text_lower)
                 wakeword_present = wakeword_match is not None
+                in_follow_up = False
                 just_barged_in = False
+                bare_barge_wakeword = False
 
                 # Tag every transcription with its dBFS volume and the current
                 # background-speech baseline (logged for tuning; the baseline
@@ -2961,6 +3090,7 @@ class Assistant:
                         continue
 
                     logger.info(f"BARGE-IN: {text}")
+                    bare_barge_wakeword = self._is_bare_barge_wakeword(text_lower)
                     self._cancel_turn(turn_satellite_id)
                     # Buffer contains TTS-bleed accumulated during the
                     # cancelled turn; flush so the next user utterance is
@@ -2968,8 +3098,9 @@ class Assistant:
                     # any ASR inference still finishing on contaminated
                     # audio gets discarded — without swallowing the user's
                     # real reply, which can't arrive for ≥1.5s.
-                    self.audio_capture.flush()
-                    sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
+                    if not bare_barge_wakeword:
+                        self.audio_capture.flush()
+                        sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
                     just_barged_in = True
                 elif not wakeword_present:
                     # Follow-up window: a brief grace period after TTS ends
@@ -2986,6 +3117,7 @@ class Assistant:
                         and 0 <= onset_gap < self.follow_up_seconds
                     ) or sat.conversation_mode
                     if not in_follow_up:
+                        self._reject_pending_satellite_wake(sat)
                         # Genuine background: non-wakeword, not an accepted
                         # follow-up, and not mid-turn (that path is handled by
                         # the `turn_active` branch above). This is the only
@@ -3016,6 +3148,14 @@ class Assistant:
                     logger.info(f"FOLLOW-UP: {text}")
 
                 if just_barged_in:
+                    if bare_barge_wakeword:
+                        # A short barge-in capture can split "Atticus, stop"
+                        # into separate ASR results. Stop TTS now, then keep the
+                        # queued tail available as the follow-up command.
+                        self._mark_turn_end(turn_satellite_id)
+                        sat.skip_followup_self_echo = True
+                        logger.info("Barge-in wakeword alone — awaiting follow-up")
+                        continue
                     if self._is_pure_stop(text_lower):
                         # Pure "stop"/"cancel": the turn is already cancelled.
                         # Stand down to idle — no follow-up window, no spoken
@@ -3030,6 +3170,7 @@ class Assistant:
                         sat.last_turn_end = 0.0
                         self._clear_pending_conversation_turn(sat)
                         self.audio_capture.clear_follow_up(sat)
+                        self._satellite_idle(sat)
                         logger.info("Barge-in (pure stop) — standing down")
                         continue
                     # A completed non-stop barge-in is the user's replacement
@@ -3049,6 +3190,7 @@ class Assistant:
                     sat.last_turn_end = 0.0
                     self._clear_pending_conversation_turn(sat)
                     self.audio_capture.clear_follow_up(sat)
+                    self._satellite_idle(sat)
                     logger.info("Pure stop in follow-up — standing down")
                     continue
 
@@ -3075,8 +3217,30 @@ class Assistant:
                 # follow-up path is exempt — a one-word context-term reply there
                 # can be a legitimate answer.
                 if wakeword_present and self._is_context_echo(user_prompt):
+                    if not provisional:
+                        self._reject_pending_satellite_wake(sat)
                     logger.debug(f"Suppressed (context-bias echo, likely non-speech): {text!r}")
                     continue
+
+                # A soft endpoint is an in-progress transcript, not a turn
+                # commit. Once it contains a credible wakeword, notify the
+                # satellite immediately and keep the recorder buffer intact so
+                # the hard endpoint can supply the complete command.
+                onset_gap = self._asr_onset["t"] - sat.last_turn_end
+                started_in_follow_up = (
+                    self.follow_up_seconds > 0
+                    and sat.last_turn_end > 0
+                    and 0 <= onset_gap < self.follow_up_seconds
+                ) or sat.conversation_mode
+                if (
+                    provisional
+                    and wakeword_present
+                    and not just_barged_in
+                    and not started_in_follow_up
+                    and not sat.protocol_wake_pending
+                ):
+                    self._begin_satellite_turn(sat)
+                    sat.protocol_wake_pending = True
 
                 if not user_prompt:
                     # A provisional with no command yet (e.g. "Hey Atticus…"
@@ -3090,6 +3254,7 @@ class Assistant:
                         # it on loudness + an unbiased re-transcribe before
                         # opening the follow-up window; a rejected one is noise.
                         if not self._verify_bare_wakeword(loudness_db, baseline_db):
+                            self._reject_pending_satellite_wake(sat)
                             continue
                         # Wakeword said alone (often to barge in and then
                         # pause before asking) — open the follow-up window
@@ -3098,6 +3263,10 @@ class Assistant:
                         # one-shot bypass so the user's question isn't
                         # suppressed as self-echo when it shares words
                         # with the response we just cancelled.
+                        if sat.protocol_wake_pending:
+                            sat.protocol_wake_pending = False
+                        else:
+                            self._begin_satellite_turn(sat)
                         self._mark_turn_end(turn_satellite_id)
                         sat.skip_followup_self_echo = True
                         logger.info("Wakeword alone — awaiting follow-up")
@@ -3136,6 +3305,17 @@ class Assistant:
                 # same reason as stt_seconds above.
                 endpoint_wait_seconds = self._asr_endpoint_wait.get("s")
                 endpoint_kind = "soft" if provisional else "hard"
+                # A soft wake probe already established the turn ID while the
+                # recorder kept listening. Without one, the hard endpoint is
+                # the first authoritative wakeword-acceptance point.
+                if wakeword_present and not in_follow_up:
+                    if sat.protocol_wake_pending:
+                        sat.protocol_wake_pending = False
+                    else:
+                        self._begin_satellite_turn(sat)
+                elif in_follow_up:
+                    self._begin_satellite_follow_up_turn(sat)
+                self._satellite_thinking(sat)
                 if sat.conversation_mode:
                     self._queue_conversation_turn(
                         user_prompt,

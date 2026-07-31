@@ -84,6 +84,21 @@ class TestConnectSatellite:
         assert a.satellites["my-id"].id == "my-id"
         a.disconnect_satellite("my-id")
 
+    def test_same_device_id_replaces_the_existing_session(self):
+        a = _make_assistant()
+        a.audio_capture.satellite_recorder_thread = lambda session: None
+        old_chunks = a.connect_satellite("old-session", device_id="kitchen-01")
+        old_tts: "queue.Queue" = queue.Queue()
+        a.set_satellite_sink("old-session", old_tts)
+
+        a.connect_satellite("new-session", device_id="kitchen-01")
+
+        assert set(a.satellites) == {"dashboard-text", "new-session"}
+        assert old_chunks.get_nowait() is None
+        assert old_tts.get_nowait() == ("stop",)
+        assert a.satellites["new-session"].device_id == "kitchen-01"
+        a.disconnect_satellite("new-session")
+
     def test_conversation_mode_is_exclusive(self):
         from core.assistant import ConversationModeUnavailable
 
@@ -204,6 +219,7 @@ def test_satellite_session_defaults():
     assert s.ha_area is None
     assert s.server_vad is True
     assert s.auth_token is None
+    assert s.device_id is None
 
 
 class TestServerVadHook:
@@ -377,6 +393,67 @@ class TestVadEndpointing:
 
         assert [r[3] for r in results] == [True, False]  # one provisional, one final
         assert results[0][4] == results[1][4] == "sat-a"
+
+    def test_hard_endpoint_keeps_its_vad_onset_when_tts_starts_after_soft_probe(self):
+        ac = AudioCapture(use_vad=False, min_utterance_ms=100, max_utterance_ms=10000)
+        ac._use_vad_enabled = True
+        ac.vad_min_speech_samples = 100
+        # The old RMS fallback would immediately finalise its accumulated buffer
+        # after TTS began, but assign a new onset to that duplicate utterance.
+        ac.tts_max_utterance_samples = 1000
+        script = [
+            {"speech_started": True},
+            {"soft_endpointed": True},
+            {"endpointed": True, "last_speech_samples": 5000},
+        ]
+        chunk_q: "queue.Queue" = queue.Queue()
+        session = SatelliteSession(id="sat-a", chunk_q=chunk_q)
+
+        class TtsStartingEndpointer(_ScriptedEndpointer):
+            def process(self, samples) -> None:
+                super().process(samples)
+                if self.soft_endpointed:
+                    session.tts_active.set()
+
+        ac._build_endpointer = lambda: TtsStartingEndpointer(script)
+        chunk = np.zeros(2000, dtype=np.float32)
+        for _ in range(3):
+            chunk_q.put(chunk)
+        chunk_q.put(None)
+
+        ac.satellite_recorder_thread(session)
+
+        results = []
+        while not ac.audio_queue.empty():
+            results.append(ac.audio_queue.get_nowait())
+
+        assert [r[3] for r in results] == [True, False]
+        assert results[0][1] == results[1][1]
+
+    def test_soft_endpoint_probes_short_wake_phrase_below_normal_minimum(self):
+        ac = AudioCapture(use_vad=False, min_utterance_ms=1500, max_utterance_ms=10000)
+        ac._use_vad_enabled = True
+        script = [
+            {"speech_started": True},
+            {"soft_endpointed": True},
+        ]
+        ac._build_endpointer = lambda: _ScriptedEndpointer(script)
+
+        chunk_q: "queue.Queue" = queue.Queue()
+        session = SatelliteSession(id="sat-a", chunk_q=chunk_q)
+        # 500ms: enough for a short wake probe, below the normal 1.5s floor.
+        chunk = np.zeros(4000, dtype=np.float32)
+        chunk_q.put(chunk)
+        chunk_q.put(chunk)
+        chunk_q.put(None)
+
+        ac.satellite_recorder_thread(session)
+
+        result = ac.audio_queue.get_nowait()
+        assert result[0].size == 8000
+        assert result[3] is True
+        assert result[4] == "sat-a"
+        assert ac.audio_queue.empty()
 
     def test_endpointer_reset_after_hard_endpoint_prevents_stale_duplicate(self):
         ac = AudioCapture(use_vad=False, min_utterance_ms=100, max_utterance_ms=10000)

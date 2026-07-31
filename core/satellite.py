@@ -63,6 +63,15 @@ class SatelliteSession:
     conversation_turn_generation: int = 0
     conversation_turn_lock: threading.Lock = field(default_factory=threading.Lock)
     follow_up_deadline: float = 0.0  # monotonic; 0.0 = window closed
+    # Native satellite-v2 lifecycle. The ID remains stable through a
+    # wake-word-free continuation and is cleared only when the window closes.
+    protocol_turn_id: Optional[str] = None
+    protocol_state_generation: int = 0
+    protocol_follow_up_timer: Optional[threading.Timer] = None
+    # True after a soft-endpoint transcript matched the wakeword. The recorder
+    # keeps collecting the same utterance; its hard endpoint either accepts
+    # this turn ID or rejects the provisional match and returns to idle.
+    protocol_wake_pending: bool = False
     noise_baseline: BackgroundNoiseBaseline = field(default_factory=BackgroundNoiseBaseline)
     # Per-satellite half-duplex self-mute (muted while *this* satellite's own
     # reply plays) — distinct from AudioCapture.mic_globally_enabled, the
@@ -106,3 +115,4 @@ class SatelliteSession:
     ha_area_name: Optional[str] = None
     server_vad: bool = True  # False => client pre-endpoints audio; #12
     auth_token: Optional[str] = None  # satellite-v2 identity token; #12
+    device_id: Optional[str] = None  # stable satellite-v2 device identity

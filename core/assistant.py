@@ -193,14 +193,14 @@ def _build_barge_pattern(wakeword: str, base_pattern: str) -> str:
 
 # Spoken phrase pools live in `utils.phrases` — edit them there.
 from utils.phrases import (  # noqa: E402
+    ACK_CACHE_ATTRS,
+    ACK_PHRASES,
     BUSY_PHRASES,
     GREETING_TOPICS,
     LLM_ERROR_PHRASES,
     NO_AI_PHRASES,
     REMINDER_PREFIX_PHRASES,
     STARTUP_CACHE_SPECS,
-    STARTUP_SHARED_CACHE_ATTRS,
-    STARTUP_SHARED_PHRASES,
     TOOL_UNAVAILABLE_PHRASES,
 )
 
@@ -351,7 +351,8 @@ class Assistant:
                 from 0.0 (silent) to 1.0 (normal volume).
             barge_in: "off" (half-duplex) or "wakeword" (interrupt with wakeword)
             conversation_mode_default: Let the first connected satellite enter
-                exclusive Conversation mode automatically.
+                exclusive Conversation mode automatically, disconnecting other
+                voice satellites until it is disabled.
             barge_in_threshold_dbfs: Silence floor while TTS plays, in dBFS
                 (the unit transcription volume is logged in). An interrupting
                 voice must exceed it to be captured — lower = easier to barge
@@ -616,6 +617,9 @@ class Assistant:
         # Snapshotted into a turn's `TurnStats.endpoint_wait_seconds`
         # alongside `stt_seconds` at dispatch.
         self._asr_endpoint_wait: dict = {"s": None}
+        # True only for the one early, speech-onset ASR probe per utterance.
+        # It can confirm a wakeword to the satellite, never dispatch a command.
+        self._asr_wake_probe: dict = {"flag": False}
         # A2: the last completed turn's stats payload (`TurnStats.to_payload()`),
         # for `GET /status` to expose without the caller needing to scrape SSE
         # history. None until the first turn finishes.
@@ -833,6 +837,7 @@ class Assistant:
         self.synthesize = tts_mod.synthesize
         self.web_search_stall_cache: list = []
         self.note_write_stall_cache: list = []
+        self.music_search_stall_cache: list = []
         self.pre_thinking_stall_cache: list = []
         self.thinking_stall_cache: list = []
         self.ack_cache: list = []
@@ -1540,8 +1545,9 @@ class Assistant:
         tell the browser its own id). The WebSocket handler feeds float32
         16 kHz mono chunks into the returned queue; the satellite_recorder_thread
         drains it and pushes utterances to the ASR pipeline. Conversation mode is
-        exclusive and bypasses the wakeword; a None request uses the configured
-        default. Normal mode opens a 60 s initial wakeword-free grace window.
+        exclusive, disconnects any other voice satellites, and bypasses the
+        wakeword; a None request uses the configured default. Normal mode opens
+        a 60 s initial wakeword-free grace window.
 
         `label`/`server_vad`/`auth_token`/`device_id` are the satellite-v2 forward-compat
         fields (#12/#13) — the browser path leaves them at their defaults
@@ -1566,9 +1572,6 @@ class Assistant:
                 logger.info("Replacing existing satellite session %s for device %s", prior_id, device_id)
                 self.disconnect_satellite(prior_id)
 
-        with self._conversation_lock:
-            if self._conversation_owner_id is not None:
-                raise ConversationModeUnavailable("Conversation mode is active on another device.")
         chunk_q: "queue.Queue" = queue.Queue(maxsize=100)
         session = SatelliteSession(
             id=satellite_id,
@@ -1580,7 +1583,13 @@ class Assistant:
             auth_token=auth_token,
             device_id=device_id,
         )
-        self.satellites[satellite_id] = session
+        # Check and register under one lock. Otherwise a satellite could pass
+        # the ownership check just as another connection enables Conversation
+        # mode, then appear after that mode's disconnect snapshot.
+        with self._conversation_lock:
+            if self._conversation_owner_id is not None:
+                raise ConversationModeUnavailable("Conversation mode is active on another device.")
+            self.satellites[satellite_id] = session
         requested_mode = self.conversation_mode_default if conversation_mode is None else conversation_mode
         if requested_mode:
             enabled, reason = self.set_satellite_conversation_mode(satellite_id, True)
@@ -1632,6 +1641,7 @@ class Assistant:
 
     def set_satellite_conversation_mode(self, satellite_id: str, enabled: bool) -> tuple[bool, str]:
         """Enable or disable exclusive Conversation mode for one satellite."""
+        satellites_to_disconnect: list[str] = []
         with self._conversation_lock:
             session = self.satellites.get(satellite_id)
             if session is None:
@@ -1646,14 +1656,20 @@ class Assistant:
                 return True, ""
             if self._conversation_owner_id not in (None, satellite_id):
                 return False, "Conversation mode is active on another device."
-            others = [sid for sid in self.satellites if sid not in ("dashboard-text", satellite_id)]
-            if others:
-                return False, "Disconnect other voice satellites before enabling Conversation mode."
             self._conversation_owner_id = satellite_id
             session.conversation_mode = True
             self.audio_capture.arm_follow_up(session, 3600)
-            logger.info("Conversation mode enabled for satellite %s", satellite_id)
-            return True, ""
+            satellites_to_disconnect = [
+                sid for sid in self.satellites if sid not in ("dashboard-text", satellite_id)
+            ]
+
+        # Tear down other voice paths outside the conversation lock: disconnect
+        # clears their own conversation state and takes the same lock.
+        for other_id in satellites_to_disconnect:
+            self.request_stop(other_id)
+            self.disconnect_satellite(other_id)
+        logger.info("Conversation mode enabled for satellite %s", satellite_id)
+        return True, ""
 
     def set_satellite_sink(self, satellite_id: str, q: Optional["queue.Queue"]) -> None:
         """Route TTS output to `satellite_id`'s WebSocket queue (or None to clear it)."""
@@ -1821,15 +1837,15 @@ class Assistant:
     )
 
     def _render_phrase_caches(self) -> None:
-        shared = [self.synthesize(phrase, self.voice_clone_prompt) for phrase in STARTUP_SHARED_PHRASES]
-        for attr in STARTUP_SHARED_CACHE_ATTRS:
-            setattr(self, attr, shared)
-        rendered = len(shared)
+        acknowledgements = [self.synthesize(phrase, self.voice_clone_prompt) for phrase in ACK_PHRASES]
+        for attr in ACK_CACHE_ATTRS:
+            setattr(self, attr, acknowledgements)
+        rendered = len(acknowledgements)
         for attr, phrases, llm_only in STARTUP_CACHE_SPECS:
             if llm_only and not self.llm_enabled:
                 continue
             setattr(self, attr, [self.synthesize(phrase, self.voice_clone_prompt) for phrase in phrases])
-            rendered += len(phrases)
+            rendered += len(getattr(self, attr))
         logger.info("Cached %d reusable startup phrase clips", rendered)
 
     def _rerender_phrase_caches(self) -> None:
@@ -2954,6 +2970,7 @@ class Assistant:
                 self._asr_audio,
                 self._asr_satellite_id,
                 self._asr_endpoint_wait,
+                self._asr_wake_probe,
             ),
             batch_size=1,
             generate_kwargs={"max_new_tokens": 256},
@@ -2979,6 +2996,7 @@ class Assistant:
                     continue
 
                 provisional = self._asr_provisional.get("flag", False)
+                wake_probe = self._asr_wake_probe.get("flag", False)
                 if not text:
                     if not provisional:
                         self._reject_pending_satellite_wake(sat)
@@ -3010,6 +3028,26 @@ class Assistant:
                     if not provisional:
                         self._reject_pending_satellite_wake(sat)
                     logger.debug(f"Dropped context-prompt echo: {text!r}")
+                    continue
+
+                if wake_probe:
+                    # This is deliberately feedback-only. The final endpointed
+                    # transcript remains responsible for accepting and routing
+                    # the command, so an incomplete phrase cannot execute early.
+                    wake_match = self._wakeword_re.search(text.lower())
+                    probe_command = (
+                        text[wake_match.end() :].strip(_PROMPT_STRIP_CHARS)
+                        if wake_match is not None
+                        else ""
+                    )
+                    if (
+                        wake_match is not None
+                        and not self._is_context_echo(probe_command)
+                        and not self._is_speaking(turn_satellite_id)
+                        and sat.protocol_turn_id is None
+                    ):
+                        self._begin_satellite_turn(sat)
+                        sat.protocol_wake_pending = True
                     continue
 
                 # Provisional (soft-endpoint) snapshot of an unfinished
@@ -3359,7 +3397,13 @@ class Assistant:
             return "thinking"
         return "idle"
 
-    def speak_proactive(self, text: str, alarm: bool = False, emit_event: bool = True) -> None:
+    def speak_proactive(
+        self,
+        text: str,
+        alarm: bool = False,
+        emit_event: bool = True,
+        satellite_id: Optional[str] = None,
+    ) -> None:
         """Speak `text` through the cloned voice without a user turn.
 
         Waits for any in-progress voice turn (SLM + TTS) to fully complete
@@ -3370,7 +3414,8 @@ class Assistant:
         duration. Blocks until playback finishes.
 
         `alarm=True` (timer completions) plays the pre-rendered alert tone
-        immediately before the spoken text.
+        immediately before the spoken text. `satellite_id` targets one connected
+        voice satellite; an explicit target never falls back to another device.
         """
         if not self.models_ready.wait(timeout=30):
             logger.warning("speak_proactive: models not ready")
@@ -3382,6 +3427,13 @@ class Assistant:
                 break
             time.sleep(0.05)
         with self._turn_lock:
+            if satellite_id is None:
+                proactive_sat = self.satellites.get(self._last_connected_satellite_id)
+            else:
+                proactive_sat = self.satellites.get(satellite_id)
+                if proactive_sat is None or proactive_sat.tts_sink is None:
+                    logger.info("speak_proactive: target satellite %s is no longer connected", satellite_id)
+                    return
             for s in self.satellites.values():
                 s.transcribing = False
             # Proactive speech isn't a reply to any particular satellite's
@@ -3389,7 +3441,6 @@ class Assistant:
             # falls back to whichever satellite connected most recently (see
             # `_last_connected_satellite_id`'s docstring for the known
             # multi-satellite limitation this implies).
-            proactive_sat = self.satellites.get(self._last_connected_satellite_id)
             self._turn_local.sink = proactive_sat.tts_sink if proactive_sat is not None else None
             self._turn_local.tts_active_event = (
                 proactive_sat.tts_active if proactive_sat is not None else None

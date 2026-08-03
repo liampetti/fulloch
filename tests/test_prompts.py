@@ -71,13 +71,35 @@ class TestAgentPromptShape:
         assert "dry observational humor" in prompt
         assert "<|style:whispering|>" not in prompt
 
+    def test_non_balanced_personality_styles_tool_delivery(self, notes_dir):
+        prompt = prompts.get_agent_system_prompt(personality="wry")
+        assert "For `send_satellite_message`" in prompt
+        assert "send_satellite_message" in prompt
+        assert "kitchen's patience has been noted" in prompt
+        assert '"dinner is ready"}]}' not in prompt
+        assert '"delivery": "..."' in prompt
+
+    def test_balanced_personality_keeps_tool_delivery_literal(self, notes_dir):
+        prompt = prompts.get_agent_system_prompt(personality="balanced")
+        assert "Tool delivery:" not in prompt
+
     def test_prompt_confirms_whisper_delivery_is_supported(self, notes_dir):
         prompt = prompts.get_agent_system_prompt()
         assert "Never claim you cannot whisper" in prompt
 
-    def test_prompt_keeps_recent_weather_forecasts_in_conversation_context(self, notes_dir):
+    def test_prompt_keeps_recent_weather_forecasts_when_weather_tool_is_available(self, notes_dir, monkeypatch):
+        monkeypatch.setattr(
+            prompts.tool_registry,
+            "canonical_name",
+            lambda name: name if name == "get_weather_forecast" else None,
+        )
         prompt = prompts.get_agent_system_prompt()
         assert "answer from that forecast in conversation history" in prompt
+
+    def test_prompt_omits_weather_guidance_without_weather_tool(self, notes_dir, monkeypatch):
+        monkeypatch.setattr(prompts.tool_registry, "canonical_name", lambda _name: None)
+        prompt = prompts.get_agent_system_prompt()
+        assert "answer from that forecast in conversation history" not in prompt
 
     def test_conversation_mode_prompt_explains_wakeword_free_interruptions(self, notes_dir):
         prompt = prompts.get_agent_system_prompt(conversation_mode=True, wakeword_barge_in=True)

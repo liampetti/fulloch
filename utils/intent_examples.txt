@@ -210,5 +210,5 @@
   {"reply": "The downstairs office has two lights on — the main one at 75 percent and the pendant fully on."}
 
 - User: "How's the temperature in the office"
-  Output:
-  {"actions": [{"intent": "get_temperature", "args": ["office"]}]}
+Output:
+{"actions": [{"intent": "get_temperature", "args": ["office"]}]}

@@ -114,6 +114,7 @@ class TestBargeInTranscriptDispatch:
             audio_sink,
             satellite_id_sink,
             endpoint_wait_sink,
+            wake_probe_sink,
         ):
             onset_sink["t"] = 1.0
             loudness_sink["db"] = -30.0
@@ -121,6 +122,7 @@ class TestBargeInTranscriptDispatch:
             audio_sink["buf"] = object()
             satellite_id_sink["id"] = "sat-a"
             endpoint_wait_sink["s"] = 0.0
+            wake_probe_sink["flag"] = False
             yield object()
 
         def asr_pipe(stream, **_kwargs):

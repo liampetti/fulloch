@@ -71,7 +71,7 @@ def _actions(*intents):
 def test_safe_regex_intent_commits_immediately():
     # Complete reversible / read-only intents commit at the soft endpoint.
     assert should_commit_provisional("turn off the lights", _actions("turn_off")) is True
-    assert should_commit_provisional("what time is it", _actions("get_time")) is True
+    assert should_commit_provisional("what time is it", _actions("get_current_time")) is True
     assert should_commit_provisional("louder", _actions("ha_volume_up")) is True
 
 

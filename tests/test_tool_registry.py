@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tools.tool_registry import ToolSchema, UnknownToolError  # noqa: E402
+from tools.tool_registry import ToolRegistry, ToolSchema, UnknownToolError  # noqa: E402
 
 
 class TestRegistration:
@@ -137,6 +137,12 @@ class TestDescribeTools:
         assert "limit" in description
         assert "optional" in description
         assert "default: 10" in description
+
+    def test_describe_hides_unavailable_tool(self):
+        registry = ToolRegistry()
+        registry.register_tool(lambda: "", name="hidden", available=lambda: False)
+
+        assert "hidden" not in registry.describe_tools()
 
 
 class TestSchema:

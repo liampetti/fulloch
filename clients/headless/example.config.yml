@@ -7,6 +7,7 @@ server:
   host: "192.168.1.50"          # Fulloch server address
   port: 8765                    # dashboard port
   # ssl: false                  # set false to use ws:// instead of wss://
+  # ca_cert: "/path/to/fulloch-home-ca.crt"  # required for Fulloch's self-signed/private-CA HTTPS
   token: "my-satellite-token"   # matched against satellite_tokens in the server's config.yml
 
 satellite:

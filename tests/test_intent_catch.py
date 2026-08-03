@@ -22,6 +22,7 @@ from utils.intent_catch import (
     extract_lock,
     extract_note_delete,
     extract_resume,
+    extract_satellite_message,
     extract_skip,
     extract_stop,
     extract_summarize_thinking,
@@ -617,7 +618,7 @@ class TestCatchAll:
 
     def test_catch_time(self):
         result = catchAll("what time is it")
-        assert result == {"actions": [{"intent": "get_time", "args": []}]}
+        assert result == {"actions": [{"intent": "get_current_time", "args": []}]}
 
     @pytest.mark.parametrize(
         "utterance",
@@ -660,7 +661,7 @@ class TestCatchAll:
 
     def test_catch_list_timers(self):
         result = catchAll("get timers")
-        assert result == {"actions": [{"intent": "list_timers", "args": []}]}
+        assert result == {"actions": [{"intent": "get_timer_status", "args": []}]}
 
     def test_no_match_returns_original(self):
         original = "tell me a joke"
@@ -727,6 +728,28 @@ class TestExtractNoteDelete:
         assert isinstance(result, dict)
         assert "reply" in result and "actions" not in result
         assert "dashboard" in result["reply"].lower()
+
+    def test_catch_all_allows_editor_requests_when_edit_mode_is_enabled(self, monkeypatch):
+        monkeypatch.setattr("utils.intent_catch._obsidian_edit_enabled", lambda: True)
+        assert catchAll("delete the active note") == "delete the active note"
+
+
+class TestExtractSatelliteMessage:
+    def test_extracts_tell_with_target_and_message(self):
+        assert extract_satellite_message("Tell downstairs that dinner is ready") == (
+            "downstairs",
+            "dinner is ready",
+        )
+
+    def test_catch_all_routes_satellite_message(self):
+        assert catchAll("announce to the kitchen saying the guests are here") == {
+            "actions": [
+                {
+                    "intent": "send_satellite_message",
+                    "args": ["kitchen", "the guests are here"],
+                }
+            ]
+        }
 
 
 class TestExtractDeepThink:

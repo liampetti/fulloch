@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class FullochCoordinator(DataUpdateCoordinator):
-    def __init__(self, hass, session: aiohttp.ClientSession, url: str) -> None:
+    def __init__(self, hass, session: aiohttp.ClientSession, url: str, headers: dict[str, str]) -> None:
         super().__init__(
             hass,
             logger,
@@ -19,11 +19,13 @@ class FullochCoordinator(DataUpdateCoordinator):
         )
         self.session = session
         self.url = url
+        self.headers = headers
 
     async def _async_update_data(self) -> dict:
         try:
             async with self.session.get(
                 f"{self.url}/status",
+                headers=self.headers,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:

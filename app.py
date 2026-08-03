@@ -229,6 +229,8 @@ def main():
     dash_cert = general.get("dashboard_ssl_certfile")
     dash_key = general.get("dashboard_ssl_keyfile")
     dash_http_redirect_port = general.get("dashboard_http_redirect_port")
+    integration_api_enabled = general.get("integration_api_enabled", True)
+    integration_api_port = general.get("integration_api_port", 8766)
 
     # Phase A: decide whether first-run setup is needed before loading anything.
     decision = detect_setup_state(cfg)
@@ -248,6 +250,11 @@ def main():
         lifecycle = Lifecycle(phase=LOADING)
 
     context = AppContext(lifecycle=lifecycle, config_path=_CONFIG_PATH)
+
+    if integration_api_enabled:
+        from server.integration_api import start_integration_api
+
+        start_integration_api(context, dash_host, int(integration_api_port))
 
     # The dashboard is one long-lived server shared by setup and run: the
     # wizard's install endpoint downloads models then releases the block below,

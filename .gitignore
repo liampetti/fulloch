@@ -111,6 +111,6 @@ scripts/gen_kokoro_demos.py
 # Keep Example Configs (negation patterns)
 # =============================================================================
 !data/config.example.yml
-!.env.example\
+!.env.example
 !data/models/grammars/agent.gbnf
 searxng_data/settings.yml.new

@@ -70,6 +70,11 @@ _TIMER_RE = re.compile(
     r"(?:start|set)\s+(?:a\s+)?(?:timer|time)\s+(?:for\s+)?(.+?)(?:\s+please)?$",
     re.IGNORECASE,
 )
+_SATELLITE_MESSAGE_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:tell|announce(?:\s+to)?|send\s+(?:a\s+)?message\s+to)\s+"
+    r"(?P<target>.+?)\s+(?:that|saying)\s+(?P<message>.+?)\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
 _LIST_TIMERS_RE = re.compile(
     r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*"
     r"get\s+(?:a\s+)?(?:timers|timer|time)(?:\s+(.*?))?(?:\s+status)?$",
@@ -109,6 +114,16 @@ def extract_timer(command: str) -> Optional[str]:
 
 def list_timers(command: str) -> Optional[bool]:
     return True if _match("List Timers", _LIST_TIMERS_RE, command) else None
+
+
+def extract_satellite_message(command: str) -> Optional[tuple[str, str]]:
+    """Return `(target, message)` for a direct satellite announcement."""
+    match = _match("Satellite message", _SATELLITE_MESSAGE_RE, command)
+    if not match:
+        return None
+    target = re.sub(r"^the\s+", "", match.group("target").strip(), flags=re.IGNORECASE)
+    message = match.group("message").strip().rstrip(".!?")
+    return (target, message) if target and message else None
 
 
 _CONTEXTUAL_WEB_SEARCH_RE = re.compile(
@@ -642,16 +657,10 @@ def extract_summarize_thinking(command: str) -> Optional[bool]:
     return None
 
 
-# Deleting or editing notes is deliberately NOT a capability — the voice
-# assistant can only add to notes (there is no delete/edit tool). Without this
-# guard, an asked-to-delete SLM emits a free-text reply claiming it removed the
-# note when it did nothing, leaving the user to believe data is gone when it
-# isn't. Catch the explicit phrasings deterministically and short-circuit to a
-# fixed refusal *before* the SLM runs, so it can't confabulate. Requires both a
-# removal/edit verb near the start AND a note-domain object ("note", "fact",
-# "journal"), so "turn off the lights" or "add a note to delete the config
-# tomorrow" don't trip it. A false refusal is recoverable (the user rephrases);
-# a false claim of deletion is silent and corrosive — so we err toward refusing.
+# When Obsidian edit/delete mode is off, deletion and editing are deliberately
+# not voice capabilities. Catch explicit phrasings before the SLM can claim it
+# acted when nothing happened. When the user has explicitly enabled that mode,
+# let active-note/cursor requests reach the guarded editor tools instead.
 _NOTE_DELETE_RE = re.compile(
     r"^\s*(?:please\s+|hey\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|"
     r"will\s+you\s+|i\s+(?:want|need|'?d\s+like)\s+you\s+to\s+|just\s+)*"
@@ -670,6 +679,13 @@ _NOTE_DELETE_REPLY = (
 def extract_note_delete(command: str) -> Optional[bool]:
     """True if `command` asks to delete or edit a note/fact (an unsupported op)."""
     return True if _match("Note delete", _NOTE_DELETE_RE, command) else None
+
+
+def _obsidian_edit_enabled() -> bool:
+    """Read the live editor-access switch without importing tools at startup."""
+    from tools.notes import _obsidian_edit_allowed
+
+    return _obsidian_edit_allowed()
 
 
 # Each rule: (extractor, intent_dict_builder). The builder receives the
@@ -707,13 +723,17 @@ _INTENT_RULES = [
     ),
     (extract_toggle, lambda v: {"intent": "toggle", "args": [v]}),
     (extract_after_play, lambda v: {"intent": "play_song", "args": [v]}),
+    (
+        extract_satellite_message,
+        lambda v: {"intent": "send_satellite_message", "args": [v[0], v[1]]},
+    ),
     (extract_stop, lambda _: {"intent": "pause", "args": []}),
-    (has_time_query, lambda _: {"intent": "get_time", "args": []}),
+    (has_time_query, lambda _: {"intent": "get_current_time", "args": []}),
     (has_default_weather_forecast, lambda _: {"intent": "get_weather_forecast", "args": []}),
     (extract_skip, lambda _: {"intent": "skip", "args": []}),
     (extract_resume, lambda _: {"intent": "resume", "args": []}),
     (extract_timer, lambda v: {"intent": "start_countdown", "args": [v]}),
-    (list_timers, lambda _: {"intent": "list_timers", "args": []}),
+    (list_timers, lambda _: {"intent": "get_timer_status", "args": []}),
     (extract_summarize_thinking, lambda _: {"intent": "summarize_thinking", "args": []}),
     (extract_deep_think, lambda v: {"intent": "deep_think", "args": [v]}),
 ]
@@ -724,10 +744,9 @@ def catchAll(user_message: str):
     `{"actions": [{"intent": ..., "args": ...}]}`; otherwise return the
     original message string unchanged for the SLM to handle.
     """
-    # Deletion/editing of notes isn't supported — refuse deterministically
-    # before the SLM can claim it did it. Returns a `reply` emission, so the
-    # agent loop speaks the refusal directly without an SLM call or any tool.
-    if extract_note_delete(user_message):
+    # Keep the deterministic refusal unless the user explicitly enabled the
+    # active-note editor controls in the dashboard.
+    if extract_note_delete(user_message) and not _obsidian_edit_enabled():
         logger.debug("Caught note delete/edit request; refusing")
         return {"reply": _NOTE_DELETE_REPLY}
     for extract, build in _INTENT_RULES:

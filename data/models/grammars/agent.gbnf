@@ -1,5 +1,6 @@
 # Fulloch agent grammar — every SLM emission is exactly one of:
-#   {"actions": [<up to 3 actions>]}    -- dispatch tools, no spoken reply yet
+#   {"actions": [<up to 3 actions>], "delivery": "..."}
+#                                         -- optional post-success confirmation
 #   {"reply": "<spoken response>"}      -- final answer / chat / proposal
 # Mutually exclusive — never both fields in a single emission.
 # Synthesis happens by the agent emitting `reply` on a replan turn
@@ -11,7 +12,7 @@
 
 root ::= actions-obj | reply-obj
 
-actions-obj ::= "{" ws "\"actions\"" ws ":" ws actions-array "}" ws
+actions-obj ::= "{" ws "\"actions\"" ws ":" ws actions-array ("," ws "\"delivery\"" ws ":" ws string)? "}" ws
 
 reply-obj ::= "{" ws "\"reply\"" ws ":" ws string "}" ws
 

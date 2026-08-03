@@ -22,6 +22,10 @@ DOWNLINK_SAMPLE_RATE = 16000
 RECONNECT_BACKOFF_MAX_S = 30.0
 
 
+class ConversationModeActiveError(Exception):
+    """The server temporarily blocks this satellite during Conversation mode."""
+
+
 def load_config(path: str) -> dict:
     with open(path) as f:
         cfg = yaml.safe_load(f)
@@ -47,6 +51,8 @@ class HeadlessSatellite:
         self.cfg = cfg
         self.url = build_url(cfg)
         self.satellite_id = None
+        self._turn_id = None
+        self._next_seq = 0
         self.downlink_sample_rate = DOWNLINK_SAMPLE_RATE
         self.heartbeat_interval_s = 15.0
         self.full_duplex = bool(cfg["audio"].get("full_duplex", False))
@@ -64,7 +70,7 @@ class HeadlessSatellite:
             try:
                 await self._run_once()
                 backoff = 1.0
-            except (OSError, websockets.exceptions.WebSocketException) as e:
+            except (OSError, websockets.exceptions.WebSocketException, ConversationModeActiveError) as e:
                 print(f"Connection error: {e}; retrying in {backoff:.0f}s", file=sys.stderr)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX_S)
@@ -84,6 +90,8 @@ class HeadlessSatellite:
                     f"Rejected: {welcome.get('code')}: {welcome.get('message')}",
                     file=sys.stderr,
                 )
+                if welcome.get("code") == "conversation_mode_active":
+                    raise ConversationModeActiveError("conversation mode is active")
                 return
             if welcome.get("type") != "satellite.welcome":
                 raise websockets.exceptions.WebSocketProtocolError("expected satellite.welcome")
@@ -120,10 +128,10 @@ class HeadlessSatellite:
 
     def _build_hello_msg(self) -> str:
         sat = self.cfg["satellite"]
-        return json.dumps({
+        message = {
             "type": "satellite.hello",
             "token": self.cfg["server"].get("token"),
-            "protocol": {"name": "satellite-v2", "major": 2, "minor": 1},
+            "protocol": {"name": "satellite-v2", "major": 2, "minor": 2},
             "device": {
                 "id": sat.get("id", "headless-satellite"),
                 "name": sat.get("room", "Headless satellite"),
@@ -132,7 +140,10 @@ class HeadlessSatellite:
                 "board": sat.get("board", "headless"),
             },
             "capabilities": {"audio_input": True, "audio_output": True},
-        })
+        }
+        if self.satellite_id and self._turn_id:
+            message["resume"] = {"session_id": self.satellite_id, "turn_id": self._turn_id, "next_seq": self._next_seq}
+        return json.dumps(message)
 
     def _apply_welcome(self, welcome: dict) -> None:
         """Validate the fixed audio contract advertised by the server."""
@@ -216,6 +227,7 @@ class HeadlessSatellite:
 
         speaker_stream = None
         sample_rate = self.downlink_sample_rate
+        expected_audio = None
 
         def close_speaker(*, cancel: bool = False) -> None:
             nonlocal speaker_stream
@@ -232,6 +244,9 @@ class HeadlessSatellite:
 
         async for raw in ws:
             if isinstance(raw, (bytes, bytearray)):
+                if expected_audio is not None:
+                    self._next_seq = expected_audio["seq"] + 1
+                    expected_audio = None
                 pcm = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
                 if speaker_stream is not None:
                     speaker_stream.write(pcm)
@@ -246,6 +261,7 @@ class HeadlessSatellite:
                 turn_id = msg.get("turn_id")
                 print(f"Assistant state: {state}" + (f" ({turn_id})" if turn_id else ""))
                 if state == "speaking":
+                    self._turn_id = turn_id
                     await self._set_mic_muted(ws, True)
                     close_speaker()
                     speaker_stream = sd.OutputStream(
@@ -262,6 +278,14 @@ class HeadlessSatellite:
                 print("TTS cancelled")
                 close_speaker(cancel=True)
                 await self._set_mic_muted(ws, False)
+                self._turn_id = None
+            elif mtype == "tts.end":
+                close_speaker()
+                await self._set_mic_muted(ws, False)
+                self._turn_id = None
+            elif mtype == "tts.audio":
+                if msg.get("turn_id") == self._turn_id and isinstance(msg.get("seq"), int):
+                    expected_audio = msg
             elif mtype == "conversation.transcript":
                 print(f"Heard: {msg.get('text')}")
             elif mtype == "conversation.response":

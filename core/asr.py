@@ -102,12 +102,14 @@ def stream_generator(
     audio_sink: Optional[dict] = None,
     satellite_id_sink: Optional[dict] = None,
     endpoint_wait_sink: Optional[dict] = None,
+    wake_probe_sink: Optional[dict] = None,
 ) -> Generator:
     """Yield audio buffers from a queue until a None sentinel.
 
     Queue items are
     `(buf, speech_onset_monotonic, loudness_dbfs[, provisional[, satellite_id[,
-    endpoint_monotonic]]])` tuples (everything past `buf`/`onset` is optional
+    endpoint_monotonic[, wake_probe]]]])` tuples (everything past `buf`/`onset`
+    is optional
     for backward compatibility). When `onset_sink` / `loudness_sink` /
     `provisional_sink` / `audio_sink` / `satellite_id_sink` / `endpoint_wait_sink`
     are given, each yielded buffer's onset time, dBFS volume, provisional flag
@@ -117,7 +119,8 @@ def stream_generator(
     utterance sat queued after the recorder detected its end, before ASR
     picked it up) are written to `onset_sink['t']` / `loudness_sink['db']` /
     `provisional_sink['flag']` / `audio_sink['buf']` / `satellite_id_sink['id']`
-    / `endpoint_wait_sink['s']` before it's yielded, so the consumer can
+    / `endpoint_wait_sink['s']` / `wake_probe_sink['flag']` before it's yielded,
+    so the consumer can
     correlate the resulting transcription with them (and re-transcribe the
     same audio if needed). Generators are lazy, so no further item is
     dequeued between yielding a buffer and the consumer receiving its
@@ -130,6 +133,7 @@ def stream_generator(
         provisional = item[3] if len(item) > 3 else False
         satellite_id = item[4] if len(item) > 4 else None
         endpoint_t = item[5] if len(item) > 5 else None
+        wake_probe = item[6] if len(item) > 6 else False
         if onset_sink is not None:
             onset_sink["t"] = onset_t
         if loudness_sink is not None:
@@ -142,4 +146,6 @@ def stream_generator(
             satellite_id_sink["id"] = satellite_id
         if endpoint_wait_sink is not None:
             endpoint_wait_sink["s"] = (dequeue_t - endpoint_t) if endpoint_t is not None else None
+        if wake_probe_sink is not None:
+            wake_probe_sink["flag"] = wake_probe
         yield buf

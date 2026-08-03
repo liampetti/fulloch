@@ -25,6 +25,7 @@
   let waiting = false;       // this page's text turn is in flight
   let voiceBusy = false;     // a voice/other turn is working, from /status
   let lastTs = 0;
+  let startupMessage = null;
 
   // The send button doubles as a stop button while the agent is working.
   const SEND_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4 22 12 3.4 3.6 3 10l13 2-13 2z"/></svg>';
@@ -179,6 +180,7 @@
       loadWakeHint();
     }
     lastTs = 0;
+    startupMessage = null;
     statsMsgs.clear();
     resetTraceGroup();
     removeTyping();
@@ -396,8 +398,16 @@
       }
       return;
     }
-    if (ev.ts <= lastTs && lastTs > 0) return; // duplicate (history replay)
-    lastTs = ev.ts;
+    const isStartup = ev.role === 'assistant' && ev.source === 'startup';
+    // The startup greeting is a permanent introduction, not a chronological
+    // turn: history and SSE can arrive in either order, so never let its older
+    // timestamp suppress it and keep its single bubble first.
+    if (isStartup) {
+      if (startupMessage) return;
+    } else {
+      if (ev.ts <= lastTs && lastTs > 0) return; // duplicate (history replay)
+      lastTs = ev.ts;
+    }
     finishTyping();  // a new event ends any prior turn's animation
     clearEmpty();
 
@@ -487,7 +497,15 @@
     }
 
     wrap.append(bubble, meta);
-    chat.appendChild(wrap);
+    if (isStartup) {
+      chat.prepend(wrap);
+      startupMessage = wrap;
+    } else {
+      chat.appendChild(wrap);
+    }
+    // The submit handler starts the thinking indicator before the SSE user
+    // event arrives; move it after that user bubble rather than above it.
+    if (ev.role === 'user' && typingEl) chat.appendChild(typingEl);
     if (ev.role === 'assistant' && ev.stats) attachStats(wrap, ev);
     if (animate) typeInto(bubble, text);
     scrollEnd();

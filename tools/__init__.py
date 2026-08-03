@@ -20,7 +20,7 @@ _OPTIONAL_TOOLS = {
 }
 
 # Tools that are always loaded — no config dependency.
-_ALWAYS_LOAD = ["time_tools", "thinking", "notes", "calculator"]
+_ALWAYS_LOAD = ["time_tools", "thinking", "notes", "calculator", "satellite_messages"]
 
 
 def _load(module_name: str) -> None:

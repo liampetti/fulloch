@@ -72,6 +72,70 @@ def _personality(host) -> Optional[str]:
     return getattr(host, "personality", None)
 
 
+def _should_style_satellite_message(host, emission: Optional[dict]) -> bool:
+    """Let non-balanced LLM personalities phrase outbound announcements."""
+    if not getattr(host, "llm_enabled", False) or _personality(host) in (None, "balanced"):
+        return False
+    actions = emission.get("actions") if isinstance(emission, dict) else None
+    return isinstance(actions, list) and len(actions) == 1 and actions[0].get("intent") == "send_satellite_message"
+
+
+_ANNOUNCEMENT_SUFFIXES = {
+    "playful": "The plates are ready for their moment.",
+    "calm": "Come through when you're ready.",
+    "wry": "The kitchen's patience has been noted.",
+}
+_LITERAL_ANNOUNCEMENT_RE = re.compile(
+    r"\b(?:verbatim|exact(?:ly)?|quote|alarm|emergency|evacuat|fire|smoke|carbon monoxide|"
+    r"medic(?:al|ine|ation)|ambulance|call 000|call 911)\b",
+    re.IGNORECASE,
+)
+_SENSITIVE_DELIVERY_INTENTS = frozenset({"ha_lock", "ha_unlock"})
+
+
+def _satellite_message_args(emission: Optional[dict]) -> Optional[list]:
+    actions = emission.get("actions") if isinstance(emission, dict) else None
+    if not isinstance(actions, list) or len(actions) != 1:
+        return None
+    action = actions[0]
+    if not isinstance(action, dict):
+        return None
+    args = action.get("args")
+    if action.get("intent") != "send_satellite_message" or not isinstance(args, list) or len(args) < 2:
+        return None
+    return args
+
+
+def _apply_announcement_fallback(host, user_prompt: str, raw_emission: Optional[dict], emission: dict) -> None:
+    """Guarantee a built-in personality changes non-verbatim outbound copy."""
+    suffix = _ANNOUNCEMENT_SUFFIXES.get(_personality(host))
+    raw_args = _satellite_message_args(raw_emission)
+    action_args = _satellite_message_args(emission)
+    if not suffix or not raw_args or not action_args or _LITERAL_ANNOUNCEMENT_RE.search(user_prompt):
+        return
+    raw_text, proposed = raw_args[1], action_args[1]
+    if not isinstance(raw_text, str) or not isinstance(proposed, str):
+        return
+    if _normalise_search_query([raw_text]) == _normalise_search_query([proposed]):
+        action_args[1] = f"{proposed.rstrip('. ')}. {suffix}"
+
+
+def _can_speak_delivery(host, actions: object) -> bool:
+    if _personality(host) in (None, "balanced") or not isinstance(actions, list):
+        return False
+    return all(
+        not isinstance(action, dict) or action.get("intent") not in _SENSITIVE_DELIVERY_INTENTS
+        for action in actions
+    )
+
+
+def _play_music_search_ack(host, session) -> None:
+    """Cover Spotify's remote search and playback-dispatch latency."""
+    cache = getattr(host, "music_search_stall_cache", None)
+    if cache:
+        host._play_random_ack(session or getattr(host, "tts_session", None), cache=cache)
+
+
 def _normalise_search_query(args) -> Optional[str]:
     """Stable cache key for a web-search action's query.
 
@@ -178,7 +242,12 @@ class AgentLoop:
 
         # Regex fast-path: if it matches, use it as the first agent emission.
         caught = catchAll(user_prompt)
-        first_emission = caught if isinstance(caught, dict) else None
+        regex_emission = caught if isinstance(caught, dict) else None
+        first_emission = regex_emission
+        if _should_style_satellite_message(host, regex_emission):
+            # Other fast commands stay deterministic. A named outbound message
+            # is delivery copy, so let a non-balanced personality phrase it.
+            first_emission = None
         if first_emission is None and prior_question and is_contextual_web_search_request(user_prompt):
             first_emission = {
                 "actions": [{"intent": "external_information", "args": [prior_question]}]
@@ -197,7 +266,7 @@ class AgentLoop:
         if not host.llm_enabled:
             if stats is not None:
                 stats.route = "no_llm"
-            return self._run_without_llm(user_prompt, first_emission)
+            return self._run_without_llm(user_prompt, first_emission or regex_emission)
 
         def remote_fallback() -> str:
             return self._remote_llm_unavailable_fallback(host)
@@ -205,7 +274,7 @@ class AgentLoop:
         if getattr(host, "_remote_llm_retry_blocked", lambda: False)():
             logger.info("Remote LLM retry cooldown active; using regex-only path")
             return self._run_without_llm(
-                user_prompt, first_emission, unavailable_fallback=remote_fallback
+                user_prompt, first_emission or regex_emission, unavailable_fallback=remote_fallback
             )
 
         slm_started = False
@@ -251,11 +320,8 @@ class AgentLoop:
                         except Exception:
                             logger.exception("on_slm_start hook raised")
                 else:
-                    # Replan iterations — play a "mid-process" phrase so
-                    # the SLM thinking time isn't silent. Uses the replan
-                    # cache ("Working through it.", "Almost there.", etc.)
-                    # rather than ACK_PHRASES so the user hears progress
-                    # rather than repeated acknowledgements.
+                    # Replan iterations get the same short acknowledgement as
+                    # the initial call; do not narrate internal model work.
                     if session is None or not session.cancelled:
                         threading.Thread(
                             target=host._play_random_ack,
@@ -316,14 +382,14 @@ class AgentLoop:
                 except RemoteUnreachable as e:
                     logger.warning("Remote LLM unreachable; regex-only this turn")
                     host._note_llm_remote_status(False, str(e))
-                    if first_emission is None:
+                    if first_emission is None and regex_emission is None:
                         return remote_fallback()
                     # A replan failure occurs after the regex action has already
                     # run; never dispatch it a second time just to degrade.
                     if iteration > 0:
                         return remote_fallback()
                     return self._run_without_llm(
-                        user_prompt, first_emission, unavailable_fallback=remote_fallback
+                        user_prompt, first_emission or regex_emission, unavailable_fallback=remote_fallback
                     )
                 host._note_llm_remote_status(True)
                 logger.debug(f"Agent emission: {emission_text}")
@@ -377,6 +443,13 @@ class AgentLoop:
             # it out: the real tools still dispatch, the text becomes the spoken
             # reply, and the hallucinated-tool guard doesn't block the whole turn
             # on the non-tool `reply`.
+            if emission is not regex_emission:
+                _apply_announcement_fallback(host, user_prompt, regex_emission, emission)
+            delivery = emission.get("delivery")
+            if not isinstance(delivery, str) or not _can_speak_delivery(host, emission.get("actions")):
+                delivery = None
+            elif not (delivery := delivery.strip()):
+                delivery = None
             bundled_reply = None
             _acts = emission.get("actions")
             if isinstance(_acts, list):
@@ -395,7 +468,10 @@ class AgentLoop:
                         kept.append(a)
                 if len(kept) != len(_acts):  # a pseudo-reply was split out
                     # Only a pseudo-reply (no real tools) → it's just a reply.
-                    emission = {"actions": kept} if kept else {"reply": bundled_reply or ""}
+                    emission = (
+                        {"actions": kept, **({"delivery": delivery} if delivery else {})}
+                        if kept else {"reply": bundled_reply or ""}
+                    )
                     if not kept:
                         bundled_reply = None
                     emission_text = json.dumps(emission)
@@ -525,6 +601,8 @@ class AgentLoop:
                         host.play_chunks(chunks, sr, session=session or host.tts_session)
                         if session is not None and session.cancelled:
                             return ""
+                    elif intent_name == "play_song":
+                        _play_music_search_ack(host, session)
                     _t_dispatch = time.monotonic()
                     # Single typed boundary: handle_action runs the tool,
                     # classify_step maps any leading sentinel to a StepKind so
@@ -554,23 +632,22 @@ class AgentLoop:
                         logger.debug("Summarising web search payload")
                         if session is not None and session.cancelled:
                             return ""
-                        # Summarise is a full SLM call (~2-3s). The web-search
-                        # stall covered the SearXNG round-trip; play a parallel
-                        # ack now so this gap isn't silent too.
-                        if session is None or not session.cancelled:
-                            threading.Thread(
-                                target=host._play_random_ack,
-                                args=(session or host.tts_session,),
-                                kwargs={
-                                    "sink": getattr(host._turn_local, "sink", None),
-                                    "tts_active_event": getattr(host._turn_local, "tts_active_event", None),
-                                },
-                                daemon=True,
-                            ).start()
+                        # Searching has already announced itself before the
+                        # SearXNG request. If the summary model stalls, give
+                        # bounded search-specific progress rather than piling
+                        # generic "Aha" acknowledgements onto the response.
                         try:
-                            summary = host._summarise_search_result(
-                                step.text, cancel_check, stats=stats
-                            )
+                            with ThinkingWatchdog(
+                                host.web_search_stall_cache,
+                                host.play_chunks,
+                                session or host.tts_session,
+                                sink=getattr(host._turn_local, "sink", None),
+                                tts_active_event=getattr(host._turn_local, "tts_active_event", None),
+                                max_stalls=2,
+                            ):
+                                summary = host._summarise_search_result(
+                                    step.text, cancel_check, stats=stats
+                                )
                         except RemoteUnreachable as e:
                             logger.warning("Remote LLM unreachable mid-turn; regex-only")
                             host._note_llm_remote_status(False, str(e))
@@ -737,6 +814,8 @@ class AgentLoop:
                 already = any(p.rstrip(".") == summary for p in parts)
                 if summary and not already:
                     parts.insert(0, summary)
+            if delivery:
+                parts.append(delivery.strip())
             spoken = ". ".join(parts)
             if not spoken:
                 spoken = "Done."
@@ -808,6 +887,8 @@ class AgentLoop:
                 },
                 source=source,
             )
+            if intent_name == "play_song":
+                _play_music_search_ack(host, session)
             step = intents.classify_step(intents.handle_action(action))
             host._history_for(self.satellite).append(
                 {

@@ -462,15 +462,6 @@ def create_app(
     lifecycle = context.lifecycle
 
     app = FastAPI(title="Fulloch Dashboard")
-    # Split CSS / JS assets live under /static/. Mounted last so the explicit
-    # /logo.png and /voice/sample routes above still take precedence on those
-    # exact paths (StaticFiles only matches prefixes that have no explicit
-    # route, so /logo.png is fine — but the mount order doesn't matter for
-    # matching here, only for safety).
-    from fastapi.staticfiles import StaticFiles
-
-    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR), check_dir=False), name="static")
-
     register_satellite_routes(app, context, lifecycle)
 
     # Split CSS / JS assets live under /static/. Mounted last so the explicit

@@ -152,16 +152,12 @@ _register(
         notes="GPU + flash-attention 2. Smaller/faster than the 1.7B, lower accuracy.",
     )
 )
-# CPU-friendly Qwen3-ASR (1.7B int4 ONNX) — the validated, wakeword-reliable CPU
-# ASR used by the Full (GPU) stack, which runs it on CPU to free VRAM for the 9B
-# SLM + TTS. 0% vs 3.3% WER vs the 0.6B on the synthetic voice set, ~0.2x RTF on
-# CPU. Same wakeword/context biasing seam. Fetch only the int4 files (hf_allow)
+# CPU-friendly Qwen3-ASR (1.7B int4 ONNX) — the validated, wakeword-reliable
+# default for CPU-only stacks. Same wakeword/context biasing seam. Fetch only
+# the int4 files (hf_allow)
 # to skip the ~8GB fp32 decoder weights and the packaged tars. Model dir holds
 # the onnx files + tokenizer; not a standard HF snapshot, so loaded from a path.
-# The CPU-only tiers (cpu_local / cpu_server) default to the smaller
-# `qwen-onnx-small` instead — same Qwen3-ASR family (wakeword biasing, 30
-# languages) but ~3x fewer parameters, so much faster per utterance on CPU;
-# `qwen-onnx` remains available there manually for the extra accuracy.
+# The smaller `qwen-onnx-small` remains available for lower-RAM deployments.
 _register(
     BackendSpec(
         domain=ASR,

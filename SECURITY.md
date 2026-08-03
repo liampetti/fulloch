@@ -2,12 +2,12 @@
 
 ## Design Philosophy
 
-Fulloch is designed with privacy as a core principle. All processing happens locally on your device:
+Fulloch is designed with privacy as a core principle. The local stack processes speech, language, and stored data on your device:
 
 - **Speech Recognition**: Qwen3 ASR runs entirely on-device
 - **Text-to-Speech**: Qwen3 TTS Base runs entirely on-device (voice cloned from a local `data/voices/<name>.{wav,txt}` reference pair; no audio leaves your machine)
 - **Language Model**: Qwen3.5 9B runs entirely on-device via llama.cpp
-- **No Cloud Dependencies**: No data is sent to external servers for AI processing
+- **Optional remote services**: Remote LLM, Spotify, and search integrations only send requests when configured
 
 ## Reporting a Vulnerability
 
@@ -35,8 +35,10 @@ Fulloch connects to a small number of external services:
 |---------|----------------|-----------|
 | Home Assistant | Local HTTP (REST) | Entity commands, calendar queries, weather forecasts |
 | SearXNG | Local HTTP | Search queries (only when `search:` is configured) |
+| Remote LLM | Configured OpenAI-compatible endpoint | Conversation prompts and tool observations |
+| Spotify | Spotify Web API | Search and playback requests, when `spotify:` is configured |
 
-Home Assistant is the sole smart-home backend; all third-party device protocols (Spotify, Hue, Calendar, etc.) terminate inside HA, not Fulloch.
+Home Assistant is the sole smart-home control backend. Spotify search uses Spotify's Web API directly, then hands resolved playback to Home Assistant when a target is available.
 
 ### Best Practices
 
@@ -53,6 +55,7 @@ Fulloch stores secrets in `data/credentials.json` (written by the setup wizard, 
 - **Dashboard password** (`dashboard_password`) — PBKDF2-SHA256 hash. Required when binding to a non-loopback address; set via the wizard's finish step.
 - **Remote LLM API key** (`llm_api_key`) if using an OpenAI-compatible endpoint.
 - **Obsidian plugin token** (`obsidian_token`) if using the Obsidian bridge.
+- **Home Assistant integration tokens** (`integration_tokens`) — bearer tokens for the separate plain-HTTP integration API. Keep its bind address on a trusted network and rotate tokens if exposed.
 
 > During initial first-run setup no password is set yet, so keep the dashboard on a trusted/loopback network until the wizard completes.
 

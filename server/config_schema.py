@@ -185,7 +185,7 @@ SCHEMA: tuple = (
         "Voice",
         False,
         "Let the first connected voice satellite enter exclusive Conversation mode. "
-        "It keeps the mic live during replies and skips the wakeword.",
+        "It disconnects other satellites, keeps the mic live during replies, and skips the wakeword.",
         apply=HOT,
     ),
     Field(
@@ -294,6 +294,22 @@ SCHEMA: tuple = (
         "127.0.0.1",
         "Bind address. '127.0.0.1' = local only; '0.0.0.0' exposes it to "
         "your network (set a dashboard password via the setup wizard first).",
+    ),
+    Field(
+        "general",
+        "integration_api_enabled",
+        "bool",
+        "Dashboard",
+        True,
+        "Run the token-authenticated plain-HTTP API used by the Home Assistant integration.",
+    ),
+    Field(
+        "general",
+        "integration_api_port",
+        "int",
+        "Dashboard",
+        8766,
+        "Plain-HTTP Home Assistant integration API port. Uses dashboard_host as its bind address.",
     ),
     Field(
         "general",

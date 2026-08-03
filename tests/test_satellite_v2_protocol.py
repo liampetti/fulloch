@@ -30,7 +30,7 @@ def _hello(**overrides):
     message = {
         "type": "satellite.hello",
         "token": "device-token",
-        "protocol": {"name": "satellite-v2", "major": 2, "minor": 1},
+        "protocol": {"name": "satellite-v2", "major": 2, "minor": 2},
         "device": {"id": "kitchen-01", "name": "Kitchen"},
         "capabilities": {"audio_input": True, "audio_output": True},
     }
@@ -51,7 +51,7 @@ def test_hello_returns_exact_welcome_audio_contract():
     assert welcome == {
         "type": "satellite.welcome",
         "session_id": welcome["session_id"],
-        "protocol": {"major": 2, "minor": 1},
+        "protocol": {"major": 2, "minor": 2},
         "audio": {
             "uplink": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1, "frame_duration_ms": 20},
             "downlink": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1},
@@ -65,6 +65,7 @@ def test_hello_returns_exact_welcome_audio_contract():
 @pytest.mark.parametrize("message", [
     {"type": "audio.frame"},
     _hello(protocol={"name": "satellite-v2", "major": 1, "minor": 1}),
+    _hello(protocol={"name": "satellite-v2", "major": 2, "minor": 3}),
 ])
 def test_invalid_initial_protocol_is_rejected(message):
     with _client(_stub_assistant()).websocket_connect("/ws/satellite-v2") as ws:
@@ -123,7 +124,7 @@ def test_health_report_receives_a_heartbeat_acknowledgement():
         assert ws.receive_json() == {"type": "satellite.heartbeat"}
 
 
-def test_tts_is_s16le_bounded_and_cancelled_with_turn_id():
+def test_tts_is_s16le_bounded_and_completes_with_turn_id():
     assistant = _stub_assistant()
     with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
         ws.send_json(_hello())
@@ -134,8 +135,23 @@ def test_tts_is_s16le_bounded_and_cancelled_with_turn_id():
         assert speaking["type"] == "assistant.state"
         assert speaking["state"] == "speaking"
         tts_q.put((np.ones(3000, dtype=np.float32), None))
+        first_audio = ws.receive_json()
+        assert first_audio == {"type": "tts.audio", "turn_id": speaking["turn_id"], "seq": 0, "bytes": 4096}
         assert len(ws.receive_bytes()) <= 4096
+        assert ws.receive_json()["seq"] == 1
         assert len(ws.receive_bytes()) <= 4096
+        tts_q.put(("end",))
+        assert ws.receive_json() == {"type": "tts.end", "turn_id": speaking["turn_id"]}
+
+
+def test_tts_cancel_uses_the_active_turn_id():
+    assistant = _stub_assistant()
+    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
+        ws.receive_json()
+        tts_q = assistant.set_satellite_sink.call_args.args[1]
+        tts_q.put(("start", 22050))
+        speaking = ws.receive_json()
         tts_q.put(("cancel",))
         assert ws.receive_json() == {"type": "tts.cancel", "turn_id": speaking["turn_id"]}
 
@@ -156,9 +172,12 @@ def test_tts_paces_existing_downlink_frames_after_initial_buffer(monkeypatch):
         # Three existing 4 KiB wire frames. The first contains 128 ms of audio
         # and is sent immediately; later frames are paced at their playout rate.
         tts_q.put((np.ones(6144, dtype=np.float32), None))
+        assert ws.receive_json()["type"] == "tts.audio"
         assert len(ws.receive_bytes()) == 4096
+        assert ws.receive_json()["type"] == "tts.audio"
         assert len(ws.receive_bytes()) == 4096
         started_waiting = time.monotonic()
+        assert ws.receive_json()["type"] == "tts.audio"
         assert len(ws.receive_bytes()) == 724
 
     assert time.monotonic() - started_waiting >= 0.05
@@ -196,3 +215,60 @@ def test_satellite_stop_requests_an_immediate_server_stop():
         ws.send_json({"type": "satellite.stop"})
 
     assistant.request_stop.assert_called_once()
+
+
+def test_minor_one_keeps_raw_downlink_frames():
+    assistant = _stub_assistant()
+    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello(protocol={"name": "satellite-v2", "major": 2, "minor": 1}))
+        assert ws.receive_json()["protocol"] == {"major": 2, "minor": 1}
+        tts_q = assistant.set_satellite_sink.call_args.args[1]
+        tts_q.put(("start", 16000))
+        ws.receive_json()
+        tts_q.put((np.ones(20, dtype=np.float32), None))
+        assert len(ws.receive_bytes()) == 40
+
+
+def test_minor_two_reconnect_replays_requested_tts_frames():
+    assistant = _stub_assistant()
+    client = _client(assistant)
+    with client.websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
+        welcome = ws.receive_json()
+        tts_q = assistant.set_satellite_sink.call_args.args[1]
+        tts_q.put(("start", 16000))
+        speaking = ws.receive_json()
+        tts_q.put((np.ones(4096, dtype=np.float32), None))
+        first_meta = ws.receive_json()
+        first_frame = ws.receive_bytes()
+
+    with client.websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello(resume={
+            "session_id": welcome["session_id"], "turn_id": speaking["turn_id"], "next_seq": first_meta["seq"],
+        }))
+        resumed = ws.receive_json()
+        assert resumed["session_id"] == welcome["session_id"]
+        assert ws.receive_json() == {"type": "assistant.state", "state": "speaking", "turn_id": speaking["turn_id"]}
+        assert ws.receive_json() == first_meta
+        assert ws.receive_bytes() == first_frame
+        assert assistant.connect_satellite.call_count == 1
+
+
+def test_minor_two_reconnect_delivers_terminal_event_queued_while_disconnected():
+    assistant = _stub_assistant()
+    client = _client(assistant)
+    with client.websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
+        welcome = ws.receive_json()
+        tts_q = assistant.set_satellite_sink.call_args.args[1]
+        tts_q.put(("start", 16000))
+        speaking = ws.receive_json()
+
+    tts_q.put(("end",))
+    with client.websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello(resume={
+            "session_id": welcome["session_id"], "turn_id": speaking["turn_id"], "next_seq": 0,
+        }))
+        ws.receive_json()  # welcome
+        assert ws.receive_json() == {"type": "assistant.state", "state": "speaking", "turn_id": speaking["turn_id"]}
+        assert ws.receive_json() == {"type": "tts.end", "turn_id": speaking["turn_id"]}

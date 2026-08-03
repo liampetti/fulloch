@@ -15,7 +15,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     data = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([FullochMicSwitch(data["coordinator"], data["session"], data["url"], entry)])
+    async_add_entities([FullochMicSwitch(data["coordinator"], data["session"], data["url"], data["headers"], entry)])
 
 
 class FullochMicSwitch(CoordinatorEntity, SwitchEntity):
@@ -27,11 +27,13 @@ class FullochMicSwitch(CoordinatorEntity, SwitchEntity):
         coordinator: FullochCoordinator,
         session: aiohttp.ClientSession,
         url: str,
+        headers: dict[str, str],
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator)
         self._session = session
         self._url = url
+        self._headers = headers
         self._entry = entry
 
     @property
@@ -63,6 +65,7 @@ class FullochMicSwitch(CoordinatorEntity, SwitchEntity):
             async with self._session.post(
                 f"{self._url}/mic",
                 json={"enabled": enabled},
+                headers=self._headers,
                 timeout=aiohttp.ClientTimeout(total=5),
             ):
                 pass

@@ -41,6 +41,7 @@ _CAPABILITY_GROUPS = (
     ("web search", ("external_information",)),
     ("music playback", ("play_song",)),
     ("shopping lists", ("add_todo_item", "get_todo_items")),
+    ("announcements to connected voice satellites", ("send_satellite_message",)),
 )
 
 
@@ -114,6 +115,11 @@ def _capability_summary() -> str:
     return f"Available tools can help with {categories}."
 
 
+def _has_tool(name: str) -> bool:
+    """Whether a named capability is available in this installation."""
+    return tool_registry.canonical_name(name) is not None
+
+
 def _with_facts(base: str) -> str:
     """Append the long-term-facts block from the notes module."""
     from tools.notes import recall_facts
@@ -176,23 +182,139 @@ def get_agent_system_prompt(
         if obsidian_edit_enabled
         else ""
     )
+    obsidian_editor_guidance = (
+        "- In enabled Obsidian edit/delete mode, use editor tools only for an explicit request about the currently "
+        "open note, active cursor, or explicit selection. Never use one for a guessed/currently unstated note, "
+        "cursor location, or selection."
+        if obsidian_edit_enabled
+        else "- You can only add to notes — you cannot delete, remove, erase, clear, or generally edit an existing "
+        "note, daily-log entry, or saved fact."
+    )
+    personality_announcement_example = {
+        "playful": "Dinner is ready! Plates at the ready.",
+        "calm": "Dinner is ready. Come through when you're ready.",
+        "wry": "Dinner is ready. The kitchen's patience has been noted.",
+    }.get(personality, "Dinner is ready. Add one brief line in your configured character.")
+    personality_delivery_line = (
+        "For actions, you may include `delivery` as a brief personality confirmation; it is spoken only after "
+        "success, so never claim unverified facts. Omit it for locks, alarms, safety or medical instructions. "
+        "For `send_satellite_message`, its second argument is the exact recipient speech. Compose it before the "
+        "action runs. Unless wording is verbatim, give it one brief expression of your personality instead of "
+        "copying terse wording unchanged; preserve the requested meaning. For example, 'tell the kitchen dinner "
+        "is ready' becomes "
+        f'{{\"actions\":[{{\"intent\":\"send_satellite_message\",\"args\":[\"kitchen\",\"{personality_announcement_example}\"]}}]}}. '
+        "Keep exact quotes and factual values literal."
+        if personality and personality != "balanced"
+        else ""
+    )
+    media_line = (
+        "For play, pause, stop, skip, resume, mute, source, or volume requests, dispatch the "
+        "matching media tool. Never claim playback or volume changed unless that tool ran successfully this turn."
+        if any(_has_tool(name) for name in ("play_song", "pause", "resume", "skip", "ha_mute", "ha_volume_set"))
+        else ""
+    )
+    conversation_history_line = (
+        "To recall an earlier conversation (\"what did we talk about\", \"what did we discuss\", "
+        "\"what did I ask you yesterday afternoon\", \"what did we talk about around 3pm\"), first check "
+        "the current chat history; if the relevant turns aren't there, use `get_conversation_history` for that "
+        "time window. When you get a conversation transcript back, summarise the topics in a sentence or two — "
+        "naming a past topic is recall, not a fresh request, so never re-research those topics with "
+        "`external_information` or read the transcript back line by line."
+        if _has_tool("get_conversation_history")
+        else ""
+    )
+    weather_line = (
+        "- For weather, use `get_weather_forecast` with no args for a new request about today. If the user asks "
+        "what the weather was or repeats a forecast you just gave, answer from that forecast in conversation "
+        "history instead of calling the tool again. Do not write it to a note unless they explicitly ask to save it."
+        if _has_tool("get_weather_forecast")
+        else ""
+    )
+    save_reminder_lines = [
+        "- `append_to_today`: today-bound log entries (today's news summary, what happened today).",
+        "- `append_to_note`: add to a specific named note, or an item that needs context alongside it.",
+        "- `write_note`: evergreen topics with a reusable title (\"boiler manual\", \"shopping list\").",
+        "- `remember_fact`: timeless personal facts (\"I prefer tea\") — never time-based things.",
+        "- `start_countdown`: durations from now (\"in 10 minutes\") — never a specific clock time.",
+    ]
+    if _has_tool("add_todo_item"):
+        save_reminder_lines.insert(0, "- `add_todo_item`: list items (\"add eggs\").")
+    if _has_tool("create_calendar_event"):
+        save_reminder_lines.append(
+            "- `create_calendar_event`: clock/date-anchored entries (\"at 3pm\", \"Monday at 10am\")."
+        )
+    calendar_guidance = ""
+    if _has_tool("create_calendar_event"):
+        calendar_guidance = f"""
+When a relative date appears (\"today\", \"tomorrow\", \"this Sunday\", \"next week\", \"in three days\"), expand it to an absolute YYYY-MM-DD inside the args using today's date as the reference. For example, \"Remember Morgan's birthday is this Sunday\" becomes:
+{{{{"actions": [{{{{"intent": "remember_fact", "args": ["Morgan's birthday is on Sunday {sunday}"]}}}}]}}}}
+
+For `create_calendar_event`, the `date` arg follows the same absolute YYYY-MM-DD rule (for \"next Thursday\", the upcoming Thursday). Pass `recurrence` as \"weekly\", \"daily\", or \"monthly\" for repeating events, or \"none\" for one-off; pass `null` for optional args you're not using.
+
+You can only CREATE calendar events — there is NO tool to edit, move, reschedule, or delete one, so never claim you changed, moved, fixed, or removed an event. If asked to change one, say plainly you can't edit events, offer to add a corrected new one with `create_calendar_event`, and tell them to delete the old one in Home Assistant. Only say something is in their calendar after `create_calendar_event` has actually run and returned success.
+"""
+    whats_on_guidance = ""
+    if _has_tool("whats_on"):
+        whats_on_guidance = """
+`whats_on` reads calendar events two ways depending on what's asked:
+- A fixed window ("what's on today/tomorrow/this week?"): pass just `day`, e.g. {{"actions": [{{"intent": "whats_on", "args": ["today"]}}]}}.
+- A named event, whenever the user names something and asks if/when it's coming up, was on, or is scheduled ("any concerts coming up?", "when's the dentist?", "did I already miss the boiler service?"): pass `day` then `event_name`, e.g. {{"actions": [{{"intent": "whats_on", "args": ["today", "the dentist"]}}]}}. This searches 30 days before and after today by default (not just today) — never rely on the fixed-window form for a named search, it won't find events outside today's window.
+"""
+    home_control_lines = []
+    if any(_has_tool(name) for name in ("ha_open_cover", "ha_close_cover", "ha_set_cover_position", "ha_stop_cover")):
+        home_control_lines.append(
+            "- `ha_open_cover`/`ha_close_cover`: full open or close — covers, blinds, garage doors, AND valves (same verb, HA just uses a different domain under the hood). `ha_set_cover_position`: a partial position, e.g. \"open the blinds halfway\" → position 50. `ha_stop_cover`: halt one mid-travel."
+        )
+    if _has_tool("ha_vacuum"):
+        home_control_lines.append(
+            "- `ha_vacuum`: `action` is exactly \"start\" (default), \"pause\", \"stop\", \"dock\", or \"locate\" — never invent another action string."
+        )
+    if _has_tool("ha_mute"):
+        home_control_lines.append(
+            "- `ha_mute`: pass `muted` as `false` to unmute — picking the tool via an \"unmute\" phrase doesn't set that for you."
+        )
+    if _has_tool("complete_todo_item") and _has_tool("add_todo_item"):
+        home_control_lines.append(
+            "- `complete_todo_item` checks an item off; `add_todo_item` adds one — never use one for the other (e.g. \"I already bought the milk\" is `complete_todo_item`, not a new add)."
+        )
+    home_control_guidance = "\n".join(home_control_lines)
+    home_readings_lines = []
+    if _has_tool("get_entity_state"):
+        home_readings_lines.append(
+            "- Use `get_entity_state` to check a device's status — on/off, sensor reading, what's playing. E.g. \"are the living room lights on?\" → {{\"actions\": [{{\"intent\": \"get_entity_state\", \"args\": [\"living room lights\"]}}]}}. Use friendly names (\"living room lights\"), not entity_id slugs (\"light.living_room\"). If unsure of the exact name, dispatch ONE call — fuzzy matching handles variants. A `Reactive question:` means not found; retry once then drop it."
+        )
+    if _has_tool("get_entities_in_area_state"):
+        home_readings_lines.append(
+            "- Use `get_entities_in_area_state` when the user asks for a live status across a room: \"which lights are on upstairs?\" → {{\"actions\": [{{\"intent\": \"get_entities_in_area_state\", \"args\": [\"upstairs\", \"light\", \"on\"]}}]}}. Do not use the inventory tool for this."
+        )
+    if _has_tool("list_entities_in_area"):
+        home_readings_lines.append(
+            "- Use `list_entities_in_area` to discover what's in a room (\"what lights are downstairs\", \"what's in the office\"). For an open-ended status (\"what's the office looking like\"): discover first, then query each entity using the EXACT names returned. Only query domains the discovery found — never enumerate empty ones. Synthesise results into a natural 1-2 sentence reply, not raw tool output."
+        )
+    if any(_has_tool(name) for name in ("ha_set_brightness", "ha_volume_set")):
+        home_readings_lines.append(
+            "- A relative change (\"brighten them\", \"turn it up\") needs a fresh tool dispatch — don't compute a new value from memory. Check the last tool result in history for the real current value."
+        )
+    home_readings_guidance = "\n".join(home_readings_lines)
+    home_control_section = f"Home control:\n{home_control_guidance}" if home_control_guidance else ""
+    home_readings_section = f"Home & live readings:\n{home_readings_guidance}" if home_readings_guidance else ""
     body = f"""
 You are {name}, a helpful, friendly local voice assistant.{_personality_instruction(personality)} {_today_line()}
-Everything runs and is stored locally on this device — only web search uses the internet, so you can assure the user their notes, facts, and conversations stay on-device.
+Notes, facts, and conversation history stay on this device. Optional web search, Spotify playback, and remote language-model configurations send the relevant request to their configured service.
 {capabilities}
 {voice_mode_line}
 {obsidian_edit_line}
 
 Every reply is exactly one JSON object — one of:
 
-  {{"actions": [...]}}    — dispatch tools (1–3 in the array). Pick this when the user wants you to DO something using one of the available tools.
+  {{"actions": [...], "delivery": "..."}} — dispatch tools (1–3 in the array), optionally with a short post-success confirmation.
   {{"reply": "..."}}      — speak this text directly. Pick this when no tool is needed (small talk, a factual answer, a proposal asking for confirmation, or a summary of tool results you have already seen in history).
 
-Use exactly one field per object, with at most three actions — never more. When the user asks about one thing (e.g. "the temperature downstairs"), one action is enough; do not enumerate similar rooms or devices to scan. `reply` is the spoken-answer field, not a tool name — don't place it inside `actions`.
+Use either `actions` (with optional `delivery`) or `reply`, with at most three actions — never more. When the user asks about one thing (e.g. "the temperature downstairs"), one action is enough; do not enumerate similar rooms or devices to scan. `reply` is the spoken-answer field, not a tool name — don't place it inside `actions`.
 
 A `reply` is the final spoken answer the user hears — nothing runs after it. If answering means checking, confirming, verifying, or looking up live information, emit the action that does it (`external_information` for live facts) — never a `reply` that only says you will check, look it up, confirm, or find out. Don't promise to act; act, then answer from the result.
 
-For play, pause, stop, skip, resume, mute, source, or volume requests, dispatch the matching media tool. Never claim playback or volume changed unless that tool ran successfully this turn.
+{media_line}
 
 When the user says something open-ended ("I need to relax", "movie night"), don't dispatch tools immediately — propose a plan in `reply` and wait for the next turn. If the next turn confirms ("yes", "go ahead", "do it"), look at the prior assistant turn in history and emit the matching `actions`.
 
@@ -200,54 +322,33 @@ When you see a tool result in history starting with `Reactive question:`, read i
 
 Keep `reply` text natural and conversational. Three sentences or fewer unless the user explicitly asked for detail. Don't read URLs, raw JSON, code, or asterisks. Don't comment on mispronunciations, typos, or transcription errors.
 Whisper and quiet delivery requests are supported by the speech system for every voice. Never claim you cannot whisper; answer naturally and let the system lower the output volume.
+{personality_delivery_line}
 
 Notes:
 - Only use `write_note`, `append_to_note`, `append_to_today`, and `remember_fact` when the user explicitly asks to save, write, note, log, or remember something — never proactively, and never with placeholder content (use real detail from history or your knowledge). For research-then-save turns, dispatch the search first, then save from the result.
-- You can only add to notes — you cannot delete, remove, erase, clear, or generally edit an existing note, daily-log entry, or saved fact. Obsidian editor tools are available only after the user deliberately enables edit/delete access in the dashboard: use `rename_active_obsidian_note` only to rename the currently open note, `insert_at_obsidian_cursor` only to insert exact requested text at the active cursor, `replace_selected_obsidian_text` only to replace explicit selected text, and `delete_active_obsidian_note` only for an explicit active-note deletion request. Never use any of them for a guessed/currently unstated note, cursor location, or selection.
+{obsidian_editor_guidance}
 - To find a note — or a specific thing the user logged earlier — use `search_notes`; it matches by keyword and by meaning together, so you don't need the exact wording. Never claim a note mentions something unless you've confirmed it from the returned text.
 - To read back the whole of today's log ("read my notes from today", "what did I log today", "read today's note"), use `read_today` — it opens today's dated note directly; pass a YYYY-MM-DD date for a past day. Don't use `search_notes` to dump the daily log.
 - If the user asks you to repeat something said earlier ("read that back", "what did you just say") and it isn't in conversation history, search today's note with `search_notes` first — it may have been logged there. Don't use `external_information` for these recall requests.
 
-To recall an earlier conversation ("what did we talk about", "what did we discuss", "what did I ask you yesterday afternoon", "what did we talk about around 3pm"), first check the current chat history; if the relevant turns aren't there, use `get_conversation_history` for that time window. When you get a conversation transcript back, summarise the topics in a sentence or two — naming a past topic is recall, not a fresh request, so never re-research those topics with `external_information` or read the transcript back line by line.
+{conversation_history_line}
 
 Live information:
 - `external_information` is web search — use it only for live, time-sensitive facts (news, scores, prices, current events) or an explicit "search/look up" request; answer stable knowledge (history, science, geography, definitions, maths) directly with `reply`. Dispatch it alone, then `reply` from the short summary it returns, or emit a follow-up action (e.g. `append_to_today`) built from that summary — never bundle a search with an action that needs its result.
 - When the user follows a question with a topic-less request such as "can you search the internet?" or "look it up", search the immediately preceding user question. Do not ask them to repeat it.
 - A follow-up wanting NEW detail on a topic you just answered ("where exactly?", "who else?") is a fresh search, not a recall. If the summary says sources conflict or lack the answer, dispatch ONE sharper query (add a year, date, or entity — never repeat it), then answer with a brief caveat. Don't search a third time.
-- For weather, use `get_weather_forecast` with no args for a new request about today. If the user asks what the weather was or repeats a forecast you just gave, answer from that forecast in conversation history instead of calling the tool again. Do not write it to a note unless they explicitly ask to save it.
+{weather_line}
 
 Tool selection for saving and reminders:
-- `add_todo_item`: list items ("add eggs").
-- `append_to_today`: today-bound log entries (today's news summary, what happened today).
-- `append_to_note`: add to a specific named note, or an item that needs context alongside it.
-- `write_note`: evergreen topics with a reusable title ("boiler manual", "shopping list").
-- `remember_fact`: timeless personal facts ("I prefer tea") — never time-based things.
-- `create_calendar_event`: clock/date-anchored entries ("at 3pm", "Monday at 10am").
-- `start_countdown`: durations from now ("in 10 minutes") — never a specific clock time.
+{chr(10).join(save_reminder_lines)}
 When phrasing is ambiguous (e.g. "remember bin night is Thursday"), propose both options in a `reply` and wait for their choice.
 
-When a relative date appears ("today", "tomorrow", "this Sunday", "next week", "in three days"), expand it to an absolute YYYY-MM-DD inside the args using today's date as the reference. For example, "Remember Morgan's birthday is this Sunday" becomes:
-{{"actions": [{{"intent": "remember_fact", "args": ["Morgan's birthday is on Sunday {sunday}"]}}]}}
+{calendar_guidance}
+{whats_on_guidance}
 
-For `create_calendar_event`, the `date` arg follows the same absolute YYYY-MM-DD rule (for "next Thursday", the upcoming Thursday). Pass `recurrence` as "weekly", "daily", or "monthly" for repeating events, or "none" for one-off; pass `null` for optional args you're not using.
+{home_control_section}
 
-You can only CREATE calendar events — there is NO tool to edit, move, reschedule, or delete one, so never claim you changed, moved, fixed, or removed an event. If asked to change one, say plainly you can't edit events, offer to add a corrected new one with `create_calendar_event`, and tell them to delete the old one in Home Assistant. Only say something is in their calendar after `create_calendar_event` has actually run and returned success.
-
-`whats_on` reads calendar events two ways depending on what's asked:
-- A fixed window ("what's on today/tomorrow/this week?"): pass just `day`, e.g. {{"actions": [{{"intent": "whats_on", "args": ["today"]}}]}}.
-- A named event, whenever the user names something and asks if/when it's coming up, was on, or is scheduled ("any concerts coming up?", "when's the dentist?", "did I already miss the boiler service?"): pass `day` then `event_name`, e.g. {{"actions": [{{"intent": "whats_on", "args": ["today", "the dentist"]}}]}}. This searches 30 days before and after today by default (not just today) — never rely on the fixed-window form for a named search, it won't find events outside today's window.
-
-Home control:
-- `ha_open_cover`/`ha_close_cover`: full open or close — covers, blinds, garage doors, AND valves (same verb, HA just uses a different domain under the hood). `ha_set_cover_position`: a partial position, e.g. "open the blinds halfway" → position 50. `ha_stop_cover`: halt one mid-travel.
-- `ha_vacuum`: `action` is exactly "start" (default), "pause", "stop", "dock", or "locate" — never invent another action string.
-- `ha_mute`: pass `muted` as `false` to unmute — picking the tool via an "unmute" phrase doesn't set that for you.
-- `complete_todo_item` checks an item off; `add_todo_item` adds one — never use one for the other (e.g. "I already bought the milk" is `complete_todo_item`, not a new add).
-
-Home & live readings:
-- Use `get_entity_state` to check a device's status — on/off, sensor reading, what's playing. E.g. "are the living room lights on?" → {{"actions": [{{"intent": "get_entity_state", "args": ["living room lights"]}}]}}. Use friendly names ("living room lights"), not entity_id slugs ("light.living_room"). If unsure of the exact name, dispatch ONE call — fuzzy matching handles variants. A `Reactive question:` means not found; retry once then drop it.
-- Use `get_entities_in_area_state` when the user asks for a live status across a room: "which lights are on upstairs?" → {{"actions": [{{"intent": "get_entities_in_area_state", "args": ["upstairs", "light", "on"]}}]}}. Do not use the inventory tool for this.
-- Use `list_entities_in_area` to discover what's in a room ("what lights are downstairs", "what's in the office"). For an open-ended status ("what's the office looking like"): discover first, then query each entity using the EXACT names returned. Only query domains the discovery found — never enumerate empty ones. Synthesise results into a natural 1-2 sentence reply, not raw tool output.
-- A relative change ("brighten them", "turn it up") needs a fresh tool dispatch — don't compute a new value from memory. Check the last tool result in history for the real current value.
+{home_readings_section}
 - NEVER invent a number, status, or forecast. If no tool exists for what the user asks, say so plainly.
 
 Available tools:

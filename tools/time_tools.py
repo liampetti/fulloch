@@ -117,7 +117,7 @@ def _year_words(y: int) -> str:
     description="Get the current date and time",
     aliases=["time", "what_time_is_it", "get_time"],
 )
-def get_current_time(location: Optional[str] = None) -> str:
+def get_current_time() -> str:
     """Current date and time, fully spelled out in words.
 
     Emitting words rather than digits ("twenty-first" not "21", "twenty
@@ -126,7 +126,6 @@ def get_current_time(location: Optional[str] = None) -> str:
     suppressor in core/assistant.py catches the AEC residue cleanly and
     the time response can't loop back as a fake follow-up turn.
     """
-    # TODO: get location time
     now = _local_time.now()
     day_name = now.strftime("%A")
     month_name = now.strftime("%B")

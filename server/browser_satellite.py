@@ -2,12 +2,15 @@
 
 import asyncio
 import json
+import logging
 import queue
 import uuid
 from typing import TYPE_CHECKING
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .lifecycle import AppContext, Lifecycle
@@ -127,7 +130,8 @@ def register_browser_satellite_route(
                                 credit_seconds += await playback_credit.get()
                             credit_seconds -= frame_seconds
                             await ws.send_bytes(frame.astype(np.float32).tobytes())
-                except Exception:
+                except Exception as error:
+                    logger.warning("Browser satellite %s TTS delivery failed: %s", satellite_id, error)
                     return
 
         recv_task = asyncio.create_task(receive())

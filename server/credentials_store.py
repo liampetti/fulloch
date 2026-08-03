@@ -10,8 +10,11 @@ Credentials map to os.environ names injected at startup via inject_env():
   dashboard_password    → DASHBOARD_PASSWORD
   obsidian_token        → OBSIDIAN_TOKEN
   spotify_client_id     → SPOTIFY_CLIENT_ID
-  spotify_client_secret → SPOTIFY_CLIENT_SECRET
-  spotify_refresh_token → SPOTIFY_REFRESH_TOKEN
+    spotify_client_secret → SPOTIFY_CLIENT_SECRET
+    spotify_refresh_token → SPOTIFY_REFRESH_TOKEN
+
+`integration_tokens` is intentionally read directly by the integration API as
+a JSON list; it has no environment-variable equivalent.
 
 System-level env vars (Docker compose, shell exports) always take precedence —
 inject_env() uses os.environ.setdefault() and never overwrites existing values.

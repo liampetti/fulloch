@@ -86,6 +86,10 @@ class SatelliteSession:
     # VAD is unavailable/disabled (the RMS fallback is used instead).
     vad_endpointer: Optional["VadEndpointer"] = None
     soft_probe_emitted: bool = False
+    # A single ASR snapshot sent after VAD speech onset. It may establish the
+    # native lifecycle early, but never dispatches an incomplete command.
+    early_wake_probe_started_at: float = 0.0
+    early_wake_probe_emitted: bool = False
     # Onset timestamp of a soft-endpoint provisional that was committed early.
     # The hard VAD endpoint fires ~200ms later for the same speech; without this
     # guard the duplicate transcription is treated as a barge-in and cancels the

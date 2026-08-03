@@ -19,7 +19,7 @@ def assistant():
         return instance
 
 
-def _run_transcripts(assistant, transcripts, before_final=None):
+def _run_transcripts(assistant, transcripts, before_final=None, wake_probe_indexes=()):
     items = iter(transcripts)
 
     def stream_generator(
@@ -30,6 +30,7 @@ def _run_transcripts(assistant, transcripts, before_final=None):
         audio_sink,
         satellite_id_sink,
         endpoint_wait_sink,
+        wake_probe_sink,
     ):
         for index, _text in enumerate(transcripts):
             onset_sink["t"] = 10.0
@@ -38,6 +39,7 @@ def _run_transcripts(assistant, transcripts, before_final=None):
             audio_sink["buf"] = object()
             satellite_id_sink["id"] = "sat-a"
             endpoint_wait_sink["s"] = 0.0
+            wake_probe_sink["flag"] = index in wake_probe_indexes
             yield object()
 
     def asr_pipe(stream, **_kwargs):
@@ -95,6 +97,30 @@ def test_bare_hard_wake_starts_lifecycle_before_follow_up(assistant):
 
     assert [event["state"] for event in events] == ["wake_detected", "listening"]
     assistant._mark_turn_end.assert_called_once_with("sat-a")
+
+
+def test_speech_onset_wake_probe_only_emits_feedback(assistant):
+    events = []
+    assistant.register_turn_listener(events.append)
+
+    _run_transcripts(assistant, ["atticus"], wake_probe_indexes={0})
+
+    assert [event["state"] for event in events] == ["wake_detected", "listening"]
+    assert assistant.satellites["sat-a"].protocol_wake_pending is True
+    assistant._start_turn.assert_not_called()
+
+
+def test_speech_onset_wake_probe_rejects_context_bias_echo(assistant):
+    assistant.asr_context_terms = ["kiama"]
+    assistant._asr_context_tokens = frozenset({"kiama"})
+    events = []
+    assistant.register_turn_listener(events.append)
+
+    _run_transcripts(assistant, ["atticus kiama"], wake_probe_indexes={0})
+
+    assert events == []
+    assert assistant.satellites["sat-a"].protocol_wake_pending is False
+    assistant._start_turn.assert_not_called()
 
 
 def test_follow_up_replaces_the_prior_protocol_turn_before_thinking(assistant):

@@ -77,7 +77,11 @@ VAD_ENDPOINT_SILENCE_MS = SILENCE_DURATION_MS
 # non-destructive commands (lights/timers/etc.) can commit early;
 # notes/locks/media/thinking-mode turns always fall through to the hard
 # endpoint below regardless of this value.
-VAD_SOFT_ENDPOINT_SILENCE_MS = 200
+VAD_SOFT_ENDPOINT_SILENCE_MS = 100
+# A single provisional ASR snapshot is sent shortly after VAD detects speech,
+# without waiting for a pause. It is wakeword-only: it can update a native
+# satellite's lifecycle but never dispatches the partial command.
+EARLY_WAKE_PROBE_MS = 600
 # While VAD has not yet detected any speech, discard the buffer once it grows
 # past this so a noisy room doesn't accumulate seconds of pre-speech audio
 # (which would both inflate onset latency and hand ASR a long noise clip).
@@ -260,6 +264,7 @@ class AudioCapture:
             * (VAD_MIN_SPEECH_MS if vad_min_speech_ms is None else vad_min_speech_ms)
             / 1000
         )
+        self.early_wake_probe_seconds = EARLY_WAKE_PROBE_MS / 1000.0
         # Slack added to the follow-up deadline so a reply that *starts* just
         # inside the window still clears the recorder's shorter-min gate when
         # it's endpointed ~silence_duration later (the assistant gauges the
@@ -269,7 +274,7 @@ class AudioCapture:
         # State
         # Each item is
         # `(buf, speech_onset_monotonic, loudness_dbfs, provisional, satellite_id,
-        # endpoint_monotonic)` — the onset lets the transcriber measure the
+        # endpoint_monotonic, wake_probe)` — the onset lets the transcriber measure the
         # follow-up window from when the speaker began, the loudness tags the
         # utterance with its dBFS volume (voiced-window RMS where VAD is
         # active) for noise-baseline logging, satellite_id says which
@@ -502,6 +507,8 @@ class AudioCapture:
                     silence_counter = 0
                     speech_onset_t = None
                     session.soft_probe_emitted = False
+                    session.early_wake_probe_started_at = 0.0
+                    session.early_wake_probe_emitted = False
                     if session.vad_endpointer is not None:
                         session.vad_endpointer.reset()
                     continue
@@ -523,7 +530,36 @@ class AudioCapture:
                     if not endpointer.speech_started and buffer_samples >= self.vad_idle_reset_samples:
                         sat_buf.clear()
                         endpointer.reset()
+                        session.early_wake_probe_started_at = 0.0
+                        session.early_wake_probe_emitted = False
                         continue
+
+                    if endpointer.speech_started and session.early_wake_probe_started_at == 0.0:
+                        session.early_wake_probe_started_at = time.monotonic()
+
+                    # Do not make command decisions from this incomplete audio.
+                    # Its only purpose is detecting the wakeword while the user
+                    # continues speaking, instead of waiting for a trailing pause.
+                    if (
+                        endpointer.speech_started
+                        and not session.early_wake_probe_emitted
+                        and time.monotonic() - session.early_wake_probe_started_at
+                        >= self.early_wake_probe_seconds
+                    ):
+                        buf = np.concatenate(list(sat_buf), axis=0)
+                        onset = endpointer.speech_onset or time.monotonic()
+                        rms = endpointer.voiced_rms
+                        if rms is None:
+                            rms = _buf_rms(buf)
+                        self.audio_queue.put(
+                            (buf, onset, rms_to_dbfs(rms), True, session.id, time.monotonic(), True)
+                        )
+                        session.early_wake_probe_emitted = True
+                        logger.debug(
+                            "VAD early wake probe: %.2fs enqueued (%s)",
+                            buf.size / self.sample_rate,
+                            session.id,
+                        )
 
                     # Soft (early) endpoint: the speaker has briefly paused but
                     # the hard endpoint hasn't fired. Emit one provisional
@@ -594,6 +630,8 @@ class AudioCapture:
                         )
                         sat_buf.clear()
                         endpointer.reset()
+                        session.early_wake_probe_started_at = 0.0
+                        session.early_wake_probe_emitted = False
                         continue
 
                     # A short reply during the follow-up window ("yes", "stop")
@@ -621,6 +659,8 @@ class AudioCapture:
                         logger.debug("VAD endpoint: enqueued %.2fs for transcription (%s)", secs, session.id)
                     sat_buf.clear()
                     endpointer.reset()
+                    session.early_wake_probe_started_at = 0.0
+                    session.early_wake_probe_emitted = False
                     continue
 
                 # RMS fallback: VAD unavailable/disabled for this satellite, or

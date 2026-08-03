@@ -86,6 +86,22 @@ def test_search_stall_plays_before_dispatch():
     assert stall_pos < dispatch_pos, "stall must play before the search dispatch"
 
 
+def test_search_uses_dedicated_progress_clips_during_summary():
+    a = _import_assistant_module()
+    from utils.phrases import WEB_SEARCH_PHRASES
+
+    assert "web_search_stall_cache" not in a.ACK_CACHE_ATTRS
+    specs = {attr: pool for attr, pool, _ in a.STARTUP_CACHE_SPECS}
+    assert specs["web_search_stall_cache"] == WEB_SEARCH_PHRASES
+
+    src = inspect.getsource(a.AgentLoop._run)
+    summary_pos = src.index("Summarising web search payload")
+    watchdog_pos = src.index("ThinkingWatchdog(", summary_pos)
+    generate_pos = src.index("_summarise_search_result(", summary_pos)
+    assert watchdog_pos < generate_pos
+    assert "max_stalls=2" in src[watchdog_pos:generate_pos]
+
+
 def test_summary_surfaced_in_spoken_output():
     a = _import_assistant_module()
     src = inspect.getsource(a.AgentLoop._run)

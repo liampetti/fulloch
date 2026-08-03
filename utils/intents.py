@@ -180,7 +180,7 @@ MAX_AGENT_CALLS_PER_TURN = 6
 # `is_web_search` to play its "searching the web" stall *before* dispatching
 # this tool, since the SearXNG round-trip is the slow part of the turn.
 WEB_SEARCH_TOOL = "external_information"
-NOTE_WRITE_TOOLS = frozenset({"write_note", "append_to_note", "remember_fact"})
+NOTE_WRITE_TOOLS = frozenset({"write_note", "append_to_note", "append_to_today", "remember_fact"})
 
 # Data-retrieval tools whose result is raw records — a state-change dump, a
 # conversation transcript, fused note chunks — rather than a spoken-ready

@@ -8,7 +8,9 @@
 
 _The **Ful**ly **Loc**al **H**ome Voice Assistant, a private voice layer for your notes, your home, and the web._
 
-Fulloch is your fully private, local voice assistant running on your own PC or Mac. Ask questions, capture thoughts, and search your **[Obsidian](https://github.com/obsidianmd/obsidian-releases)** vault by voice. Control your home via **[Home Assistant](https://github.com/home-assistant)**. Pull live answers from the web with **[SearXNG](https://github.com/searxng/searxng)**. All fully private and running on your home PC.
+Fulloch is your privacy-focused local voice assistant running on your own PC or Mac. Ask questions, capture thoughts, and search your **[Obsidian](https://github.com/obsidianmd/obsidian-releases)** vault by voice. Control your home via **[Home Assistant](https://github.com/home-assistant)**. Pull live answers from the web with **[SearXNG](https://github.com/searxng/searxng)**. The local stack keeps speech, language processing, notes, facts, and conversation history on your machine; optional web search, Spotify, and remote language models contact their configured services.
+
+[Click here to see the satellite companion project](https://github.com/liampetti/fulloch-satellite) for running multiple ESP32-S3 satellites around your home.
 
 ## Features
 
@@ -24,7 +26,7 @@ Fulloch is your fully private, local voice assistant running on your own PC or M
 - **Voice options** - the GPU stack clones from reference audio; CPU users can choose fast built-in Kokoro voices or experimental Pocket TTS one-shot cloning
 - **Quiet delivery** - ask it to whisper or speak quietly; every TTS backend lowers output volume to 30% by default
 
-> **Higgs TTS 3:** The optional Higgs GPU backend is available only under Boson AI's Research and Non-Commercial License, not Fulloch's MIT license. It requires explicit consent for every voice reference. See [Model Sources and Licenses](docs/model-sources.md#higgs-tts-3-license).
+> **Higgs TTS 3:** The optional Higgs GPU backend is available only under Boson AI's Research and Non-Commercial License, not Fulloch's MIT license. It requires explicit consent for every voice reference. See [Model Sources and Licenses](MODELS.md#higgs-tts-3-license).
 
 ## Quick installation
 
@@ -39,9 +41,10 @@ docker run -d \
   -p 8765:8765 \
   -e DASHBOARD_HOST=0.0.0.0 \
   -v ./data:/app/data:rw \
-  # -v /path/to/your/ObsidianVault:/vault:rw \
   ghcr.io/liampetti/fulloch:cpu
 ```
+
+Add `-v /path/to/your/ObsidianVault:/vault:rw` before the image name to expose an Obsidian vault.
 
 ### GPU (Linux/Windows + NVIDIA)
 
@@ -55,92 +58,8 @@ docker run -d \
   -p 8765:8765 \
   -e DASHBOARD_HOST=0.0.0.0 \
   -v ./data:/app/data:rw \
-  # -v /path/to/your/ObsidianVault:/vault:rw \
   ghcr.io/liampetti/fulloch:latest
 ```
-
-> **RTX 50-series:** Native MTP speculative decoding and llama.cpp's built-in
-> FlashAttention are disabled on Blackwell because llama.cpp can fault on
-> longer agent prompts. This does not affect the Python FlashAttention 2
-> dependency used by the GPU speech models.
-
-> The commented-out `-v` line exposes your Obsidian vault to Fulloch so voice notes can read/write it. Uncomment it, edit the host path, and add a matching `obsidian.path_translation` entry in `data/config.yml`, see the Obsidian section below.
->
-> **Named volumes** (e.g. `-v fulloch-data:/app/data:rw` in compose) work too, the image's entrypoint chowns the volume to the container's user on first boot, so no separate `chown` init container is needed. The bind mount above (the default in this README) inherits the host's UID and is even simpler.
-
-### SearXNG sidecar (optional, for live web answers)
-
-Create a shared network, then run SearXNG on it and point Fulloch at it via `search.searxng_url`:
-
-```bash
-docker network create fulloch
-docker run -d \
-  --name searxng \
-  --network fulloch \
-  --restart unless-stopped \
-  -p 8080:8080 \
-  -e SEARXNG_SECRET=change-me \
-  searxng/searxng
-```
-
-Then in the Fulloch setup wizard, set **Web search URL** to `http://searxng:8080/search`. (Skip the `-p 8080:8080` if you don't need to reach SearXNG from the host, the Fulloch container only needs the in-network name.)
-
-### Once launched
-- Open `https://localhost:8765` and follow the wizard. See [First 2 minutes](#first-2-minutes) below for a step-by-step walkthrough of what to expect.
-
-## First 2 minutes
-
-What the first two minutes of a fresh install actually look like, so
-nothing in the timeline surprises you:
-
-1. **`docker run` returns in a second.** The container starts and the
-   entrypoint chowns the data dir (a no-op on bind mounts; fixes named
-   volumes on first boot). The image is ~2 GB for the CPU stack and ~6
-   GB for the GPU stack; only download size, not memory.
-2. **Open `https://localhost:8765`.** The dashboard's first render
-   shows the URL banner with a Copy button and a one-line note about
-   the self-signed-cert warning. Click through the warning; it's
-   expected for a private LAN install.
-3. **Walk the wizard.** Four steps: pick a thinking mode (regex
-   simple / full GPU / remote LLM), pick a name and voice, optionally
-   connect Home Assistant and SearXNG, optionally connect Obsidian.
-4. **Models download.** This is the long bit. The CPU stack pulls
-    roughly 5 GB (Qwen3 1.7B ONNX + Kokoro 82M); choosing Pocket TTS instead
-    adds its roughly 250 MB English ONNX voice-cloning bundle. The GPU
-    stack pulls roughly 13 GB (Qwen3 1.7B PyTorch ASR + Qwen3 1.7B PyTorch TTS + the
-   9B language model).
-5. **Startup** Once models are downloaded the assistant can go through startup, this will happen everytime you stop and restart Fulloch. This should only take about a minute or two with the Qwen3 TTS taking the longest to warm-up. Once everything is loaded you are presented with the chat screen. You can type text or click to activate voice mode, if you also select "Always Listen" you do not need the wakeword anymore (default is 'Hey Atticus').
-
-### Trusted LAN HTTPS
-
-The default certificate is self-signed, which is enough for browser microphone
-permission after accepting the warning once. To remove that warning on home
-network devices, create a private Fulloch CA and dashboard certificate:
-
-```bash
-python scripts/create_local_ca.py --force
-```
-
-The script writes the dashboard certificate to `data/certs/dashboard.crt`, so it
-uses the existing HTTPS configuration. It prints the one-time trust command for
-Linux, macOS, Windows, iOS/iPadOS, and Android. Install only
-`data/certs/fulloch-home-ca.crt` on client devices; never distribute
-`fulloch-home-ca.key`. Restart Fulloch after running the script. Add extra names
-or addresses before clients use them, for example:
-
-```bash
-python scripts/create_local_ca.py --force --host fulloch.home --ip 192.168.1.20
-```
-
-## Configuration
-
-The **setup wizard** configures Fulloch on first boot, and the **settings console** (gear icon, the same web UI) edits every option afterwards. Everything is reachable from the UI: wakeword, barge-in, voice, the Home Assistant connection, notes path, and web search. But if you'd rather hand-edit, the full annotated reference is [`data/config.example.yml`](data/config.example.yml).
-
-Secrets (HA token, LLM API key, dashboard password) are stored in `data/credentials.json`, written by the setup wizard. Copying `data/` to a new machine transfers everything. To configure headlessly, copy [`data/credentials.example.json`](data/credentials.example.json) to `data/credentials.json` and fill in the values, or set the equivalent env vars (`HA_TOKEN`, `LLM_API_KEY`, `DASHBOARD_PASSWORD`, `OBSIDIAN_TOKEN`) in `.env`.
-
-## Web Dashboard
-
-The web dashboard is **unauthenticated and bound to `127.0.0.1` by default**. To reach it from another device, set `dashboard_host: "0.0.0.0"` in config and set a password in the setup wizard's finish step.
 
 ### OpenAI Endpoint
 
@@ -148,15 +67,20 @@ The web dashboard is **unauthenticated and bound to `127.0.0.1` by default**. To
 
 The moment you point the language model at an OpenAI-compatible endpoint, the avatar and favicon swap to a travelling version of the character (Let's call him *Parloch*: The **Par**tially **loc**al **h**ome voice assistant), and the tagline reads *"language model is off-device."* Pick a local model again (**None** or the GPU 9B) and Fulloch comes home. It triggers as soon as a remote endpoint is *configured*, even if it is on your home network.
 
-> **Note:** GBNF grammar is passed through to llama.cpp-family servers (llama-server, LM Studio, Unsloth Studio), so the remote path enforces the same action/reply shape as the local one. Other OpenAI-compatible endpoints ignore the undocumented `grammar` field and fall back to `response_format: json_object` plus a one-shot repair round-trip, so tool-call errors are more likely there.
+### Obsidian Integration
+Connect your Obsidian vault so Fulloch reads, writes, appends, and searches your notes by voice.
+
+Just add your vault's directory as a volume when launching Docker container `-v /Users/you/Documents/MyVault:/vault:rw`
+
+The Obsidian wizard's "Auto-detect" scans the container filesystem for a vault, so it'll find `/vault` (or wherever you mounted it) without further config.
+
+A plugin is being developed that allows editing and live writing assistance of currently open documents. More information about getting the plugin setup in [technical details document](TECHNICAL_DETAILS.md).
 
 ## Home Assistant Integration
 
 A HACS-installable integration for status sensors, mic control, proactive speech, and automation triggers.
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=liampetti&repository=fulloch&category=Integration)
-
-Or manually: HACS → **Custom repositories** → paste `https://github.com/liampetti/fulloch`, category **Integration** → **Download** → restart HA → **Settings → Integrations → Add → Fulloch**.
 
 | Entity | Description |
 | -- | -- |
@@ -177,43 +101,6 @@ Or manually: HACS → **Custom repositories** → paste `https://github.com/liam
 | -- | -- |
 | `fulloch_wakeword_detected` | Voice turn starts |
 | `fulloch_turn_ended` | Fulloch finishes speaking |
-
-Use events in automations, e.g. dim lights on `fulloch_wakeword_detected`, restore on `fulloch_turn_ended`. Use `fulloch.speak` for proactive notifications from your home.
-
-The dashboard's **Entities** tab blocks specific entities (locks, alarms) from voice control without affecting dashboard or automation access. Changes apply immediately.
-
-> Search-by-name music queries (*"play the Beatles"*, *"play jazz in the kitchen"*, *"play music everywhere"*) need a `spotify:` block in `config.yml`, Fulloch searches Spotify directly via the Web API, then hands the resolved track/playlist off to a Home Assistant `media_player` entity to actually play. Requires a one-time manual OAuth step to get a refresh token. See the `spotify:` section in `data/config.example.yml` for the config keys and `data/credentials.json` fields. Without a `spotify:` block, there's no music search, pause/resume/skip still work through Home Assistant regardless (so they keep working for AVR/TV too).
-
-## Obsidian Integration
-
-Connect your Obsidian vault so Fulloch reads, writes, appends, and searches your notes by voice, and knows which note you have open. The first time you connect, Fulloch offers to copy your existing notes into the vault as `Inbox/fulloch-import/`. Cloud sync (Remotely Save, etc.) is unchanged, Fulloch only sees the local vault.
-
-**Setup (about 2 minutes):**
-
-1. **In the Fulloch setup wizard**, the "Connect Obsidian" step lets you auto-detect your vault or paste its path. Click **Save and continue**, or **Skip** to do it later.
-2. **Open the dashboard's Obsidian tab** and click **Show install instructions** to get a download link and your auth token.
-3. **In Obsidian**, extract the downloaded `fulloch.zip` into `<your-vault>/.obsidian/plugins/fulloch/`, then enable the Fulloch plugin in **Settings → Community plugins** and paste the token.
-
-   In the plugin settings, use the HTTPS dashboard URL (for example, `https://localhost` with port `8765`). A plain `localhost` value creates an insecure `ws://` connection, which Fulloch redirects and WebSockets cannot follow. The default self-signed dashboard certificate must be trusted on the computer running Obsidian; use the private-CA instructions above for a permanent trust setup.
-
-That's it. Once the plugin connects, the dashboard flips to **Connected** and voice notes go straight to your vault. Closing Obsidian doesn't break anything, Fulloch remembers the vault and voice keeps working.
-
-By default, voice can only create and append notes. While the plugin is connected, the Obsidian tab has an explicit **Enable edit/delete** control for active-editor actions: insert at the live cursor, replace currently selected text, rename the active note, or move it to Obsidian trash. The dashboard tab pulses red while this mode is enabled; disable it again when you are finished.
-
-To point Fulloch at a different vault later, use the **Switch vault** section on the Obsidian tab.
-
-**Running Fulloch in Docker?** The plugin runs on the host, so it reports host paths (e.g. `/Users/you/Documents/MyVault`). Fulloch inside the container can't see those. Two edits to wire it up:
-
-1. Add your vault's directory as a volume when launching Docker container `-v /Users/you/Documents/MyVault:/vault:rw`
-2. Add the same mapping under `obsidian.path_translation` in `data/config.yml`:
-
-   ```yaml
-   obsidian:
-     path_translation:
-       "/Users/you/Documents/MyVault": "/vault"
-   ```
-
-Restart Fulloch. The Obsidian wizard's "Auto-detect" scans the container filesystem for a vault, so it'll find `/vault` (or wherever you mounted it) without further config, path translation above is still needed so the plugin's *host* paths resolve correctly once connected.
 
 ## Instant Commands
 

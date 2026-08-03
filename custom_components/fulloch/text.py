@@ -15,8 +15,8 @@ async def async_setup_entry(
     data = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
         [
-            FullochSpeakText(data["session"], data["url"], entry),
-            FullochChatText(data["session"], data["url"], entry),
+            FullochSpeakText(data["session"], data["url"], data["headers"], entry),
+            FullochChatText(data["session"], data["url"], data["headers"], entry),
         ]
     )
 
@@ -31,10 +31,12 @@ class _FullochTextBase(TextEntity):
         self,
         session: aiohttp.ClientSession,
         url: str,
+        headers: dict[str, str],
         entry: ConfigEntry,
     ) -> None:
         self._session = session
         self._url = url
+        self._headers = headers
         self._entry = entry
 
     @property
@@ -59,6 +61,7 @@ class FullochSpeakText(_FullochTextBase):
             async with self._session.post(
                 f"{self._url}/speak",
                 json={"text": value},
+                headers=self._headers,
                 timeout=aiohttp.ClientTimeout(total=10),
             ):
                 pass
@@ -81,6 +84,7 @@ class FullochChatText(_FullochTextBase):
             async with self._session.post(
                 f"{self._url}/chat",
                 json={"text": value},
+                headers=self._headers,
                 timeout=aiohttp.ClientTimeout(total=120),
             ) as resp:
                 data = await resp.json()
@@ -89,6 +93,7 @@ class FullochChatText(_FullochTextBase):
                 async with self._session.post(
                     f"{self._url}/speak",
                     json={"text": answer},
+                    headers=self._headers,
                     timeout=aiohttp.ClientTimeout(total=10),
                 ):
                     pass

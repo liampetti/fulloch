@@ -385,6 +385,7 @@ def _after_write(path: Path) -> None:
         "Only use when the user explicitly asks to insert text at their cursor."
     ),
     aliases=["insert_at_cursor", "obsidian_insert"],
+    available=_obsidian_edit_allowed,
 )
 def insert_at_obsidian_cursor(text: str) -> str:
     """Ask the connected Obsidian plugin to insert text at its active cursor."""
@@ -405,6 +406,7 @@ def insert_at_obsidian_cursor(text: str) -> str:
         "explicitly asks to rename the note they currently have open."
     ),
     aliases=["rename_active_note", "obsidian_rename"],
+    available=_obsidian_edit_allowed,
 )
 def rename_active_obsidian_note(title: str) -> str:
     """Ask the connected Obsidian plugin to rename its active note."""
@@ -425,6 +427,7 @@ def rename_active_obsidian_note(title: str) -> str:
         "user request, and only when Obsidian edit/delete access is enabled."
     ),
     aliases=["delete_active_note", "obsidian_delete"],
+    available=_obsidian_edit_allowed,
 )
 def delete_active_obsidian_note() -> str:
     """Ask the connected Obsidian plugin to delete its active note."""
@@ -442,6 +445,7 @@ def delete_active_obsidian_note() -> str:
         "use for an explicit request to replace selected text when edit/delete access is enabled."
     ),
     aliases=["replace_selection", "obsidian_replace_selected"],
+    available=_obsidian_edit_allowed,
 )
 def replace_selected_obsidian_text(text: str) -> str:
     """Ask the connected plugin to replace its active editor selection."""

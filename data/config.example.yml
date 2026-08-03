@@ -23,7 +23,7 @@ general:
   personality: "balanced"       # balanced | playful | calm | wry | custom; applies to every model.
   # personality_custom: "Warm and reassuring; use pauses sparingly."  # Used when personality: custom.
   barge_in: "wakeword"           # off | wakeword — interrupt mid-response
-  conversation_mode_default: false # exclusive full-duplex, no-wakeword voice session.
+  conversation_mode_default: false # exclusive full-duplex, no-wakeword session; disconnects other satellites until disabled.
   follow_up_time: "5s"           # wakeword-free reply window after TTS; "0s" disables.
 
   # === Endpointing ==========================================================
@@ -39,6 +39,8 @@ general:
   dashboard_show_turn_details: false # expand agent-loop and inference details for every dashboard turn.
   dashboard_port: 8765
   dashboard_host: "127.0.0.1"    # 0.0.0.0 to expose to LAN (set a dashboard password first).
+  integration_api_enabled: true   # token-authenticated HTTP API for the Home Assistant integration.
+  integration_api_port: 8766      # plain HTTP; uses dashboard_host as its bind address.
   # HTTPS — both paths required, or TLS is skipped. Under Docker the files
   # must live under ./data. A self-signed cert is generated on first install.
   # When HTTPS is on, a tiny dispatcher fronts the same port: http://

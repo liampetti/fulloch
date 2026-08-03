@@ -114,18 +114,30 @@ class TestConnectSatellite:
         a.disconnect_satellite("sat-a")
         assert a.conversation_owner_id is None
 
-    def test_conversation_mode_requires_the_only_voice_satellite(self):
+    def test_conversation_mode_disconnects_other_voice_satellites(self):
+        from core.assistant import ConversationModeUnavailable
+
         a = _make_assistant()
         a.audio_capture.satellite_recorder_thread = _blocking_recorder
         a.connect_satellite("sat-a")
         a.connect_satellite("sat-b")
+        sink_b: "queue.Queue" = queue.Queue()
+        a.set_satellite_sink("sat-b", sink_b)
 
         enabled, _ = a.set_satellite_conversation_mode("sat-a", True)
 
-        assert enabled is False
-        assert a.conversation_owner_id is None
+        assert enabled is True
+        assert set(a.satellites) == {"dashboard-text", "sat-a"}
+        assert a.conversation_owner_id == "sat-a"
+        assert sink_b.get_nowait() == ("stop",)
+
+        with pytest.raises(ConversationModeUnavailable):
+            a.connect_satellite("sat-c")
+
+        a.set_satellite_conversation_mode("sat-a", False)
+        a.connect_satellite("sat-c")
         a.disconnect_satellite("sat-a")
-        a.disconnect_satellite("sat-b")
+        a.disconnect_satellite("sat-c")
 
 
 class TestDisconnectSatellite:
@@ -193,6 +205,34 @@ class TestSetSatelliteSink:
     def test_sink_for_unknown_satellite_is_noop(self):
         a = _make_assistant()
         a.set_satellite_sink("never-connected", queue.Queue())  # must not raise
+
+
+class TestTargetedProactiveSpeech:
+    def test_explicit_target_uses_its_own_sink(self):
+        a = _make_assistant()
+        a.models_ready.set()
+        a._tts_module = MagicMock()
+        a._tts_module.speak_stream.return_value = 0.0
+        sink_a: "queue.Queue" = queue.Queue()
+        sink_b: "queue.Queue" = queue.Queue()
+        a.satellites["sat-a"] = SatelliteSession(id="sat-a", tts_sink=sink_a)
+        a.satellites["sat-b"] = SatelliteSession(id="sat-b", tts_sink=sink_b)
+        a._last_connected_satellite_id = "sat-a"
+
+        a.speak_proactive("Hello downstairs", emit_event=False, satellite_id="sat-b")
+
+        assert a._tts_module.speak_stream.call_args.kwargs["sink"] is sink_b
+
+    def test_missing_explicit_target_does_not_fall_back_to_latest_satellite(self):
+        a = _make_assistant()
+        a.models_ready.set()
+        a._tts_module = MagicMock()
+        a.satellites["sat-a"] = SatelliteSession(id="sat-a", tts_sink=queue.Queue())
+        a._last_connected_satellite_id = "sat-a"
+
+        a.speak_proactive("Hello downstairs", satellite_id="missing")
+
+        a._tts_module.speak_stream.assert_not_called()
 
 
 class TestSinkFor:
@@ -455,6 +495,27 @@ class TestVadEndpointing:
         assert result[4] == "sat-a"
         assert ac.audio_queue.empty()
 
+    def test_speech_onset_emits_one_wake_only_probe_without_a_pause(self):
+        ac = AudioCapture(use_vad=False, min_utterance_ms=1500, max_utterance_ms=10000)
+        ac._use_vad_enabled = True
+        ac._build_endpointer = lambda: _ScriptedEndpointer([{"speech_started": True}, {}])
+
+        chunk_q: "queue.Queue" = queue.Queue()
+        session = SatelliteSession(id="sat-a", chunk_q=chunk_q)
+        # Start the probe clock in the past to test the recorder decision without
+        # sleeping for the production 600 ms delay.
+        session.early_wake_probe_started_at = time.monotonic() - ac.early_wake_probe_seconds
+        chunk_q.put(np.zeros(2000, dtype=np.float32))
+        chunk_q.put(None)
+
+        ac.satellite_recorder_thread(session)
+
+        result = ac.audio_queue.get_nowait()
+        assert result[3] is True
+        assert result[6] is True
+        assert session.early_wake_probe_emitted is True
+        assert ac.audio_queue.empty()
+
     def test_endpointer_reset_after_hard_endpoint_prevents_stale_duplicate(self):
         ac = AudioCapture(use_vad=False, min_utterance_ms=100, max_utterance_ms=10000)
         ac._use_vad_enabled = True
@@ -481,6 +542,8 @@ class TestVadEndpointing:
 
         assert len(results) == 1  # not a second, stale commit from leftover state
         assert session.vad_endpointer.reset_calls == 1
+        assert session.early_wake_probe_emitted is False
+        assert session.early_wake_probe_started_at == 0.0
 
     def test_two_satellites_get_independent_endpointer_instances(self):
         ac = AudioCapture(use_vad=False)

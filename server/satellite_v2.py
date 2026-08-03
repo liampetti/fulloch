@@ -2,10 +2,13 @@
 
 import asyncio
 import json
+import logging
 import queue
 import secrets
 import time
 import uuid
+from collections import deque
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
@@ -13,12 +16,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from . import config_store
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from .lifecycle import AppContext, Lifecycle
 
 
 SATELLITE_V2_PROTOCOL_MAJOR = 2
-SATELLITE_V2_PROTOCOL_MINOR = 1
+SATELLITE_V2_PROTOCOL_MINOR = 2
 SATELLITE_V2_CONTROL_MAX_BYTES = 2 * 1024
 SATELLITE_V2_UPLINK_BYTES = 640
 SATELLITE_V2_DOWNLINK_MAX_BYTES = 4 * 1024
@@ -26,10 +31,45 @@ SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ = 16000
 SATELLITE_V2_DOWNLINK_INITIAL_BUFFER_SECONDS = 1.0
 SATELLITE_V2_HEARTBEAT_MS = 15_000
 SATELLITE_V2_HEARTBEAT_MISSES = 3
+SATELLITE_V2_RESUME_SECONDS = 2.0
+# PCM S16LE at 16 kHz: retain three seconds, rounded up to full downlink frames.
+SATELLITE_V2_REPLAY_FRAMES = 24
+
+
+@dataclass
+class _RecoverySession:
+    """Server-owned state that survives a brief native socket replacement."""
+
+    satellite_id: str
+    device_id: str
+    chunk_q: Optional[queue.Queue] = None
+    tts_q: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=200))
+    protocol_events: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=128))
+    lifecycle_turn_id: Optional[str] = None
+    turn_id: Optional[str] = None
+    next_seq: int = 0
+    source_sample_rate: int = 0
+    sent_audio_seconds: float = 0.0
+    pace_origin: Optional[float] = None
+    replay: deque = field(default_factory=lambda: deque(maxlen=SATELLITE_V2_REPLAY_FRAMES))
+    connection: Optional[str] = None
+    expires_at: float = 0.0
+    cleanup_task: Optional[asyncio.Task] = None
+    listener: object = None
 
 
 def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: "Lifecycle") -> None:
     """Attach the native voice-satellite endpoint."""
+    recovery_sessions: dict[str, _RecoverySession] = {}
+
+    async def expire_session(session: _RecoverySession) -> None:
+        await asyncio.sleep(SATELLITE_V2_RESUME_SECONDS)
+        if session.connection is not None or time.monotonic() < session.expires_at:
+            return
+        recovery_sessions.pop(session.satellite_id, None)
+        context.assistant.unregister_turn_listener(session.listener)
+        context.assistant.disconnect_satellite(session.satellite_id)
+        context.assistant.set_satellite_sink(session.satellite_id, None)
 
     @app.websocket("/ws/satellite-v2")
     async def satellite_ws_v2(ws: WebSocket):
@@ -82,7 +122,9 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
         if (
             not isinstance(protocol, dict) or protocol.get("name") != "satellite-v2"
             or protocol.get("major") != SATELLITE_V2_PROTOCOL_MAJOR
-            or not isinstance(protocol.get("minor"), int) or not isinstance(device, dict)
+            or not isinstance(protocol.get("minor"), int)
+            or not 1 <= protocol["minor"] <= SATELLITE_V2_PROTOCOL_MINOR
+            or not isinstance(device, dict)
             or not isinstance(device.get("id"), str) or not device["id"].strip()
             or not isinstance(capabilities, dict)
         ):
@@ -94,39 +136,74 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
             await reject("auth", "invalid token")
             return
 
-        satellite_id = uuid.uuid4().hex
-        tts_q: queue.Queue = queue.Queue(maxsize=200)
-        protocol_events: queue.Queue = queue.Queue(maxsize=128)
+        resume = first.get("resume")
+        session = None
+        if protocol["minor"] >= 2 and isinstance(resume, dict):
+            resume_id, resume_turn_id, next_seq = resume.get("session_id"), resume.get("turn_id"), resume.get("next_seq")
+            candidate = recovery_sessions.get(resume_id) if isinstance(resume_id, str) else None
+            if (
+                candidate is not None
+                and candidate.connection is None
+                and time.monotonic() <= candidate.expires_at
+                and candidate.device_id == device["id"].strip()
+                and candidate.turn_id == resume_turn_id
+                and isinstance(next_seq, int) and next_seq >= 0
+            ):
+                session = candidate
+                if session.cleanup_task is not None:
+                    session.cleanup_task.cancel()
+                    session.cleanup_task = None
+        if session is None:
+            session = _RecoverySession(uuid.uuid4().hex, device["id"].strip())
         from core.assistant import ConversationModeUnavailable
 
-        try:
-            chunk_q = context.assistant.connect_satellite(
-                satellite_id, label=device.get("name") or device["id"], auth_token=auth_token,
-                device_id=device["id"].strip(),
-            )
-        except ConversationModeUnavailable as error:
-            await reject("conversation_mode_active", str(error))
-            return
-        context.assistant.set_satellite_sink(satellite_id, tts_q)
-
-        def on_turn_event(event: dict) -> None:
-            if event.get("satellite_id") != satellite_id:
-                return
+        if session.satellite_id not in recovery_sessions:
             try:
-                protocol_events.put_nowait(event)
-            except queue.Full:
-                pass
+                chunk_q = context.assistant.connect_satellite(
+                    session.satellite_id, label=device.get("name") or device["id"], auth_token=auth_token,
+                    device_id=session.device_id,
+                )
+            except ConversationModeUnavailable as error:
+                await reject("conversation_mode_active", str(error))
+                return
+            context.assistant.set_satellite_sink(session.satellite_id, session.tts_q)
+            session.chunk_q = chunk_q
 
-        context.assistant.register_turn_listener(on_turn_event)
+            def on_turn_event(event: dict) -> None:
+                if event.get("satellite_id") != session.satellite_id:
+                    return
+                try:
+                    session.protocol_events.put_nowait(event)
+                except queue.Full:
+                    pass
+
+            session.listener = on_turn_event
+            context.assistant.register_turn_listener(on_turn_event)
+            recovery_sessions[session.satellite_id] = session
+        else:
+            chunk_q = session.chunk_q
+        connection_id = uuid.uuid4().hex
+        session.connection = connection_id
+        satellite_id = session.satellite_id
+        tts_q, protocol_events = session.tts_q, session.protocol_events
+        supports_resume = protocol["minor"] >= 2
+        negotiated_minor = min(protocol["minor"], SATELLITE_V2_PROTOCOL_MINOR)
         await ws.send_json({
             "type": "satellite.welcome", "session_id": satellite_id,
-            "protocol": {"major": SATELLITE_V2_PROTOCOL_MAJOR, "minor": SATELLITE_V2_PROTOCOL_MINOR},
+            "protocol": {"major": SATELLITE_V2_PROTOCOL_MAJOR, "minor": negotiated_minor},
             "audio": {
                 "uplink": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1, "frame_duration_ms": 20},
                 "downlink": {"encoding": "pcm_s16le", "sample_rate_hz": SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ, "channels": 1},
             },
             "heartbeat_interval_ms": SATELLITE_V2_HEARTBEAT_MS,
         })
+        if supports_resume and session.turn_id is not None:
+            await ws.send_json({"type": "assistant.state", "state": "speaking", "turn_id": session.turn_id})
+            requested_seq = resume["next_seq"] if isinstance(resume, dict) else session.next_seq
+            for frame_turn_id, seq, frame in session.replay:
+                if frame_turn_id == session.turn_id and seq >= requested_seq:
+                    await ws.send_json({"type": "tts.audio", "turn_id": frame_turn_id, "seq": seq, "bytes": len(frame)})
+                    await ws.send_bytes(frame)
         last_health_at = time.monotonic()
 
         async def receive() -> None:
@@ -193,7 +270,6 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                 return
 
         async def send() -> None:
-            turn_id, source_sample_rate, sent_audio_seconds, pace_origin = None, 0, 0.0, None
             while True:
                 try:
                     event = protocol_events.get_nowait()
@@ -204,13 +280,13 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                         await ws.send_json(event)
                     elif event.get("type") == "assistant.state":
                         payload = {key: value for key, value in event.items() if key != "satellite_id"}
-                        turn_id = payload.get("turn_id", turn_id)
+                        session.lifecycle_turn_id = payload.get("turn_id", session.lifecycle_turn_id)
                         await ws.send_json(payload)
                     elif event.get("role") == "user" and getattr(context.assistant.satellites.get(satellite_id), "conversation_mode", False):
-                        turn_id = turn_id or uuid.uuid4().hex
-                        await ws.send_json({"type": "conversation.transcript", "turn_id": turn_id, "text": event.get("content", ""), "final": True})
-                    elif event.get("role") == "assistant" and turn_id is not None and getattr(context.assistant.satellites.get(satellite_id), "conversation_mode", False):
-                        await ws.send_json({"type": "conversation.response", "turn_id": turn_id, "text": event.get("content", ""), "final": True})
+                        session.lifecycle_turn_id = session.lifecycle_turn_id or uuid.uuid4().hex
+                        await ws.send_json({"type": "conversation.transcript", "turn_id": session.lifecycle_turn_id, "text": event.get("content", ""), "final": True})
+                    elif event.get("role") == "assistant" and session.lifecycle_turn_id is not None and getattr(context.assistant.satellites.get(satellite_id), "conversation_mode", False):
+                        await ws.send_json({"type": "conversation.response", "turn_id": session.lifecycle_turn_id, "text": event.get("content", ""), "final": True})
                     continue
                 try:
                     item = tts_q.get_nowait()
@@ -222,28 +298,42 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                     return
                 try:
                     if isinstance(kind, str) and kind == "start":
-                        turn_id, source_sample_rate, sent_audio_seconds, pace_origin = turn_id or uuid.uuid4().hex, item[1], 0.0, None
-                        await ws.send_json({"type": "assistant.state", "state": "speaking", "turn_id": turn_id})
-                    elif isinstance(kind, str) and kind == "cancel" and turn_id is not None:
-                        await ws.send_json({"type": "tts.cancel", "turn_id": turn_id})
-                    elif not isinstance(kind, str) and turn_id is not None:
-                        if source_sample_rate != SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ and len(kind):
-                            positions = np.linspace(0, len(kind) - 1, round(len(kind) * SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ / source_sample_rate))
+                        session.turn_id = session.lifecycle_turn_id or uuid.uuid4().hex
+                        session.next_seq, session.replay = 0, deque(maxlen=SATELLITE_V2_REPLAY_FRAMES)
+                        session.source_sample_rate, session.sent_audio_seconds, session.pace_origin = item[1], 0.0, None
+                        await ws.send_json({"type": "assistant.state", "state": "speaking", "turn_id": session.turn_id})
+                    elif isinstance(kind, str) and kind == "cancel" and session.turn_id is not None:
+                        await ws.send_json({"type": "tts.cancel", "turn_id": session.turn_id})
+                        session.turn_id = None
+                    elif isinstance(kind, str) and kind == "end" and session.turn_id is not None:
+                        await ws.send_json({"type": "tts.end", "turn_id": session.turn_id})
+                        session.turn_id = None
+                    elif not isinstance(kind, str) and session.turn_id is not None:
+                        if session.source_sample_rate != SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ and len(kind):
+                            positions = np.linspace(0, len(kind) - 1, round(len(kind) * SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ / session.source_sample_rate))
                             kind = np.interp(positions, np.arange(len(kind)), kind).astype(np.float32)
                         raw = (np.clip(kind, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
                         for offset in range(0, len(raw), SATELLITE_V2_DOWNLINK_MAX_BYTES):
                             frame = raw[offset : offset + SATELLITE_V2_DOWNLINK_MAX_BYTES]
                             frame_seconds = len(frame) / (2 * SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ)
                             now = time.monotonic()
-                            if pace_origin is None:
-                                pace_origin = now
-                            elif sent_audio_seconds >= SATELLITE_V2_DOWNLINK_INITIAL_BUFFER_SECONDS:
-                                due_at = pace_origin + sent_audio_seconds - SATELLITE_V2_DOWNLINK_INITIAL_BUFFER_SECONDS
+                            # Buffer before pacing so a disconnect during the
+                            # await below cannot discard a dequeued TTS frame.
+                            seq = session.next_seq
+                            session.next_seq += 1
+                            session.replay.append((session.turn_id, seq, frame))
+                            if session.pace_origin is None:
+                                session.pace_origin = now
+                            elif session.sent_audio_seconds >= SATELLITE_V2_DOWNLINK_INITIAL_BUFFER_SECONDS:
+                                due_at = session.pace_origin + session.sent_audio_seconds - SATELLITE_V2_DOWNLINK_INITIAL_BUFFER_SECONDS
                                 if due_at > now:
                                     await asyncio.sleep(due_at - now)
+                            if supports_resume:
+                                await ws.send_json({"type": "tts.audio", "turn_id": session.turn_id, "seq": seq, "bytes": len(frame)})
                             await ws.send_bytes(frame)
-                            sent_audio_seconds += frame_seconds
-                except Exception:
+                            session.sent_audio_seconds += frame_seconds
+                except Exception as error:
+                    logger.warning("Satellite %s TTS delivery failed: %s", satellite_id, error)
                     return
 
         recv_task = asyncio.create_task(receive())
@@ -258,6 +348,9 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                     pass
             await asyncio.gather(*done, return_exceptions=True)
         finally:
-            context.assistant.unregister_turn_listener(on_turn_event)
-            context.assistant.disconnect_satellite(satellite_id)
-            context.assistant.set_satellite_sink(satellite_id, None)
+            # A resumed socket may already own this logical session. Never let
+            # an old handler tear down its replacement.
+            if session.connection == connection_id:
+                session.connection = None
+                session.expires_at = time.monotonic() + SATELLITE_V2_RESUME_SECONDS
+                session.cleanup_task = asyncio.create_task(expire_session(session))

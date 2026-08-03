@@ -51,6 +51,7 @@ class ToolRegistry:
         self._tools: Dict[str, Callable] = {}
         self._schemas: Dict[str, ToolSchema] = {}
         self._aliases: Dict[str, str] = {}
+        self._availability: Dict[str, Callable[[], bool]] = {}
 
     def register_tool(
         self,
@@ -58,6 +59,7 @@ class ToolRegistry:
         name: Optional[str] = None,
         description: Optional[str] = None,
         aliases: Optional[List[str]] = None,
+        available: Optional[Callable[[], bool]] = None,
     ) -> Callable:
         tool_name = name or func.__name__
 
@@ -77,6 +79,8 @@ class ToolRegistry:
             description=description or func.__doc__ or f"Function {tool_name}",
             params=_extract_params(func),
         )
+        if available is not None:
+            self._availability[tool_name] = available
 
         for alias in aliases or []:
             if alias in self._aliases or alias in self._tools:
@@ -140,6 +144,9 @@ class ToolRegistry:
         """
         lines = []
         for schema in self._schemas.values():
+            available = self._availability.get(schema.name)
+            if available is not None and not available():
+                continue
             parts = []
             for p in schema.params:
                 if p.required:
@@ -158,10 +165,11 @@ def tool(
     name: Optional[str] = None,
     description: Optional[str] = None,
     aliases: Optional[List[str]] = None,
+    available: Optional[Callable[[], bool]] = None,
 ):
     """Decorator: register a function as a tool callable by the SLM."""
 
     def decorator(func):
-        return tool_registry.register_tool(func, name, description, aliases)
+        return tool_registry.register_tool(func, name, description, aliases, available)
 
     return decorator

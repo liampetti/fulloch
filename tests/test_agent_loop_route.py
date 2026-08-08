@@ -240,3 +240,32 @@ def test_delivery_is_not_spoken_for_lock_actions():
 
     assert not al._can_speak_delivery(_host(personality="wry"), [{"intent": "ha_lock", "args": ["front door"]}])
     assert al._can_speak_delivery(_host(personality="wry"), [{"intent": "turn_on", "args": ["lamp"]}])
+
+
+def test_delivery_replaces_raw_tool_results_after_success(monkeypatch):
+    import core.agent_loop as al
+
+    monkeypatch.setattr(
+        al,
+        "catchAll",
+        lambda prompt: {
+            "actions": [
+                {"intent": "turn_on", "args": ["lights"]},
+                {"intent": "play_song", "args": ["music"]},
+            ],
+            "delivery": "The lights are on and music is playing.",
+        },
+    )
+    monkeypatch.setattr(al.intents, "is_registered_tool", lambda name: name in {"turn_on", "play_song"})
+    monkeypatch.setattr(
+        al.intents,
+        "handle_action",
+        lambda action: "Raw result for " + action["intent"],
+    )
+    spoken = []
+    host = _host(personality="wry", _record_spoken=spoken.append)
+
+    out = al.AgentLoop(host, session=None, source="text").run("turn on lights and play music")
+
+    assert out == "The lights are on and music is playing."
+    assert spoken == [out]

@@ -70,6 +70,7 @@ COPY --chown=appuser:appuser server/ server/
 COPY --chown=appuser:appuser data/config.example.yml /app/seed/config.example.yml
 COPY --chown=appuser:appuser data/models/grammars/agent.gbnf /app/seed/grammars/agent.gbnf
 COPY --chown=appuser:appuser data/wav/ /app/seed/wav/
+COPY --chown=appuser:appuser data/voices/ /app/seed/voices/
 
 # Obsidian plugin zip, built from source in the obsidian-plugin-builder stage
 # above — served by GET /api/obsidian/plugin.zip (server/dashboard.py).

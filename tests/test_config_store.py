@@ -84,6 +84,14 @@ def test_list_coercion_from_csv(tmp_path):
     assert terms == ["phoebe bridgers", "downstairs office"]
 
 
+def test_dict_coercion_accepts_json_and_rejects_non_objects(tmp_path):
+    path = _write(tmp_path, "general:\n  wakeword: hi\n")
+    cs.update_config({"obsidian.path_translation": '{"/host": "/vault"}'}, path)
+    assert cs.read_config(path)["obsidian"]["path_translation"] == {"/host": "/vault"}
+    with pytest.raises(cs.ConfigValidationError):
+        cs.update_config({"obsidian.path_translation": "not json"}, path)
+
+
 def test_write_models_block(tmp_path):
     path = _write(tmp_path, "general:\n  wakeword: hi\n")
     cs.write_models(

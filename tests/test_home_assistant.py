@@ -36,6 +36,7 @@ def test_import_does_no_network_load_lazily(monkeypatch):
         ("_ENTITY_ALIASES", {}),
         ("_ENTITY_ALIASES_MULTI", {}),
         ("_AREA_MAP", {}),
+        ("_FLOOR_MAP", {}),
         ("_DEFAULT_WEATHER_ENTITY", None),
         ("SPOTIFY_ENTITY", None),
         ("TV_ENTITY", None),
@@ -46,6 +47,7 @@ def test_import_does_no_network_load_lazily(monkeypatch):
         monkeypatch.setattr(ha, _name, _val)
     monkeypatch.setattr(ha, "_fetch_entity_aliases", fake_fetch)
     monkeypatch.setattr(ha, "_fetch_area_map", lambda: {})
+    monkeypatch.setattr(ha, "_fetch_floor_map", lambda: {})
 
     assert calls["n"] == 0  # nothing fetched yet
     ha._ensure_loaded()
@@ -340,8 +342,9 @@ def test_get_temperature_resolves_collided_climate_over_light():
         # Variant resolver recovers the climate entity despite the light winning.
         assert _resolve_entity("upstairs", domain="climate") == "climate.living"
         result = get_temperature("upstairs")
-        # Reads the climate temp, and speaks as "upstairs" (not the slug "living").
-        assert "18" in result and "upstairs" in result.lower()
+        # Reads the climate temp, preserves its decimal precision, and speaks
+        # as "upstairs" (not the slug "living").
+        assert "18.3" in result and "upstairs" in result.lower()
         assert "living" not in result.lower()
 
 
@@ -365,7 +368,7 @@ def test_get_temperature_reports_climate_target_when_different():
     ):
         result = get_temperature("upstairs")
 
-    assert "18" in result
+    assert "18.3" in result
     assert "21" in result
 
 
@@ -843,6 +846,40 @@ def test_resolve_area_matches_by_display_name():
         assert ha._resolve_area("downstairs") == "downstairs"
         assert ha._resolve_area("the office") == "office"
         assert ha._resolve_area("upstairs") is None
+
+
+def test_floor_name_does_not_fuzzy_match_child_area():
+    import tools.home_assistant as ha
+
+    with (
+        patch.object(ha, "_AREA_MAP", {"upstairs_bathroom": "Upstairs Bathroom"}),
+        patch.object(ha, "_FLOOR_MAP", {"upstairs": "Upstairs"}),
+    ):
+        assert ha._resolve_area("upstairs") is None
+        assert ha._resolve_floor("upstairs") == "upstairs"
+
+
+def test_list_entities_in_floor_aggregates_its_areas():
+    import tools.home_assistant as ha
+
+    responses = iter(
+        [
+            json.dumps(["upstairs_bathroom", "main_bedroom"]),
+            json.dumps(["light.bathroom"]),
+            json.dumps(["light.bedroom", "sensor.bedroom_temperature"]),
+        ]
+    )
+    with (
+        patch.object(ha, "HA_TOKEN", "tok"),
+        patch.object(ha, "_AREA_MAP", {"upstairs_bathroom": "Upstairs Bathroom"}),
+        patch.object(ha, "_FLOOR_MAP", {"upstairs": "Upstairs"}),
+        patch.object(ha, "_DENIED_ENTITIES", frozenset()),
+        patch("tools.home_assistant._render_template", side_effect=responses),
+        patch("tools.home_assistant._friendly_for", side_effect=lambda entity_id: entity_id),
+    ):
+        result = ha.list_entities_in_area("upstairs")
+
+    assert result == "Upstairs has: light.bathroom, light.bedroom, sensor.bedroom_temperature"
 
 
 def test_media_target_prefers_spotify_and_resolves_a_room_player():

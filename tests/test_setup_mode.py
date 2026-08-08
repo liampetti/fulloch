@@ -21,7 +21,9 @@ from server.lifecycle import Lifecycle  # noqa: E402
 
 
 def _mk_hub(models_dir: Path, repo_id: str) -> None:
-    (models_dir / "hub" / f"models--{repo_id.replace('/', '--')}").mkdir(parents=True)
+    root = models_dir / "hub" / f"models--{repo_id.replace('/', '--')}"
+    root.mkdir(parents=True)
+    (root / ".fulloch_complete").touch()
 
 
 def test_no_config_is_first_run():

@@ -814,9 +814,10 @@ class AgentLoop:
                 already = any(p.rstrip(".") == summary for p in parts)
                 if summary and not already:
                     parts.insert(0, summary)
-            if delivery:
-                parts.append(delivery.strip())
-            spoken = ". ".join(parts)
+            # `delivery` is the one concise, post-success confirmation. Do not
+            # append it after raw tool results, which would restate the same
+            # completed actions to the user.
+            spoken = delivery if delivery else ". ".join(parts)
             if not spoken:
                 spoken = "Done."
             spoken = intents.strip_unfounded_save_claim(spoken, note_written)

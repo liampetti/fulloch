@@ -42,7 +42,7 @@ from .higgs_controls import apply_delivery, extract_delivery_request
 from .satellite import SatelliteSession
 from .satellite_context import current_satellite_id as _current_satellite_id
 from .slm import ContextExhaustedError, RemoteUnreachable, generate_slm, load_slm
-from .text_utils import clean_for_tts, split_sentences
+from .text_utils import clean_for_tts, split_sentences, spoken_for_tts
 from .tts_session import TtsSession, parse_barge_time
 from .turn_arbiter import TurnArbiter
 from .turn_stats import TurnStats, set_model_labels
@@ -274,6 +274,7 @@ _MODEL_LOAD_ESTIMATES = {
     (LLM, "llama"): "usually 10-25 seconds",
     (ASR, "qwen-gguf"): "usually 5-15 seconds",
     (TTS, "qwen-gguf"): "usually 5-15 seconds",
+    (TTS, "pocket-tts-gguf"): "usually 5-15 seconds",
 }
 
 
@@ -1733,7 +1734,7 @@ class Assistant:
         if sink is not None and gain != 1.0:
             sink = _GainSink(sink, gain)
         return self._tts_module.speak_stream(
-            text,
+            spoken_for_tts(text),
             prompt,
             session=session,
             stats=stats,
@@ -1868,7 +1869,7 @@ class Assistant:
         one failure doesn't block the others.
         """
         applied: set = set()
-        live_voice = self._tts_backend in {"kokoro-onnx", "pocket-tts-onnx"}
+        live_voice = self._tts_backend in {"kokoro-onnx", "pocket-tts-onnx", "pocket-tts-gguf"}
         for ch in changes:
             path, value = ch["path"], ch["value"]
             if path not in self._HOT_CONFIG_PATHS:

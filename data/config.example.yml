@@ -59,8 +59,8 @@ general:
 
 # === Models =================================================================
 # Omit the block to use the stack defaults. The wizard writes this block from
-# the chosen tier. The language model is either `local` (a bundled GGUF) or
-# `external` (an OpenAI-compatible server).
+# the chosen tier. The language model is `local` (a bundled GGUF), `external`
+# (an OpenAI-compatible server), or `none` (fully local regex-only commands).
 #
 # models:
 #   asr:
@@ -77,11 +77,12 @@ general:
 #     # higgs-gguf               # Higgs TTS 3 Q4 GGUF (GPU, experimental)
 #     # qwen-gguf                # Qwen3 1.7B GGUF (GPU)
 #     # qwen-gguf-small          # Qwen3 0.6B GGUF (GPU)
+#     # pocket-tts-gguf          # Pocket TTS Q8_0 GGUF (GPU, experimental English voice clone)
 #     # qwen-small               # Qwen3 0.6B PyTorch (GPU)
 #     # kokoro-onnx              # Kokoro 82M (default CPU)
 #     # pocket-tts-onnx          # Pocket TTS ONNX (experimental CPU one-shot WAV voice clone)
 #   llm:
-#     backend: local             # local | external
+#     backend: local             # local | external | none (regex-only commands)
 #     local_model: qwen          # qwen (recommended) | gemma | custom
 #     # model: "/path/to/model.gguf"  # Required only when local_model: custom.
 #     # n_context: 12288         # Optional; larger contexts use more VRAM.

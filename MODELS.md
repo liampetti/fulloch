@@ -15,6 +15,7 @@ Fulloch downloads model assets during setup. The selected backend determines whi
 - Qwen3-TTS GGUF: [1.7B](https://huggingface.co/cstr/qwen3-tts-1.7b-base-GGUF), [0.6B](https://huggingface.co/cstr/qwen3-tts-0.6b-base-GGUF), and [tokenizer](https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF).
 - Kokoro: [onnx-community/Kokoro-82M-v1.0-ONNX](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX).
 - Pocket TTS ONNX: [KevinAHM/pocket-tts-onnx](https://huggingface.co/KevinAHM/pocket-tts-onnx), using the English INT8 bundle for experimental CPU one-shot voice cloning (CC-BY-4.0 model; Apache-2.0 wrapper code).
+- Pocket TTS GGUF: [cstr/pocket-tts-GGUF](https://huggingface.co/cstr/pocket-tts-GGUF), using the English Q8_0 voice-cloning build for experimental GPU use through CrispASR (CC-BY-4.0).
 - Higgs TTS 3: [Fulloch mirror](https://huggingface.co/liampetti/HiggsTTS3.gguf), using `higgs-v3-tts-q4_k.gguf` and `higgs_tts_v3_tokenizer.json`. The mirror preserves provenance from the [original GGUF conversion](https://huggingface.co/NeemaShioSe/HiggsTTS3.gguf) and is derived from [Boson AI's Higgs TTS 3](https://huggingface.co/bosonai/higgs-tts-3-4b).
 
 ## Language Models

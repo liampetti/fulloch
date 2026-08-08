@@ -15,6 +15,7 @@ from utils.intent_catch import (
     extract_after_play,
     extract_area_light_state,
     extract_color,
+    extract_compound_actions,
     extract_cover,
     extract_deep_think,
     extract_dim_brighten,
@@ -303,6 +304,30 @@ class TestDimBrighten:
         assert catchAll("can you dim the lights in the downstairs office") == {
             "actions": [{"intent": "ha_set_brightness", "args": ["downstairs office", 30]}]
         }
+
+
+class TestCompoundCommands:
+    """Independent deterministic clauses can execute together without an SLM."""
+
+    def test_routes_light_control_and_playback(self):
+        assert catchAll("okay, can you dim the lights in the office and play music") == {
+            "actions": [
+                {"intent": "ha_set_brightness", "args": ["office", 30]},
+                {"intent": "play_song", "args": ["music"]},
+            ]
+        }
+
+    def test_routes_three_independent_commands_in_spoken_order(self):
+        assert extract_compound_actions("turn on the kitchen lights then play music and start a timer for ten minutes") == [
+            {"intent": "turn_on", "args": ["kitchen lights"]},
+            {"intent": "play_song", "args": ["music"]},
+            {"intent": "start_countdown", "args": ["ten minutes"]},
+        ]
+
+    def test_ambiguous_or_unsupported_clause_falls_through(self):
+        command = "turn on the kitchen lights and turn it up"
+        assert extract_compound_actions(command) is None
+        assert catchAll(command) == command
 
 
 class TestTurnOnOff:

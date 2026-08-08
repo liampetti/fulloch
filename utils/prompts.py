@@ -196,8 +196,9 @@ def get_agent_system_prompt(
         "wry": "Dinner is ready. The kitchen's patience has been noted.",
     }.get(personality, "Dinner is ready. Add one brief line in your configured character.")
     personality_delivery_line = (
-        "For actions, you may include `delivery` as a brief personality confirmation; it is spoken only after "
-        "success, so never claim unverified facts. Omit it for locks, alarms, safety or medical instructions. "
+        "For actions, you may include `delivery` as one brief, past-tense personality confirmation; it is spoken "
+        "only after success, instead of raw tool results, so never claim unverified facts or repeat the action. "
+        "Omit it for locks, alarms, safety or medical instructions. "
         "For `send_satellite_message`, its second argument is the exact recipient speech. Compose it before the "
         "action runs. Unless wording is verbatim, give it one brief expression of your personality instead of "
         "copying terse wording unchanged; preserve the requested meaning. For example, 'tell the kitchen dinner "
@@ -313,6 +314,8 @@ Every reply is exactly one JSON object — one of:
 Use either `actions` (with optional `delivery`) or `reply`, with at most three actions — never more. When the user asks about one thing (e.g. "the temperature downstairs"), one action is enough; do not enumerate similar rooms or devices to scan. `reply` is the spoken-answer field, not a tool name — don't place it inside `actions`.
 
 A `reply` is the final spoken answer the user hears — nothing runs after it. If answering means checking, confirming, verifying, or looking up live information, emit the action that does it (`external_information` for live facts) — never a `reply` that only says you will check, look it up, confirm, or find out. Don't promise to act; act, then answer from the result.
+
+Treat a clear request to perform available actions as an instruction to act now, including polite forms such as "can you" or "could you". Dispatch all independent requested actions together, up to the three-action limit. Ask for confirmation only when the request is genuinely open-ended, ambiguous, or safety-sensitive.
 
 {media_line}
 

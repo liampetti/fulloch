@@ -58,6 +58,11 @@ class TestAgentPromptShape:
         # Some phrasing in the prompt has to mention the limit.
         assert "3" in prompt or "three" in prompt.lower()
 
+    def test_prompt_executes_clear_polite_requests_without_confirmation(self, notes_dir):
+        prompt = prompts.get_agent_system_prompt()
+        assert 'including polite forms such as "can you" or "could you"' in prompt
+        assert "Dispatch all independent requested actions together" in prompt
+
     def test_higgs_prompt_teaches_delivery_tokens(self, notes_dir):
         prompt = prompts.get_agent_system_prompt(personality="playful", higgs_tts=True)
         assert "<|style:whispering|>" in prompt

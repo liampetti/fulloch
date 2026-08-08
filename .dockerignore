@@ -51,15 +51,23 @@ LICENSE
 .env
 .env.example
 data/config.yml
-data/config.example.yml
+!data/config.example.yml
 data/credentials.json
 data/token.json
 
 # =============================================================================
 # Local Data and Models (mount separately)
 # =============================================================================
-data/models/
-data/voices/
+# Keep only the application grammar, not downloaded model caches.
+data/models/*
+!data/models/grammars/
+!data/models/grammars/agent.gbnf
+# The image seeds these repository-owned starter references on first run.
+# Private/custom references should live under data/voices/private/ (ignored by
+# git) and are never copied into release builds.
+data/voices/*
+!data/voices/*.wav
+!data/voices/*.txt
 data/cache/
 *.gguf
 

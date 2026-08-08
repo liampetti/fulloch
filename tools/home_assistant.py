@@ -210,6 +210,9 @@ _ENTITY_ALIASES_MULTI: dict = {}
 # through `/api/template` (Jinja `areas()` / `area_name()` / `area_entities()`
 # built-ins) rather than a dedicated registry fetch.
 _AREA_MAP: dict = {}
+# floor_id -> display name, populated alongside areas. Floors contain areas;
+# they let users ask for an inventory or status of a whole storey.
+_FLOOR_MAP: dict = {}
 _loaded = False
 _load_lock = threading.Lock()
 
@@ -259,6 +262,27 @@ def _fetch_area_map() -> dict:
         names = area_ids
     logger.info(f"Fetched {len(area_ids)} areas from Home Assistant")
     return {area_id: (name or area_id) for area_id, name in zip(area_ids, names, strict=True)}
+
+
+def _fetch_floor_map() -> dict:
+    """Fetch `{floor_id: display_name}` for every HA floor via templates."""
+    ids_raw = _render_template("{{ floors() | list | tojson }}")
+    if ids_raw is None:
+        return {}
+    try:
+        floor_ids = json.loads(ids_raw)
+    except (ValueError, TypeError):
+        logger.warning(f"Could not parse HA floors() template response: {ids_raw!r}")
+        return {}
+    names_raw = _render_template("{{ floors() | map('floor_name') | list | tojson }}")
+    try:
+        names = json.loads(names_raw) if names_raw else []
+    except (ValueError, TypeError):
+        names = []
+    if len(names) != len(floor_ids):
+        names = floor_ids
+    logger.info(f"Fetched {len(floor_ids)} floors from Home Assistant")
+    return {floor_id: (name or floor_id) for floor_id, name in zip(floor_ids, names, strict=True)}
 
 
 # ---------------------------------------------------------------------------
@@ -640,12 +664,44 @@ def _resolve_area(name: str) -> Optional[str]:
         if key == area_id.lower() or key == area_name.lower():
             return area_id
 
+    # A floor name must not fuzzy-match one of its child areas. For example,
+    # "upstairs" is a floor, not the "Upstairs Bathroom" area.
+    for floor_id, floor_name in _FLOOR_MAP.items():
+        if key == floor_id.lower() or key == floor_name.lower():
+            return None
+
     input_tokens = {_singularize(t) for t in key.split()}
     if input_tokens:
         fuzzy = [
             (area_id, area_name)
             for area_id, area_name in _AREA_MAP.items()
             if input_tokens.issubset({_singularize(t) for t in area_name.lower().split()})
+        ]
+        if fuzzy:
+            fuzzy.sort(key=lambda kv: len(kv[1]))
+            return fuzzy[0][0]
+
+    return None
+
+
+def _resolve_floor(name: str) -> Optional[str]:
+    """Resolve a spoken floor/storey name to an HA floor_id."""
+    key = name.lower().strip()
+    for filler in _LEADING_FILLERS:
+        if key.startswith(filler):
+            key = key[len(filler) :].strip()
+            break
+
+    for floor_id, floor_name in _FLOOR_MAP.items():
+        if key == floor_id.lower() or key == floor_name.lower():
+            return floor_id
+
+    input_tokens = {_singularize(t) for t in key.split()}
+    if input_tokens:
+        fuzzy = [
+            (floor_id, floor_name)
+            for floor_id, floor_name in _FLOOR_MAP.items()
+            if input_tokens.issubset({_singularize(t) for t in floor_name.lower().split()})
         ]
         if fuzzy:
             fuzzy.sort(key=lambda kv: len(kv[1]))
@@ -1238,9 +1294,17 @@ def get_temperature(entity: str) -> str:
         return f"I couldn't read a temperature for {friendly}."
 
     unit = _temperature_unit(attrs)
-    if current is not None and target is not None and round(current) != round(target):
-        return f"{friendly} is {round(current)} {unit}, set to {round(target)} {unit}"
-    return f"{friendly} is {round(temp)} {unit}"
+    if current is not None and target is not None and current != target:
+        return f"{friendly} is {_format_reading(current)} {unit}, set to {_format_reading(target)} {unit}"
+    return f"{friendly} is {_format_reading(temp)} {unit}"
+
+
+def _format_reading(value) -> str:
+    """Keep HA sensor precision while dropping an unhelpful trailing `.0`."""
+    try:
+        return f"{float(value):.10g}"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _format_entity_state(entity_id: str, state: dict) -> str:
@@ -1320,10 +1384,28 @@ def _area_entities(area_id: str, domain: Optional[str] = None) -> list[str]:
     return entity_ids
 
 
+def _floor_entities(floor_id: str, domain: Optional[str] = None) -> list[str]:
+    """Return entities from every area assigned to an HA floor."""
+    raw = _render_template(f"{{{{ floor_areas({floor_id!r}) | list | tojson }}}}")
+    if raw is None:
+        return []
+    try:
+        area_ids = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return list(
+        dict.fromkeys(
+            entity_id
+            for area_id in area_ids
+            for entity_id in _area_entities(area_id, domain)
+        )
+    )
+
+
 @tool(
     name="list_entities_in_area",
     description=(
-        "List the Home Assistant entities in a room/area/zone (e.g. 'downstairs', "
+        "List the Home Assistant entities in a room, area, zone, or floor (e.g. 'downstairs', "
         "'office', 'kitchen'), optionally filtered to a domain like 'light', "
         "'switch', 'sensor', or 'climate'. Use this for questions like 'what "
         "lights do we have downstairs' or 'what else is in the office' instead "
@@ -1332,7 +1414,7 @@ def _area_entities(area_id: str, domain: Optional[str] = None) -> list[str]:
     aliases=["list_area_entities", "ha_list_entities", "area_entities", "what_is_in"],
 )
 def list_entities_in_area(area: str, domain: Optional[str] = None) -> str:
-    """List the entities Home Assistant has registered in an area.
+    """List the entities Home Assistant has registered in an area or floor.
 
     Args:
         area: Room/area/zone name, e.g. 'downstairs', 'office', 'kitchen'.
@@ -1342,16 +1424,17 @@ def list_entities_in_area(area: str, domain: Optional[str] = None) -> str:
         return "Home Assistant isn't set up."
 
     area_id = _resolve_area(area)
-    if area_id is None:
+    floor_id = _resolve_floor(area) if area_id is None else None
+    if area_id is None and floor_id is None:
         return (
             f"Reactive question: Couldn't find an area matching {area!r}. "
             f"Try a different room name or be more specific."
         )
 
-    entity_ids = _area_entities(area_id, domain)
+    entity_ids = _area_entities(area_id, domain) if area_id else _floor_entities(floor_id, domain)
     entity_ids = [eid for eid in entity_ids if eid not in _DENIED_ENTITIES]
 
-    area_name = _AREA_MAP.get(area_id, area)
+    area_name = _AREA_MAP.get(area_id, area) if area_id else _FLOOR_MAP.get(floor_id, area)
     if not entity_ids:
         scoped = f"{domain} " if domain else ""
         return f"I don't see any {scoped}entities in {area_name}."
@@ -1377,7 +1460,8 @@ def get_entities_in_area_state(
         return "Home Assistant isn't set up."
 
     area_id = _resolve_area(area)
-    if area_id is None:
+    floor_id = _resolve_floor(area) if area_id is None else None
+    if area_id is None and floor_id is None:
         return (
             f"Reactive question: Couldn't find an area matching {area!r}. "
             "Try a different room name or be more specific."
@@ -1385,10 +1469,12 @@ def get_entities_in_area_state(
 
     entity_ids = [
         entity_id
-        for entity_id in _area_entities(area_id, domain)
+        for entity_id in (
+            _area_entities(area_id, domain) if area_id else _floor_entities(floor_id, domain)
+        )
         if entity_id not in _DENIED_ENTITIES
     ]
-    area_name = _AREA_MAP.get(area_id, area)
+    area_name = _AREA_MAP.get(area_id, area) if area_id else _FLOOR_MAP.get(floor_id, area)
     if not entity_ids:
         scoped = f"{domain} " if domain else ""
         return f"I don't see any {scoped}entities in {area_name}."
@@ -2218,7 +2304,7 @@ def _ensure_loaded() -> None:
     With no token configured there's nothing to fetch, so it's a cheap no-op
     that stays re-checkable in case a token is set later.
     """
-    global _loaded, _ENTITY_ALIASES, _ENTITY_ALIASES_MULTI, _AREA_MAP
+    global _loaded, _ENTITY_ALIASES, _ENTITY_ALIASES_MULTI, _AREA_MAP, _FLOOR_MAP
     global _DEFAULT_WEATHER_ENTITY, SPOTIFY_ENTITY, TV_ENTITY, AVR_ENTITY
     global CALENDAR_ENTITY, TODO_ENTITY
     if _loaded or not HA_TOKEN:
@@ -2228,6 +2314,7 @@ def _ensure_loaded() -> None:
             return
         _ENTITY_ALIASES, _ENTITY_ALIASES_MULTI = _fetch_entity_aliases()
         _AREA_MAP = _fetch_area_map()
+        _FLOOR_MAP = _fetch_floor_map()
         _DEFAULT_WEATHER_ENTITY = _autodetect_weather_entity()
         SPOTIFY_ENTITY = _autodetect_spotify_entity()
         TV_ENTITY = _autodetect_tv_entity()

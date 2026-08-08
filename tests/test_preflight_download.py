@@ -110,7 +110,17 @@ def test_check_gpu_fails_for_gpu_tier_without_gpu():
 def test_check_gpu_passes_for_gpu_tier_with_gpu():
     """A GPU-only tier with a visible GPU → ok."""
     with patch.object(pf, "_needs_gpu", return_value=True):
-        with patch.object(pf, "gpu_info", return_value={"available": True, "name": "RTX 5060 Ti", "vram_gb": 16.0}):
-            ok, msg = pf.check_gpu_for_models({})
+        with patch.object(pf, "_models_vram_gb", return_value=16.0):
+            with patch.object(pf, "gpu_info", return_value={"available": True, "name": "RTX 5060 Ti", "vram_gb": 16.0}):
+                ok, msg = pf.check_gpu_for_models({})
     assert ok is True
     assert msg == ""
+
+
+def test_check_gpu_fails_when_visible_gpu_lacks_required_vram():
+    with patch.object(pf, "_needs_gpu", return_value=True):
+        with patch.object(pf, "_models_vram_gb", return_value=16.0):
+            with patch.object(pf, "gpu_info", return_value={"available": True, "name": "RTX", "vram_gb": 8.0}):
+                ok, msg = pf.check_gpu_for_models({})
+    assert ok is False
+    assert "16.0GB" in msg and "8.0GB" in msg

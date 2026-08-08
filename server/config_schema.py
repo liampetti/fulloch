@@ -514,8 +514,8 @@ class TierPreset:
 # Three ready-made stacks. The Full stack is GPU end-to-end — ASR, TTS, and
 # the 9B LLM all GPU-resident. It defaults to the 1.7B PyTorch ASR/TTS pair.
 # The two CPU-only stacks use the accurate 1.7B ONNX ASR with
-# Kokoro TTS by default; experimental Pocket TTS voice cloning is selectable
-# afterward. The CPU stacks otherwise differ only in the LLM — a separate
+# Pocket TTS voice cloning by default; Kokoro is a smaller built-in-voice
+# alternative. The CPU stacks otherwise differ only in the LLM — a separate
 # OpenAI-compatible server on your network, or regex-only/no LLM.
 # (A 4B "balanced" tier was dropped — at the quant needed to be reliable it
 # costs roughly the same VRAM as the 9B, so the 9B is the local minimum.)
@@ -539,7 +539,7 @@ TIER_PRESETS: tuple = (
         "network). No GPU needed on this device.",
         {
             "asr": {"backend": "qwen-onnx"},
-            "tts": {"backend": "kokoro-onnx"},
+            "tts": {"backend": "pocket-tts-onnx"},
             "llm": {"backend": "external"},
         },
     ),
@@ -550,7 +550,7 @@ TIER_PRESETS: tuple = (
         "matching only (no free-form language model).",
         {
             "asr": {"backend": "qwen-onnx"},
-            "tts": {"backend": "kokoro-onnx"},
+            "tts": {"backend": "pocket-tts-onnx"},
             "llm": {"backend": "none"},
         },
         recommended=True,

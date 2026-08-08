@@ -51,6 +51,9 @@ _LOG_LEVELS = {
 }
 _log_level_name = str(_GENERAL.get("log_level", "info")).lower()
 LOG_LEVEL = _LOG_LEVELS.get(_log_level_name, logging.INFO)
+# Developer-only switch for diagnosing OpenAI-compatible HTTP traffic. Leave
+# this off for normal debug sessions: the SDK logs full request options.
+DEBUG_LLM_HTTP_LOGS = False
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -77,6 +80,15 @@ for _noisy in (
     "datasets",
     "filelock",
     "urllib3",
+    # Spotipy logs complete API responses, including bearer tokens, at DEBUG.
+    # Never allow those payloads into normal application logs.
+    "spotipy",
+    # The OpenAI SDK logs full request options and HTTP lifecycle events at
+    # DEBUG. Keep those payload-sized lines opt-in while preserving Fulloch's
+    # own debug output.
+    "openai",
+    "httpx",
+    "httpcore",
     "qwen_tts",
     "torch",
     # torch.compile / CUDA graph capture chatter from
@@ -99,6 +111,9 @@ for _noisy in (
     "torchaudio",
 ):
     logging.getLogger(_noisy).setLevel(_third_party_level)
+if DEBUG_LLM_HTTP_LOGS:
+    for _noisy in ("openai", "httpx", "httpcore"):
+        logging.getLogger(_noisy).setLevel(LOG_LEVEL)
 # "Setting pad_token_id to eos_token_id" fires at WARNING on every
 # transformers.generate call — silence just that submodule.
 logging.getLogger("transformers.generation.utils").setLevel(max(LOG_LEVEL, logging.ERROR))

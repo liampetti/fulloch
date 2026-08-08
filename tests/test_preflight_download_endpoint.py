@@ -71,3 +71,15 @@ def test_endpoint_reports_only_failed_checks(tmp_path):
                 body = c.post("/setup/preflight-download").json()
     assert body["ok"] is False
     assert body["errors"] == [{"check": "network", "message": "offline"}]
+
+
+def test_endpoint_preflights_requested_models_not_empty_config(tmp_path):
+    c = _make_client(tmp_path)
+    models = {"asr": {"backend": "qwen-onnx"}, "tts": {"backend": "pocket-tts-onnx"}, "llm": {"backend": "none"}}
+    with patch("server.preflight.check_disk_for_models", return_value=(True, "")) as disk:
+        with patch("server.preflight.check_network", return_value=(True, "")):
+            with patch("server.preflight.check_gpu_for_models", return_value=(True, "")) as gpu:
+                body = c.post("/setup/preflight-download", json={"models": models}).json()
+    assert body["ok"] is True
+    disk.assert_called_once_with(models)
+    gpu.assert_called_once_with(models)

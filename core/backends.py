@@ -109,7 +109,7 @@ _register(
         default_model="Qwen/Qwen3-ASR-1.7B",
         hf_repo="Qwen/Qwen3-ASR-1.7B",
         download_size_gb=3.5,
-        vram_gb=4.5,
+        vram_gb=4.0,
         deps=("qwen_asr", "flash_attn"),
         notes="GPU + flash-attention 2. High accuracy; biases on wakeword context.",
     )
@@ -376,6 +376,28 @@ _register(
     )
 )
 
+# Pocket TTS through CrispASR's CUDA GGUF runtime. Unlike the Qwen GGUF
+# backends, Pocket embeds its tokenizer and Mimi codec in one model file.
+_register(
+    BackendSpec(
+        domain=TTS,
+        backend="pocket-tts-gguf",
+        gpu_only=True,
+        experimental=True,
+        display_name="Pocket TTS Q8_0 GGUF (GPU voice clone)",
+        loader="core.tts_crispasr:load_tts",
+        default_model="./data/models/pocket-tts-gguf/pocket-tts-english-q8_0.gguf",
+        hf_repo="cstr/pocket-tts-GGUF",
+        hf_file="pocket-tts-english-q8_0.gguf",
+        download_size_gb=0.13,
+        vram_gb=1.0,
+        deps=(),
+        notes="Experimental CUDA CrispASR Pocket TTS. English-only one-shot voice cloning from "
+        "data/voices/<name>.wav; the GGUF embeds its tokenizer and audio codec.",
+        extra={"gpu": True, "backend": "pocket-tts"},
+    )
+)
+
 _register(
     BackendSpec(
         domain=TTS,
@@ -517,7 +539,7 @@ def list_backends(domain: str) -> list[BackendSpec]:
             "moonshine-tiny",
         ),
         TTS: (
-            "higgs-gguf", "qwen-gguf", "qwen-gguf-small", "qwen", "qwen-small",
+            "higgs-gguf", "qwen-gguf", "qwen-gguf-small", "pocket-tts-gguf", "qwen", "qwen-small",
             "kokoro-onnx", "pocket-tts-onnx",
         ),
     }.get(domain, ())

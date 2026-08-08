@@ -5,7 +5,7 @@ TTS jobs so the CUDA-graph cache picks up multiple prefill shapes during
 warmup (smooths first-real-turn latency).
 """
 
-from core.text_utils import clean_for_tts, split_clauses, split_sentences
+from core.text_utils import clean_for_tts, split_clauses, split_sentences, spoken_for_tts
 
 
 def test_empty_string_returns_empty_list():
@@ -79,3 +79,16 @@ def test_normalises_news_semicolons_and_acronyms_without_sentence_fragments():
 
 def test_preserves_commas_but_turns_semicolons_into_sentence_breaks():
     assert clean_for_tts("One, two; three") == "One, two. three"
+
+
+def test_spoken_for_tts_expands_decimals_money_percentages_and_units():
+    assert spoken_for_tts("It is 18.2°C, weighs 2.5 kg, and costs $12.50 at 75%.") == (
+        "It is eighteen point two degrees Celsius, weighs two point five kilograms, "
+        "and costs twelve dollars and fifty cents at seventy-five percent."
+    )
+
+
+def test_spoken_for_tts_preserves_decimal_precision_and_common_identifiers():
+    assert spoken_for_tts("The result is 0.0033. Visit 192.168.1.1 on 2026-08-04 at 10:30.") == (
+        "The result is zero point zero zero three three. Visit 192.168.1.1 on 2026-08-04 at 10:30."
+    )

@@ -65,6 +65,7 @@ def test_backends_are_implemented():
     assert b.get_spec("asr", "moonshine").implemented is True
     assert b.get_spec("tts", "kokoro-onnx").implemented is True
     assert b.get_spec("tts", "pocket-tts-onnx").implemented is True
+    assert b.get_spec("tts", "pocket-tts-gguf").implemented is True
     assert b.get_loader("llm", "openai")  # resolves to load_openai
 
 
@@ -76,6 +77,7 @@ def test_gpu_only_flags():
     assert b.get_spec("asr", "moonshine").gpu_only is False
     assert b.get_spec("tts", "kokoro-onnx").gpu_only is False
     assert b.get_spec("tts", "pocket-tts-onnx").gpu_only is False
+    assert b.get_spec("tts", "pocket-tts-gguf").gpu_only is True
     assert b.get_spec("llm", "openai").gpu_only is False
     assert b.get_spec("asr", "qwen-gguf").gpu_only is True
     assert b.get_spec("tts", "qwen-gguf").gpu_only is True
@@ -104,6 +106,16 @@ def test_higgs_backend_metadata_and_cpu_gating():
     assert higgs.extra["max_actions"] == 256
     assert b.is_offerable(higgs, "gpu") is True
     assert b.is_offerable(higgs, "cpu") is False
+
+
+def test_pocket_gguf_backend_metadata_and_cpu_gating():
+    pocket = b.get_spec("tts", "pocket-tts-gguf")
+    assert pocket.loader == "core.tts_crispasr:load_tts"
+    assert pocket.hf_repo == "cstr/pocket-tts-GGUF"
+    assert pocket.hf_file == "pocket-tts-english-q8_0.gguf"
+    assert pocket.extra == {"gpu": True, "backend": "pocket-tts"}
+    assert b.is_offerable(pocket, "gpu") is True
+    assert b.is_offerable(pocket, "cpu") is False
 
 
 def test_small_gguf_backend_metadata():
@@ -187,6 +199,7 @@ def test_asr_and_tts_options_have_stable_user_facing_order():
         "higgs-gguf",
         "qwen-gguf",
         "qwen-gguf-small",
+        "pocket-tts-gguf",
         "qwen",
         "qwen-small",
         "kokoro-onnx",

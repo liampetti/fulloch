@@ -440,9 +440,18 @@ def _already_present(asset: Asset) -> bool:
         # at least one non-sentinel file too, so a sentinel-only dir is treated
         # as missing and re-downloaded rather than silently loaded as complete.
         return any(f for f in d.iterdir() if f.name != COMPLETE_SENTINEL)
-    # snapshot: hub dir for the repo
+    # Snapshot downloads created by this version carry an explicit completion
+    # marker. Retain the standard HF ref/snapshot check for pre-marker caches.
     hub_dir = Path(asset.dest) / f"models--{asset.repo.replace('/', '--')}"
-    return hub_dir.is_dir()
+    if (hub_dir / COMPLETE_SENTINEL).is_file():
+        return True
+    ref = hub_dir / "refs" / "main"
+    try:
+        revision = ref.read_text().strip()
+    except OSError:
+        return False
+    snapshot = hub_dir / "snapshots" / revision
+    return bool(revision) and snapshot.is_dir() and any(snapshot.iterdir())
 
 
 class DownloadManager:
@@ -516,6 +525,9 @@ class DownloadManager:
                         _default_snapshot_with_progress(asset.repo, asset.dest, asset, self._lock)
                     else:
                         self._snapshot_fn(asset.repo, asset.dest)
+                    hub_dir = Path(asset.dest) / f"models--{asset.repo.replace('/', '--')}"
+                    hub_dir.mkdir(parents=True, exist_ok=True)
+                    (hub_dir / COMPLETE_SENTINEL).touch()
                 elif asset.kind == "dir_snapshot":
                     if self._dir_snapshot_fn is _default_dir_snapshot:
                         _default_dir_snapshot_with_progress(

@@ -26,6 +26,7 @@ DEFAULT_MODELS_DIR = "./data/models"
 # Dropped by the dashboard's "Re-run setup" action; forces the wizard on the
 # next start regardless of config/assets. The wizard clears it on completion.
 DEFAULT_RESET_MARKER = "./data/.setup_pending"
+SNAPSHOT_COMPLETE_MARKER = ".fulloch_complete"
 
 # Keys the app hard-requires to construct the assistant. A populated config
 # that lacks one of these is a version mismatch — surfaced as a clear update
@@ -63,6 +64,22 @@ def _hub_dir(model_id: str, models_dir: str) -> Path:
     return Path(models_dir) / "hub" / f"models--{model_id.replace('/', '--')}"
 
 
+def _hub_snapshot_complete(model_id: str, models_dir: str) -> bool:
+    """Check Hugging Face's completed ref/snapshot layout, not just its cache dir."""
+    root = _hub_dir(model_id, models_dir)
+    if (root / SNAPSHOT_COMPLETE_MARKER).is_file():
+        return True
+    # Backward compatibility for caches created before Fulloch wrote its own
+    # marker. A valid HF cache has a main ref pointing at a non-empty snapshot.
+    ref = root / "refs" / "main"
+    try:
+        revision = ref.read_text().strip()
+    except OSError:
+        return False
+    snapshot = root / "snapshots" / revision
+    return bool(revision) and snapshot.is_dir() and any(snapshot.iterdir())
+
+
 def _asset_present(domain_cfg: dict, models_dir: str) -> bool:
     """Whether the model asset for one resolved domain is on disk.
 
@@ -86,7 +103,7 @@ def _asset_present(domain_cfg: dict, models_dir: str) -> bool:
         # Directory-style model (e.g. the ONNX bundle) — present if it exists
         # and isn't empty.
         return p.is_dir() and any(p.iterdir())
-    return _hub_dir(model, models_dir).is_dir()
+    return _hub_snapshot_complete(model, models_dir)
 
 
 def _missing_required_keys(config: dict) -> list:

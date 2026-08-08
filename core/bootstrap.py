@@ -92,6 +92,17 @@ def ensure_scaffolding(data_dir: str = "./data", seed_dir: str = None) -> None:
                 shutil.copy2(src, dst)
                 logger.info("Seeded %s into %s", src.name, dst)
 
+    # Public starter voice references ship with the image so a fresh Pocket or
+    # Qwen voice-clone install can speak immediately. Never overwrite a voice
+    # a user generated or added to the persistent volume.
+    seed_voices = seed / "voices"
+    if seed_voices.is_dir():
+        for src in seed_voices.iterdir():
+            dst = data / "voices" / src.name
+            if src.is_file() and not dst.is_file():
+                shutil.copy2(src, dst)
+                logger.info("Seeded voice reference %s into %s", src.name, dst)
+
     # First-run config from the bundled template; the wizard writes the rest.
     config = data / "config.yml"
     seed_config = seed / "config.example.yml"

@@ -10,6 +10,7 @@ brand-new config is still seeded from the example to inherit its default values.
 """
 
 import logging
+import json
 import os
 import re
 import tempfile
@@ -120,6 +121,17 @@ def _coerce(field, raw: Any) -> Optional[Any]:
         else:
             items = [s.strip() for s in re.split(r"[\n,]", str(raw)) if s.strip()]
         return items or None
+    if t == "dict":
+        if isinstance(raw, dict):
+            value = raw
+        else:
+            try:
+                value = json.loads(str(raw))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raise ValueError("expected a JSON object") from None
+        if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+            raise ValueError("expected a JSON object with string keys and values")
+        return value
     return str(raw)
 
 

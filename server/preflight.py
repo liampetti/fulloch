@@ -217,7 +217,7 @@ def check_network(url: str = "https://huggingface.co/", timeout: float = 5.0) ->
 
 
 def check_gpu_for_models(models: dict) -> tuple[bool, str]:
-    """Fail if any selected backend requires a GPU but none is visible.
+    """Fail if selected GPU backends have no visible GPU or enough VRAM.
 
     Only runs when a backend actually needs a GPU — the CPU tiers never
     trip this check, so a CPU-only box picking `cpu_local` is fine.
@@ -226,10 +226,16 @@ def check_gpu_for_models(models: dict) -> tuple[bool, str]:
         return True, ""
     gpu = gpu_info()
     if gpu["available"]:
-        return True, ""
+        needed = _models_vram_gb(models)
+        available = gpu.get("vram_gb")
+        if available is None or available >= needed:
+            return True, ""
+        return False, (
+            f"the chosen stack needs ~{needed}GB VRAM, but the detected GPU has "
+            f"{available}GB. Pick a smaller stack or use a larger GPU."
+        )
     return False, (
         "no NVIDIA GPU detected, but the chosen stack needs one. "
         "Either run the GPU container (`:latest` image with `--gpus all`) "
         "or pick a CPU tier."
     )
-

@@ -27,6 +27,36 @@ _TTS_ACRONYM_RE = re.compile(
 )
 _SEMICOLON_RE = re.compile(r"\s*;\s*")
 
+_ONES = (
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+    "eighteen", "nineteen",
+)
+_TENS = ("", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
+_SCALES = ((1_000_000_000_000, "trillion"), (1_000_000_000, "billion"), (1_000_000, "million"), (1_000, "thousand"))
+_NUMBER_BODY = r"(?:\d{1,3}(?:,\d{3})+|\d+)"
+_NUMBER = rf"-?{_NUMBER_BODY}(?:\.\d+)?"
+_BOUNDARY_AFTER = r"(?!(?:[\w/:-]|\.\d))"
+_CURRENCY_RE = re.compile(
+    rf"(?<![\w./:-])(?P<symbol>[$£€])\s*(?P<number>-?{_NUMBER_BODY})(?:\.(?P<cents>\d{{1,2}}))?{_BOUNDARY_AFTER}"
+)
+_PERCENT_RE = re.compile(rf"(?<![\w./:-])(?P<number>{_NUMBER})\s*%{_BOUNDARY_AFTER}")
+_UNIT_NAMES = {
+    "°c": "degree Celsius", "°f": "degree Fahrenheit", "celsius": "degree Celsius",
+    "fahrenheit": "degree Fahrenheit", "kg": "kilogram", "g": "gram", "mg": "milligram",
+    "lb": "pound", "lbs": "pound", "oz": "ounce", "km": "kilometre", "m": "metre",
+    "cm": "centimetre", "mm": "millimetre", "mi": "mile", "ft": "foot", "in": "inch",
+    "l": "litre", "ml": "millilitre", "gal": "gallon", "mph": "mile per hour",
+    "kph": "kilometre per hour", "km/h": "kilometre per hour", "m/s": "metre per second",
+}
+_UNIT_RE = re.compile(
+    rf"(?<![\w./:-])(?P<number>{_NUMBER})\s*(?P<unit>"
+    + "|".join(re.escape(unit) for unit in sorted(_UNIT_NAMES, key=len, reverse=True))
+    + rf"){_BOUNDARY_AFTER}",
+    re.IGNORECASE,
+)
+_NUMBER_RE = re.compile(rf"(?<![\w./:-])(?P<number>{_NUMBER}){_BOUNDARY_AFTER}")
+
 _THINK_PATTERN = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
 # Gemma 4 wraps its reasoning in a "thought" channel: `<|channel>thought ... <channel|>`.
 # Its template also emits an empty `<|channel>thought\n<channel|>` ghost block even
@@ -70,6 +100,84 @@ def clean_for_tts(text: str, strip_think: bool = True) -> str:
     text = _EMOJI_PATTERN.sub("", text)
     text = _SEMICOLON_RE.sub(". ", text)
     return _TTS_ACRONYM_RE.sub(lambda m: " ".join(m.group(1)), text)
+
+
+def _integer_words(number: int) -> str:
+    if number < 20:
+        return _ONES[number]
+    if number < 100:
+        tens, remainder = divmod(number, 10)
+        return _TENS[tens] if not remainder else f"{_TENS[tens]}-{_ONES[remainder]}"
+    if number < 1_000:
+        hundreds, remainder = divmod(number, 100)
+        prefix = f"{_ONES[hundreds]} hundred"
+        return prefix if not remainder else f"{prefix} {_integer_words(remainder)}"
+    for scale, name in _SCALES:
+        if number >= scale:
+            major, remainder = divmod(number, scale)
+            prefix = f"{_integer_words(major)} {name}"
+            return prefix if not remainder else f"{prefix} {_integer_words(remainder)}"
+    return str(number)
+
+
+def _number_words(value: str) -> str:
+    """Speak a decimal digit-by-digit after the point, preserving precision."""
+    negative = value.startswith("-")
+    value = value.removeprefix("-").replace(",", "")
+    whole, dot, fraction = value.partition(".")
+    spoken = _integer_words(int(whole))
+    if dot:
+        spoken += " point " + " ".join(_ONES[int(digit)] for digit in fraction)
+    return f"minus {spoken}" if negative else spoken
+
+
+def _pluralize_unit(unit: str, value: str) -> str:
+    singular = abs(float(value.replace(",", ""))) == 1
+    if singular:
+        return unit
+    if unit == "foot":
+        return "feet"
+    if unit == "inch":
+        return "inches"
+    if unit.startswith("degree "):
+        return f"degrees {unit.removeprefix('degree ')}"
+    if unit.endswith("per hour") or unit.endswith("per second"):
+        return unit.replace("mile per", "miles per").replace("kilometre per", "kilometres per").replace("metre per", "metres per")
+    return f"{unit}s"
+
+
+def spoken_for_tts(text: str) -> str:
+    """Render common numeric notation into speech without changing display text.
+
+    This intentionally skips dates, times, versions, paths, IP addresses, and
+    identifier-like strings. Those forms have a digit next to a protected
+    separator, while standalone quantities are safe to verbalise.
+    """
+    def currency(match: re.Match) -> str:
+        number = match.group("number")
+        cents = match.group("cents")
+        singular = abs(int(number.replace(",", ""))) == 1
+        symbol = match.group("symbol")
+        units = {"$": ("dollar", "cent"), "£": ("pound", "pence"), "€": ("euro", "cent")}[symbol]
+        result = f"{_number_words(number)} {units[0] if singular else units[0] + 's'}"
+        if cents and int(cents):
+            cents_value = str(int(cents))
+            cent_name = units[1] if int(cents_value) == 1 else units[1] + ("" if units[1] == "pence" else "s")
+            result += f" and {_number_words(cents_value)} {cent_name}"
+        return result
+
+    def percent(match: re.Match) -> str:
+        return f"{_number_words(match.group('number'))} percent"
+
+    def quantity(match: re.Match) -> str:
+        number = match.group("number")
+        unit = _UNIT_NAMES[match.group("unit").lower()]
+        return f"{_number_words(number)} {_pluralize_unit(unit, number)}"
+
+    text = _CURRENCY_RE.sub(currency, text)
+    text = _PERCENT_RE.sub(percent, text)
+    text = _UNIT_RE.sub(quantity, text)
+    return _NUMBER_RE.sub(lambda match: _number_words(match.group("number")), text)
 
 
 def split_sentences(text: str) -> list:

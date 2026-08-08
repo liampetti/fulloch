@@ -1,5 +1,4 @@
-"""CrispASR-hosted Qwen3-TTS-Base GGUF (1.7B or 0.6B) — voice-clone TTS via ggml,
-CPU by default, optionally CUDA.
+"""CrispASR-hosted Qwen3 or Pocket TTS GGUF voice-clone TTS via ggml.
 
 Uses CrispASR's direct Qwen3-TTS C ABI in a persistent worker. Unlike the
 unified `crispasr.Session.synthesize()` API, this ABI emits PCM while codec
@@ -43,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_DIR = "./data/models/qwen3-tts-crispasr-gguf"
 DEFAULT_MODEL_DIR_0_6B = "./data/models/qwen3-tts-crispasr-0.6b-gguf"
+DEFAULT_MODEL_DIR_POCKET = "./data/models/pocket-tts-gguf"
 DEFAULT_LIB_DIR = "./data/models/crispasr-python"
 DEFAULT_LIB_DIR_GPU = "/opt/crispasr-python-cuda"
 CODEC_FILE = "qwen3-tts-tokenizer-12hz.gguf"
@@ -66,15 +66,16 @@ _session = None  # Warm CrispASR session/worker, set by load_tts().
 _worker_config = None
 _voice_prompt = None
 _worker_stream_count = 0
+_pocket_tts = False
 
 # CrispASR's native Qwen TTS graph allocation grows with a single input span.
 # Keep long note/news replies bounded so a full 16 GB GPU stack retains room for
 # the decoder graph rather than aborting the worker on one oversized clause.
 _MAX_SYNTHESIS_CHARS = 240
-# CrispASR's direct TTS ABI retains ggml scheduler buffers between stream calls.
-# Recycle before its allocation growth can consume the Full stack's remaining
-# 16 GB headroom. A worker reload occurs between clauses while browser playback
-# already has generated PCM queued.
+# CrispASR's direct Qwen TTS ABI retains ggml scheduler buffers between stream
+# calls. Recycle before its allocation growth can consume the Full stack's
+# remaining 16 GB headroom. Pocket TTS uses its separate complete-buffer API,
+# so keeping it warm avoids an unnecessary model reload between turns.
 _MAX_STREAMS_PER_WORKER = 8
 
 
@@ -98,9 +99,10 @@ def load_tts(
     lib_dir: Optional[str] = None,
     num_threads: int = 4,
     gpu: bool = False,
+    backend: Optional[str] = None,
     **_opts,
 ):
-    """Load the CrispASR Python runtime + Qwen3-TTS GGUF talker/codec, warm.
+    """Load a CrispASR Qwen3 or Pocket TTS GGUF model, warm.
 
     Both `lib_dir` (the extracted `crispasr` Python package + its .so's) and
     `model_id` (a directory holding one known talker GGUF + the codec GGUF)
@@ -111,7 +113,7 @@ def load_tts(
 
     `gpu=True` starts the CUDA session in an isolated worker process.
     """
-    global _session, _worker_config, _voice_prompt, _worker_stream_count
+    global _session, _worker_config, _voice_prompt, _worker_stream_count, _pocket_tts
 
     if lib_dir is None:
         lib_dir = DEFAULT_LIB_DIR_GPU if gpu else DEFAULT_LIB_DIR
@@ -125,6 +127,34 @@ def load_tts(
             f"scripts/fetch_crispasr_tts.py{' --gpu' if gpu else ''} first."
         )
     root = Path(model_id)
+    _pocket_tts = backend == "pocket-tts"
+    if _pocket_tts:
+        model_path = root / "pocket-tts-english-q8_0.gguf" if root.is_dir() else root
+        if not model_path.is_file():
+            raise FileNotFoundError(
+                f"Pocket TTS GGUF not found at {model_path} — rerun setup to download it."
+            )
+        logger.info("Loading CrispASR Pocket TTS GGUF (%s) …", model_path.name)
+        t0 = time.monotonic()
+        if gpu:
+            _worker_config = {
+                "model_path": model_path,
+                "lib_dir": lib_root,
+                "backend": backend,
+                "num_threads": num_threads,
+            }
+            _voice_prompt = None
+            _worker_stream_count = 0
+            _session = CrispASRWorker(**_worker_config)
+        else:
+            if str(lib_root) not in sys.path:
+                sys.path.insert(0, str(lib_root))
+            import crispasr  # heavy ctypes-backed import, deferred to load time
+
+            _session = crispasr.Session(str(model_path), backend=backend, n_threads=int(num_threads))
+        logger.info("CrispASR Pocket TTS ready in %.1fs", time.monotonic() - t0)
+        return _session
+
     talker_path = backend_name = None
     for filename, be in _TALKER_BACKENDS.items():
         candidate = root / filename
@@ -218,6 +248,11 @@ def _synth(text: str) -> np.ndarray:
 
 def _synth_stream(text: str):
     """Yield PCM as CrispASR decodes each generated Qwen codec window."""
+    if _pocket_tts:
+        # Pocket's CrispASR API returns a complete PCM buffer; it has no native
+        # streaming callback like Qwen3-TTS.
+        yield _synth(text)
+        return
     if isinstance(_session, CrispASRWorker):
         yield from _session.stream("synthesize_stream", text=text)
         return
@@ -258,8 +293,12 @@ def _restart_dead_worker(force: bool = False) -> None:
 
 
 def _recycle_worker_if_needed() -> None:
-    """Bound native ggml scheduler retention across a long spoken reply."""
-    if isinstance(_session, CrispASRWorker) and _worker_stream_count >= _MAX_STREAMS_PER_WORKER:
+    """Bound retained direct-Qwen CUDA scheduler buffers between streams."""
+    if (
+        not _pocket_tts
+        and isinstance(_session, CrispASRWorker)
+        and _worker_stream_count >= _MAX_STREAMS_PER_WORKER
+    ):
         _restart_dead_worker(force=True)
 
 

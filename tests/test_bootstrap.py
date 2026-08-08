@@ -31,6 +31,20 @@ def test_seeds_config_and_grammar_on_first_run(tmp_path):
     assert (data / "models" / "grammars" / "agent.gbnf").is_file()
 
 
+def test_seeds_bundled_voice_references_without_overwriting_user_voices(tmp_path):
+    seed = _make_seed(tmp_path)
+    (seed / "voices").mkdir()
+    (seed / "voices" / "atticus.wav").write_bytes(b"seed voice")
+    data = tmp_path / "data"
+    (data / "voices").mkdir(parents=True)
+    (data / "voices" / "custom.wav").write_bytes(b"user voice")
+
+    ensure_scaffolding(str(data), seed_dir=str(seed))
+
+    assert (data / "voices" / "atticus.wav").read_bytes() == b"seed voice"
+    assert (data / "voices" / "custom.wav").read_bytes() == b"user voice"
+
+
 def test_generates_https_cert_and_wires_it_on_first_run(tmp_path):
     seed = _make_seed(tmp_path)
     data = tmp_path / "data"

@@ -110,6 +110,27 @@ def test_plan_skips_none_llm():
     assert kok.kind == "dir_snapshot" and kok.allow
 
 
+def test_snapshot_without_completion_marker_is_not_present(tmp_path):
+    asset = dl.Asset(key="asr:qwen", label="x", kind="snapshot", dest=str(tmp_path), repo="Qwen/model")
+    (tmp_path / "models--Qwen--model").mkdir()
+
+    assert dl._already_present(asset) is False
+
+    (tmp_path / "models--Qwen--model" / dl.COMPLETE_SENTINEL).touch()
+    assert dl._already_present(asset) is True
+
+
+def test_legacy_complete_hf_snapshot_is_present_without_marker(tmp_path):
+    root = tmp_path / "models--Qwen--model"
+    (root / "refs").mkdir(parents=True)
+    (root / "refs" / "main").write_text("abc")
+    (root / "snapshots" / "abc").mkdir(parents=True)
+    (root / "snapshots" / "abc" / "config.json").write_text("{}")
+
+    asset = dl.Asset(key="asr:qwen", label="x", kind="snapshot", dest=str(tmp_path), repo="Qwen/model")
+    assert dl._already_present(asset) is True
+
+
 def test_plan_downloads_compound_crispasr_tts_model_to_one_directory(tmp_path):
     resolved = resolve_models(
         {
@@ -137,6 +158,15 @@ def test_plan_downloads_pocket_tts_english_bundle_only():
     pocket = next(a for a in dl.plan_assets(resolved) if a.key == "tts:pocket-tts-onnx")
     assert pocket.kind == "dir_snapshot"
     assert pocket.allow == ["pocket_tts_onnx.py", "onnx/english_2026-04/*"]
+
+
+def test_plan_downloads_pocket_tts_gguf_file():
+    resolved = resolve_models(
+        {"asr": {"backend": "moonshine"}, "tts": {"backend": "pocket-tts-gguf"}, "llm": {"backend": "none"}}
+    )
+    pocket = next(a for a in dl.plan_assets(resolved) if a.key == "tts:pocket-tts-gguf")
+    assert pocket.kind == "file"
+    assert pocket.filename == "pocket-tts-english-q8_0.gguf"
 
 
 def test_plan_downloads_compound_small_crispasr_tts_model(tmp_path):
@@ -318,7 +348,7 @@ def test_tier_fit_warns_on_low_disk():
 
 def test_tier_fit_warns_on_low_ram():
     gpu = {"available": False, "name": None, "vram_gb": None}
-    # CPU tiers need ~4.9 GB RAM (4.5 qwen-onnx ASR + 0.4 TTS); 1 GB available should warn.
+    # CPU tiers need ~5.2 GB RAM (4.5 qwen-onnx ASR + 0.7 Pocket TTS); 1 GB available should warn.
     ram = {"total_gb": 4.0, "available_gb": 1.0}
     fits = pf.tier_fit(gpu, disk_gb=999, ram=ram)
     by_id = {f["id"]: f for f in fits}
@@ -350,8 +380,8 @@ def test_tier_fit_exposes_ram_gb():
     gpu = {"available": False, "name": None, "vram_gb": None}
     fits = pf.tier_fit(gpu, disk_gb=999)
     by_id = {f["id"]: f for f in fits}
-    # cpu_local: qwen-onnx (4.5) + kokoro-onnx (0.4) = 4.9
-    assert by_id["cpu_local"]["ram_gb"] == pytest.approx(4.9)
+    # cpu_local: qwen-onnx (4.5) + pocket-tts-onnx (0.7) = 5.2
+    assert by_id["cpu_local"]["ram_gb"] == pytest.approx(5.2)
     # full: ASR/TTS/LLM are all GPU-resident now, none set ram_gb
     assert by_id["full"]["ram_gb"] == pytest.approx(0.0)
 

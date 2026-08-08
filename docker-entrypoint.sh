@@ -15,18 +15,29 @@
 # continues — the app's first write will fail with a clearer
 # PermissionError naming the actual file.
 #
-# Runs as root, then exec's CMD as `appuser` (the Dockerfile's USER
-# directive handles the actual setuid).
+# Runs as root, then drops to `appuser` before starting the command.
 set -eu
 
 DATA_DIR="${FULLOCH_DATA_DIR:-/app/data}"
 TARGET_USER="${FULLOCH_ENTRYPOINT_USER:-appuser}"
 
+run_app() {
+    # Keep local shell/test invocations usable; the release image always has
+    # appuser, so this branch is never taken in a container.
+    if ! TARGET_UID="$(id -u "$TARGET_USER" 2>/dev/null)"; then
+        exec "$@"
+    fi
+    if [ "$(id -u)" = "$TARGET_UID" ]; then
+        exec "$@"
+    fi
+    exec su -s /bin/sh "$TARGET_USER" -c 'exec "$@"' -- "$@"
+}
+
 # Bootstrap hasn't run yet — the dir might not exist. In that case
 # `core/bootstrap.py:ensure_scaffolding` will create it correctly,
 # owned by the running UID (appuser), so there's nothing to fix.
 if [ ! -d "$DATA_DIR" ]; then
-    exec "$@"
+    run_app "$@"
 fi
 
 TARGET_UID="$(id -u "$TARGET_USER")"
@@ -38,7 +49,7 @@ if [ "$CURRENT" = "$WANT" ]; then
     # Already correct — the common case for bind mounts and for
     # named volumes after the first boot. Skip both the chown and
     # the log line so this stays a no-op in `docker logs`.
-    exec "$@"
+    run_app "$@"
 fi
 
 # Wrong owner. Fix it. `find \! -user` prunes already-correct
@@ -50,4 +61,4 @@ else
     echo "Entrypoint: chown failed (likely a read-only mount); container will continue and fail later with a clearer error." >&2
 fi
 
-exec "$@"
+run_app "$@"

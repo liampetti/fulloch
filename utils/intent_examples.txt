@@ -63,15 +63,22 @@
 
 - User: "I need to relax"
   Output:
-  {"reply": "I can dim the lights and play some calming music for you?"}
+  {"reply": "Would you like a relaxing scene, such as dimmer lights and some music?"}
 
 - Conversation context:
-    Assistant: "I can dim the lights and play some calming music for you?"
+    Assistant: "Would you like a relaxing scene, such as dimmer lights and some music?"
   User: "yes"
   Output:
   {"actions": [
     {"intent": "ha_set_brightness", "args": ["Lounge", 20]},
     {"intent": "play_song", "args": ["Calm Evening"]}
+  ]}
+
+- User: "Turn on the lights and play music"
+  Output:
+  {"actions": [
+    {"intent": "turn_on", "args": ["lights"]},
+    {"intent": "play_song", "args": ["music"]}
   ]}
 
 - User: "Set the office to 22 and turn off the AC in the bedroom"

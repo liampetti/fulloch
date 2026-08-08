@@ -77,7 +77,7 @@ const sel = {
   wakeword: 'hey atticus', wakeword_pattern: '', voice_clone: '',
   openai: { base_url: '', model: '', api_key: '' },
   ha: { url: '', token: '' },
-  search_url: '',
+  search_url: '', clear_integrations: false,
 };
 let tierChosen = false;
 
@@ -129,15 +129,12 @@ async function boot() {
   if (haUrl && haUrl.value) sel.ha.url = haUrl.value;
   const searchUrl = SCHEMA.fields.find(f => f.path === 'search.searxng_url');
   if (searchUrl && searchUrl.value) sel.search_url = searchUrl.value;
-  // Seed model tier + backends from any existing `models:` block. Match by
-  // backend only (ignoring extra keys like a custom model path) — an exact
-  // preset match lets the pretty tier card highlight; anything else falls to
-  // 'custom' so sel.models (the real config) is what gets submitted, not a
-  // preset's defaults.
+  // Only an exact preset match gets a tier card. A backend-only match would
+  // discard custom paths, context sizes, or remote endpoint options on save.
   if (SCHEMA.models) {
     sel.models = JSON.parse(JSON.stringify(SCHEMA.models));
     const matched = (SCHEMA.tier_presets || []).find(t =>
-      ['asr', 'tts', 'llm'].every(d => (t.models[d] || {}).backend === (sel.models[d] || {}).backend));
+      JSON.stringify(t.models) === JSON.stringify(sel.models));
     sel.tier = matched ? matched.id : 'custom';
     tierChosen = true;
     if (sel.models.llm && (sel.models.llm.backend === 'openai' || sel.models.llm.backend === 'external')) {
@@ -221,7 +218,7 @@ function tlsBanner() {
 
 // Plain-English labels for the wizard (no model sizes in main view)
 const TIER_META = {
-  'cpu_local':  { icon: '⚡', label: 'Simple commands',  blurb: 'Pattern-matching for smart home, timers, and quick questions. No download, no AI model — instant.' },
+  'cpu_local':  { icon: '⚡', label: 'Simple commands',  blurb: 'Pattern-matching for smart home, timers, and quick questions. Downloads local speech models; no language model or cloud service.' },
   'full':       { icon: '🧠', label: 'Full conversation', blurb: 'A local AI handles anything you ask. Reasons through problems, fully private and offline. Requires a GPU.' },
   'cpu_server': { icon: '🌐', label: 'Remote AI',         blurb: 'Uses an AI server you already run (Ollama, LM Studio, OpenAI). Full conversation without the local download.' },
 };
@@ -344,10 +341,11 @@ function renderBackendCfg() {
   const mk = (domain, label) => {
     const cur = curBackend(domain);
     if (domain === 'llm') {
-      const mode = cur === 'openai' || cur === 'external' ? 'external' : 'local';
+      const mode = cur === 'none' ? 'none' : (cur === 'openai' || cur === 'external' ? 'external' : 'local');
       return `<div><label>${label}</label><select id="be-llm">
         <option value="local"${mode === 'local' ? ' selected' : ''}>Local</option>
         <option value="external"${mode === 'external' ? ' selected' : ''}>External</option>
+        <option value="none"${mode === 'none' ? ' selected' : ''}>Regex-only commands</option>
       </select></div>`;
     }
     const opts = b[domain].filter(o => o.offerable).map(o => {
@@ -362,15 +360,13 @@ function renderBackendCfg() {
     sel.tier = 'custom';
     const llmMode = $('be-llm').value;
     sel.models = { asr: { backend: $('be-asr').value }, tts: { backend: $('be-tts').value },
-                   llm: llmMode === 'local'
-                     ? { backend: 'local', local_model: 'qwen' }
-                     : { backend: 'external' } };
+                    llm: llmMode === 'local'
+                      ? { backend: 'local', local_model: 'qwen' }
+                      : llmMode === 'external' ? { backend: 'external' } : { backend: 'none' } };
     document.querySelectorAll('#tier-list .opt').forEach(o => o.classList.remove('sel'));
     syncOpenaiForm();
   };
   ['asr','tts','llm'].forEach(d => $(`be-${d}`).addEventListener('change', syncCustom));
-  const adv = $('adv-backends');
-  if (adv) adv.addEventListener('toggle', () => { if (adv.open) syncCustom(); });
 }
 
 function chosenModels() {
@@ -501,7 +497,8 @@ function stepConnect() {
       <div class="cbody">
         <p class="help">Control lights, media, climate, and more by voice.</p>
         <label>URL</label>
-        <input type="text" id="ha-url" placeholder="http://homeassistant.local:8123" value="${haUrl}">
+        <input type="text" id="ha-url" placeholder="http://192.168.1.50:8123" value="${haUrl}">
+        <p class="help">This runs inside Docker: use Home Assistant's LAN IP and port, not <code>localhost</code>. For example, <code>http://192.168.1.50:8123</code>.</p>
         <label>Long-lived access token</label>
         <input type="text" id="ha-token" placeholder="${haTokenPh}" value="${haToken}">
         <div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.6rem">
@@ -533,6 +530,12 @@ function stepConnect() {
     </div>
   </div>`);
   screen().innerHTML = ''; screen().appendChild(c);
+
+  if (SCHEMA.models) {
+    const clear = el(`<label class="help" style="display:block;margin-top:0.75rem"><input type="checkbox" id="clear-integrations"> Remove existing Home Assistant and Search settings</label>`);
+    c.querySelector('.actions').before(clear);
+    $('clear-integrations').addEventListener('change', e => sel.clear_integrations = e.target.checked);
+  }
 
   // --- HA ---
   $('ha-url').addEventListener('input', () => sel.ha.url = $('ha-url').value.trim());
@@ -723,22 +726,22 @@ async function doInstall() {
   // being visible. Each failed check becomes one bullet in the error
   // pane so the user knows exactly which to fix. Task 3 of
   // docs/ease-of-use-tasks.md.
-  const pre = await postJSON('/setup/preflight-download');
+  const models = chosenModels();
+  const pre = await postJSON('/setup/preflight-download', { models });
   const preBody = await pre.json().catch(() => ({ ok: true, errors: [] }));
   if (!pre.ok) {
     showPreflightErrors(preBody.errors || []);
     if (btn) btn.disabled = false;
     return;
   }
-  const models = chosenModels();
   await postJSON('/setup/models', { models });
   const updates = {
     'general.wakeword': sel.wakeword,
     'general.wakeword_pattern': sel.wakeword_pattern || '',
     'general.voice_clone': sel.voice_clone || '',
   };
-  if (sel.ha.url) updates['home_assistant.url'] = sel.ha.url;
-  if (sel.search_url) updates['search.searxng_url'] = sel.search_url;
+  if (sel.ha.url || sel.clear_integrations) updates['home_assistant.url'] = sel.ha.url;
+  if (sel.search_url || sel.clear_integrations) updates['search.searxng_url'] = sel.search_url;
   await putJSON('/config', { updates });
   // Tokens go to credentials.json, not config.yml.
   if (sel.ha.token) await postJSON('/setup/credential', { key: 'ha_token', value: sel.ha.token });
@@ -1556,7 +1559,7 @@ function modelSettingsSignature() {
 function modelsCard() {
   const b = SCHEMA.backends;
   const llm = (SCHEMA.models && SCHEMA.models.llm) || {};
-  const llmMode = llm.backend === 'openai' || llm.backend === 'external' ? 'external' : 'local';
+  const llmMode = llm.backend === 'none' ? 'none' : (llm.backend === 'openai' || llm.backend === 'external' ? 'external' : 'local');
   const llamaCustom = (llm.local_model === 'custom' || llm.backend === 'llama') && llm.model &&
     !String(llm.model).endsWith(DEFAULT_LLAMA_FILE);
   const llmChoice = llamaCustom ? 'custom' : (llm.local_model || (llm.backend === 'gemma' ? 'gemma' : 'qwen'));
@@ -1573,7 +1576,7 @@ function modelsCard() {
   const optsFor = (domain, customPath) => {
     const cur = currentBackend(domain);
     return b[domain].filter(o => o.offerable).map(o =>
-      `<option value="${o.backend}"${o.backend === cur ? ' selected' : ''}>${o.display_name}</option>`
+      `<option value="${o.backend}"${!customPath && o.backend === cur ? ' selected' : ''}>${o.display_name}</option>`
     ).join('') + `<option value="custom"${customPath ? ' selected' : ''}>Custom model path</option>`;
   };
   const modelStatus = (SCHEMA.models && Object.keys(SCHEMA.models).length) ? 'configured' : 'defaults';
@@ -1602,6 +1605,7 @@ function modelsCard() {
     <select id="sm-llama-sel">
       <option value="local"${llmMode === 'local' ? ' selected' : ''}>Local</option>
       <option value="external"${llmMode === 'external' ? ' selected' : ''}>External</option>
+      <option value="none"${llmMode === 'none' ? ' selected' : ''}>Regex-only commands</option>
     </select>
     <div id="sm-openai" style="display:none;margin-top:0.75rem">
       <label>Base URL</label><input type="text" id="sm-oai-url" placeholder="http://localhost:8888/v1" value="${(llmMode === 'external' ? llm.base_url || '' : '').replace(/"/g,'&quot;')}">
@@ -1650,7 +1654,10 @@ function wireModelsCard() {
     $(`sm-${domain}-custom`).style.display = $(`sm-${domain}`).value === 'custom' ? '' : 'none';
   };
   ['asr', 'tts'].forEach(domain => {
-    $(`sm-${domain}`).addEventListener('change', () => toggleCustomModel(domain));
+    $(`sm-${domain}`).addEventListener('change', () => {
+      if ($(`sm-${domain}`).value !== 'custom') $(`sm-${domain}-model`).value = '';
+      toggleCustomModel(domain);
+    });
     toggleCustomModel(domain);
   });
   const toggleLlmModel = () => {
@@ -1734,7 +1741,7 @@ async function saveModels() {
       $('models-note').innerHTML = `<div class="banner error">OpenAI needs a base URL.</div>`;
       return false;
     }
-  } else {
+  } else if (llmMode === 'local') {
     const localModel = $('sm-local-model').value;
     llm.local_model = localModel;
     if (localModel === 'custom') {
@@ -1757,8 +1764,8 @@ async function saveModels() {
     tts: { backend: $('sm-tts').value === 'custom' ? currentBackend('tts') : $('sm-tts').value },
     llm,
   };
-  const asrModel = $('sm-asr-model').value.trim();
-  const ttsModel = $('sm-tts-model').value.trim();
+  const asrModel = $('sm-asr').value === 'custom' ? $('sm-asr-model').value.trim() : '';
+  const ttsModel = $('sm-tts').value === 'custom' ? $('sm-tts-model').value.trim() : '';
   if (asrModel) models.asr.model = asrModel;
   if (ttsModel) models.tts.model = ttsModel;
   // API key goes to credentials.json, not config.yml.
@@ -1814,7 +1821,7 @@ function fieldRow(f) {
   if (f.path === 'general.tts_speed' && currentBackend('tts') !== 'kokoro-onnx') return null;
   const id = 'cf-' + f.path.replace(/\W/g, '_');
   let needsRestart = f.apply === 'restart';
-  if (f.path === 'general.voice_clone' && ['kokoro-onnx', 'pocket-tts-onnx'].includes(currentBackend('tts'))) needsRestart = false;
+  if (f.path === 'general.voice_clone' && ['kokoro-onnx', 'pocket-tts-onnx', 'pocket-tts-gguf'].includes(currentBackend('tts'))) needsRestart = false;
   const restart = needsRestart ? '<span class="restart">restart</span>' : '';
   const defRaw = (f.default === null || f.default === undefined) ? ''
     : (Array.isArray(f.default) ? f.default.join(', ') : String(f.default));
@@ -1882,6 +1889,9 @@ function fieldRow(f) {
     const txt = Array.isArray(val) ? val.join(', ') : val;
     const ph = defRaw !== '' ? defRaw.replace(/"/g, '&quot;') : 'comma-separated';
     input = `<input type="text" id="${id}" data-path="${f.path}" data-type="list" value="${String(txt).replace(/"/g,'&quot;')}" placeholder="${ph}">`;
+  } else if (f.type === 'dict') {
+    const txt = JSON.stringify(val || {}, null, 2).replace(/</g, '&lt;');
+    input = `<textarea id="${id}" data-path="${f.path}" data-type="dict" placeholder='{"/host/path": "/container/path"}'>${txt}</textarea>`;
   } else {
     const t = (f.type === 'int' || f.type === 'float') ? 'number' : 'text';
     input = `<input type="${t}" id="${id}" data-path="${f.path}" data-type="${f.type}" value="${String(val).replace(/"/g,'&quot;')}"${defPh}>`;

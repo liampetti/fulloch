@@ -1032,7 +1032,7 @@ def create_app(
         return JSONResponse({"assets": [a.snapshot() for a in assets]})
 
     @app.post("/setup/preflight-download")
-    def setup_preflight_download() -> JSONResponse:
+    def setup_preflight_download(req: ModelsRequest = ModelsRequest()) -> JSONResponse:  # noqa: B008
         """Run the blocking preflight (disk + network + GPU) for the wizard.
 
         Called on the "Start download" click so the user gets a clear
@@ -1041,6 +1041,7 @@ def create_app(
         Task 3 of docs/ease-of-use-tasks.md.
         """
 
+        from .config_schema import TIER_PRESETS
         from .config_store import read_config
         from .preflight import (
             check_disk_for_models,
@@ -1048,8 +1049,16 @@ def create_app(
             check_network,
         )
 
-        cfg = read_config(context.config_path)
-        models = cfg.get("models") or {}
+        if req.tier:
+            tier = next((t for t in TIER_PRESETS if t.id == req.tier), None)
+            if tier is None:
+                raise HTTPException(status_code=422, detail=f"unknown tier {req.tier!r}")
+            models = tier.models
+        elif req.models:
+            models = req.models
+        else:
+            cfg = read_config(context.config_path)
+            models = cfg.get("models") or {}
         errors: list[dict] = []
 
         ok, msg = check_disk_for_models(models)

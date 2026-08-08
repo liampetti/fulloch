@@ -23,7 +23,7 @@ Fulloch is your privacy-focused local voice assistant running on your own PC or 
 - **Music search & play** - *"play the Beatles"*, *"play jazz in the kitchen"*, *"play music everywhere"* - smart search on Spotify directly and hand playback off to Home Assistant
 - **Calendar reminders** - creates events on a dedicated HA calendar and speaks them at the right time
 - **Barge-in** - interrupt mid-sentence with the wakeword
-- **Voice options** - the GPU stack clones from reference audio; CPU users can choose fast built-in Kokoro voices or experimental Pocket TTS one-shot cloning
+- **Voice options** - the GPU stack clones from reference audio; CPU defaults to Pocket TTS one-shot cloning, with minimal built-in Kokoro voices available as an alternative
 - **Quiet delivery** - ask it to whisper or speak quietly; every TTS backend lowers output volume to 30% by default
 
 > **Higgs TTS 3:** The optional Higgs GPU backend is available only under Boson AI's Research and Non-Commercial License, not Fulloch's MIT license. It requires explicit consent for every voice reference. See [Model Sources and Licenses](MODELS.md#higgs-tts-3-license).
@@ -31,6 +31,8 @@ Fulloch is your privacy-focused local voice assistant running on your own PC or 
 ## Quick installation
 
 The default stack runs on **CPU (mac/linux/windows)**. Audio runs through the browser dashboard. The LLM is either regex-only (simple commands) or off-box via an OpenAI-compatible endpoint you configure in the wizard (e.g. Ollama / LM Studio / another machine on your LAN). The dashboard avatar swaps to Parloch, the **Par**tially-**loc**al **h**ome voice assistant, when the LLM is running off-device.
+
+Install Docker Desktop (or Docker Engine) first. The first run downloads the selected speech models, so it needs an internet connection, several GB of free disk, and enough Docker memory for the wizard's displayed estimate. For the GPU image, install a current NVIDIA driver and NVIDIA Container Toolkit, then confirm `docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi` works before launching Fulloch.
 
 ### CPU (mac/linux/windows)
 
@@ -40,9 +42,11 @@ docker run -d \
   --restart unless-stopped \
   -p 8765:8765 \
   -e DASHBOARD_HOST=0.0.0.0 \
-  -v ./data:/app/data:rw \
+  -v fulloch-data:/app/data:rw \
   ghcr.io/liampetti/fulloch:cpu
 ```
+
+The named volume is repaired automatically on first boot and receives the bundled starter voice references. If you prefer a bind mount, use an existing writable directory such as `-v "$PWD/data:/app/data:rw"`. Open the HTTPS URL shown in `docker logs fulloch-ai` after startup. A self-signed certificate warning is expected on first visit; accept it to enable browser microphone access. The dashboard is LAN-visible with this command, so set a dashboard password in the wizard before using it beyond a trusted network.
 
 Add `-v /path/to/your/ObsidianVault:/vault:rw` before the image name to expose an Obsidian vault.
 
@@ -57,7 +61,7 @@ docker run -d \
   --gpus all \
   -p 8765:8765 \
   -e DASHBOARD_HOST=0.0.0.0 \
-  -v ./data:/app/data:rw \
+  -v fulloch-data:/app/data:rw \
   ghcr.io/liampetti/fulloch:latest
 ```
 
@@ -66,6 +70,12 @@ docker run -d \
 <img src="parloch.png" alt="Fulloch being Parloch" width="180" align="right">
 
 The moment you point the language model at an OpenAI-compatible endpoint, the avatar and favicon swap to a travelling version of the character (Let's call him *Parloch*: The **Par**tially **loc**al **h**ome voice assistant), and the tagline reads *"language model is off-device."* Pick a local model again (**None** or the GPU 9B) and Fulloch comes home. It triggers as soon as a remote endpoint is *configured*, even if it is on your home network.
+
+### Recovering Or Reconfiguring
+
+Use **Settings** for normal changes: voices, model backends, language-model mode, Home Assistant, Search, and dashboard preferences. Model changes need a restart; if their weights are missing, the restart returns to the wizard to download them. The **Re-run setup wizard** action makes a backup under `data/backups/`; use it to choose a different stack, not to edit a custom model path or advanced remote-LLM settings. To repair a failed download, re-run setup and select the same stack; incomplete model caches are detected and downloaded again.
+
+Advanced options not shown in Settings are documented in `data/config.example.yml`: Spotify OAuth, native satellite tokens, and external-LLM timeouts. Keep those files under the persistent `data` volume.
 
 ### Obsidian Integration
 Connect your Obsidian vault so Fulloch reads, writes, appends, and searches your notes by voice.
@@ -77,6 +87,8 @@ The Obsidian wizard's "Auto-detect" scans the container filesystem for a vault, 
 A plugin is being developed that allows editing and live writing assistance of currently open documents. More information about getting the plugin setup in [technical details document](TECHNICAL_DETAILS.md).
 
 ## Home Assistant Integration
+
+When Fulloch runs in Docker, enter Home Assistant's LAN address, for example `http://192.168.1.50:8123`. `localhost` refers to the Fulloch container, not Home Assistant.
 
 A HACS-installable integration for status sensors, mic control, proactive speech, and automation triggers.
 

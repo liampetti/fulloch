@@ -167,10 +167,14 @@ def extract_area_light_state(command: str) -> Optional[tuple[str, str]]:
 # "Reactive question:" sentinel, so the agent loop replans into the SLM as a
 # fallback. The regex only has to win the common case to pay off.
 #
-# Compound utterances ("turn on the lamp and play music") and anaphora ("turn
-# it off") are bailed on so the SLM can handle them properly.
+# Anaphora ("turn it off") is bailed on so the SLM can resolve it from history.
+# A later generic compound pass combines only clauses that each independently
+# match one of these deterministic rules.
 
 _COMPOUND_RE = re.compile(r"\b(?:and|then)\b", re.IGNORECASE)
+_COMPOUND_SPLIT_RE = re.compile(r"\s+(?:and\s+then|and|then)\s+", re.IGNORECASE)
+_LEADING_DISCOURSE_RE = re.compile(r"^\s*(?:okay|ok|alright|sure|well)[,.!\s]+", re.IGNORECASE)
+_COMPOUND_ANAPHORA_RE = re.compile(r"\b(?:it|that|this|them|those|these)\b", re.IGNORECASE)
 
 # Entity references too vague to resolve to a single entity_id — let the SLM
 # decide (it may expand "everything" into several actions).
@@ -739,6 +743,32 @@ _INTENT_RULES = [
 ]
 
 
+def extract_compound_actions(command: str) -> Optional[list[dict]]:
+    """Return ordered actions when every conjunction clause is independently safe.
+
+    Reusing the single-command rules keeps compound handling conservative: any
+    contextual, ambiguous, or unsupported clause falls through to the agent.
+    """
+    clauses = _COMPOUND_SPLIT_RE.split(command.strip())
+    if (
+        len(clauses) not in (2, 3)
+        or any(not clause.strip() or _COMPOUND_ANAPHORA_RE.search(clause) for clause in clauses)
+    ):
+        return None
+
+    clauses[0] = _LEADING_DISCOURSE_RE.sub("", clauses[0]).strip()
+    actions = []
+    for clause in clauses:
+        for extract, build in _INTENT_RULES:
+            value = extract(clause)
+            if value is not None:
+                actions.append(build(value))
+                break
+        else:
+            return None
+    return actions
+
+
 def catchAll(user_message: str):
     """Run regex catchers in order. On match, return an agent emission
     `{"actions": [{"intent": ..., "args": ...}]}`; otherwise return the
@@ -749,6 +779,8 @@ def catchAll(user_message: str):
     if extract_note_delete(user_message) and not _obsidian_edit_enabled():
         logger.debug("Caught note delete/edit request; refusing")
         return {"reply": _NOTE_DELETE_REPLY}
+    if actions := extract_compound_actions(user_message):
+        return {"actions": actions}
     for extract, build in _INTENT_RULES:
         value = extract(user_message)
         if value is not None:

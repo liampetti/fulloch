@@ -52,11 +52,28 @@ def test_models_endpoint_writes_tier(tmp_path):
     r = client.post("/setup/models", json={"tier": "cpu_local"})
     assert r.status_code == 200
     assert "qwen-onnx" in Path(path).read_text()
+    assert "pocket-tts-onnx" in Path(path).read_text()
 
 
 def test_models_endpoint_rejects_unknown_tier(tmp_path):
     client, _, _ = _client(tmp_path)
     assert client.post("/setup/models", json={"tier": "mega"}).status_code == 422
+
+
+def test_models_endpoint_accepts_regex_only_llm(tmp_path):
+    client, _, path = _client(tmp_path)
+    r = client.post(
+        "/setup/models",
+        json={
+            "models": {
+                "asr": {"backend": "qwen-onnx"},
+                "tts": {"backend": "pocket-tts-onnx"},
+                "llm": {"backend": "none"},
+            }
+        },
+    )
+    assert r.status_code == 200
+    assert "backend: none" in Path(path).read_text()
 
 
 def test_plan_endpoint_reports_presence_and_domain(tmp_path):

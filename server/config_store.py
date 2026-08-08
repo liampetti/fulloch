@@ -9,8 +9,8 @@ read; the shipped `config.example.yml` is the inline documentation reference. A
 brand-new config is still seeded from the example to inherit its default values.
 """
 
-import logging
 import json
+import logging
 import os
 import re
 import tempfile

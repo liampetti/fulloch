@@ -81,6 +81,9 @@ COPY --from=obsidian-plugin-builder --chown=appuser:appuser /plugin/fulloch.zip 
 # fail the app's first write to /app/data. Idempotent (no-op when the dir
 # is already correctly owned) and safe on read-only mounts.
 COPY --chown=root:root --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+# Start the entrypoint as root so it can repair a fresh root-owned volume; it
+# drops to appuser before launching Fulloch.
+USER root
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # Liveness probe: the dashboard's GET /ready returns 200 as soon as the

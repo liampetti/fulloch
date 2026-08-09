@@ -26,6 +26,9 @@ DEFAULT_MODELS_DIR = "./data/models"
 # Dropped by the dashboard's "Re-run setup" action; forces the wizard on the
 # next start regardless of config/assets. The wizard clears it on completion.
 DEFAULT_RESET_MARKER = "./data/.setup_pending"
+# Written only after the wizard has downloaded the selected assets successfully.
+# A seeded config.yml is deliberately not enough to authorise automatic downloads.
+DEFAULT_COMPLETE_MARKER = "./data/.setup_complete"
 SNAPSHOT_COMPLETE_MARKER = ".fulloch_complete"
 
 # Keys the app hard-requires to construct the assistant. A populated config
@@ -43,6 +46,7 @@ class SetupDecision:
     reason: str
     config_error: Optional[str] = None
     missing_assets: list = field(default_factory=list)
+    auto_download: bool = False
 
 
 def _looks_like_path(model: str) -> bool:
@@ -121,6 +125,7 @@ def detect_setup_state(
     config: Optional[dict],
     models_dir: str = DEFAULT_MODELS_DIR,
     reset_marker: str = DEFAULT_RESET_MARKER,
+    completion_marker: str = DEFAULT_COMPLETE_MARKER,
 ) -> SetupDecision:
     """Classify the install so `main` can route to setup vs. run."""
     config_present = bool(config) and isinstance(config.get("general"), dict)
@@ -186,9 +191,11 @@ def detect_setup_state(
             missing_assets.append("grammar (agent.gbnf)")
 
     needs = bool(missing_assets)
+    auto_download = needs and bool(completion_marker) and Path(completion_marker).is_file()
     return SetupDecision(
         needs_setup=needs,
         config_present=True,
-        reason="missing model assets" if needs else "ready",
+        reason=("missing model assets" if auto_download else "setup incomplete") if needs else "ready",
         missing_assets=missing_assets,
+        auto_download=auto_download,
     )

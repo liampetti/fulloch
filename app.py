@@ -305,14 +305,14 @@ def main():
             except KeyboardInterrupt:
                 pass
             return
-        if decision.config_present and decision.reason == "missing model assets":
+        if decision.auto_download:
             # An already-configured install (e.g. the user picked a new model in
             # Settings and restarted) is just missing the assets on disk — the
             # wizard has nothing left to ask, so skip straight to downloading
             # instead of re-showing it.
             from server.dashboard import start_auto_download
 
-            logger.info("Config is up to date but missing model assets — downloading now.")
+            logger.info("Completed setup is missing model assets — downloading now.")
             start_auto_download(context)
         else:
             logger.info("Waiting in setup mode — open the dashboard to configure.")

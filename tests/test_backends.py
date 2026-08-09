@@ -26,7 +26,8 @@ def test_defaults_use_the_pytorch_gpu_stack():
     assert r["asr"]["model"] == "Qwen/Qwen3-ASR-1.7B"
     assert r["llm"]["model"].endswith("Qwen3.5-9B-UD-Q4_K_XL.gguf")
     assert r["llm"]["spec"].hf_repo == "unsloth/Qwen3.5-9B-MTP-GGUF"
-    assert r["llm"]["opts"]["mtp"] is True
+    assert r["llm"]["opts"]["mtp"] is False
+    assert r["llm"]["opts"]["flash_attn"] is False
     assert r["llm"]["n_context"] == 12288
 
 
@@ -151,10 +152,20 @@ def test_public_local_llm_modes_resolve_to_their_internal_servers():
     external = b.resolve_models({"llm": {"backend": "external", "base_url": "http://llm/v1"}})["llm"]
 
     assert qwen["backend"] == "llama"
-    assert qwen["opts"]["mtp"] is True
+    assert qwen["opts"]["mtp"] is False
+    assert qwen["opts"]["flash_attn"] is False
     assert gemma["backend"] == "gemma"
     assert external["backend"] == "openai"
     assert external["opts"]["base_url"] == "http://llm/v1"
+
+
+def test_local_llm_experimental_options_are_explicit_overrides():
+    llm = b.resolve_models(
+        {"llm": {"backend": "local", "local_model": "qwen", "mtp": True, "flash_attn": True}}
+    )["llm"]
+
+    assert llm["opts"]["mtp"] is True
+    assert llm["opts"]["flash_attn"] is True
 
 
 def test_variant_reads_env(monkeypatch):

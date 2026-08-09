@@ -170,6 +170,37 @@ def test_missing_model_assets_needs_setup(tmp_path, monkeypatch):
     # Both selected Qwen GGUF backend assets are absent.
     joined = " ".join(d.missing_assets)
     assert "asr:qwen-gguf" in joined and "tts:qwen-gguf" in joined
+    assert d.auto_download is False
+    assert d.reason == "setup incomplete"
+
+
+def test_only_completed_setup_auto_downloads_missing_assets(tmp_path, monkeypatch):
+    import core.setup as setup
+
+    monkeypatch.setattr(setup, "variant", lambda: "gpu")
+    models = tmp_path / "models"
+    models.mkdir()
+    config = {
+        "general": {"wakeword": "hey atticus"},
+        "models": {
+            "asr": {"backend": "qwen-gguf", "model": str(models / "asr.gguf")},
+            "tts": {"backend": "qwen-gguf", "model": str(models / "tts")},
+            "llm": {"backend": "none"},
+        },
+    }
+    complete = tmp_path / ".setup_complete"
+
+    incomplete = detect_setup_state(
+        config, models_dir=str(models), completion_marker=str(complete)
+    )
+    assert incomplete.needs_setup and not incomplete.auto_download
+
+    complete.touch()
+    completed = detect_setup_state(
+        config, models_dir=str(models), completion_marker=str(complete)
+    )
+    assert completed.needs_setup and completed.auto_download
+    assert completed.reason == "missing model assets"
 
 
 def test_compound_gguf_tts_requires_every_declared_file(tmp_path, monkeypatch):

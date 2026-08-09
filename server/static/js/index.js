@@ -1198,10 +1198,9 @@
       if (!r.ok) return;
       const s = await r.json();
       // The dashboard is only usable once the assistant is READY (models loaded
-      // + greeting done). If the server is pre-READY — e.g. it restarted under
-      // an already-open tab — bounce to '/', which serves the loading screen
-      // until READY. Normal load never trips this (index.html is only served
-      // when READY).
+      // + greeting done). A restart can return it to setup mode while this page
+      // remains open, so force a fresh document request for the wizard.
+      if (s.phase === 'NEEDS_SETUP') { location.reload(); return; }
       if (s.phase && s.phase !== 'READY') { location.href = '/'; return; }
       const busy = s.state !== 'idle';
       if (busy !== voiceBusy) { voiceBusy = busy; syncButton(); }

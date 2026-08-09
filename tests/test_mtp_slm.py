@@ -30,11 +30,13 @@ def test_mtp_server_command_can_disable_flash_attention(monkeypatch):
     assert command[command.index("--flash-attn") + 1] == "off"
 
 
-def test_blackwell_disables_mtp_and_flash_attention(monkeypatch):
-    monkeypatch.setattr(slm, "_blackwell_gpu", lambda: True)
+def test_server_command_disables_experimental_features_by_default(monkeypatch):
+    monkeypatch.setattr(slm, "_local_server_binary", lambda: "/opt/llama-cpp/llama-server")
 
-    assert slm._mtp_supported() is False
-    assert slm._flash_attn_supported() is False
+    command = slm._local_server_command("model.gguf", 12288, 4, 512)
+
+    assert "--spec-type" not in command
+    assert command[command.index("--flash-attn") + 1] == "off"
 
 
 def test_mtp_server_requires_native_binary(monkeypatch):
@@ -51,3 +53,14 @@ def test_standard_server_command_omits_mtp_flags(monkeypatch):
 
     assert "--spec-type" not in command
     assert "--spec-draft-n-max" not in command
+
+
+def test_server_failure_detail_classifies_cuda_memory_fault(monkeypatch, tmp_path):
+    log = tmp_path / "llama-server.log"
+    log.write_text("CUDA error: an illegal memory access was encountered\n")
+    monkeypatch.setattr(slm, "SERVER_LOG_PATH", log)
+
+    detail = slm._server_failure_detail(1)
+
+    assert "GPU memory fault" in detail
+    assert str(log) in detail

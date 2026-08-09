@@ -46,7 +46,7 @@ docker run -d \
   ghcr.io/liampetti/fulloch:cpu
 ```
 
-The named volume is repaired automatically on first boot and receives the bundled starter voice references. If you prefer a bind mount, use an existing writable directory such as `-v "$PWD/data:/app/data:rw"`. Open the HTTPS URL shown in `docker logs fulloch-ai` after startup. A self-signed certificate warning is expected on first visit; accept it to enable browser microphone access. The dashboard is LAN-visible with this command, so set a dashboard password in the wizard before using it beyond a trusted network.
+The named volume is repaired automatically on first boot and receives the bundled starter voice references. If you prefer a bind mount, use an existing writable directory such as `-v "$PWD/data:/app/data:rw"`; see [data-directory permissions](TECHNICAL_DETAILS.md#docker-data-directory-permissions) if startup reports a permission error. Open the HTTPS URL shown in `docker logs fulloch-ai` in a browser to continue the setup wizard. A self-signed certificate warning is expected on first visit; accept it to enable browser microphone access. The dashboard is LAN-visible with this command, so set a dashboard password in the wizard before using it beyond a trusted network.
 
 Add `-v /path/to/your/ObsidianVault:/vault:rw` before the image name to expose an Obsidian vault.
 

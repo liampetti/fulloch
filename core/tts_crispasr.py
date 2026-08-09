@@ -78,6 +78,19 @@ _MAX_SYNTHESIS_CHARS = 240
 # so keeping it warm avoids an unnecessary model reload between turns.
 _MAX_STREAMS_PER_WORKER = 8
 
+# Pocket TTS's embedded English SentencePiece tokenizer can return no audio for
+# typographic punctuation emitted by the SLM. Keep this at its backend boundary
+# so other TTS backends retain their native Unicode handling.
+_POCKET_TEXT_TRANSLATION = str.maketrans({
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u2013": "-",
+    "\u2014": "-",
+    "\u2026": "...",
+})
+
 
 def force_cancel_playback(sink: Optional["queue.Queue"] = None) -> None:
     """Tell the browser to stop already-scheduled audio right now.
@@ -251,7 +264,7 @@ def _synth_stream(text: str):
     if _pocket_tts:
         # Pocket's CrispASR API returns a complete PCM buffer; it has no native
         # streaming callback like Qwen3-TTS.
-        yield _synth(text)
+        yield _synth(text.translate(_POCKET_TEXT_TRANSLATION))
         return
     if isinstance(_session, CrispASRWorker):
         yield from _session.stream("synthesize_stream", text=text)

@@ -78,6 +78,23 @@ def test_pocket_tts_synthesis_uses_complete_pcm_api(monkeypatch):
     np.testing.assert_allclose(chunks[0], [0.1, 0.2])
 
 
+def test_pocket_tts_normalises_typographic_punctuation(monkeypatch):
+    calls = []
+
+    class FakeWorker:
+        def call(self, command, **payload):
+            calls.append((command, payload))
+            return [0.1, 0.2]
+
+    monkeypatch.setattr(tts, "CrispASRWorker", FakeWorker)
+    monkeypatch.setattr(tts, "_session", FakeWorker())
+    monkeypatch.setattr(tts, "_pocket_tts", True)
+
+    list(tts._synth_stream("It\u2019s only as long as you cut it."))
+
+    assert calls == [("synthesize", {"text": "It's only as long as you cut it."})]
+
+
 def test_pocket_tts_does_not_periodically_recycle_its_warm_worker(monkeypatch):
     class FakeWorker:
         alive = True

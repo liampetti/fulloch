@@ -65,6 +65,8 @@ data/notes_index.npy
 data/notes_root_override.json
 data/voice_denylist.json
 data/dashboard_sessions.json
+data/backups
+.setup_complete
 
 # =============================================================================
 # Local Data and Models

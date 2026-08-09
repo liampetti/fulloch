@@ -528,7 +528,7 @@ TIER_PRESETS: tuple = (
         {
             "asr": {"backend": "qwen"},
             "tts": {"backend": "qwen"},
-            "llm": {"backend": "local", "local_model": "qwen"},
+            "llm": {"backend": "local", "local_model": "qwen", "mtp": False, "flash_attn": False},
         },
     ),
     TierPreset(

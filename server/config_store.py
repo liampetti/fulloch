@@ -240,6 +240,9 @@ def write_models(models: dict, path: str = DEFAULT_CONFIG_PATH) -> None:
         not isinstance(llm["n_context"], int) or isinstance(llm["n_context"], bool) or llm["n_context"] <= 0
     ):
         raise ValueError("models.llm.n_context must be a positive integer")
+    for option in ("mtp", "flash_attn"):
+        if option in llm and not isinstance(llm[option], bool):
+            raise ValueError(f"models.llm.{option} must be true or false")
     doc = _load_doc(path)
     block = CommentedMap()
     for domain in ("asr", "tts", "llm"):

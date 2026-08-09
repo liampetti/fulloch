@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import time
+from pathlib import Path
 from typing import Callable, Optional
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -24,6 +25,7 @@ MTP_DRAFT_TOKENS = 3
 N_CONTEXT = 12288
 N_THREADS = 4
 N_BATCH = 512
+SERVER_LOG_PATH = Path("./data/logs/llama-server.log")
 
 
 class ContextExhaustedError(RuntimeError):
@@ -53,27 +55,6 @@ def _local_server_port() -> int:
     return int(os.environ.get("FULLOCH_LOCAL_LLM_PORT", os.environ.get("FULLOCH_MTP_PORT", LOCAL_SERVER_PORT)))
 
 
-def _blackwell_gpu() -> bool:
-    """Whether the current GPU is NVIDIA Blackwell (RTX 50-series)."""
-    if not torch.cuda.is_available():
-        return False
-    try:
-        major, _minor = torch.cuda.get_device_capability()
-    except Exception:  # noqa: BLE001 - preserve acceleration when probing is unavailable
-        return False
-    return major >= 10
-
-
-def _mtp_supported() -> bool:
-    """MTP decoding currently faults on NVIDIA Blackwell (RTX 50-series) GPUs."""
-    return not _blackwell_gpu()
-
-
-def _flash_attn_supported() -> bool:
-    """Flash attention currently faults on NVIDIA Blackwell (RTX 50-series) GPUs."""
-    return not _blackwell_gpu()
-
-
 def _local_server_command(
     model_path: str,
     n_ctx: int,
@@ -81,7 +62,7 @@ def _local_server_command(
     n_batch: int,
     *,
     mtp: bool = False,
-    flash_attn: bool = True,
+    flash_attn: bool = False,
 ) -> list[str]:
     """Build the bundled llama-server command for a local GGUF backend."""
     binary = _local_server_binary()
@@ -117,13 +98,43 @@ def _local_server_command(
     return command
 
 
+def _server_log_tail(limit: int = 6000) -> str:
+    """Return enough of llama-server's own log to explain a failed startup."""
+    try:
+        with SERVER_LOG_PATH.open("rb") as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - limit))
+            return log.read().decode("utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _server_failure_detail(returncode: int | None = None) -> str:
+    """Classify CUDA failures while retaining the server-log location."""
+    tail = _server_log_tail()
+    low = tail.lower()
+    if "out of memory" in low or "cudaerrormemoryallocation" in low or "cudamalloc" in low:
+        summary = "CUDA out of memory"
+    elif "illegal memory access" in low or "xid" in low or "mmu fault" in low:
+        summary = "CUDA illegal memory access / GPU memory fault"
+    elif returncode is not None:
+        summary = f"llama-server exited with code {returncode}"
+    else:
+        summary = "llama-server stopped"
+    if tail:
+        last_line = next((line.strip() for line in reversed(tail.splitlines()) if line.strip()), "")
+        if last_line:
+            summary += f" ({last_line[:400]})"
+    return f"{summary}. See {SERVER_LOG_PATH}"
+
+
 def _wait_for_local_server(process: subprocess.Popen, port: int, timeout: float = 120.0) -> None:
     """Wait for model load without exposing the loopback server outside the app."""
     deadline = time.monotonic() + timeout
     health_url = f"http://{LOCAL_SERVER_HOST}:{port}/health"
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError(f"llama-server exited while loading the local model ({process.returncode})")
+            raise RuntimeError(_server_failure_detail(process.returncode))
         try:
             with urlopen(health_url, timeout=1):
                 return
@@ -143,22 +154,28 @@ def _stop_local_server(process: subprocess.Popen) -> None:
 
 
 def _load_local_slm(
-    model_path: str, n_ctx: int, n_threads: int, n_batch: int, mtp: bool
+    model_path: str, n_ctx: int, n_threads: int, n_batch: int, mtp: bool, flash_attn: bool
 ):
     """Start llama-server and return its OpenAI-compatible client."""
     from .llm_openai import load_openai
 
     port = _local_server_port()
-    effective_mtp = mtp and _mtp_supported()
-    flash_attn = _flash_attn_supported()
-    if _blackwell_gpu():
-        logger.warning("RTX 50-series GPU detected; disabling unsupported flash attention and MTP decoding")
+    # These are explicit user-controlled experiments. Do not second-guess the
+    # selection by GPU generation: users may choose to benchmark newer drivers.
+    effective_mtp = mtp
+    effective_flash_attn = flash_attn
     command = _local_server_command(
-        model_path, n_ctx, n_threads, n_batch, mtp=effective_mtp, flash_attn=flash_attn
+        model_path, n_ctx, n_threads, n_batch, mtp=effective_mtp, flash_attn=effective_flash_attn
     )
     mode = "MTP speculative decoding" if effective_mtp else "standard decoding"
     logger.info("Loading %s with native llama-server (%s)...", model_path, mode)
-    process = subprocess.Popen(command, stdout=subprocess.DEVNULL)
+    SERVER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with SERVER_LOG_PATH.open("w", encoding="utf-8") as server_log:
+        try:
+            process = subprocess.Popen(command, stdout=server_log, stderr=subprocess.STDOUT)
+        except Exception:
+            logger.exception("Could not start llama-server; see %s", SERVER_LOG_PATH)
+            raise
     try:
         _wait_for_local_server(process, port)
     except Exception:
@@ -179,10 +196,11 @@ def load_slm(
     n_threads: int = N_THREADS,
     n_batch: int = N_BATCH,
     mtp: bool = False,
+    flash_attn: bool = False,
 ):
     """Load a local GGUF through the bundled llama-server."""
     del grammar_path  # The shared OpenAI client loads GRAMMAR_FILE for constrained requests.
-    return _load_local_slm(model_path, n_ctx, n_threads, n_batch, mtp)
+    return _load_local_slm(model_path, n_ctx, n_threads, n_batch, mtp, flash_attn)
 
 
 def generate_slm(

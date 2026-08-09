@@ -459,8 +459,8 @@ _register(
         vram_gb=7.5,
         n_context=12288,
         deps=(),
-        notes="Grammar-constrained agent loop with native MTP speculative decoding. Full tier.",
-        extra={"mtp": True},
+        notes="Grammar-constrained agent loop. MTP speculative decoding is opt-in.",
+        extra={"mtp": False, "flash_attn": False},
     )
 )
 # Alternative local SLM: Gemma 4 12B (QAT Q4). It uses the same bundled
@@ -634,9 +634,9 @@ def resolve_models(config_models: Optional[dict]) -> dict:
                     raise ValueError(f"Unknown local LLM model {local_model!r}; choose qwen, gemma, or custom")
             elif backend == "external":
                 backend = "openai"
-            # Legacy manual override. Hardware capability now selects the safe
-            # runtime automatically, so never forward it to the model loader.
-            block.pop("flash_attn", None)
+            for option in ("mtp", "flash_attn"):
+                if option in block and not isinstance(block[option], bool):
+                    raise ValueError(f"models.llm.{option} must be true or false")
         spec = get_spec(domain, backend)
         model = block.pop("model", None) or spec.default_model
         n_context = block.pop("n_context", None) or spec.n_context

@@ -1,13 +1,31 @@
-## Blackwell GPU issues
-> **RTX 50-series:** Native MTP speculative decoding and llama.cpp's built-in
-> FlashAttention are disabled on Blackwell because llama.cpp can fault on
-> longer agent prompts. This does not affect the Python FlashAttention 2
-> dependency used by the GPU speech models.
+## llama.cpp experimental options
+> Native MTP speculative decoding and llama.cpp's built-in Flash Attention are
+> off by default for every GPU. Enable them individually in the setup wizard or
+> Settings only after stability-testing the selected model, driver, and hardware.
+> This does not affect the Python FlashAttention 2 dependency used by the GPU
+> speech models.
+
+## Docker Data Directory Permissions
+
+Fulloch starts its entrypoint as root only long enough to make `/app/data`
+owned by the in-container `appuser` (UID/GID `1000`), then launches the app as
+that non-root user. This repairs a fresh Docker named volume automatically.
+
+For a bind mount, the source directory must be writable by the container. If
+the entrypoint logs `chown failed` or Fulloch reports `PermissionError`, fix the
+host directory, then restart the container:
+
+```bash
+sudo chown -R 1000:1000 /path/to/fulloch-data
+```
+
+Do not use `--user` or replace the image entrypoint unless the mounted data
+directory is already writable by the user you select; either bypasses the
+automatic ownership repair. Read-only, root-squashed network mounts, and host
+security policies can also prevent the repair.
 
 ## Obsidian Information
 > The optional Obsidian mount exposes your vault to Fulloch so voice notes can read/write it. Add it before the image name, edit the host path, and add a matching `obsidian.path_translation` entry in `data/config.yml`, see the Obsidian section below.
->
-> **Named volumes** (e.g. `-v fulloch-data:/app/data:rw` in compose) work too, the image's entrypoint chowns the volume to the container's user on first boot, so no separate `chown` init container is needed. The bind mount above (the default in this README) inherits the host's UID and is even simpler.
 
 ## SearXNG sidecar (optional, for live web answers)
 

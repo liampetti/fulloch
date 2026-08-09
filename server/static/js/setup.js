@@ -218,9 +218,9 @@ function tlsBanner() {
 
 // Plain-English labels for the wizard (no model sizes in main view)
 const TIER_META = {
-  'cpu_local':  { icon: '⚡', label: 'Simple commands',  blurb: 'Pattern-matching for smart home, timers, and quick questions. Downloads local speech models; no language model or cloud service.' },
-  'full':       { icon: '🧠', label: 'Full conversation', blurb: 'A local AI handles anything you ask. Reasons through problems, fully private and offline. Requires a GPU.' },
-  'cpu_server': { icon: '🌐', label: 'Remote AI',         blurb: 'Uses an AI server you already run (Ollama, LM Studio, OpenAI). Full conversation without the local download.' },
+  'cpu_local':  { icon: '⚡', label: 'Simple commands',  blurb: 'Pattern-matching for smart home, timers, and quick questions. ASR and TTS run locally on the CPU; no language model or cloud service.' },
+  'full':       { icon: '🧠', label: 'Full conversation', blurb: 'A local AI handles anything you ask. ASR, TTS, and the language model run on your GPU, fully private and offline.' },
+  'cpu_server': { icon: '🌐', label: 'Remote AI',         blurb: 'Uses an AI server you already run (Ollama, LM Studio, OpenAI). ASR and TTS run locally on the CPU.' },
 };
 
 function stepBrain() {
@@ -272,8 +272,13 @@ function stepBrain() {
       <div class="row"><span class="name">${meta.icon} ${meta.label} ${rec}</span></div>
       <div class="blurb">${meta.blurb}</div></div>`);
     node.addEventListener('click', () => {
-      sel.tier = t.id; sel.models = null; tierChosen = true;
+      sel.tier = t.id;
+      // Keep the advanced controls aligned with the selected preset, rather
+      // than leaving them on the previous custom/default backend values.
+      sel.models = JSON.parse(JSON.stringify(t.models));
+      tierChosen = true;
       document.querySelectorAll('#tier-list .opt').forEach(o => o.classList.toggle('sel', o.dataset.tier === t.id));
+      renderBackendCfg();
       syncOpenaiForm();
       updateTierWarn(t.id);
     });
@@ -337,7 +342,9 @@ function updateTierWarn(tierId) {
 function renderBackendCfg() {
   const box = $('backend-cfg');
   const b = SCHEMA.backends;
-  const curBackend = (domain) => (sel.models && sel.models[domain] && sel.models[domain].backend) || '';
+  const preset = (SCHEMA.tier_presets || []).find(t => t.id === sel.tier);
+  const displayedModels = sel.models || (preset && preset.models);
+  const curBackend = (domain) => (displayedModels && displayedModels[domain] && displayedModels[domain].backend) || '';
   const mk = (domain, label) => {
     const cur = curBackend(domain);
     if (domain === 'llm') {
@@ -354,8 +361,14 @@ function renderBackendCfg() {
     }).join('');
     return `<div><label>${label}</label><select id="be-${domain}">${opts}</select></div>`;
   };
+  const currentLlm = (displayedModels && displayedModels.llm) || {};
   box.innerHTML = `<p class="help">Overrides the mode selected above.</p>
-    <div class="grid2">${mk('asr','ASR')}${mk('tts','TTS')}${mk('llm','Language model')}</div>`;
+    <div class="grid2">${mk('asr','ASR')}${mk('tts','TTS')}${mk('llm','Language model')}</div>
+    <div id="wizard-llm-accelerators" class="help" style="margin-top:0.7rem">
+      <label><input type="checkbox" id="wizard-mtp"${currentLlm.mtp ? ' checked' : ''}> Enable experimental MTP speculative decoding</label>
+      <label><input type="checkbox" id="wizard-flash-attn"${currentLlm.flash_attn ? ' checked' : ''}> Enable experimental llama.cpp Flash Attention</label>
+      <div>Both are off by default. Enable only after stability-testing this GPU.</div>
+    </div>`;
   const syncCustom = () => {
     sel.tier = 'custom';
     const llmMode = $('be-llm').value;
@@ -367,6 +380,12 @@ function renderBackendCfg() {
     syncOpenaiForm();
   };
   ['asr','tts','llm'].forEach(d => $(`be-${d}`).addEventListener('change', syncCustom));
+  const syncAccelerators = () => {
+    const local = $('be-llm').value === 'local';
+    $('wizard-llm-accelerators').style.display = local ? '' : 'none';
+  };
+  $('be-llm').addEventListener('change', syncAccelerators);
+  syncAccelerators();
 }
 
 function chosenModels() {
@@ -377,6 +396,10 @@ function chosenModels() {
     if (sel.openai.base_url) m.llm.base_url = normalizeEndpointUrl(sel.openai.base_url);
     if (sel.openai.model) m.llm.model = sel.openai.model;
     // api_key goes to credentials.json, not models config
+  }
+  if (m && m.llm && (m.llm.backend === 'local' || m.llm.backend === 'llama')) {
+    m.llm.mtp = !!($('wizard-mtp') && $('wizard-mtp').checked);
+    m.llm.flash_attn = !!($('wizard-flash-attn') && $('wizard-flash-attn').checked);
   }
   return m;
 }
@@ -763,7 +786,9 @@ function showProgress() {
   clearAlert();
   screen().innerHTML = `<div class="card"><h2>Downloading models</h2>
     <p class="lead">Pulling model weights. You can leave this page open.</p>
-    <div id="assets"></div><div id="dl-error"></div></div>`;
+    <div id="assets"></div><div id="dl-error"></div>
+    <div class="actions"><span></span><button class="danger" id="cancel-startup">Stop and return to setup</button></div></div>`;
+  $('cancel-startup').addEventListener('click', cancelStartup);
   pollProgress();
 }
 
@@ -814,8 +839,38 @@ function showLoading() {
   screen().innerHTML = `<div class="card"><h2>Starting up</h2>
     <p class="lead">Loading models and warming up prompts — the assistant will be ready shortly.</p>
     <div id="term" class="term" aria-live="polite"></div>
-    <div class="term-foot"><span class="spinner sm"></span><span class="muted" id="load-detail"></span></div></div>`;
+    <div class="term-foot"><span class="spinner sm"></span><span class="muted" id="load-detail"></span></div>
+    <div class="actions"><span></span><button class="danger" id="cancel-startup">Stop and return to setup</button></div></div>`;
+  $('cancel-startup').addEventListener('click', cancelStartup);
   pollLoading();
+}
+
+async function cancelStartup() {
+  const btn = $('cancel-startup');
+  if (btn) { btn.disabled = true; btn.textContent = 'Stopping…'; }
+  const r = await postJSON('/setup/cancel-startup', {});
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    if (btn) { btn.disabled = false; btn.textContent = 'Stop and return to setup'; }
+    showAlert(e.detail || 'Could not stop startup.');
+    return;
+  }
+  if (btn) btn.textContent = 'Returning to setup…';
+  await waitForRestart(STATUS && STATUS.server_instance_id);
+  location.replace(`/?setup=${Date.now()}`);
+}
+
+async function waitForRestart(previousInstanceId) {
+  // The old process is about to exit. Do not navigate until its replacement is
+  // serving requests, otherwise the wizard's later voice/schema fetches race
+  // the restart and leave a partially rendered page.
+  while (true) {
+    try {
+      const status = await fetch('/status', { cache: 'no-store' }).then(r => r.json());
+      if (status.server_instance_id && status.server_instance_id !== previousInstanceId) return;
+    } catch (e) { /* The server is between processes; retry shortly. */ }
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
 }
 
 function streamLogLines(log) {
@@ -1552,8 +1607,11 @@ function modelSettingsSignature() {
   return [
     'sm-asr', 'sm-asr-model', 'sm-tts', 'sm-tts-model', 'sm-personality-sel',
     'sm-personality-custom-text', 'sm-llama-sel', 'sm-local-model', 'sm-llama-model',
-    'sm-llama-ctx', 'sm-oai-url', 'sm-oai-model', 'sm-oai-key',
-  ].map(id => ($(id) || {}).value || '').join('\u0000');
+    'sm-llama-ctx', 'sm-mtp', 'sm-flash-attn', 'sm-oai-url', 'sm-oai-model', 'sm-oai-key',
+  ].map(id => {
+    const node = $(id) || {};
+    return node.type === 'checkbox' ? String(node.checked) : (node.value || '');
+  }).join('\u0000');
 }
 
 function modelsCard() {
@@ -1638,6 +1696,11 @@ function modelsCard() {
       <label>Context size (tokens)</label>
       <input type="number" id="sm-llama-ctx" placeholder="12288" value="${llamaCtx}">
       <div class="help">Larger context uses more VRAM — 16384 may OOM on a 16GB card.</div>
+      <div class="help" style="margin-top:0.7rem">
+        <label><input type="checkbox" id="sm-mtp"${llm.mtp ? ' checked' : ''}> Enable experimental MTP speculative decoding</label>
+        <label><input type="checkbox" id="sm-flash-attn"${llm.flash_attn ? ' checked' : ''}> Enable experimental llama.cpp Flash Attention</label>
+        <div>Both are off by default. Enable only after stability-testing this GPU.</div>
+      </div>
     </div>
     <div id="models-note"></div>
     <div class="actions"><span></span><button class="primary" id="save-models">Save models</button></div>
@@ -1758,6 +1821,8 @@ async function saveModels() {
     }
     const ctx = $('sm-llama-ctx').value.trim();
     if (ctx) llm.n_context = parseInt(ctx, 10);
+    llm.mtp = $('sm-mtp').checked;
+    llm.flash_attn = $('sm-flash-attn').checked;
   }
   const models = {
     asr: { backend: $('sm-asr').value === 'custom' ? currentBackend('asr') : $('sm-asr').value },

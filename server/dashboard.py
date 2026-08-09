@@ -18,6 +18,7 @@ import socket
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -54,6 +55,7 @@ logger = logging.getLogger(__name__)
 # /status handler is the only hot consumer; other config reads (wizard,
 # settings) happen on user-initiated changes, not in a tight loop.
 _CONFIG_CACHE: dict = {"path": None, "mtime": None, "data": None}
+_SERVER_INSTANCE_ID = uuid.uuid4().hex
 
 
 def _read_config_cached(path: str) -> dict:
@@ -127,6 +129,11 @@ def _schedule_restart(delay: float = 0.5) -> None:
 def _reset_marker_for(context: AppContext) -> Path:
     """The setup-reset marker, alongside config.yml (see core/setup.py)."""
     return Path(context.config_path).parent / ".setup_pending"
+
+
+def _completion_marker_for(context: AppContext) -> Path:
+    """Marker proving the wizard completed at least one successful install."""
+    return Path(context.config_path).parent / ".setup_complete"
 
 
 # Files backed up on /setup/reset. Relative to data_dir (the same dir that
@@ -264,6 +271,7 @@ def start_auto_download(context: AppContext) -> None:
 
     def _done(ok: bool) -> None:
         if ok:
+            _completion_marker_for(context).touch()
             try:
                 _reset_marker_for(context).unlink(missing_ok=True)
             except OSError:
@@ -495,6 +503,9 @@ def create_app(
     def _reset_marker_path() -> Path:
         return _reset_marker_for(context)
 
+    def _completion_marker_path() -> Path:
+        return _completion_marker_for(context)
+
     # Seed the password hash from the environment (populated by inject_env()
     # at startup from credentials.json). A post-wizard /setup/password call
     # updates context.dashboard_password_hash in place — no restart needed.
@@ -706,6 +717,7 @@ def create_app(
         # wizard-vs-dashboard routing + the progress/loading screens. Always
         # available, even before the assistant exists.
         payload = lifecycle.snapshot()
+        payload["server_instance_id"] = _SERVER_INSTANCE_ID
         payload["auth_enabled"] = bool(context.dashboard_password_hash)
         # When the dashboard is serving over TLS, surface the URL the user
         # is currently accessing (built from the live request's scheme +
@@ -1088,6 +1100,7 @@ def create_app(
 
         def _done(ok: bool) -> None:
             if ok:
+                _completion_marker_path().touch()
                 # Setup finished — clear any reset marker so the next restart
                 # stays in run mode instead of re-entering the wizard.
                 try:
@@ -1130,6 +1143,7 @@ def create_app(
 
         def _done(ok: bool) -> None:
             if ok:
+                _completion_marker_path().touch()
                 try:
                     _reset_marker_path().unlink(missing_ok=True)
                 except OSError:
@@ -1146,6 +1160,21 @@ def create_app(
         context.lifecycle.set(DOWNLOADING, "downloading models")
         context.downloader.start(assets, on_complete=_done)
         return JSONResponse({"started": True})
+
+    @app.post("/setup/cancel-startup")
+    def setup_cancel_startup() -> JSONResponse:
+        """Stop an in-flight model transfer/load and return to the wizard.
+
+        Model downloads and CUDA initialization are not safely cancellable from
+        Python threads. Re-execing the process terminates those workers and the
+        reset marker makes the fresh process serve the wizard immediately.
+        """
+        if lifecycle.phase not in {DOWNLOADING, LOADING}:
+            raise HTTPException(status_code=409, detail="startup is not in progress")
+        _reset_marker_for(context).touch()
+        lifecycle.set("NEEDS_SETUP", "startup cancelled; returning to setup")
+        _schedule_restart(delay=0.1)
+        return JSONResponse({"ok": True, "restarting": True})
 
     @app.post("/setup/reset")
     def setup_reset() -> JSONResponse:

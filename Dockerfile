@@ -19,7 +19,7 @@ ARG MAX_JOBS=4
 ENV MAX_JOBS=${MAX_JOBS}
 ARG HIGGS_TTS_REPO=https://github.com/liampetti/HiggsTTS.cpp.git
 ARG HIGGS_TTS_REF=061134ad8c3dc544ebf1362f12882fd26a879f8f
-# llama.cpp b10199: validated MTP support on NVIDIA Blackwell.
+# llama.cpp b10199: pinned local-LLM runtime revision.
 ARG LLAMA_CPP_REF=b4ca032ae3729516943884786de4ae39fba0bbca
 
 RUN apt-get update && apt-get install -y git cmake && rm -rf /var/lib/apt/lists/*
@@ -148,6 +148,9 @@ COPY --from=obsidian-plugin-builder --chown=appuser:appuser /plugin/fulloch.zip 
 # fail the app's first write to /app/data. Idempotent (no-op when the dir
 # is already correctly owned) and safe on read-only mounts.
 COPY --chown=root:root --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+# Start the entrypoint as root so it can repair a fresh root-owned volume; it
+# drops to appuser before launching Fulloch.
+USER root
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # Liveness probe: the dashboard's GET /ready returns 200 as soon as the

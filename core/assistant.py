@@ -673,6 +673,9 @@ class Assistant:
             "cudnn",
             "device-side assert",
             "illegal memory access",
+            "memory fault",
+            "mmu fault",
+            "xid",
             "ggml_cuda",
         )
         name = getattr(spec, "display_name", None) or "the model"
@@ -721,6 +724,13 @@ class Assistant:
                 f"hardware.{vram} Choose a lighter tier or a smaller model below."
             )
         if fatal:
+            if any(m in low for m in ("illegal memory access", "memory fault", "mmu fault", "xid")):
+                return True, (
+                    f"{name} triggered a GPU memory fault. This is not a normal out-of-memory error; "
+                    "disable experimental MTP and Flash Attention, then retry. "
+                    "For an NVIDIA Xid, inspect the kernel log on the system that owns the GPU. "
+                    f"Server details: {msg}{vram}"
+                )
             return True, (
                 f"{name} hit an unrecoverable GPU error and stopped: {msg}.{vram} "
                 f"Try a lighter configuration below."

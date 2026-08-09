@@ -30,7 +30,17 @@ run_app() {
     if [ "$(id -u)" = "$TARGET_UID" ]; then
         exec "$@"
     fi
-    exec su -s /bin/sh "$TARGET_USER" -c 'exec "$@"' -- "$@"
+    # `su -c` makes the first command argument shell `$0`; include it when
+    # re-executing so `python app.py` does not become `exec app.py`.
+    # `su` sanitizes PATH, which hides Conda's Python in the GPU image. Resolve
+    # bare command names before changing users, then run that absolute path.
+    APP_COMMAND="$1"
+    case "$APP_COMMAND" in
+        */*) ;;
+        *) APP_COMMAND="$(command -v "$APP_COMMAND")" ;;
+    esac
+    shift
+    exec su -s /bin/sh "$TARGET_USER" -c 'exec "$0" "$@"' -- "$APP_COMMAND" "$@"
 }
 
 # Bootstrap hasn't run yet — the dir might not exist. In that case

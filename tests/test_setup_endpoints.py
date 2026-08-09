@@ -76,6 +76,43 @@ def test_models_endpoint_accepts_regex_only_llm(tmp_path):
     assert "backend: none" in Path(path).read_text()
 
 
+def test_models_endpoint_persists_experimental_llm_options(tmp_path):
+    client, _, path = _client(tmp_path)
+    r = client.post(
+        "/setup/models",
+        json={
+            "models": {
+                "asr": {"backend": "qwen-onnx"},
+                "tts": {"backend": "pocket-tts-onnx"},
+                "llm": {"backend": "local", "local_model": "qwen", "mtp": True, "flash_attn": True},
+            }
+        },
+    )
+    assert r.status_code == 200
+    text = Path(path).read_text()
+    assert "mtp: true" in text
+    assert "flash_attn: true" in text
+
+
+def test_cancel_startup_arms_setup_marker(tmp_path, monkeypatch):
+    client, ctx, path = _client(tmp_path)
+    ctx.lifecycle.set(lc.DOWNLOADING, "downloading")
+    restart_delay = []
+
+    def schedule_restart(*, delay):
+        restart_delay.append(delay)
+
+    monkeypatch.setattr("server.dashboard._schedule_restart", schedule_restart)
+
+    r = client.post("/setup/cancel-startup")
+
+    assert r.status_code == 200
+    assert r.json()["restarting"] is True
+    assert (Path(path).parent / ".setup_pending").is_file()
+    assert ctx.lifecycle.phase == lc.NEEDS_SETUP
+    assert restart_delay == [0.1]
+
+
 def test_plan_endpoint_reports_presence_and_domain(tmp_path):
     client, _, _ = _client(tmp_path)
     r = client.post("/setup/plan", json={"tier": "cpu_local"})
@@ -133,6 +170,7 @@ def test_install_runs_download_and_signals_proceed(tmp_path):
     prog = client.get("/setup/progress").json()
     assert prog["state"] == "done"
     assert not marker.exists()  # reset marker cleared on completion
+    assert (Path(path).parent / ".setup_complete").is_file()
 
 
 def test_reset_endpoint_arms_wizard_and_backs_up(tmp_path):

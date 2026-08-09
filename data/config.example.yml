@@ -86,6 +86,8 @@ general:
 #     local_model: qwen          # qwen (recommended) | gemma | custom
 #     # model: "/path/to/model.gguf"  # Required only when local_model: custom.
 #     # n_context: 12288         # Optional; larger contexts use more VRAM.
+#     mtp: false                 # Experimental speculative decoding; enable only after benchmarking your GPU.
+#     flash_attn: false          # Experimental llama.cpp Flash Attention; enable only after stability testing.
 #
 # External LLM (llama.cpp server / vLLM / Ollama / hosted API):
 #   llm:

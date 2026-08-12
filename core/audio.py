@@ -278,7 +278,7 @@ class AudioCapture:
         # State
         # Each item is
         # `(buf, speech_onset_monotonic, loudness_dbfs, provisional, satellite_id,
-        # endpoint_monotonic, wake_probe)` — the onset lets the transcriber measure the
+        # endpoint_monotonic[, wake_probe[, kws_candidate]])` — the onset lets the transcriber measure the
         # follow-up window from when the speaker began, the loudness tags the
         # utterance with its dBFS volume (voiced-window RMS where VAD is
         # active) for noise-baseline logging, satellite_id says which
@@ -287,9 +287,7 @@ class AudioCapture:
         # (utterance-end) — diffed against ASR dequeue time by
         # `core.asr.stream_generator`'s `endpoint_wait_sink` for the A2
         # endpoint-wait turn stat. None is the stop pill.
-        self.audio_queue: (
-            "queue.Queue[Optional[tuple[np.ndarray, float, float, bool, str, float]]]"
-        ) = queue.Queue(maxsize=AUDIO_QUEUE_MAX_ITEMS)
+        self.audio_queue: "queue.Queue" = queue.Queue(maxsize=AUDIO_QUEUE_MAX_ITEMS)
         self.running = True
         # Genuinely global, HA-switch-facing "don't listen anywhere" override
         # (see `server/dashboard.py`'s `POST /mic` / the HACS mic switch
@@ -379,8 +377,10 @@ class AudioCapture:
                 session.kws_candidate = False
                 session.kws_pre_roll.clear()
                 self.wakeword_backend.reset(session.id)
+        elif wake_probe:
+            self._put_utterance((buf, onset, loudness_db, provisional, session.id, endpoint_t, True))
         else:
-            self._put_utterance((buf, onset, loudness_db, provisional, session.id, endpoint_t, wake_probe))
+            self._put_utterance((buf, onset, loudness_db, provisional, session.id, endpoint_t))
 
     def _put_utterance(self, item) -> None:
         """Queue one completed utterance without letting ASR backlog block capture."""

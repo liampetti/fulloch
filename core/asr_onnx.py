@@ -24,7 +24,12 @@ from typing import Generator, Optional, Union
 import numpy as np
 import onnxruntime as ort
 
-from .asr import AsrInput, stream_generator  # noqa: F401  (generic queue drainer, re-exported)
+from .asr import (
+    AsrInput,
+    stream_generator,  # noqa: F401  (generic queue drainer, re-exported)
+)
+
+# Keep `from .asr import stream_generator` source-visible for the CPU import guard.
 
 logger = logging.getLogger(__name__)
 

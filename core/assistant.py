@@ -345,7 +345,9 @@ class _NonBlockingSink:
 
 
 def _safe_sink(sink: Optional["queue.Queue"]):
-    return _NonBlockingSink(sink) if sink is not None else None
+    # Browser sinks are unbounded and already decoupled from playback pacing.
+    # Only native satellites use bounded hand-off queues that need drop-on-full.
+    return _NonBlockingSink(sink) if sink is not None and sink.maxsize > 0 else sink
 
 
 def _whisper_gain(value) -> float:

@@ -77,6 +77,7 @@ general:
 #     # higgs-gguf               # Higgs TTS 3 Q4 GGUF (GPU, experimental)
 #     # qwen-gguf                # Qwen3 1.7B GGUF (GPU)
 #     # qwen-gguf-small          # Qwen3 0.6B GGUF (GPU)
+#     # pocket-tts-pytorch       # Pocket TTS PyTorch (GPU, experimental streaming English voice clone; HF_TOKEN + accepted terms required)
 #     # pocket-tts-gguf          # Pocket TTS Q8_0 GGUF (GPU, experimental English voice clone)
 #     # qwen-small               # Qwen3 0.6B PyTorch (GPU)
 #     # kokoro-onnx              # Kokoro 82M (default CPU)
@@ -86,8 +87,19 @@ general:
 #     local_model: qwen          # qwen (recommended) | gemma | custom
 #     # model: "/path/to/model.gguf"  # Required only when local_model: custom.
 #     # n_context: 12288         # Optional; larger contexts use more VRAM.
+#     # generation_timeout: 90   # Per-call hard limit; a local timeout restarts llama-server.
 #     mtp: false                 # Experimental speculative decoding; enable only after benchmarking your GPU.
 #     flash_attn: false          # Experimental llama.cpp Flash Attention; enable only after stability testing.
+#   # Optional idle gate. Omit this block (or use backend: asr) for default
+#   # always-running ASR wakeword detection, which transcribes voice activity.
+#   # The bundled Hey Atticus model is below; use a compatible ONNX path for a
+#   # custom wakeword model you have downloaded.
+#   wakeword:
+#     backend: openwakeword
+#     model: "data/models/wakeword/hey_atticus_v0.3.onnx"
+#     threshold: 0.7            # Increase threshold to reduce false activations
+#     smoothing_frames: 1       # Add frames to reduce false activations
+#     cooldown_ms: 1500         # How long to wait between successive wakeword activations
 #
 # External LLM (llama.cpp server / vLLM / Ollama / hosted API):
 #   llm:

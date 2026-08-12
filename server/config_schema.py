@@ -334,8 +334,8 @@ SCHEMA: tuple = (
         "str",
         "General",
         None,
-        "IANA timezone name (e.g. 'Australia/Sydney'). Auto-detected from your "
-        "browser on first load — only set this manually if the auto-detection is wrong.",
+        "IANA timezone name (e.g. 'Australia/Sydney'). Seeded from the browser "
+        "during initial setup; change it here to update the household timezone.",
         apply=HOT,
     ),
     # --- Home Assistant ----------------------------------------------------
@@ -451,16 +451,17 @@ def schema_as_dicts() -> list:
 
 
 # --- Wakeword presets -------------------------------------------------------
-# Each preset ships a hand-tuned ASR-tolerant regex (like the default
-# "hey atticus" pattern that absorbs greeting variants + the s/z swap). A
-# custom free-text wakeword stays available but falls back to the auto-built
-# tolerant pattern.
+# The bundled Hey Atticus model uses a hand-tuned ASR-tolerant regex. A custom
+# free-text wakeword can optionally use a user-supplied openWakeWord model, or
+# fall back to ASR-only detection.
 @dataclass(frozen=True)
 class WakewordPreset:
     id: str
     label: str
     wakeword: str
     pattern: str
+    model: str = ""
+    model_options: tuple[tuple[str, str], ...] = ()
     recommended: bool = False
 
 
@@ -470,19 +471,11 @@ WAKEWORD_PRESETS: tuple = (
         "Hey Atticus",
         "hey atticus",
         r"\b(?:hey|hay|hi)\W+[ao][dtl]{1,2}i?c\W*u[sz]\b",
+        "data/models/wakeword/hey_atticus_v0.3.onnx",
+        (
+            ("data/models/wakeword/hey_atticus_v0.3.onnx", "Hey Atticus v0.3 (Recommended)"),
+        ),
         recommended=True,
-    ),
-    WakewordPreset(
-        "alexa",
-        "Alexa",
-        "alexa",
-        r"\b(?:hey\W+)?a?lex\W*a\b",
-    ),
-    WakewordPreset(
-        "ok_computer",
-        "Ok Computer",
-        "ok computer",
-        r"\bo\W*k(?:ay)?\W+com\W*pu[td]\W*er\b",
     ),
 )
 
@@ -494,6 +487,10 @@ def wakeword_presets_as_dicts() -> list:
             "label": p.label,
             "wakeword": p.wakeword,
             "pattern": p.pattern,
+            "model": p.model,
+            "model_options": [
+                {"path": path, "label": label} for path, label in p.model_options
+            ],
             "recommended": p.recommended,
         }
         for p in WAKEWORD_PRESETS

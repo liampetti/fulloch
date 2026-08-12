@@ -1803,9 +1803,9 @@ def _calendar_window(day: str, now: Optional[_dt.datetime] = None) -> tuple[str,
     Args:
         day: "today", "tomorrow", "this_week" (also "week"), or a specific
             ISO date "YYYY-MM-DD" for a single-day window.
-        now: Override for testing; defaults to datetime.now().
+        now: Override for testing; defaults to Home Assistant's local time.
     """
-    now = now or _dt.datetime.now()
+    now = now or _local_tz.now()
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     if day == "tomorrow":
@@ -1820,12 +1820,26 @@ def _calendar_window(day: str, now: Optional[_dt.datetime] = None) -> tuple[str,
         # queries the wrong arbitrary day; it just defaults to today).
         try:
             d = _dt.date.fromisoformat(str(day).strip())
-            start = _dt.datetime.combine(d, _dt.time())
+            start = _dt.datetime.combine(d, _dt.time(), tzinfo=midnight.tzinfo)
         except (ValueError, AttributeError):
             start = midnight
         end = start + _dt.timedelta(days=1)
 
     return start.isoformat(), end.isoformat()
+
+
+def _normalise_ha_timestamp(timestamp: str) -> _dt.datetime:
+    """Parse an HA timestamp in the configured local timezone.
+
+    Home Assistant commonly returns UTC timestamps, but integrations may return
+    other offsets or naive local datetimes. Normalising at the boundary keeps
+    every subsequent comparison, sort, and spoken date in one timezone.
+    """
+    parsed = _dt.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    local_tz = _local_tz.get_tz()
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=local_tz)
+    return parsed.astimezone(local_tz)
 
 
 def _normalise_ha_event(event: dict) -> dict:
@@ -1835,10 +1849,16 @@ def _normalise_ha_event(event: dict) -> dict:
     ISO 8601 datetime `start`.
     """
     start = event.get("start", "")
+    all_day = "T" not in start
+    if not all_day:
+        try:
+            start = _normalise_ha_timestamp(start).isoformat()
+        except (AttributeError, TypeError, ValueError):
+            pass
     return {
         "start": start,
         "summary": event.get("summary"),
-        "all_day": "T" not in start,
+        "all_day": all_day,
     }
 
 
@@ -1882,10 +1902,9 @@ def _ha_get_events(day: str) -> str:
     for cal in calendars:
         raw_events.extend((response.get(cal) or {}).get("events") or [])
     events = [_normalise_ha_event(e) for e in raw_events]
-    # Merged calendars arrive grouped by source; sort so the spoken summary
-    # reads chronologically. Date-only all-day starts sort before that day's
-    # timed events (string compare: "2026-06-26" < "2026-06-26T12:00").
-    events.sort(key=lambda e: e["start"])
+    # Merged calendars arrive grouped by source; normalised timestamps make
+    # ordering correct even when calendars return different UTC offsets.
+    events.sort(key=lambda e: _normalise_ha_timestamp(e["start"]))
     summary = tts_friendly_event_summary(events)
     # Multi-event days benefit from agent summarisation/filtering; route
     # through the replan loop. The "no events" case stays as a direct
@@ -1971,7 +1990,7 @@ def _relative_day_phrase(start_dt: _dt.datetime, now: _dt.datetime) -> str:
 def _speak_matched_events(matches: list[dict], now: _dt.datetime) -> str:
     spoken = []
     for event in matches:
-        start_dt = _dt.datetime.fromisoformat(event["start"])
+        start_dt = _normalise_ha_timestamp(event["start"])
         day = _relative_day_phrase(start_dt, now)
         summary = event.get("summary") or "an event"
         if event.get("all_day"):
@@ -1990,7 +2009,7 @@ def _ha_get_events_name(event_description: str, limit: str = "30d") -> str:
         return "No calendar is configured in Home Assistant."
 
     days = _parse_lookback_days(limit)
-    now = _dt.datetime.now()
+    now = _local_tz.now()
     start_iso = (now - _dt.timedelta(days=days)).isoformat()
     end_iso = (now + _dt.timedelta(days=days)).isoformat()
 
@@ -2024,7 +2043,7 @@ def _ha_get_events_name(event_description: str, limit: str = "30d") -> str:
             f"{days} days before or after today."
         )
 
-    matches.sort(key=lambda e: e["start"])
+    matches.sort(key=lambda e: _normalise_ha_timestamp(e["start"]))
     summary = _speak_matched_events(matches, now)
     if len(matches) >= 2:
         return f"Reactive question: {summary}"
@@ -2519,7 +2538,7 @@ def _weather_history_summary(entity_id: str, start: _dt.date, days: int, unit: s
     for s in hist:
         ts_str = s.get("last_changed") or s.get("last_updated") or ""
         try:
-            ts = _dt.datetime.fromisoformat(ts_str).astimezone(_local_tz.get_tz())
+            ts = _normalise_ha_timestamp(ts_str)
             day = ts.date()
         except Exception:
             continue
@@ -2578,7 +2597,7 @@ def get_weather_forecast(
     except (TypeError, ValueError):
         days = 2
     days = max(1, min(days, 7))
-    today = _dt.date.today()
+    today = _local_tz.today()
     if start_date:
         try:
             start = _dt.date.fromisoformat(start_date)
@@ -2638,8 +2657,8 @@ def get_weather_forecast(
     for day in forecast:
         raw_dt = day.get("datetime") or ""
         try:
-            day_date = _dt.date.fromisoformat(raw_dt[:10])
-        except ValueError:
+            day_date = _normalise_ha_timestamp(raw_dt).date()
+        except (TypeError, ValueError):
             continue
         if day_date < start:
             continue
@@ -2662,12 +2681,13 @@ def _parse_history_start(start: str):
 
     Accepts an ISO date ('2026-06-02' → whole-day window) or ISO datetime
     ('2026-06-02T12:00:00' → start+2h default window). Naive values are
-    localised to the host timezone. Raises ValueError on an unparseable arg.
+    localised to Home Assistant's configured timezone. Raises ValueError on an
+    unparseable arg.
     """
     if "T" in start or " " in start:
         start_dt = _dt.datetime.fromisoformat(start)
         if start_dt.tzinfo is None:
-            start_dt = start_dt.astimezone(_local_tz.get_tz())
+            start_dt = start_dt.replace(tzinfo=_local_tz.get_tz())
         return start_dt, start_dt + _dt.timedelta(hours=2), False
     d = _dt.date.fromisoformat(start)
     start_dt = _dt.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=_local_tz.get_tz())
@@ -2686,7 +2706,7 @@ def _parse_history_end(end: Optional[str], default_end_dt):
         if "T" in end or " " in end:
             end_dt = _dt.datetime.fromisoformat(end)
             if end_dt.tzinfo is None:
-                end_dt = end_dt.astimezone(_local_tz.get_tz())
+                end_dt = end_dt.replace(tzinfo=_local_tz.get_tz())
         else:
             d = _dt.date.fromisoformat(end)
             end_dt = _dt.datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=_local_tz.get_tz())
@@ -2780,7 +2800,7 @@ def get_entity_history(
             if "T" in start or " " in start:
                 start_dt = _dt.datetime.fromisoformat(start)
                 if start_dt.tzinfo is None:
-                    start_dt = start_dt.astimezone(_local_tz.get_tz())
+                    start_dt = start_dt.replace(tzinfo=_local_tz.get_tz())
                 default_end_dt = start_dt + _dt.timedelta(hours=2)
             else:
                 d = _dt.date.fromisoformat(start)
@@ -2794,7 +2814,7 @@ def get_entity_history(
             if "T" in end or " " in end:
                 end_dt = _dt.datetime.fromisoformat(end)
                 if end_dt.tzinfo is None:
-                    end_dt = end_dt.astimezone(_local_tz.get_tz())
+                    end_dt = end_dt.replace(tzinfo=_local_tz.get_tz())
             else:
                 d = _dt.date.fromisoformat(end)
                 end_dt = _dt.datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=_local_tz.get_tz())
@@ -2835,14 +2855,14 @@ def get_entity_history(
 
     states = history[0]
     friendly = _friendly_for(entity_id)
-    today = _dt.date.today()
+    today = _local_tz.today()
     yesterday = today - _dt.timedelta(days=1)
 
     def _when(s) -> str:
         """A spoken 'today/yesterday/<weekday> at <time>' label for one state."""
         ts_str = s.get("last_changed") or s.get("last_updated") or ""
         try:
-            ts = _dt.datetime.fromisoformat(ts_str).astimezone(_local_tz.get_tz())
+            ts = _normalise_ha_timestamp(ts_str)
             ts_date = ts.date()
             if ts_date == today:
                 day_label = "today"
@@ -2912,7 +2932,11 @@ def get_conversation_history(start: str, end: Optional[str] = None) -> str:
     # Merge both sensors into a single timeline tagged by speaker, then sort
     # by timestamp so each user question sits next to the reply it drew.
     events = [(s, "You") for s in user_states] + [(s, "Fulloch") for s in bot_states]
-    events.sort(key=lambda it: it[0].get("last_changed") or it[0].get("last_updated") or "")
+    events.sort(
+        key=lambda it: _normalise_ha_timestamp(
+            it[0].get("last_changed") or it[0].get("last_updated") or ""
+        )
+    )
 
     _SKIP = {"unknown", "unavailable", ""}
     today = _local_tz.today()
@@ -2924,7 +2948,7 @@ def get_conversation_history(start: str, end: Optional[str] = None) -> str:
             continue
         ts_str = s.get("last_changed") or s.get("last_updated") or ""
         try:
-            ts = _dt.datetime.fromisoformat(ts_str).astimezone(_local_tz.get_tz())
+            ts = _normalise_ha_timestamp(ts_str)
             ts_date = ts.date()
             if ts_date == today:
                 day_label = "today"

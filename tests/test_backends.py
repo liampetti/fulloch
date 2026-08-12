@@ -67,6 +67,7 @@ def test_backends_are_implemented():
     assert b.get_spec("tts", "kokoro-onnx").implemented is True
     assert b.get_spec("tts", "pocket-tts-onnx").implemented is True
     assert b.get_spec("tts", "pocket-tts-gguf").implemented is True
+    assert b.get_spec("tts", "pocket-tts-pytorch").implemented is True
     assert b.get_loader("llm", "openai")  # resolves to load_openai
 
 
@@ -79,6 +80,7 @@ def test_gpu_only_flags():
     assert b.get_spec("tts", "kokoro-onnx").gpu_only is False
     assert b.get_spec("tts", "pocket-tts-onnx").gpu_only is False
     assert b.get_spec("tts", "pocket-tts-gguf").gpu_only is True
+    assert b.get_spec("tts", "pocket-tts-pytorch").gpu_only is True
     assert b.get_spec("llm", "openai").gpu_only is False
     assert b.get_spec("asr", "qwen-gguf").gpu_only is True
     assert b.get_spec("tts", "qwen-gguf").gpu_only is True
@@ -119,6 +121,15 @@ def test_pocket_gguf_backend_metadata_and_cpu_gating():
     assert b.is_offerable(pocket, "cpu") is False
 
 
+def test_pocket_pytorch_backend_metadata_and_cpu_gating():
+    pocket = b.get_spec("tts", "pocket-tts-pytorch")
+    assert pocket.loader == "core.tts_pocket:load_tts"
+    assert pocket.hf_snapshots[0][0] == "kyutai/pocket-tts"
+    assert pocket.hf_snapshots[0][1] == ("languages/english_2026-04/model.safetensors",)
+    assert b.is_offerable(pocket, "gpu") is True
+    assert b.is_offerable(pocket, "cpu") is False
+
+
 def test_small_gguf_backend_metadata():
     asr = b.get_spec("asr", "qwen-gguf-small")
     tts = b.get_spec("tts", "qwen-gguf-small")
@@ -149,7 +160,9 @@ def test_gemma_resolves_with_registry_defaults():
 def test_public_local_llm_modes_resolve_to_their_internal_servers():
     qwen = b.resolve_models({"llm": {"backend": "local", "local_model": "qwen"}})["llm"]
     gemma = b.resolve_models({"llm": {"backend": "local", "local_model": "gemma"}})["llm"]
-    external = b.resolve_models({"llm": {"backend": "external", "base_url": "http://llm/v1"}})["llm"]
+    external = b.resolve_models({"llm": {"backend": "external", "base_url": "http://llm/v1"}})[
+        "llm"
+    ]
 
     assert qwen["backend"] == "llama"
     assert qwen["opts"]["mtp"] is False
@@ -210,6 +223,7 @@ def test_asr_and_tts_options_have_stable_user_facing_order():
         "higgs-gguf",
         "qwen-gguf",
         "qwen-gguf-small",
+        "pocket-tts-pytorch",
         "pocket-tts-gguf",
         "qwen",
         "qwen-small",

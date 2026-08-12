@@ -27,6 +27,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from .inference_safety import TTS_JOB_QUEUE_MAXSIZE, submit_tts_job
 from .text_utils import split_clauses
 from .tts_session import TtsSession
 from .turn_stats import TurnStats
@@ -445,7 +446,7 @@ class _Job:
     session: TtsSession
 
 
-_job_queue: "queue.Queue[_Job]" = queue.Queue()
+_job_queue: "queue.Queue[_Job]" = queue.Queue(maxsize=TTS_JOB_QUEUE_MAXSIZE)
 
 
 def _worker_loop() -> None:
@@ -476,7 +477,7 @@ _worker.start()
 
 def _submit(text: str, session: TtsSession, maxsize: int = 8) -> "queue.Queue":
     out: "queue.Queue" = queue.Queue(maxsize=maxsize)
-    _job_queue.put(_Job(text=text, out=out, session=session))
+    submit_tts_job(_job_queue, _Job(text=text, out=out, session=session))
     return out
 
 

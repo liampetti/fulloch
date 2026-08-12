@@ -125,3 +125,29 @@ def test_endpoint_wait_sink_none_without_endpoint_time():
 
     next(gen)
     assert sink["s"] is None
+
+
+def test_qwen_wrapper_returns_a_list_for_one_shot_transcription():
+    from core.asr import QwenASRPipelineWrapper
+
+    class _Model:
+        def transcribe(self, **kwargs):
+            return [type("Result", (), {"text": "hey atticus"})()]
+
+    pipe = QwenASRPipelineWrapper(_Model())
+    result = pipe(_buf())
+
+    assert result == [{"text": "hey atticus"}]
+
+
+def test_qwen_wrapper_still_streams_generator_input():
+    from core.asr import QwenASRPipelineWrapper
+
+    class _Model:
+        def transcribe(self, **kwargs):
+            return [type("Result", (), {"text": "weather"})()]
+
+    pipe = QwenASRPipelineWrapper(_Model())
+    result = pipe((buf for buf in [_buf()]))
+
+    assert list(result) == [{"text": "weather"}]

@@ -64,6 +64,7 @@ class BackendSpec:
     hf_file: Optional[str] = None  # single-file download (e.g. a .gguf); else full snapshot
     hf_files: tuple = ()  # (repo, filename) pairs downloaded into a directory model path
     hf_allow: tuple = ()  # allow_patterns for a dir snapshot (fetch only these)
+    hf_snapshots: tuple = ()  # (repo, allow_patterns, revision) snapshots cached in the HF hub
     download_size_gb: Optional[float] = None
     vram_gb: Optional[float] = None
     ram_gb: Optional[float] = None  # system RAM needed at runtime (CPU backends only)
@@ -376,6 +377,39 @@ _register(
     )
 )
 
+# Official Kyutai Pocket TTS. It streams native PCM chunks, unlike the
+# complete-buffer CrispASR GGUF adapter. Voice-cloning weights are gated on
+# Hugging Face, so setup requires accepted terms and HF_TOKEN.
+_register(
+    BackendSpec(
+        domain=TTS,
+        backend="pocket-tts-pytorch",
+        gpu_only=True,
+        experimental=True,
+        display_name="Pocket TTS PyTorch (GPU voice clone)",
+        loader="core.tts_pocket:load_tts",
+        default_model="kyutai/pocket-tts",
+        hf_snapshots=(
+            (
+                "kyutai/pocket-tts",
+                ("languages/english_2026-04/model.safetensors",),
+                "19f95fe2df36e79fbd9f10008595cc4c977a0fcc",
+            ),
+            (
+                "kyutai/pocket-tts-without-voice-cloning",
+                ("languages/english_2026-04/tokenizer.model",),
+                "d29db7978e464fb90cb3359ee0c69a273b9142cc",
+            ),
+        ),
+        download_size_gb=0.5,
+        vram_gb=1.0,
+        deps=("pocket_tts",),
+        notes="Experimental official Kyutai PyTorch CUDA backend with native PCM streaming. "
+        "Accept the kyutai/pocket-tts Hugging Face terms and set HF_TOKEN before setup; "
+        "English one-shot cloning from data/voices/<name>.wav.",
+    )
+)
+
 # Pocket TTS through CrispASR's CUDA GGUF runtime. Unlike the Qwen GGUF
 # backends, Pocket embeds its tokenizer and Mimi codec in one model file.
 _register(
@@ -539,8 +573,15 @@ def list_backends(domain: str) -> list[BackendSpec]:
             "moonshine-tiny",
         ),
         TTS: (
-            "higgs-gguf", "qwen-gguf", "qwen-gguf-small", "pocket-tts-gguf", "qwen", "qwen-small",
-            "kokoro-onnx", "pocket-tts-onnx",
+            "higgs-gguf",
+            "qwen-gguf",
+            "qwen-gguf-small",
+            "pocket-tts-pytorch",
+            "pocket-tts-gguf",
+            "qwen",
+            "qwen-small",
+            "kokoro-onnx",
+            "pocket-tts-onnx",
         ),
     }.get(domain, ())
     rank = {backend: index for index, backend in enumerate(order)}
@@ -631,7 +672,9 @@ def resolve_models(config_models: Optional[dict]) -> dict:
                 elif local_model == "custom":
                     backend = "llama"
                 else:
-                    raise ValueError(f"Unknown local LLM model {local_model!r}; choose qwen, gemma, or custom")
+                    raise ValueError(
+                        f"Unknown local LLM model {local_model!r}; choose qwen, gemma, or custom"
+                    )
             elif backend == "external":
                 backend = "openai"
             for option in ("mtp", "flash_attn"):

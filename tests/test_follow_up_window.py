@@ -56,7 +56,7 @@ class _StubAudioCapture:
     def __init__(self):
         self.armed_window = None
 
-    def arm_follow_up(self, session, seconds):
+    def arm_follow_up(self, session, seconds, start_at=None):
         self.armed_window = seconds
 
 

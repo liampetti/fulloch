@@ -8,7 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from server import config_store as cs  # noqa: E402
-from server.config_schema import SCHEMA, field_for  # noqa: E402
+from server.config_schema import SCHEMA, WAKEWORD_PRESETS, field_for  # noqa: E402
 
 
 def _write(tmp_path, text):
@@ -117,6 +117,48 @@ def test_write_models_validates_public_llm_modes(tmp_path):
 
     cs.write_models({"llm": {"backend": "local", "local_model": "qwen"}}, path)
     assert cs.read_config(path)["models"]["llm"]["local_model"] == "qwen"
+
+
+def test_write_models_validates_generation_timeout(tmp_path):
+    path = _write(tmp_path, "general:\n  wakeword: hi\n")
+
+    with pytest.raises(ValueError, match="generation_timeout"):
+        cs.write_models(
+            {"llm": {"backend": "local", "local_model": "qwen", "generation_timeout": 0}}, path
+        )
+
+    cs.write_models(
+        {"llm": {"backend": "local", "local_model": "qwen", "generation_timeout": 120}}, path
+    )
+    assert cs.read_config(path)["models"]["llm"]["generation_timeout"] == 120
+
+
+def test_write_models_validates_and_preserves_openwakeword_config(tmp_path):
+    path = _write(tmp_path, "general:\n  wakeword: hey atticus\n")
+    models = {
+        "llm": {"backend": "none"},
+        "wakeword": {
+            "backend": "openwakeword",
+            "model": "data/models/wakeword/hey_atticus.onnx",
+            "threshold": 0.5,
+            "smoothing_frames": 3,
+            "cooldown_ms": 1500,
+        },
+    }
+    cs.write_models(models, path)
+    assert cs.read_config(path)["models"]["wakeword"]["backend"] == "openwakeword"
+
+    models["wakeword"]["threshold"] = 2
+    with pytest.raises(ValueError, match="threshold"):
+        cs.write_models(models, path)
+
+
+def test_wakeword_presets_only_offer_bundled_atticus_model():
+    assert [preset.wakeword for preset in WAKEWORD_PRESETS] == ["hey atticus"]
+    assert WAKEWORD_PRESETS[0].model == "data/models/wakeword/hey_atticus_v0.3.onnx"
+    assert WAKEWORD_PRESETS[0].model_options == (
+        ("data/models/wakeword/hey_atticus_v0.3.onnx", "Hey Atticus v0.3 (Recommended)"),
+    )
 
 
 def test_set_llm_model_name_preserves_rest_of_block(tmp_path):

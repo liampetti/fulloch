@@ -5,7 +5,7 @@ backends' weights on a background thread and stream per-asset progress to the
 browser. Online only during setup; the runtime stays `HF_HUB_OFFLINE=1`.
 
 Asset kinds:
-  - ``snapshot`` — a full HF repo into the hub cache (ASR/TTS/BGE)
+    - ``snapshot`` — an HF repo (optionally pattern-limited) into the hub cache
   - ``file``     — a single file from an HF repo (the GGUF SLM)
   - ``url``      — a plain HTTP file (json.gbnf grammar)
 
@@ -40,6 +40,24 @@ DONE = "done"
 ERROR = "error"
 
 
+def _hf_access_denied(error: Exception) -> bool:
+    """Whether a Hugging Face failure is likely resolved by an access token."""
+    message = f"{type(error).__name__}: {error}".lower()
+    return any(marker in message for marker in (
+        "gatedrepo",
+        "gated repo",
+        "access to model",
+        "access denied",
+        "authentication",
+        "unauthorized",
+        "forbidden",
+        "401 client error",
+        "403 client error",
+        "status code 401",
+        "status code 403",
+    ))
+
+
 @dataclass
 class Asset:
     key: str
@@ -49,10 +67,12 @@ class Asset:
     repo: Optional[str] = None
     filename: Optional[str] = None
     url: Optional[str] = None
-    allow: Optional[list] = None  # allow_patterns for a dir_snapshot
+    allow: Optional[list] = None  # optional snapshot_download allow_patterns
+    revision: Optional[str] = None
     size_gb: Optional[float] = None
     status: str = PENDING
     error: Optional[str] = None
+    needs_hf_token: bool = False
     bytes_done: int = field(default=0, compare=False, repr=False)
     bytes_total: Optional[int] = field(default=None, compare=False, repr=False)
 
@@ -72,6 +92,7 @@ class Asset:
             "size_gb": self.size_gb,
             "status": self.status,
             "error": self.error,
+            "needs_hf_token": self.needs_hf_token,
             "pct": pct,
             "bytes_done": self.bytes_done,
             "bytes_total": self.bytes_total,
@@ -117,7 +138,26 @@ def plan_assets(resolved: dict, models_dir: str = "./data/models") -> list:
         model = cfg["model"]
         # Nothing to fetch for the no-LLM bypass or a remote endpoint (no HF
         # repo/file), so skip those domains.
-        if not (spec.hf_repo or spec.hf_file or spec.hf_files):
+        if not (spec.hf_repo or spec.hf_file or spec.hf_files or spec.hf_snapshots):
+            continue
+        if spec.hf_snapshots:
+            for index, (repo, allow, revision) in enumerate(spec.hf_snapshots):
+                assets.append(
+                    Asset(
+                        key=f"{domain}:{spec.backend}"
+                        if index == 0
+                        else f"{domain}:{spec.backend}:{index}",
+                        label=spec.display_name
+                        if index == 0
+                        else f"{spec.display_name} support files",
+                        kind="snapshot",
+                        dest=hub,
+                        repo=repo,
+                        allow=list(allow),
+                        revision=revision,
+                        size_gb=spec.download_size_gb if index == 0 else None,
+                    )
+                )
             continue
         if spec.hf_files:
             # Compound directory models such as Qwen3-TTS need weights from
@@ -126,7 +166,9 @@ def plan_assets(resolved: dict, models_dir: str = "./data/models") -> list:
             for index, (repo, filename) in enumerate(spec.hf_files):
                 assets.append(
                     Asset(
-                        key=f"{domain}:{spec.backend}" if index == 0 else f"{domain}:{spec.backend}:codec",
+                        key=f"{domain}:{spec.backend}"
+                        if index == 0
+                        else f"{domain}:{spec.backend}:codec",
                         label=spec.display_name if index == 0 else f"{spec.display_name} codec",
                         kind="file",
                         dest=dest,
@@ -241,29 +283,58 @@ def _make_asset_tqdm(asset: Asset, lock: threading.Lock):
     class _T:
         def __init__(self, iterable=None, *, total=None, **_kw):
             self._iterable = iterable
-        def __enter__(self): return self
-        def __exit__(self, *_): pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
         def __iter__(self):
             for item in self._iterable or ():
                 yield item
-        def update(self, n=1): pass
-        def set_postfix(self, **_): pass
-        def set_description(self, *_a, **_k): pass
-        def close(self): pass
-        def display(self, *_a, **_k): pass
-        def clear(self, *_a, **_k): pass
-        def refresh(self, *_a, **_k): pass
-        def reset(self, total=None): pass
-        def write(self, s="", *_a, **_k): pass
+
+        def update(self, n=1):
+            pass
+
+        def set_postfix(self, **_):
+            pass
+
+        def set_description(self, *_a, **_k):
+            pass
+
+        def close(self):
+            pass
+
+        def display(self, *_a, **_k):
+            pass
+
+        def clear(self, *_a, **_k):
+            pass
+
+        def refresh(self, *_a, **_k):
+            pass
+
+        def reset(self, total=None):
+            pass
+
+        def write(self, s="", *_a, **_k):
+            pass
+
         @property
-        def n(self): return 0
+        def n(self):
+            return 0
+
         @classmethod
         def get_lock(cls):
             if not hasattr(cls, "_lock"):
                 cls._lock = threading.RLock()
             return cls._lock
+
         @classmethod
-        def set_lock(cls, lock): cls._lock = lock
+        def set_lock(cls, lock):
+            cls._lock = lock
+
     return _T
 
 
@@ -289,6 +360,7 @@ def _byte_progress(asset: Asset, lock: threading.Lock):
     import sys as _sys
 
     import huggingface_hub.utils.tqdm  # noqa: F401 — ensure it's imported/cached
+
     _hf_tqdm_module = _sys.modules["huggingface_hub.utils.tqdm"]
 
     class _P:
@@ -298,15 +370,28 @@ def _byte_progress(asset: Asset, lock: threading.Lock):
                     asset.bytes_total = (asset.bytes_total or 0) + total
                 if initial:
                     asset.bytes_done += initial
-        def __enter__(self): return self
-        def __exit__(self, *_): pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
         def update(self, n=1):
             with lock:
                 asset.bytes_done += n
-        def close(self): pass
-        def set_description(self, *_a, **_k): pass
-        def set_postfix(self, **_): pass
-        def refresh(self, *_a, **_k): pass
+
+        def close(self):
+            pass
+
+        def set_description(self, *_a, **_k):
+            pass
+
+        def set_postfix(self, **_):
+            pass
+
+        def refresh(self, *_a, **_k):
+            pass
 
     original = _hf_tqdm_module.tqdm
     _hf_tqdm_module.tqdm = _P
@@ -316,19 +401,27 @@ def _byte_progress(asset: Asset, lock: threading.Lock):
         _hf_tqdm_module.tqdm = original
 
 
-def _default_snapshot(repo: str, dest: str) -> None:
+def _default_snapshot(repo: str, dest: str, allow=None, revision=None) -> None:
     from huggingface_hub import snapshot_download
 
     Path(dest).mkdir(parents=True, exist_ok=True)
-    snapshot_download(repo_id=repo, cache_dir=dest)
+    snapshot_download(repo_id=repo, cache_dir=dest, allow_patterns=allow, revision=revision)
 
 
-def _default_snapshot_with_progress(repo: str, dest: str, asset: Asset, lock: threading.Lock) -> None:
+def _default_snapshot_with_progress(
+    repo: str, dest: str, allow, revision, asset: Asset, lock: threading.Lock
+) -> None:
     from huggingface_hub import snapshot_download
 
     Path(dest).mkdir(parents=True, exist_ok=True)
     with _byte_progress(asset, lock):
-        snapshot_download(repo_id=repo, cache_dir=dest, tqdm_class=_make_asset_tqdm(asset, lock))
+        snapshot_download(
+            repo_id=repo,
+            cache_dir=dest,
+            allow_patterns=allow,
+            revision=revision,
+            tqdm_class=_make_asset_tqdm(asset, lock),
+        )
 
 
 def _default_file(repo: str, filename: str, dest: str) -> None:
@@ -338,7 +431,9 @@ def _default_file(repo: str, filename: str, dest: str) -> None:
     hf_hub_download(repo_id=repo, filename=filename, local_dir=dest)
 
 
-def _default_file_with_progress(repo: str, filename: str, dest: str, asset: Asset, lock: threading.Lock) -> None:
+def _default_file_with_progress(
+    repo: str, filename: str, dest: str, asset: Asset, lock: threading.Lock
+) -> None:
     from huggingface_hub import hf_hub_download
 
     Path(dest).mkdir(parents=True, exist_ok=True)
@@ -356,7 +451,9 @@ def _default_dir_snapshot(repo: str, dest: str, allow=None) -> None:
     snapshot_download(repo_id=repo, local_dir=dest, allow_patterns=allow)
 
 
-def _default_dir_snapshot_with_progress(repo: str, dest: str, allow, asset: Asset, lock: threading.Lock) -> None:
+def _default_dir_snapshot_with_progress(
+    repo: str, dest: str, allow, asset: Asset, lock: threading.Lock
+) -> None:
     from huggingface_hub import snapshot_download
 
     Path(dest).mkdir(parents=True, exist_ok=True)
@@ -409,11 +506,16 @@ def _hf_online():
     back to offline once the download finishes.
     """
     import huggingface_hub.constants as hf_constants
+    from huggingface_hub import configure_http_backend
 
     prev_env = os.environ.get("HF_HUB_OFFLINE")
     prev_attr = hf_constants.HF_HUB_OFFLINE
     os.environ["HF_HUB_OFFLINE"] = "0"
     hf_constants.HF_HUB_OFFLINE = False
+    # huggingface_hub caches one requests session per thread. A prior offline
+    # model load leaves those sessions mounted with OfflineAdapter even after
+    # the constant above is changed, so rebuild them for this wizard download.
+    configure_http_backend()
     try:
         yield
     finally:
@@ -422,6 +524,7 @@ def _hf_online():
             os.environ.pop("HF_HUB_OFFLINE", None)
         else:
             os.environ["HF_HUB_OFFLINE"] = prev_env
+        configure_http_backend()
 
 
 def _already_present(asset: Asset) -> bool:
@@ -480,6 +583,8 @@ class DownloadManager:
             self._assets = assets
             for a in assets:
                 a.status = PENDING
+                a.error = None
+                a.needs_hf_token = False
                 a.bytes_done = 0
                 a.bytes_total = None
             self._state = "downloading"
@@ -490,10 +595,13 @@ class DownloadManager:
         self._thread.start()
         return True
 
-    def _set(self, asset: Asset, status: str, error: Optional[str] = None) -> None:
+    def _set(
+        self, asset: Asset, status: str, error: Optional[str] = None, needs_hf_token: bool = False
+    ) -> None:
         with self._lock:
             asset.status = status
             asset.error = error
+            asset.needs_hf_token = needs_hf_token
 
     def _run(self, on_complete) -> None:
         ok = True
@@ -522,9 +630,14 @@ class DownloadManager:
                 logger.info("Downloading %s (%s)", asset.label, asset.key)
                 if asset.kind == "snapshot":
                     if self._snapshot_fn is _default_snapshot:
-                        _default_snapshot_with_progress(asset.repo, asset.dest, asset, self._lock)
+                        _default_snapshot_with_progress(
+                            asset.repo, asset.dest, asset.allow, asset.revision, asset, self._lock
+                        )
                     else:
-                        self._snapshot_fn(asset.repo, asset.dest)
+                        if asset.allow or asset.revision:
+                            self._snapshot_fn(asset.repo, asset.dest, asset.allow, asset.revision)
+                        else:
+                            self._snapshot_fn(asset.repo, asset.dest)
                     hub_dir = Path(asset.dest) / f"models--{asset.repo.replace('/', '--')}"
                     hub_dir.mkdir(parents=True, exist_ok=True)
                     (hub_dir / COMPLETE_SENTINEL).touch()
@@ -556,7 +669,12 @@ class DownloadManager:
                 self._set(asset, DONE)
             except Exception as e:  # noqa: BLE001 — surface, don't crash the thread
                 logger.exception("Download failed: %s", asset.key)
-                self._set(asset, ERROR, f"{type(e).__name__}: {e}")
+                self._set(
+                    asset,
+                    ERROR,
+                    f"{type(e).__name__}: {e}",
+                    needs_hf_token=_hf_access_denied(e),
+                )
                 ok = False
                 break
         return ok
@@ -569,6 +687,7 @@ class DownloadManager:
             return {
                 "state": self._state,
                 "error": self._error,
+                "needs_hf_token": any(a.needs_hf_token for a in self._assets),
                 "completed": done,
                 "total": len(assets),
                 "assets": assets,

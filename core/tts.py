@@ -35,6 +35,7 @@ from typing import Any, Callable, Optional
 import torch
 from qwen_tts import Qwen3TTSModel
 
+from .inference_safety import TTS_JOB_QUEUE_MAXSIZE, InferenceWatchdog, submit_tts_job
 from .tts_session import TtsSession
 from .turn_stats import TurnStats
 
@@ -111,7 +112,7 @@ class _TtsJob:
     session: TtsSession
 
 
-_job_queue: "queue.Queue[_TtsJob]" = queue.Queue()
+_job_queue: "queue.Queue[_TtsJob]" = queue.Queue(maxsize=TTS_JOB_QUEUE_MAXSIZE)
 
 
 def _worker_loop() -> None:
@@ -125,14 +126,15 @@ def _worker_loop() -> None:
     while True:
         job = _job_queue.get()
         try:
-            for chunk, sample_rate in model.stream_generate_voice_clone(
-                text=job.text,
-                voice_clone_prompt=job.voice_clone_prompt,
-                **_STREAM_KWARGS,
-            ):
-                if job.session.cancelled:
-                    break
-                job.out.put((chunk, sample_rate))
+            with InferenceWatchdog("Qwen3 TTS PyTorch generation"):
+                for chunk, sample_rate in model.stream_generate_voice_clone(
+                    text=job.text,
+                    voice_clone_prompt=job.voice_clone_prompt,
+                    **_STREAM_KWARGS,
+                ):
+                    if job.session.cancelled:
+                        break
+                    job.out.put((chunk, sample_rate))
         except Exception as e:
             logger.exception(
                 f"TTS generation error for text '{job.text[:50]}': {type(e).__name__}: {e}"
@@ -152,13 +154,9 @@ _worker_thread.start()
 def _submit(text: str, prompt, session: TtsSession, maxsize: int = 0) -> "queue.Queue":
     """Post a generation job and return the output queue to read chunks from."""
     out: "queue.Queue" = queue.Queue(maxsize=maxsize)
-    _job_queue.put(
-        _TtsJob(
-            text=text,
-            voice_clone_prompt=prompt,
-            out=out,
-            session=session,
-        )
+    submit_tts_job(
+        _job_queue,
+        _TtsJob(text=text, voice_clone_prompt=prompt, out=out, session=session),
     )
     return out
 

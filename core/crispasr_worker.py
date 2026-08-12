@@ -10,7 +10,9 @@ import ctypes
 import json
 import logging
 import os
+import signal
 import site
+import socket
 import subprocess
 import sys
 import tempfile
@@ -21,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 logger = logging.getLogger(__name__)
+WORKER_TIMEOUT_S = 60.0
 
 
 class _QwenTtsParams(ctypes.Structure):
@@ -275,21 +278,40 @@ class CrispASRWorker:
             ],
             cwd=Path(__file__).parent.parent,
             env=env,
+            start_new_session=True,
         )
         self._broken = False
-        self._connection = self._listener.accept()
-        status, detail = self._connection.recv()
+        try:
+            # `multiprocessing.connection.Listener` wraps its AF_UNIX socket in
+            # a SocketListener. The timeout belongs to that raw socket, not the
+            # SocketListener wrapper.
+            self._listener._listener._socket.settimeout(WORKER_TIMEOUT_S)
+            self._connection = self._listener.accept()
+            status, detail = self._recv_with_deadline("startup")
+        except (socket.timeout, TimeoutError, EOFError) as exc:
+            self._broken = True
+            self.close()
+            raise TimeoutError("Timed out starting CrispASR worker") from exc
         if status != "ready":
             self.close()
             raise RuntimeError(f"CrispASR worker failed to start: {detail}")
+
+    def _recv_with_deadline(self, operation: str):
+        if not self._connection.poll(WORKER_TIMEOUT_S):
+            self._broken = True
+            self.close()
+            raise TimeoutError(f"CrispASR worker timed out during {operation}")
+        return self._connection.recv()
 
     def call(self, command, **payload):
         if not self.alive:
             raise RuntimeError("CrispASR worker exited unexpectedly")
         try:
             self._connection.send((command, payload))
-            ok, result = self._connection.recv()
-        except (BrokenPipeError, EOFError) as exc:
+            ok, result = self._recv_with_deadline(command)
+        except TimeoutError:
+            raise
+        except (BrokenPipeError, EOFError, OSError) as exc:
             self._broken = True
             raise RuntimeError("CrispASR worker exited unexpectedly") from exc
         if not ok:
@@ -302,15 +324,17 @@ class CrispASRWorker:
             raise RuntimeError("CrispASR worker exited unexpectedly")
         try:
             self._connection.send((command, payload))
-        except (BrokenPipeError, EOFError) as exc:
+        except (BrokenPipeError, EOFError, OSError) as exc:
             self._broken = True
             raise RuntimeError("CrispASR worker exited unexpectedly") from exc
         started = time.monotonic()
         first_chunk = True
         while True:
             try:
-                status, result = self._connection.recv()
-            except (BrokenPipeError, EOFError) as exc:
+                status, result = self._recv_with_deadline(f"{command} stream")
+            except TimeoutError:
+                raise
+            except (BrokenPipeError, EOFError, OSError) as exc:
                 self._broken = True
                 raise RuntimeError("CrispASR worker exited unexpectedly") from exc
             if status == "stream":
@@ -340,22 +364,38 @@ class CrispASRWorker:
         if self._process.poll() is None:
             try:
                 self.call("close")
-            except (BrokenPipeError, EOFError, RuntimeError):
+            except (BrokenPipeError, EOFError, RuntimeError, TimeoutError):
                 pass
             try:
                 self._process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 pass
         if self._process.poll() is None:
-            self._process.terminate()
-            self._process.wait(timeout=2)
-        self._connection.close()
+            try:
+                os.killpg(self._process.pid, signal.SIGTERM)
+                self._process.wait(timeout=2)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if self._process.poll() is None:
+            try:
+                os.killpg(self._process.pid, signal.SIGKILL)
+                self._process.wait(timeout=2)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        connection = getattr(self, "_connection", None)
+        if connection is not None:
+            connection.close()
         self._listener.close()
         self._runtime_dir.cleanup()
         self._process = None
 
     def __del__(self):
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            # Interpreter shutdown and partial construction must not leak an
+            # exception from finalization; normal callers use `close` directly.
+            pass
 
 
 def _worker_main(address, authkey, encoded_settings):

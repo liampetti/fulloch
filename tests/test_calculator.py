@@ -5,8 +5,11 @@ stubbing is needed. Covers arithmetic + sandbox safety, speech-friendly
 number formatting across magnitudes, date maths, and unit conversion.
 """
 
+from datetime import date
+
 from tools.calculator import (
     _fmt_number,
+    _parse_date,
     calculate,
     convert_units,
     date_of,
@@ -66,6 +69,14 @@ class TestFormatNumber:
 
 
 class TestDays:
+    def test_relative_dates_use_application_timezone(self, monkeypatch):
+        import tools.calculator as calculator
+
+        monkeypatch.setattr(calculator._local_time, "today", lambda: date(2026, 6, 14))
+
+        assert _parse_date("today").isoformat() == "2026-06-14"
+        assert _parse_date("tomorrow").isoformat() == "2026-06-15"
+
     def test_days_between_exact(self):
         assert days_between("2026-01-01", "2026-01-11") == (
             "There are 10 days between those two dates."

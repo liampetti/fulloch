@@ -7,7 +7,17 @@ from typing import Generator, Optional, Union
 import numpy as np
 import torch
 
+from .inference_safety import InferenceWatchdog
+
 logger = logging.getLogger(__name__)
+
+
+class AsrInput:
+    """A queued audio buffer with an optional per-call ASR context override."""
+
+    def __init__(self, pcm: np.ndarray, context: Optional[str] = None):
+        self.pcm = pcm
+        self.context = context
 
 ASR_MODEL_NAME = "Qwen/Qwen3-ASR-1.7B"
 SAMPLE_RATE = 16000  # Qwen3-ASR standard sample rate
@@ -39,35 +49,47 @@ class QwenASRPipelineWrapper:
     ):
         # batch_size / generate_kwargs are accepted for HF-pipeline parity but
         # ignored — Qwen3ASRModel.transcribe handles batching internally.
-        lang_kwargs = {"language": self.language} if self.language else {}
         if isinstance(audio_input, Generator):
-            for chunk in audio_input:
-                if chunk is None:
-                    continue
-                if isinstance(chunk, torch.Tensor):
-                    chunk = chunk.cpu().numpy()
-                elif not isinstance(chunk, np.ndarray):
-                    chunk = np.array(chunk)
-                _t0 = time.monotonic()
+            return self._stream(audio_input)
+
+        # Non-streaming path: single array in, list of dicts out.
+        lang_kwargs = {"language": self.language} if self.language else {}
+        context = self.context if not isinstance(audio_input, AsrInput) or audio_input.context is None else audio_input.context
+        if isinstance(audio_input, AsrInput):
+            audio_input = audio_input.pcm
+        if not isinstance(audio_input, np.ndarray):
+            audio_input = np.array(audio_input)
+        with InferenceWatchdog("Qwen3 ASR PyTorch transcription"):
+            results = self.model.transcribe(
+                audio=[(audio_input, SAMPLE_RATE)], context=context, **lang_kwargs
+            )
+        results = results if isinstance(results, list) else [results]
+        return [{"text": getattr(r, "text", str(r))} for r in results]
+
+    def _stream(self, audio_input: Generator) -> Generator:
+        """Yield transcriptions without making ``__call__`` a generator itself."""
+        lang_kwargs = {"language": self.language} if self.language else {}
+        for chunk in audio_input:
+            if chunk is None:
+                continue
+            context = self.context if not isinstance(chunk, AsrInput) or chunk.context is None else chunk.context
+            if isinstance(chunk, AsrInput):
+                chunk = chunk.pcm
+            if isinstance(chunk, torch.Tensor):
+                chunk = chunk.cpu().numpy()
+            elif not isinstance(chunk, np.ndarray):
+                chunk = np.array(chunk)
+            _t0 = time.monotonic()
+            with InferenceWatchdog("Qwen3 ASR PyTorch transcription"):
                 results = self.model.transcribe(
                     audio=[(chunk, SAMPLE_RATE)],
-                    context=self.context,
+                    context=context,
                     return_time_stamps=False,
                     **lang_kwargs,
                 )
-                self.last_transcribe_seconds = time.monotonic() - _t0
-                for res in results if isinstance(results, list) else [results]:
-                    yield {"text": getattr(res, "text", str(res))}
-            return
-
-        # Non-streaming path: single array in, list of dicts out.
-        if not isinstance(audio_input, np.ndarray):
-            audio_input = np.array(audio_input)
-        results = self.model.transcribe(
-            audio=[(audio_input, SAMPLE_RATE)], context=self.context, **lang_kwargs
-        )
-        results = results if isinstance(results, list) else [results]
-        return [{"text": getattr(r, "text", str(r))} for r in results]
+            self.last_transcribe_seconds = time.monotonic() - _t0
+            for res in results if isinstance(results, list) else [results]:
+                yield {"text": getattr(res, "text", str(res))}
 
 
 def load_asr_model(model_name: Optional[str] = None, language: Optional[str] = None, **opts):
@@ -103,6 +125,8 @@ def stream_generator(
     satellite_id_sink: Optional[dict] = None,
     endpoint_wait_sink: Optional[dict] = None,
     wake_probe_sink: Optional[dict] = None,
+    verification_context: Optional[str] = None,
+    kws_candidate_sink: Optional[dict] = None,
 ) -> Generator:
     """Yield audio buffers from a queue until a None sentinel.
 
@@ -134,6 +158,7 @@ def stream_generator(
         satellite_id = item[4] if len(item) > 4 else None
         endpoint_t = item[5] if len(item) > 5 else None
         wake_probe = item[6] if len(item) > 6 else False
+        kws_candidate = item[7] if len(item) > 7 else False
         if onset_sink is not None:
             onset_sink["t"] = onset_t
         if loudness_sink is not None:
@@ -148,4 +173,6 @@ def stream_generator(
             endpoint_wait_sink["s"] = (dequeue_t - endpoint_t) if endpoint_t is not None else None
         if wake_probe_sink is not None:
             wake_probe_sink["flag"] = wake_probe
-        yield buf
+        if kws_candidate_sink is not None:
+            kws_candidate_sink["flag"] = kws_candidate
+        yield AsrInput(buf, verification_context) if kws_candidate else buf

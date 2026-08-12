@@ -63,6 +63,10 @@ TTS_MIN_UTTERANCE_MS = 500
 # against noise blips (speech must have been detected), so the long floor isn't
 # needed here.
 FOLLOW_UP_MIN_UTTERANCE_MS = 500
+# Complete utterances may be substantially larger than the incoming 200 ms
+# chunks. Keep only a short backlog while ASR is busy rather than retaining
+# unbounded recordings during a noisy/disconnected-client burst.
+AUDIO_QUEUE_MAX_ITEMS = 16
 # VAD endpointing: speech probability threshold (Silero outputs 0..1 per
 # window; higher = stricter about what counts as voice) and how long the
 # probability must stay low before the speaker is judged to have finished.
@@ -285,13 +289,105 @@ class AudioCapture:
         # endpoint-wait turn stat. None is the stop pill.
         self.audio_queue: (
             "queue.Queue[Optional[tuple[np.ndarray, float, float, bool, str, float]]]"
-        ) = queue.Queue()
+        ) = queue.Queue(maxsize=AUDIO_QUEUE_MAX_ITEMS)
         self.running = True
         # Genuinely global, HA-switch-facing "don't listen anywhere" override
         # (see `server/dashboard.py`'s `POST /mic` / the HACS mic switch
         # entity) — ANDed with each satellite's own `SatelliteSession.transcribing`
         # (the per-satellite half-duplex self-mute) in `satellite_recorder_thread`.
         self.mic_globally_enabled = True
+        self.wakeword_backend = None
+        # Set by Assistant. The recorder owns KWS inference but the assistant
+        # owns native-satellite lifecycle events.
+        self.wakeword_detected_callback = None
+        self.wakeword_metrics = {
+            "candidates": 0,
+            "backend_errors": 0,
+            "last_score": None,
+        }
+
+    def set_wakeword_backend(self, backend) -> None:
+        """Enable an idle-only gate; None retains the established ASR-only path."""
+        self.wakeword_backend = backend
+
+    def set_wakeword_detected_callback(self, callback) -> None:
+        """Set the callback invoked immediately when the acoustic KWS matches."""
+        self.wakeword_detected_callback = callback
+
+    def _wakeword_gate_active(self, session: SatelliteSession) -> bool:
+        return bool(
+            self.wakeword_backend is not None
+            and not session.tts_active.is_set()
+            # Pocket can generate and enqueue a full response faster than the
+            # browser plays it. Keep the idle classifier off through the known
+            # browser playback end, not merely until generation finishes.
+            and time.monotonic() >= session.last_turn_end
+            and not self._follow_up_open(session)
+            and not session.conversation_mode
+        )
+
+    def _feed_wakeword_gate(self, session: SatelliteSession, chunk: np.ndarray) -> None:
+        if not self._wakeword_gate_active(session):
+            return
+        session.kws_pre_roll.append(chunk)
+        max_chunks = max(1, int(self.sample_rate / max(1, chunk.size)))
+        del session.kws_pre_roll[:-max_chunks]
+        if session.kws_candidate:
+            return
+        try:
+            result = self.wakeword_backend.feed_pcm(session.id, chunk)
+        except Exception as exc:  # Runtime failures must preserve usable ASR-only voice control.
+            logger.warning("Wakeword gate failed; falling back to ASR-only: %s", exc)
+            self.wakeword_backend = None
+            self.wakeword_metrics["backend_errors"] += 1
+            return
+        if result.matched:
+            session.kws_candidate = True
+            session.kws_score = result.score
+            session.kws_detected_at = result.detected_at
+            self.wakeword_metrics["candidates"] += 1
+            self.wakeword_metrics["last_score"] = round(result.score, 3)
+            logger.info("openWakeWord activated: score=%.3f (%s)", result.score, session.id)
+            if self.wakeword_detected_callback is not None:
+                self.wakeword_detected_callback(session.id)
+
+    def _discard_wakeword_candidate(self, session: SatelliteSession) -> None:
+        """Prevent an idle false candidate from authorising a later utterance."""
+        if not session.kws_candidate:
+            return
+        session.kws_candidate = False
+        session.kws_score = 0.0
+        session.kws_detected_at = 0.0
+        session.kws_pre_roll.clear()
+        if self.wakeword_backend is not None:
+            self.wakeword_backend.reset(session.id)
+
+    def _enqueue(self, session, buf, onset, loudness_db, provisional, endpoint_t, wake_probe=False):
+        gated = self._wakeword_gate_active(session)
+        if gated and not session.kws_candidate:
+            return
+        if session.kws_candidate:
+            # Keep the one-second independent pre-roll so classifier latency never
+            # clips the beginning of the phrase passed to Qwen verification.
+            prefix = np.concatenate(session.kws_pre_roll) if session.kws_pre_roll else np.empty(0, np.float32)
+            if prefix.size:
+                buf = np.concatenate((prefix, buf))
+            self._put_utterance((buf, onset, loudness_db, provisional, session.id, endpoint_t, wake_probe, True))
+            # A soft endpoint is feedback-only; retain the candidate until the
+            # authoritative hard endpoint can dispatch the full command.
+            if not provisional:
+                session.kws_candidate = False
+                session.kws_pre_roll.clear()
+                self.wakeword_backend.reset(session.id)
+        else:
+            self._put_utterance((buf, onset, loudness_db, provisional, session.id, endpoint_t, wake_probe))
+
+    def _put_utterance(self, item) -> None:
+        """Queue one completed utterance without letting ASR backlog block capture."""
+        try:
+            self.audio_queue.put_nowait(item)
+        except queue.Full:
+            logger.warning("Dropping completed utterance; ASR queue is full")
 
     # --- Live config setters (settings console hot-apply) ------------------
     # Each mutates a single derived value the recorder reads on its next loop
@@ -371,15 +467,18 @@ class AudioCapture:
                 soft_endpoint_silence_ms=soft_endpoint_silence_ms,
             )
 
-    def arm_follow_up(self, session: "SatelliteSession", window_seconds: float) -> None:
-        """Open `session`'s follow-up window for `window_seconds` (plus capture slack).
+    def arm_follow_up(
+        self, session: "SatelliteSession", window_seconds: float, start_at: Optional[float] = None
+    ) -> None:
+        """Open `session`'s follow-up window after `start_at` (plus capture slack).
 
         While open, `session`'s own recorder loop uses
         `follow_up_min_utterance_samples`, so a short reply isn't dropped
         before it reaches ASR. Per-satellite: B's follow-up window is
         unaffected by A opening or closing its own.
         """
-        session.follow_up_deadline = time.monotonic() + window_seconds + self._follow_up_slack_s
+        start_at = max(time.monotonic(), start_at) if start_at is not None else time.monotonic()
+        session.follow_up_deadline = start_at + window_seconds + self._follow_up_slack_s
 
     def clear_follow_up(self, session: "SatelliteSession") -> None:
         """Close `session`'s follow-up window (e.g. when a fresh turn begins)."""
@@ -473,21 +572,15 @@ class AudioCapture:
                 if chunk is None:
                     break
 
+                if chunk is not FLUSH and self.mic_globally_enabled and session.transcribing:
+                    self._feed_wakeword_gate(session, chunk)
+
                 if not session.server_vad:
                     if chunk is FLUSH:
                         if sat_buf and self.mic_globally_enabled and session.transcribing:
                             buf = np.concatenate(list(sat_buf), axis=0)
                             onset = speech_onset_t if speech_onset_t is not None else time.monotonic()
-                            self.audio_queue.put(
-                                (
-                                    buf,
-                                    onset,
-                                    rms_to_dbfs(_buf_rms(buf)),
-                                    False,
-                                    session.id,
-                                    time.monotonic(),
-                                )
-                            )
+                            self._enqueue(session, buf, onset, rms_to_dbfs(_buf_rms(buf)), False, time.monotonic())
                         sat_buf.clear()
                         speech_onset_t = None
                         continue
@@ -506,6 +599,7 @@ class AudioCapture:
                     sat_buf.clear()
                     silence_counter = 0
                     speech_onset_t = None
+                    self._discard_wakeword_candidate(session)
                     session.soft_probe_emitted = False
                     session.early_wake_probe_started_at = 0.0
                     session.early_wake_probe_emitted = False
@@ -530,6 +624,7 @@ class AudioCapture:
                     if not endpointer.speech_started and buffer_samples >= self.vad_idle_reset_samples:
                         sat_buf.clear()
                         endpointer.reset()
+                        self._discard_wakeword_candidate(session)
                         session.early_wake_probe_started_at = 0.0
                         session.early_wake_probe_emitted = False
                         continue
@@ -543,6 +638,7 @@ class AudioCapture:
                     if (
                         endpointer.speech_started
                         and not session.early_wake_probe_emitted
+                        and not self._wakeword_gate_active(session)
                         and time.monotonic() - session.early_wake_probe_started_at
                         >= self.early_wake_probe_seconds
                     ):
@@ -551,9 +647,7 @@ class AudioCapture:
                         rms = endpointer.voiced_rms
                         if rms is None:
                             rms = _buf_rms(buf)
-                        self.audio_queue.put(
-                            (buf, onset, rms_to_dbfs(rms), True, session.id, time.monotonic(), True)
-                        )
+                        self._enqueue(session, buf, onset, rms_to_dbfs(rms), True, time.monotonic(), True)
                         session.early_wake_probe_emitted = True
                         logger.debug(
                             "VAD early wake probe: %.2fs enqueued (%s)",
@@ -589,9 +683,7 @@ class AudioCapture:
                                 if rms is None:
                                     rms = _buf_rms(buf)
                                 loudness_db = rms_to_dbfs(rms)
-                                self.audio_queue.put(
-                                    (buf, onset, loudness_db, True, session.id, time.monotonic())
-                                )
+                                self._enqueue(session, buf, onset, loudness_db, True, time.monotonic())
                                 session.soft_probe_emitted = True
                                 secs = buf.size / self.sample_rate
                                 logger.debug(
@@ -630,6 +722,7 @@ class AudioCapture:
                         )
                         sat_buf.clear()
                         endpointer.reset()
+                        self._discard_wakeword_candidate(session)
                         session.early_wake_probe_started_at = 0.0
                         session.early_wake_probe_emitted = False
                         continue
@@ -652,13 +745,12 @@ class AudioCapture:
                         if rms is None:
                             rms = _buf_rms(buf)
                         loudness_db = rms_to_dbfs(rms)
-                        self.audio_queue.put(
-                            (buf, onset, loudness_db, False, session.id, time.monotonic())
-                        )
+                        self._enqueue(session, buf, onset, loudness_db, False, time.monotonic())
                         secs = buf.size / self.sample_rate
                         logger.debug("VAD endpoint: enqueued %.2fs for transcription (%s)", secs, session.id)
                     sat_buf.clear()
                     endpointer.reset()
+                    self._discard_wakeword_candidate(session)
                     session.early_wake_probe_started_at = 0.0
                     session.early_wake_probe_emitted = False
                     continue
@@ -696,15 +788,8 @@ class AudioCapture:
                     or _contains_speech(buf, self._vad_model, self._vad_get_timestamps, self.sample_rate)
                 ):
                     onset = speech_onset_t if speech_onset_t is not None else time.monotonic()
-                    self.audio_queue.put(
-                        (
-                            buf,
-                            onset,
-                            rms_to_dbfs(_buf_rms(buf)),
-                            tts_active and hit_max,
-                            session.id,
-                            time.monotonic(),
-                        )
+                    self._enqueue(
+                        session, buf, onset, rms_to_dbfs(_buf_rms(buf)), tts_active and hit_max, time.monotonic()
                     )
                     logger.debug("Satellite: enqueued %.2fs for transcription", buf.size / self.sample_rate)
 
@@ -718,6 +803,8 @@ class AudioCapture:
                 silence_counter = 0
                 speech_onset_t = None
         finally:
+            if self.wakeword_backend is not None:
+                self.wakeword_backend.reset(session.id)
             with self._endpointer_lock:
                 self._live_endpointers.pop(session.id, None)
             logger.info("Satellite recorder stopped (%s)", session.id)
@@ -725,4 +812,13 @@ class AudioCapture:
     def stop(self):
         """Signal the recorder to stop and inject poison pill."""
         self.running = False
-        self.audio_queue.put(None)
+        try:
+            self.audio_queue.put_nowait(None)
+        except queue.Full:
+            # The consumer needs a sentinel to terminate. Discarding one stale
+            # utterance is preferable to blocking shutdown behind a full queue.
+            try:
+                self.audio_queue.get_nowait()
+                self.audio_queue.put_nowait(None)
+            except queue.Empty:
+                pass

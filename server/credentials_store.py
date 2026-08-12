@@ -12,6 +12,7 @@ Credentials map to os.environ names injected at startup via inject_env():
   spotify_client_id     → SPOTIFY_CLIENT_ID
     spotify_client_secret → SPOTIFY_CLIENT_SECRET
     spotify_refresh_token → SPOTIFY_REFRESH_TOKEN
+    hf_token              → HF_TOKEN
 
 `integration_tokens` is intentionally read directly by the integration API as
 a JSON list; it has no environment-variable equivalent.
@@ -45,6 +46,7 @@ _ENV_MAP: dict[str, str] = {
     "spotify_client_id": "SPOTIFY_CLIENT_ID",
     "spotify_client_secret": "SPOTIFY_CLIENT_SECRET",
     "spotify_refresh_token": "SPOTIFY_REFRESH_TOKEN",
+    "hf_token": "HF_TOKEN",
 }
 
 

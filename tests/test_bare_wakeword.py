@@ -59,6 +59,11 @@ class TestUnbiasedRetranscribe:
         assistant.asr_pipe.return_value = [{"text": "hey atticus"}]
         assert assistant._verify_bare_wakeword(-20.0, -35.6) is True
 
+    def test_generator_result_is_consumed_for_verification(self, assistant):
+        assistant.asr_pipe.return_value = (item for item in [{"text": "hello there"}])
+
+        assert assistant._verify_bare_wakeword(-20.0, -35.6) is False
+
     def test_bias_dropped_during_call_and_restored_after(self, assistant):
         seen = {}
 

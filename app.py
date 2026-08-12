@@ -12,7 +12,10 @@ Usage:
 
 import logging
 import os
+from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -54,8 +57,52 @@ LOG_LEVEL = _LOG_LEVELS.get(_log_level_name, logging.INFO)
 # Developer-only switch for diagnosing OpenAI-compatible HTTP traffic. Leave
 # this off for normal debug sessions: the SDK logs full request options.
 DEBUG_LLM_HTTP_LOGS = False
+APP_LOG_PATH = Path("./data/logs/fulloch.log")
+LOG_MAX_BYTES = 10 * 1024 * 1024
+LOG_BACKUP_COUNT = 5
 
-logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+class _ConfiguredTimezoneFormatter(logging.Formatter):
+    """Render log timestamps in the assistant's configured local timezone."""
+
+    def __init__(self, *args, tz_name: str | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        try:
+            self._tz = ZoneInfo(tz_name) if tz_name else timezone.utc
+        except ZoneInfoNotFoundError:
+            self._tz = timezone.utc
+
+    def formatTime(self, record, datefmt=None):
+        timestamp = datetime.fromtimestamp(record.created, tz=self._tz)
+        if datefmt:
+            return timestamp.strftime(datefmt)
+        return timestamp.strftime("%Y-%m-%d %H:%M:%S") + f",{timestamp.microsecond // 1000:03d}"
+
+
+_log_formatter = _ConfiguredTimezoneFormatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    tz_name=_GENERAL.get("timezone"),
+)
+_log_handler = logging.StreamHandler()
+_log_handler.setFormatter(_log_formatter)
+_log_handlers: list[logging.Handler] = [_log_handler]
+try:
+    APP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _app_log_handler = RotatingFileHandler(
+        APP_LOG_PATH,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    _app_log_handler.setFormatter(_log_formatter)
+    _log_handlers.append(_app_log_handler)
+except OSError as exc:
+    # Keep the assistant usable when its persistent data directory is unavailable.
+    _log_handler.emit(logging.makeLogRecord({
+        "name": __name__, "levelno": logging.WARNING, "levelname": "WARNING",
+        "msg": "Could not enable application file logging: %s", "args": (exc,),
+    }))
+logging.basicConfig(level=LOG_LEVEL, handlers=_log_handlers)
 logger = logging.getLogger(__name__)
 if _log_level_name not in _LOG_LEVELS:
     logger.warning(f"Unknown general.log_level {_log_level_name!r}; using info")
@@ -90,6 +137,9 @@ for _noisy in (
     "httpx",
     "httpcore",
     "qwen_tts",
+    # Pocket TTS emits a line for every 80 ms decoder frame at DEBUG, plus
+    # per-fragment timers at INFO. Fulloch emits its own concise TTS lifecycle.
+    "pocket_tts",
     "torch",
     # torch.compile / CUDA graph capture chatter from
     # `enable_streaming_optimizations(use_compile=True)` in core/tts.py.

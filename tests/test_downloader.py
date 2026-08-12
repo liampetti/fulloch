@@ -1,5 +1,6 @@
 """Download manager + pre-flight (v2.2 Step 4)."""
 
+import os
 import sys
 import threading
 import time
@@ -81,6 +82,32 @@ def test_byte_progress_patches_hf_tqdm_and_restores():
     assert hf_utils_tqdm.tqdm is original
 
 
+def test_hf_online_replaces_cached_offline_http_session():
+    """A failed offline model load must not keep the wizard downloader offline."""
+    import huggingface_hub.constants as constants
+    from huggingface_hub import configure_http_backend, get_session
+    from huggingface_hub.utils._http import OfflineAdapter
+
+    original_env = os.environ.get("HF_HUB_OFFLINE")
+    original_flag = constants.HF_HUB_OFFLINE
+    try:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        constants.HF_HUB_OFFLINE = True
+        configure_http_backend()
+        assert isinstance(get_session().get_adapter("https://example.test"), OfflineAdapter)
+
+        with dl._hf_online():
+            assert constants.HF_HUB_OFFLINE is False
+            assert not isinstance(get_session().get_adapter("https://example.test"), OfflineAdapter)
+    finally:
+        constants.HF_HUB_OFFLINE = original_flag
+        if original_env is None:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+        else:
+            os.environ["HF_HUB_OFFLINE"] = original_env
+        configure_http_backend()
+
+
 def test_plan_assets_covers_backends_and_always_required():
     resolved = resolve_models(
         {"asr": {"backend": "qwen"}, "tts": {"backend": "qwen"}, "llm": {"backend": "llama"}}
@@ -111,7 +138,9 @@ def test_plan_skips_none_llm():
 
 
 def test_snapshot_without_completion_marker_is_not_present(tmp_path):
-    asset = dl.Asset(key="asr:qwen", label="x", kind="snapshot", dest=str(tmp_path), repo="Qwen/model")
+    asset = dl.Asset(
+        key="asr:qwen", label="x", kind="snapshot", dest=str(tmp_path), repo="Qwen/model"
+    )
     (tmp_path / "models--Qwen--model").mkdir()
 
     assert dl._already_present(asset) is False
@@ -127,7 +156,9 @@ def test_legacy_complete_hf_snapshot_is_present_without_marker(tmp_path):
     (root / "snapshots" / "abc").mkdir(parents=True)
     (root / "snapshots" / "abc" / "config.json").write_text("{}")
 
-    asset = dl.Asset(key="asr:qwen", label="x", kind="snapshot", dest=str(tmp_path), repo="Qwen/model")
+    asset = dl.Asset(
+        key="asr:qwen", label="x", kind="snapshot", dest=str(tmp_path), repo="Qwen/model"
+    )
     assert dl._already_present(asset) is True
 
 
@@ -153,7 +184,11 @@ def test_plan_downloads_compound_crispasr_tts_model_to_one_directory(tmp_path):
 
 def test_plan_downloads_pocket_tts_english_bundle_only():
     resolved = resolve_models(
-        {"asr": {"backend": "moonshine"}, "tts": {"backend": "pocket-tts-onnx"}, "llm": {"backend": "none"}}
+        {
+            "asr": {"backend": "moonshine"},
+            "tts": {"backend": "pocket-tts-onnx"},
+            "llm": {"backend": "none"},
+        }
     )
     pocket = next(a for a in dl.plan_assets(resolved) if a.key == "tts:pocket-tts-onnx")
     assert pocket.kind == "dir_snapshot"
@@ -162,11 +197,34 @@ def test_plan_downloads_pocket_tts_english_bundle_only():
 
 def test_plan_downloads_pocket_tts_gguf_file():
     resolved = resolve_models(
-        {"asr": {"backend": "moonshine"}, "tts": {"backend": "pocket-tts-gguf"}, "llm": {"backend": "none"}}
+        {
+            "asr": {"backend": "moonshine"},
+            "tts": {"backend": "pocket-tts-gguf"},
+            "llm": {"backend": "none"},
+        }
     )
     pocket = next(a for a in dl.plan_assets(resolved) if a.key == "tts:pocket-tts-gguf")
     assert pocket.kind == "file"
     assert pocket.filename == "pocket-tts-english-q8_0.gguf"
+
+
+def test_plan_downloads_pocket_tts_pytorch_weights_into_hub_cache():
+    resolved = resolve_models(
+        {
+            "asr": {"backend": "moonshine"},
+            "tts": {"backend": "pocket-tts-pytorch"},
+            "llm": {"backend": "none"},
+        }
+    )
+    assets = [a for a in dl.plan_assets(resolved) if a.key.startswith("tts:pocket-tts-pytorch")]
+
+    assert len(assets) == 2
+    assert {asset.repo for asset in assets} == {
+        "kyutai/pocket-tts",
+        "kyutai/pocket-tts-without-voice-cloning",
+    }
+    assert all(asset.kind == "snapshot" for asset in assets)
+    assert all(asset.revision for asset in assets)
 
 
 def test_plan_downloads_compound_small_crispasr_tts_model(tmp_path):
@@ -220,6 +278,29 @@ def test_download_marks_error_and_stops(tmp_path):
     assert snap["state"] == "error"
     assert err["ok"] is False
     assert any(a["status"] == "error" for a in snap["assets"])
+
+
+def test_download_marks_hf_access_denial_as_token_eligible(tmp_path):
+    def denied(*_args):
+        raise RuntimeError("403 Client Error: Forbidden: access to model is restricted")
+
+    mgr = dl.DownloadManager(snapshot_fn=denied)
+    assets = [dl.Asset("tts:test", "test", "snapshot", str(tmp_path), repo="owner/model")]
+    mgr.start(assets)
+    _wait_done(mgr)
+
+    snap = mgr.snapshot()
+    assert snap["needs_hf_token"] is True
+    assert snap["assets"][0]["needs_hf_token"] is True
+
+
+def test_download_does_not_offer_token_for_network_error(tmp_path):
+    mgr = dl.DownloadManager(snapshot_fn=lambda *_args: (_ for _ in ()).throw(RuntimeError("network down")))
+    assets = [dl.Asset("tts:test", "test", "snapshot", str(tmp_path), repo="owner/model")]
+    mgr.start(assets)
+    _wait_done(mgr)
+
+    assert mgr.snapshot()["needs_hf_token"] is False
 
 
 def test_already_present_assets_skip(tmp_path):

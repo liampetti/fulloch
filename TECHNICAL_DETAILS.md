@@ -66,8 +66,8 @@ nothing in the timeline surprises you:
    simple / full GPU / remote LLM), pick a name and voice, optionally
    connect Home Assistant and SearXNG, optionally connect Obsidian.
 4. **Models download.** This is the long bit. The CPU stack pulls
-    roughly 5 GB (Qwen3 1.7B ONNX + Kokoro 82M); choosing Pocket TTS instead
-    adds its roughly 250 MB English ONNX voice-cloning bundle. The GPU
+     roughly 5 GB (Qwen3 1.7B ONNX + Pocket TTS's English ONNX voice-cloning
+     bundle). Kokoro 82M is available as a smaller built-in-voice alternative. The GPU
     stack pulls roughly 13 GB (Qwen3 1.7B PyTorch ASR + Qwen3 1.7B PyTorch TTS + the
    9B language model).
 5. **Startup** Once models are downloaded the assistant can go through startup, this will happen everytime you stop and restart Fulloch. This should only take about a minute or two with the Qwen3 TTS taking the longest to warm-up. Once everything is loaded you are presented with the chat screen. You can type text or click to activate voice mode. Selecting "Always Listen" starts exclusive Conversation mode: it skips the wakeword, keeps the mic live during replies, and disconnects other voice satellites until you turn it off (default wakeword is 'Hey Atticus').
@@ -95,7 +95,7 @@ python scripts/create_local_ca.py --force --host fulloch.home --ip 192.168.1.20
 
 ## Configuration
 
-The **setup wizard** configures Fulloch on first boot, and the **settings console** (gear icon, the same web UI) edits every option afterwards. Everything is reachable from the UI: wakeword, barge-in, voice, the Home Assistant connection, notes path, and web search. But if you'd rather hand-edit, the full annotated reference is [`data/config.example.yml`](data/config.example.yml).
+The **setup wizard** configures Fulloch on first boot, and the **settings console** (gear icon, the same web UI) edits schema-backed settings afterwards: wakeword, barge-in, voice, model backends, the Home Assistant connection, notes path, web search, and normal external-LLM connection settings. Spotify OAuth, native `satellite_tokens`, and external-LLM timeout options remain hand-configured in [`data/config.example.yml`](data/config.example.yml). The setup browser seeds `general.timezone` only when it is unset; later changes are explicit Settings edits that take effect immediately. Ordinary dashboard visits never change the household timezone.
 
 Secrets are stored in `data/credentials.json`. The setup wizard writes the HA token, LLM API key, dashboard password, and Obsidian token; add integration API tokens manually. Copying `data/` to a new machine transfers everything. To configure headlessly, copy [`data/credentials.example.json`](data/credentials.example.json) to `data/credentials.json` and fill in the values, or set the equivalent env vars (`HA_TOKEN`, `LLM_API_KEY`, `DASHBOARD_PASSWORD`, `OBSIDIAN_TOKEN`) in `.env`.
 
@@ -127,8 +127,20 @@ satellite, for example: "Tell downstairs that dinner is ready." Browser
 satellites use their selected Home Assistant area as their name; native
 satellites use their configured room name.
 
+Native clients use `/ws/satellite-v2` protocol 2.2. The first message is
+`satellite.hello`; the server replies with `satellite.welcome`. Uplink audio is
+fixed at 16 kHz mono `pcm_s16le` in exactly 640-byte (20 ms) frames; downlink is
+the same format in frames of at most 4 KiB. Clients send `satellite.health` at
+the negotiated 15-second heartbeat interval. Protocol minor 2 adds sequenced
+`tts.audio` frames and a two-second replay window after a same-device reconnect.
+See the [headless client protocol reference](clients/headless/README.md#satellite-v2-protocol).
+
 ## OpenAI Endpoint Grammar
-> **Note:** GBNF grammar is passed through to llama.cpp-family servers (llama-server, LM Studio, Unsloth Studio), so the remote path enforces the same action/reply shape as the local one. Other OpenAI-compatible endpoints ignore the undocumented `grammar` field and fall back to `response_format: json_object` plus a one-shot repair round-trip, so tool-call errors are more likely there.
+> **Note:** When `agent.gbnf` is available, Fulloch sends it as the `grammar`
+> request option to OpenAI-compatible endpoints. llama.cpp-family servers enforce
+> it; endpoints that ignore it can return unconstrained text. Fulloch validates
+> the result locally and may attempt one repair round-trip, so tool-call errors
+> are more likely on servers without grammar support.
 
 ## HACS Integration
 Fulloch exposes a token-authenticated plain-HTTP integration API at port `8766` by default for HACS and future trusted native integrations. Add one or more tokens to `data/credentials.json` before configuring HACS:

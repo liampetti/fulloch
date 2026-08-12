@@ -40,11 +40,13 @@ RUN git clone "${HIGGS_TTS_REPO}" /tmp/higgs-tts && \
     rm -rf /tmp/higgs-tts
 
 # All local GGUF models run through this matching upstream llama-server build.
+# Release images must not inherit the CI builder's CPU instruction set: a native
+# binary can SIGILL when users run it on a different x86-64 processor.
 RUN git init /tmp/llama.cpp && \
     git -C /tmp/llama.cpp remote add origin https://github.com/ggml-org/llama.cpp.git && \
     git -C /tmp/llama.cpp fetch --depth 1 origin "${LLAMA_CPP_REF}" && \
     git -C /tmp/llama.cpp checkout --detach FETCH_HEAD && \
-    cmake -S /tmp/llama.cpp -B /tmp/llama.cpp/build -DBUILD_SHARED_LIBS=OFF -DGGML_CUDA=ON && \
+    cmake -S /tmp/llama.cpp -B /tmp/llama.cpp/build -DBUILD_SHARED_LIBS=OFF -DGGML_CUDA=ON -DGGML_NATIVE=OFF && \
     cmake --build /tmp/llama.cpp/build --target llama-server -j "${MAX_JOBS}" && \
     mkdir -p /opt/llama-cpp && \
     cp /tmp/llama.cpp/build/bin/llama-server /opt/llama-cpp/ && \
@@ -55,6 +57,11 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
     pip install --no-deps git+https://github.com/liampetti/Qwen3-TTS-streaming.git@97da215 && \
     pip install flash-attn --no-build-isolation && \
     python -m spacy download en_core_web_sm
+
+# openWakeWord's wheel excludes its feature extractors. They are required for
+# every custom classifier, so package both runtime variants without bundling
+# any of openWakeWord's unrelated pre-trained wakeword classifiers.
+RUN python -c "from pathlib import Path; from urllib.request import urlretrieve; import openwakeword; target = Path(openwakeword.__file__).parent / 'resources' / 'models'; target.mkdir(parents=True, exist_ok=True); urls = [model['download_url'] for model in openwakeword.FEATURE_MODELS.values()]; [urlretrieve(url, target / url.rsplit('/', 1)[-1]) for url in urls + [url.replace('.tflite', '.onnx') for url in urls]]"
 
 # Stage 2: Runtime (no CUDA compilers/headers)
 FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime

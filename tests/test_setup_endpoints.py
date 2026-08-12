@@ -47,6 +47,47 @@ def test_config_put_rejects_unknown_key(tmp_path):
     assert r.status_code == 422
 
 
+def test_setup_timezone_only_seeds_an_unset_config(tmp_path, monkeypatch):
+    import utils.local_time as local_time
+
+    client, _, path = _client(tmp_path)
+    monkeypatch.setattr(local_time, "_tz", None)
+
+    first = client.post("/setup/timezone", json={"tz": "Australia/Sydney"})
+    second = client.post("/setup/timezone", json={"tz": "America/New_York"})
+
+    assert first.json() == {"ok": True, "configured": False}
+    assert second.json() == {"ok": True, "configured": True}
+    assert "timezone: Australia/Sydney" in Path(path).read_text()
+    assert str(local_time.get_tz()) == "Australia/Sydney"
+
+
+def test_config_timezone_update_applies_immediately(tmp_path, monkeypatch):
+    import utils.local_time as local_time
+
+    client, _, path = _client(tmp_path)
+    monkeypatch.setattr(local_time, "_tz", None)
+
+    response = client.put("/config", json={"updates": {"general.timezone": "Australia/Sydney"}})
+
+    assert response.status_code == 200
+    assert response.json()["restart_required"] is False
+    assert response.json()["applied"] == [
+        {"path": "general.timezone", "apply": "hot", "hot_applied": True}
+    ]
+    assert "timezone: Australia/Sydney" in Path(path).read_text()
+    assert str(local_time.get_tz()) == "Australia/Sydney"
+
+
+def test_config_timezone_update_rejects_unknown_zone(tmp_path):
+    client, _, path = _client(tmp_path)
+
+    response = client.put("/config", json={"updates": {"general.timezone": "Mars/Olympus"}})
+
+    assert response.status_code == 422
+    assert "timezone" not in Path(path).read_text()
+
+
 def test_models_endpoint_writes_tier(tmp_path):
     client, _, path = _client(tmp_path)
     r = client.post("/setup/models", json={"tier": "cpu_local"})
@@ -99,7 +140,7 @@ def test_cancel_startup_arms_setup_marker(tmp_path, monkeypatch):
     ctx.lifecycle.set(lc.DOWNLOADING, "downloading")
     restart_delay = []
 
-    def schedule_restart(*, delay):
+    def schedule_restart(*, delay, assistant=None):
         restart_delay.append(delay)
 
     monkeypatch.setattr("server.dashboard._schedule_restart", schedule_restart)
@@ -210,6 +251,25 @@ def test_list_backups_returns_empty_then_entries(tmp_path):
     backups = r.json()["backups"]
     assert len(backups) == 1
     assert "config.yml" in backups[0]["files"]
+
+
+def test_create_backup_prunes_to_ten_newest_snapshots(tmp_path, monkeypatch):
+    from server import dashboard
+
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    for second in range(11):
+        snapshot = backups / f"2026-08-12T1200{second:02d}"
+        snapshot.mkdir()
+        (snapshot / "meta.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(dashboard.time, "strftime", lambda *_args: "2026-08-12T120011")
+
+    dashboard._create_backup(tmp_path)
+
+    names = [backup["name"] for backup in dashboard._list_backups(tmp_path)]
+    assert len(names) == 10
+    assert names[0] == "2026-08-12T120011"
+    assert "2026-08-12T120000" not in names
 
 
 def test_restore_backup_replaces_files(tmp_path):

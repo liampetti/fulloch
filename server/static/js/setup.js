@@ -74,12 +74,27 @@ function showPreflightErrors(errors) {
 let SCHEMA = null, PREFLIGHT = null, STATUS = null;
 const sel = {
   tier: 'cpu_local', models: null,
-  wakeword: 'hey atticus', wakeword_pattern: '', voice_clone: '',
+  wakeword: 'hey atticus', wakeword_pattern: '', wakeword_model: '', voice_clone: '',
   openai: { base_url: '', model: '', api_key: '' },
   ha: { url: '', token: '' },
   search_url: '', clear_integrations: false,
 };
 let tierChosen = false;
+
+function wakewordModelOptions() {
+  const seen = new Set();
+  return (SCHEMA.wakeword_presets || []).flatMap(p => p.model_options || []).filter(option => {
+    if (!option.path || seen.has(option.path)) return false;
+    seen.add(option.path);
+    return true;
+  });
+}
+
+function wakewordModelDatalist(id) {
+  const options = wakewordModelOptions().map(option =>
+    `<option value="${option.path.replace(/"/g, '&quot;')}">${option.label}</option>`).join('');
+  return `<datalist id="${id}">${options}</datalist>`;
+}
 
 const WIZARD_STEPS = ['Brain', 'Set up', 'Download', 'Starting up'];
 let curStep = 0;
@@ -97,12 +112,16 @@ function renderSteps(activeIdx, mode) {
 
 // ---- entry ----------------------------------------------------------------
 async function boot() {
-  fetch('/setup/timezone', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tz: Intl.DateTimeFormat().resolvedOptions().timeZone }) }).catch(() => {});
   let status;
   try { status = await getJSON('/status'); }
   catch (e) { screen().innerHTML = `<div class="card">Waiting for server…</div>`; setTimeout(boot, 1500); return; }
   STATUS = status;
+
+  // Only initial setup may seed an unset household timezone from this browser.
+  if (status.phase !== 'READY') {
+    fetch('/setup/timezone', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tz: Intl.DateTimeFormat().resolvedOptions().timeZone }) }).catch(() => {});
+  }
 
   if (status.phase === 'READY') { return openSettings(); }
   if (status.phase === 'DOWNLOADING') { return showProgress(); }
@@ -133,6 +152,8 @@ async function boot() {
   // discard custom paths, context sizes, or remote endpoint options on save.
   if (SCHEMA.models) {
     sel.models = JSON.parse(JSON.stringify(SCHEMA.models));
+    const wakewordModel = sel.models.wakeword || {};
+    if (wakewordModel.backend === 'openwakeword') sel.wakeword_model = wakewordModel.model || '';
     const matched = (SCHEMA.tier_presets || []).find(t =>
       JSON.stringify(t.models) === JSON.stringify(sel.models));
     sel.tier = matched ? matched.id : 'custom';
@@ -141,6 +162,12 @@ async function boot() {
       sel.openai.base_url = sel.models.llm.base_url || '';
       sel.openai.model = sel.models.llm.model || '';
     }
+  }
+  const defaultWakePreset = (SCHEMA.wakeword_presets || []).find(p => p.recommended);
+  if (!sel.wakeword_model && !(SCHEMA.models && SCHEMA.models.wakeword)
+      && defaultWakePreset && sel.wakeword === defaultWakePreset.wakeword) {
+    sel.wakeword_pattern = defaultWakePreset.pattern;
+    sel.wakeword_model = defaultWakePreset.model;
   }
   stepBrain();
 }
@@ -401,6 +428,13 @@ function chosenModels() {
     m.llm.mtp = !!($('wizard-mtp') && $('wizard-mtp').checked);
     m.llm.flash_attn = !!($('wizard-flash-attn') && $('wizard-flash-attn').checked);
   }
+  if (m) {
+    if (sel.wakeword_model) {
+      m.wakeword = { backend: 'openwakeword', model: sel.wakeword_model, threshold: 0.7, smoothing_frames: 1, cooldown_ms: 1500 };
+    } else {
+      delete m.wakeword;
+    }
+  }
   return m;
 }
 function ttsBackend() { const m = chosenModels(); return m && m.tts ? m.tts.backend : 'qwen'; }
@@ -440,7 +474,10 @@ async function stepSetup() {
     <div id="wake-list"></div>
     <details class="advanced"${customWake ? ' open' : ''}><summary>Custom name</summary>
       <input type="text" id="wake-custom" placeholder="e.g. hey jarvis" value="${customWake.replace(/"/g, '&quot;')}" style="margin-top:0.5rem">
-      <div class="help">A tolerant pattern is built automatically.</div>
+      <label style="margin-top:0.5rem">Wakeword model path <span class="muted" style="font-weight:400;font-size:0.8rem">(optional)</span></label>
+       <input type="text" id="wake-model" list="wake-model-options" placeholder="/path/to/wakeword.onnx" value="${sel.wakeword_model.replace(/"/g, '&quot;')}">
+       ${wakewordModelDatalist('wake-model-options')}
+       <div class="help">Choose a bundled Hey Atticus version or enter a compatible ONNX path. Leave blank to use ASR wakeword detection, which transcribes all voice activity.</div>
     </details>
 
     <div class="section-title">Voice</div>
@@ -462,19 +499,21 @@ async function stepSetup() {
   const wakeList = $('wake-list');
   presets.forEach(p => {
     const rec = p.recommended ? '<span class="badge rec">recommended</span>' : '';
-    const node = el(`<div class="opt ${sel.wakeword === p.wakeword ? 'sel' : ''}" data-wake="${p.wakeword}" data-pattern="${p.pattern.replace(/"/g, '&quot;')}">
+    const node = el(`<div class="opt ${sel.wakeword === p.wakeword ? 'sel' : ''}" data-wake="${p.wakeword}" data-pattern="${p.pattern.replace(/"/g, '&quot;')}" data-model="${p.model.replace(/"/g, '&quot;')}">
       <div class="row"><span class="name">${p.label} ${rec}</span></div></div>`);
     node.addEventListener('click', () => {
-      sel.wakeword = p.wakeword; sel.wakeword_pattern = p.pattern;
+      sel.wakeword = p.wakeword; sel.wakeword_pattern = p.pattern; sel.wakeword_model = p.model;
       $('wake-custom').value = '';
+      $('wake-model').value = p.model;
       document.querySelectorAll('#wake-list .opt').forEach(o => o.classList.toggle('sel', o.dataset.wake === p.wakeword));
     });
     wakeList.appendChild(node);
   });
   $('wake-custom').addEventListener('input', (e) => {
     const v = e.target.value.trim();
-    if (v) { sel.wakeword = v; sel.wakeword_pattern = ''; document.querySelectorAll('#wake-list .opt').forEach(o => o.classList.remove('sel')); }
+    if (v) { sel.wakeword = v; sel.wakeword_pattern = ''; sel.wakeword_model = ''; $('wake-model').value = ''; document.querySelectorAll('#wake-list .opt').forEach(o => o.classList.remove('sel')); }
   });
+  $('wake-model').addEventListener('input', e => sel.wakeword_model = e.target.value.trim());
 
   // --- voice ---
   _voiceStop();
@@ -813,8 +852,17 @@ async function pollProgress() {
       <div class="st">${a.status}</div></div>`));
   });
   if (snap.state === 'error') {
-    $('dl-error').innerHTML = `<div class="banner error">${snap.error || 'Download failed.'}
-      <button style="margin-left:1rem" onclick="retryDownload()">Retry download</button></div>`;
+    const tokenHelp = snap.needs_hf_token ? `
+      <div class="hf-token-help">
+        <strong>This model needs Hugging Face access.</strong>
+        <p>Accept the model's access terms on Hugging Face, then create a read token and paste it here. It is stored only in <code>data/credentials.json</code>.</p>
+        <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">Create a Hugging Face read token</a>
+        <label for="hf-token">Hugging Face token</label>
+        <input type="password" id="hf-token" autocomplete="off" placeholder="hf_...">
+        <button class="primary" onclick="saveHfTokenAndRetry()">Save token and retry</button>
+      </div>` : '';
+    $('dl-error').innerHTML = `<div class="banner error"><div>${snap.error || 'Download failed.'}</div>${tokenHelp}
+      <button style="margin-top:.75rem" onclick="retryDownload()">Retry download</button></div>`;
     return;
   }
   if (snap.state === 'done') { return showLoading(); }
@@ -825,6 +873,18 @@ async function retryDownload() {
   $('dl-error').innerHTML = '';
   await postJSON('/setup/retry-download', {});
   pollProgress();
+}
+
+async function saveHfTokenAndRetry() {
+  const token = ($('hf-token').value || '').trim();
+  if (!token) { $('hf-token').focus(); return; }
+  const r = await postJSON('/setup/credential', { key: 'hf_token', value: token });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    alert('Could not save the Hugging Face token: ' + (e.detail || r.status));
+    return;
+  }
+  await retryDownload();
 }
 
 // ---- loading (models loading into memory) ---------------------------------
@@ -1013,6 +1073,7 @@ async function openSettings() {
       if (preset) {
         $('cf-general_wakeword').value = preset.wakeword;
         $('cf-general_wakeword_pattern').value = preset.pattern;
+        $('sm-wakeword-model').value = preset.model || '';
       }
     }
   });
@@ -1605,7 +1666,8 @@ let MODEL_INITIAL = '';
 
 function modelSettingsSignature() {
   return [
-    'sm-asr', 'sm-asr-model', 'sm-tts', 'sm-tts-model', 'sm-personality-sel',
+    'sm-asr', 'sm-asr-model', 'sm-tts', 'sm-tts-model', 'sm-wakeword-model', 'sm-wakeword-threshold',
+    'sm-wakeword-smoothing-frames', 'sm-wakeword-cooldown-ms', 'sm-personality-sel',
     'sm-personality-custom-text', 'sm-llama-sel', 'sm-local-model', 'sm-llama-model',
     'sm-llama-ctx', 'sm-mtp', 'sm-flash-attn', 'sm-oai-url', 'sm-oai-model', 'sm-oai-key',
   ].map(id => {
@@ -1833,6 +1895,16 @@ async function saveModels() {
   const ttsModel = $('sm-tts').value === 'custom' ? $('sm-tts-model').value.trim() : '';
   if (asrModel) models.asr.model = asrModel;
   if (ttsModel) models.tts.model = ttsModel;
+  const wakewordModel = $('sm-wakeword-model').value.trim();
+  if (wakewordModel) {
+    models.wakeword = {
+      backend: 'openwakeword',
+      model: wakewordModel,
+      threshold: Number($('sm-wakeword-threshold').value),
+      smoothing_frames: Number($('sm-wakeword-smoothing-frames').value),
+      cooldown_ms: Number($('sm-wakeword-cooldown-ms').value),
+    };
+  }
   // API key goes to credentials.json, not config.yml.
   const llmKey = llmMode === 'external' ? $('sm-oai-key').value.trim() : '';
   if (llmKey) await postJSON('/setup/credential', { key: 'llm_api_key', value: llmKey });
@@ -1886,7 +1958,7 @@ function fieldRow(f) {
   if (f.path === 'general.tts_speed' && currentBackend('tts') !== 'kokoro-onnx') return null;
   const id = 'cf-' + f.path.replace(/\W/g, '_');
   let needsRestart = f.apply === 'restart';
-  if (f.path === 'general.voice_clone' && ['kokoro-onnx', 'pocket-tts-onnx', 'pocket-tts-gguf'].includes(currentBackend('tts'))) needsRestart = false;
+  if (f.path === 'general.voice_clone' && ['kokoro-onnx', 'pocket-tts-onnx', 'pocket-tts-gguf', 'pocket-tts-pytorch'].includes(currentBackend('tts'))) needsRestart = false;
   const restart = needsRestart ? '<span class="restart">restart</span>' : '';
   const defRaw = (f.default === null || f.default === undefined) ? ''
     : (Array.isArray(f.default) ? f.default.join(', ') : String(f.default));
@@ -1901,15 +1973,36 @@ function fieldRow(f) {
     const preset = presets.find(p => p.wakeword === val && p.pattern === pattern);
     const options = presets.map(p => `<option value="${p.wakeword.replace(/"/g, '&quot;')}"${preset === p ? ' selected' : ''}>${p.label}</option>`).join('');
     const custom = !preset;
+    const wakeword = (SCHEMA.models && SCHEMA.models.wakeword) || {};
+    const wakewordModel = String(wakeword.model || '');
+    const wakewordThreshold = wakeword.threshold ?? 0.7;
+    const wakewordSmoothingFrames = wakeword.smoothing_frames ?? 1;
+    const wakewordCooldownMs = wakeword.cooldown_ms ?? 1500;
     return el(`<div class="field"><div class="lbl"><label style="margin:0">Wakeword</label>
-      <span class="info" title="Choose a tested wakeword preset, or enter a custom wakeword and optional regex.">i</span> ${restart}</div>
+      <span class="info" title="Choose Hey Atticus or enter a custom wakeword. An optional ONNX model prevents ASR from transcribing every voice activity segment.">i</span> ${restart}</div>
       <select id="wakeword-preset"><option value="custom"${custom ? ' selected' : ''}>Custom</option>${options}</select>
       <div id="wakeword-custom-fields"${custom ? '' : ' hidden'}>
         <label for="cf-general_wakeword">Custom wakeword</label>
         <input type="text" id="cf-general_wakeword" data-path="general.wakeword" data-type="str" value="${String(val).replace(/"/g, '&quot;')}">
         <label for="cf-general_wakeword_pattern">Wakeword regex (optional)</label>
         <input type="text" id="cf-general_wakeword_pattern" data-path="general.wakeword_pattern" data-type="str" value="${pattern.replace(/"/g, '&quot;')}" placeholder="${autoWakePattern(val).replace(/"/g, '&quot;')}">
-      </div></div>`);
+      </div>
+       <label for="sm-wakeword-model">Wakeword model path (optional)</label>
+       <input type="text" id="sm-wakeword-model" list="sm-wakeword-model-options" placeholder="/path/to/wakeword.onnx" value="${wakewordModel.replace(/"/g, '&quot;')}">
+       ${wakewordModelDatalist('sm-wakeword-model-options')}
+       <div class="help">Choose a bundled Hey Atticus version or enter a compatible ONNX path. Leave blank for ASR-only wakeword detection, which transcribes all voice activity.</div>
+       <div class="grid2" style="margin-top:0.5rem">
+         <div><label for="sm-wakeword-threshold">Detection threshold</label>
+           <input type="number" id="sm-wakeword-threshold" min="0" max="1" step="0.01" value="${wakewordThreshold}">
+           <div class="help">0 to 1. Raise it to reduce false activations.</div></div>
+         <div><label for="sm-wakeword-smoothing-frames">Smoothing frames</label>
+           <input type="number" id="sm-wakeword-smoothing-frames" min="1" max="100" step="1" value="${wakewordSmoothingFrames}">
+           <div class="help">Consecutive detections required.</div></div>
+       </div>
+       <label for="sm-wakeword-cooldown-ms">Cooldown (ms)</label>
+       <input type="number" id="sm-wakeword-cooldown-ms" min="0" max="60000" step="100" value="${wakewordCooldownMs}">
+       <div class="help">Wait time after activation before detecting another wakeword.</div>
+       </div>`);
   }
   if (f.path === 'general.wakeword_pattern') {
     const wkInput = document.getElementById('cf-general_wakeword');

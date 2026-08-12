@@ -91,6 +91,36 @@ def test_cancel_check_aborts_before_content():
     assert c.generate(user_prompt="hi", cancel_check=lambda: True) == ""
 
 
+def test_local_generation_deadline_restarts_the_server():
+    c, _ = _make_client(lambda k: iter([_chunk("too late")]))
+    c._generation_timeout = 0
+    restarted = []
+    c._fulloch_restart_local_server = restarted.append
+
+    with pytest.raises(RemoteUnreachable, match="timed out and was restarted"):
+        c.generate(user_prompt="hi")
+
+    assert restarted and "deadline" in restarted[0]
+
+
+def test_local_stream_failure_restarts_the_server():
+    def broken_stream(_):
+        def stream():
+            raise RuntimeError("CUDA worker stopped")
+            yield  # pragma: no cover - make this a generator
+
+        return stream()
+
+    c, _ = _make_client(broken_stream)
+    restarted = []
+    c._fulloch_restart_local_server = restarted.append
+
+    with pytest.raises(RemoteUnreachable, match="failed and was restarted"):
+        c.generate(user_prompt="hi")
+
+    assert restarted == ["RuntimeError: CUDA worker stopped"]
+
+
 def test_max_tokens_clamped_to_reply_ceiling():
     # The N_CONTEXT-sized default must not reach the remote model: no grammar
     # bounds it there, so it would let one answer run thousands of tokens.
@@ -212,6 +242,28 @@ def test_malformed_json_still_attempts_repair():
     out = c.generate(user_prompt="hi", grammar=llm_openai.AGENT_JSON_SENTINEL)
     assert len(calls) == 2  # repair was attempted
     assert out == '{"reply":"hi"}'
+
+
+def test_local_json_repair_5xx_records_and_restarts():
+    class _ServerError(RuntimeError):
+        status_code = 500
+
+    calls = []
+
+    def behavior(_):
+        if not calls:
+            calls.append("stream")
+            return iter([_chunk('{"reply": hi}')])
+        raise _ServerError("decode worker stopped")
+
+    c, _ = _make_client(behavior)
+    restarted = []
+    c._fulloch_restart_local_server = restarted.append
+
+    with pytest.raises(RemoteUnreachable, match="during JSON repair"):
+        c.generate(user_prompt="hi", grammar=llm_openai.AGENT_JSON_SENTINEL)
+
+    assert restarted == ["JSON repair _ServerError: decode worker stopped"]
 
 
 def test_is_context_error_mapping():

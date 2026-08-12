@@ -23,12 +23,20 @@ class _Connection:
     def close(self):
         pass
 
+    def poll(self, _timeout):
+        return bool(self.messages)
+
 
 class _Listener:
     connection = _Connection()
 
     def __init__(self, address, family, authkey):
         self.address = address
+        self._listener = self
+        self._socket = self
+
+    def settimeout(self, _timeout):
+        pass
 
     def accept(self):
         return self.connection
@@ -38,7 +46,7 @@ class _Listener:
 
 
 class _Process:
-    def __init__(self, args, cwd, env):
+    def __init__(self, args, cwd, env, **kwargs):
         self.args = args
         self.cwd = cwd
         self.env = env
@@ -62,6 +70,9 @@ class _StreamConnection:
 
     def recv(self):
         return self.messages.pop(0)
+
+    def poll(self, _timeout):
+        return bool(self.messages)
 
 
 class _BrokenStreamConnection(_StreamConnection):
@@ -143,3 +154,25 @@ def test_worker_stream_marks_connection_broken_on_eof():
         raise AssertionError("EOF must fail the stream")
     assert instance.alive is False
     instance._process = None  # Deliberately partial test double; don't run normal cleanup.
+
+
+def test_worker_timeout_marks_worker_broken_and_closes(monkeypatch):
+    class NoResponseConnection(_StreamConnection):
+        def poll(self, _timeout):
+            return False
+
+    instance = object.__new__(worker.CrispASRWorker)
+    instance._process = _LiveProcess()
+    instance._connection = NoResponseConnection()
+    instance._broken = False
+    closed = []
+    monkeypatch.setattr(instance, "close", lambda: closed.append(True))
+
+    try:
+        instance.call("transcribe")
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("a silent worker must time out")
+    assert instance._broken is True
+    assert closed == [True]

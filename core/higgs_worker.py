@@ -1,15 +1,19 @@
 """Persistent isolated HiggsTTS.cpp server process."""
 
 import os
+import signal
 import socket
 import struct
 import subprocess
+import threading
 import time
 from collections import deque
 from glob import glob
 from pathlib import Path
 
 import numpy as np
+
+IO_TIMEOUT_S = 60.0
 
 
 class HiggsWorker:
@@ -36,6 +40,7 @@ class HiggsWorker:
         self.port = self._free_port()
         self.process: subprocess.Popen | None = None
         self._stderr = deque(maxlen=80)
+        self._stderr_thread: threading.Thread | None = None
 
         for path in (self.server_path, self.model_path, self.tokenizer_path, self.reference_wav):
             if not path.is_file():
@@ -97,12 +102,14 @@ class HiggsWorker:
             stderr=subprocess.PIPE,
             text=True,
             env=env,
+            start_new_session=True,
         )
-        deadline = time.monotonic() + 120
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
+        deadline = time.monotonic() + IO_TIMEOUT_S
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
-                stderr = self.process.stderr.read() if self.process.stderr else ""
-                raise RuntimeError(f"Higgs server exited during startup:\n{stderr}")
+                raise RuntimeError(f"Higgs server exited during startup:\n{''.join(self._stderr)}")
             try:
                 with socket.create_connection(("127.0.0.1", self.port), timeout=0.2):
                     return
@@ -111,10 +118,20 @@ class HiggsWorker:
         self.close()
         raise TimeoutError("Timed out waiting for Higgs server")
 
+    def _drain_stderr(self) -> None:
+        if self.process is None or self.process.stderr is None:
+            return
+        for line in self.process.stderr:
+            self._stderr.append(line)
+
     @staticmethod
-    def _recv_exact(connection: socket.socket, length: int) -> bytes:
+    def _recv_exact(connection: socket.socket, length: int, deadline: float) -> bytes:
         chunks = bytearray()
         while len(chunks) < length:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Timed out reading Higgs synthesis response")
+            connection.settimeout(remaining)
             chunk = connection.recv(length - len(chunks))
             if not chunk:
                 raise ConnectionError("Higgs server closed the connection early")
@@ -126,26 +143,33 @@ class HiggsWorker:
         if not self.alive:
             raise RuntimeError("Higgs server is not running")
         payload = text.encode("utf-8")
-        with socket.create_connection(("127.0.0.1", self.port), timeout=30) as connection:
-            connection.sendall(struct.pack("!If", len(payload), temperature) + payload)
-            while True:
-                frame_type = self._recv_exact(connection, 1)[0]
-                payload_bytes = struct.unpack("!I", self._recv_exact(connection, 4))[0]
-                if payload_bytes > 16 * 1024 * 1024:
-                    raise RuntimeError("Higgs server sent an oversized stream frame")
-                frame = self._recv_exact(connection, payload_bytes)
-                if frame_type == 1:
-                    if payload_bytes == 0 or payload_bytes % 4:
-                        raise RuntimeError("Higgs server sent malformed PCM")
-                    yield np.frombuffer(frame, dtype=np.float32).copy()
-                elif frame_type == 2:
-                    if payload_bytes:
-                        raise RuntimeError("Higgs server sent a malformed end frame")
-                    return
-                elif frame_type == 3:
-                    raise RuntimeError(f"Higgs synthesis failed: {frame.decode('utf-8', 'replace')}")
-                else:
-                    raise RuntimeError(f"Higgs server sent unknown stream frame {frame_type}")
+        deadline = time.monotonic() + IO_TIMEOUT_S
+        try:
+            with socket.create_connection(("127.0.0.1", self.port), timeout=IO_TIMEOUT_S) as connection:
+                connection.settimeout(IO_TIMEOUT_S)
+                connection.sendall(struct.pack("!If", len(payload), temperature) + payload)
+                while True:
+                    frame_type = self._recv_exact(connection, 1, deadline)[0]
+                    payload_bytes = struct.unpack("!I", self._recv_exact(connection, 4, deadline))[0]
+                    if payload_bytes > 16 * 1024 * 1024:
+                        raise RuntimeError("Higgs server sent an oversized stream frame")
+                    frame = self._recv_exact(connection, payload_bytes, deadline)
+                    if frame_type == 1:
+                        if payload_bytes == 0 or payload_bytes % 4:
+                            raise RuntimeError("Higgs server sent malformed PCM")
+                        yield np.frombuffer(frame, dtype=np.float32).copy()
+                    elif frame_type == 2:
+                        if payload_bytes:
+                            raise RuntimeError("Higgs server sent a malformed end frame")
+                        return
+                    elif frame_type == 3:
+                        raise RuntimeError(f"Higgs synthesis failed: {frame.decode('utf-8', 'replace')}")
+                    else:
+                        raise RuntimeError(f"Higgs server sent unknown stream frame {frame_type}")
+        except (socket.timeout, TimeoutError) as exc:
+            self.close()
+            self.start()
+            raise TimeoutError("Higgs synthesis timed out; worker restarted") from exc
 
     def synthesize(self, text: str, temperature: float = 0.9) -> np.ndarray:
         """Collect a streamed response for callers that require one array."""
@@ -156,10 +180,15 @@ class HiggsWorker:
         if self.process is None:
             return
         if self.alive:
-            self.process.terminate()
             try:
-                self.process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
+                os.killpg(self.process.pid, signal.SIGTERM)
+                self.process.wait(timeout=2)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if self.process.poll() is None:
+            try:
+                os.killpg(self.process.pid, signal.SIGKILL)
+                self.process.wait(timeout=2)
+            except (OSError, subprocess.SubprocessError):
+                pass
         self.process = None

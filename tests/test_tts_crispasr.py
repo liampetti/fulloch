@@ -95,6 +95,38 @@ def test_pocket_tts_normalises_typographic_punctuation(monkeypatch):
     assert calls == [("synthesize", {"text": "It's only as long as you cut it."})]
 
 
+def test_pocket_tts_normalises_whitespace_before_synthesis(monkeypatch):
+    calls = []
+
+    class FakeWorker:
+        def call(self, command, **payload):
+            calls.append((command, payload))
+            return [0.1]
+
+    monkeypatch.setattr(tts, "CrispASRWorker", FakeWorker)
+    monkeypatch.setattr(tts, "_session", FakeWorker())
+    monkeypatch.setattr(tts, "_pocket_tts", True)
+
+    list(tts._synth_stream("First line.\n\nSecond line."))
+
+    assert calls == [("synthesize", {"text": "First line. Second line."})]
+
+
+def test_pocket_tts_rolls_sentences_not_comma_clauses(monkeypatch):
+    monkeypatch.setattr(tts, "_POCKET_MAX_SYNTHESIS_CHARS", 80)
+
+    fragments = list(
+        tts._pocket_synthesis_fragments(
+            "Hello, there friend. The weather is warm, dry, and clear. It stays pleasant tonight."
+        )
+    )
+
+    assert fragments == [
+        "Hello, there friend.",
+        "The weather is warm, dry, and clear. It stays pleasant tonight.",
+    ]
+
+
 def test_pocket_tts_does_not_periodically_recycle_its_warm_worker(monkeypatch):
     class FakeWorker:
         alive = True

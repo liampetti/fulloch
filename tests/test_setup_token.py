@@ -49,6 +49,14 @@ def test_inject_env_does_not_override_existing(tmp_path, monkeypatch):
     assert os.environ.get("HA_TOKEN") == "from-env"
 
 
+def test_hf_token_is_injected_into_environment(tmp_path, monkeypatch):
+    path = str(tmp_path / "credentials.json")
+    credentials_store.set_credential("hf_token", "hf-test-token", path=path)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    credentials_store.inject_env(path=path)
+    assert os.environ.get("HF_TOKEN") == "hf-test-token"
+
+
 def test_get_credential_returns_empty_when_absent(tmp_path):
     assert credentials_store.get_credential("ha_token", str(tmp_path / "credentials.json")) == ""
 
@@ -76,3 +84,4 @@ def test_schema_exposes_backend_options(tmp_path):
     assert llm["none"]["implemented"] is True
     assert llm["openai"]["implemented"] is True
     assert llm["llama"]["cpu_ok"] is False
+    assert body["credentials"]["hf_token"] is False

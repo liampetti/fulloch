@@ -96,7 +96,7 @@ def test_missing_area_query_param_forwards_none():
     assert a.connect_satellite.call_args.kwargs["ha_area"] is None
 
 
-def test_tts_audio_waits_for_browser_playback_credit():
+def test_tts_audio_sends_into_the_initial_browser_playback_buffer():
     a = _stub_assistant()
     client = TestClient(create_app(a))
 
@@ -106,5 +106,21 @@ def test_tts_audio_waits_for_browser_playback_credit():
         tts_q.put(("start", 24000))
         assert ws.receive_json() == {"type": "tts_start", "sr": 24000}
         tts_q.put((np.ones(2400, dtype=np.float32), None))
-        ws.send_json({"type": "tts_credit", "seconds": 0.1})
         assert len(ws.receive_bytes()) == 2400 * 4
+
+
+def test_tts_does_not_send_end_before_all_pcm():
+    a = _stub_assistant()
+    client = TestClient(create_app(a))
+
+    with client.websocket_connect("/ws/satellite") as ws:
+        ws.receive_json()
+        tts_q = a.set_satellite_sink.call_args.args[1]
+        tts_q.put(("start", 24000))
+        assert ws.receive_json() == {"type": "tts_start", "sr": 24000}
+        tts_q.put((np.ones(12000, dtype=np.float32), None))
+        tts_q.put(("end",))
+
+        for _ in range(5):
+            assert len(ws.receive_bytes()) == 2400 * 4
+        assert ws.receive_json() == {"type": "tts_end"}

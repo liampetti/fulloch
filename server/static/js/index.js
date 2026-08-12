@@ -2,8 +2,6 @@
   // Session cookie auth — the browser sends the cookie automatically on every
   // fetch and WebSocket upgrade. On 401 (session expired after server restart)
   // redirect to /login so the user can re-authenticate.
-  fetch('/setup/timezone', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tz: Intl.DateTimeFormat().resolvedOptions().timeZone }) }).catch(() => {});
   const streamUrl = (path) => path;
   const _origFetch = window.fetch.bind(window);
   window.fetch = (url, opts = {}) => _origFetch(url, opts).then((r) => {
@@ -1314,6 +1312,9 @@
   let satPlayAt = 0;        // AudioContext scheduled-end time for TTS chunks
   let satTtsSr = 24000;     // sample rate announced by server in tts_start
   let satScheduledSources = [];  // AudioBufferSourceNodes pending/playing, so tts_cancel can stop them
+  let satPendingPcm = [];
+  let satPendingSamples = 0;
+  const SAT_PLAYBACK_BATCH_SECONDS = 0.24;
   let satPlaybackGeneration = 0;
   let satMicMuted = false;  // true during TTS playback — stops mic data to prevent echo
   let satMicResumeTimer = null;  // setTimeout handle for delayed unmute after satPlayAt
@@ -1380,10 +1381,17 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     conversationModeBtn.setAttribute('aria-pressed', conversationMode ? 'true' : 'false');
   };
 
-  const satScheduleChunk = (f32) => {
-    if (!satAudioCtx) return;
-    const buf = satAudioCtx.createBuffer(1, f32.length, satTtsSr);
-    buf.getChannelData(0).set(f32);
+  const satSchedulePendingPcm = () => {
+    if (!satAudioCtx || !satPendingSamples) return;
+    const buf = satAudioCtx.createBuffer(1, satPendingSamples, satTtsSr);
+    const samples = buf.getChannelData(0);
+    let offset = 0;
+    for (const pcm of satPendingPcm) {
+      samples.set(pcm, offset);
+      offset += pcm.length;
+    }
+    satPendingPcm = [];
+    satPendingSamples = 0;
     const src = satAudioCtx.createBufferSource();
     src.buffer = buf;
     src.connect(satAudioCtx.destination);
@@ -1396,13 +1404,14 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     satScheduledSources.push(src);
     src.start(start);
     satPlayAt = start + buf.duration;
-    const generation = satPlaybackGeneration;
-    const creditDelay = Math.max(0, (start + buf.duration - satAudioCtx.currentTime - 0.15) * 1000);
-    setTimeout(() => {
-      if (generation === satPlaybackGeneration && satWs?.readyState === WebSocket.OPEN) {
-        satWs.send(JSON.stringify({ type: 'tts_credit', seconds: buf.duration }));
-      }
-    }, creditDelay);
+  };
+
+  const satScheduleChunk = (f32) => {
+    satPendingPcm.push(f32);
+    satPendingSamples += f32.length;
+    if (satPendingSamples >= Math.ceil(satTtsSr * SAT_PLAYBACK_BATCH_SECONDS)) {
+      satSchedulePendingPcm();
+    }
   };
 
   const satSetAudioProcessing = (enabled) => {
@@ -1421,6 +1430,8 @@ registerProcessor('fulloch-resample', ResampleTo16k);
       try { src.stop(); } catch (_) { /* already ended */ }
     }
     satScheduledSources = [];
+    satPendingPcm = [];
+    satPendingSamples = 0;
     satPlayAt = satAudioCtx ? satAudioCtx.currentTime : 0;
   };
 
@@ -1455,6 +1466,8 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     if (satAudioCtx) { try { satAudioCtx.close(); } catch(_) {} satAudioCtx = null; }
     satPlayAt = 0;
     satScheduledSources = [];
+    satPendingPcm = [];
+    satPendingSamples = 0;
     satMicMuted = false;
     if (satMicResumeTimer !== null) { clearTimeout(satMicResumeTimer); satMicResumeTimer = null; }
     satHalfDuplex = true;
@@ -1621,10 +1634,15 @@ registerProcessor('fulloch-resample', ResampleTo16k);
             satTtsSr = msg.sr || 24000;
             satPlayAt = satAudioCtx ? Math.max(satPlayAt, satAudioCtx.currentTime) : 0;
             satPlaybackGeneration += 1;
-            satWs?.send(JSON.stringify({ type: 'tts_credit', seconds: 0.5 }));
+            satPendingPcm = [];
+            satPendingSamples = 0;
             satMuteMicForPlayback();
           } else if (msg.type === 'tts_end' || msg.type === 'tts_cancel') {
-            if (msg.type === 'tts_cancel') satCancelPlayback();
+            if (msg.type === 'tts_cancel') {
+              satCancelPlayback();
+            } else {
+              satSchedulePendingPcm();
+            }
             satUnmuteMicAfterPlayback();
           }
         } catch(_) {}

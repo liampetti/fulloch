@@ -74,6 +74,17 @@ def test_arm_includes_capture_slack():
     assert sess.follow_up_deadline > before + 5.0 + ac._follow_up_slack_s - 0.1
 
 
+def test_arm_can_start_after_scheduled_playback():
+    ac = make_capture()
+    sess = make_session()
+    playback_end = time.monotonic() + 10.0
+
+    ac.arm_follow_up(sess, 5.0, start_at=playback_end)
+
+    assert sess.follow_up_deadline > playback_end + 5.0 + ac._follow_up_slack_s - 0.1
+    assert ac._follow_up_open(sess) is True
+
+
 def test_follow_up_is_per_satellite():
     ac = make_capture()
     a_sess = make_session()

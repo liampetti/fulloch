@@ -68,6 +68,7 @@ DEFAULT_BASE_URL = "http://localhost:8888/v1"  # 8080 would clash with SearXNG
 DEFAULT_MODEL = "default"
 DEFAULT_CONNECT_TIMEOUT = 0.4  # seconds — fail fast when the endpoint is down
 DEFAULT_READ_TIMEOUT = 30.0  # seconds — enough for queued local inference without a minute of dead air
+DEFAULT_GENERATION_TIMEOUT = 90.0  # seconds — bounds a server that continues streaming forever
 
 # Hard output ceilings for the remote path. The local llama.cpp backend is bound
 # by the GBNF grammar (it stops at a short JSON emission), so callers pass a huge
@@ -110,13 +111,32 @@ class OpenAIClient:
         api_key: str,
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
+        generation_timeout: float = DEFAULT_GENERATION_TIMEOUT,
     ):
 
         self.model = model
         self.base_url = base_url
         self._connect_timeout = connect_timeout
         self._read_timeout = read_timeout
+        self._generation_timeout = generation_timeout
         self._client = self._build_client(api_key)
+
+    def _recover_local_server(self, reason: str) -> bool:
+        """Restart the bundled server after a failed local request, if available."""
+        restart = getattr(self, "_fulloch_restart_local_server", None)
+        if restart is None:
+            return False
+        record_failure = getattr(self, "_fulloch_record_local_server_failure", None)
+        if record_failure is not None:
+            try:
+                record_failure(reason)
+            except Exception:  # noqa: BLE001 - diagnostics must not block recovery
+                logger.exception("Could not record local llama-server request failure")
+        try:
+            restart(reason)
+        except Exception:  # noqa: BLE001 - preserve the caller's useful fallback
+            logger.exception("Local llama-server recovery failed")
+        return True
 
     def _build_client(self, api_key: str):
         from openai import OpenAI
@@ -193,6 +213,7 @@ class OpenAIClient:
         max_new_tokens = min(max_new_tokens, ceiling)
 
         t_call = time.monotonic()
+        deadline = t_call + self._generation_timeout
         ttft = None
         out_tokens = 0
         full_text = ""
@@ -227,6 +248,10 @@ class OpenAIClient:
                     kwargs["response_format"] = {"type": "json_object"}
             stream = self._client.chat.completions.create(**kwargs)
             for chunk in stream:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"LLM generation exceeded the {self._generation_timeout:.0f}s deadline"
+                    )
                 if cancel_check is not None and cancel_check():
                     logger.info("Remote LLM generation cancelled")
                     break
@@ -242,10 +267,17 @@ class OpenAIClient:
                     out_tokens += 1
                     full_text += content
         except (APIConnectionError, APITimeoutError) as e:
+            local_restarted = self._recover_local_server(f"{type(e).__name__}: {e}")
+            if local_restarted:
+                raise RemoteUnreachable(f"Local llama-server failed and was restarted: {type(e).__name__}: {e}") from e
             # No usable response → degrade. (A read timeout *after* partial
             # content falls through below and returns what we have.)
             if not full_text:
                 raise RemoteUnreachable(f"{type(e).__name__}: {e}") from e
+        except TimeoutError as e:
+            if self._recover_local_server(str(e)):
+                raise RemoteUnreachable(f"Local llama-server timed out and was restarted: {e}") from e
+            raise RemoteUnreachable(str(e)) from e
         except BadRequestError as e:
             if _is_context_error(e):
                 raise ContextExhaustedError(str(e)) from e
@@ -263,11 +295,19 @@ class OpenAIClient:
             if _is_context_error(e):
                 raise ContextExhaustedError(str(e)) from e
             logger.warning("Remote LLM stream failed mid-response: %s: %s", type(e).__name__, e)
+            if self._recover_local_server(f"{type(e).__name__}: {e}"):
+                raise RemoteUnreachable(f"Local llama-server failed and was restarted: {type(e).__name__}: {e}") from e
             if not full_text:
                 raise RemoteUnreachable(f"{type(e).__name__}: {e}") from e
 
         if json_mode and full_text:
-            full_text = self._ensure_json(full_text, messages, max_new_tokens)
+            full_text = self._ensure_json(
+                full_text,
+                messages,
+                max_new_tokens,
+                cancel_check=cancel_check,
+                deadline=deadline,
+            )
 
         if stats is not None:
             stats.llm_calls += 1
@@ -318,7 +358,15 @@ class OpenAIClient:
         except Exception:
             return None
 
-    def _ensure_json(self, text: str, messages: list, max_new_tokens: int) -> str:
+    def _ensure_json(
+        self,
+        text: str,
+        messages: list,
+        max_new_tokens: int,
+        *,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        deadline: Optional[float] = None,
+    ) -> str:
         """Validate the JSON; cheap local close attempt, then one repair round-trip.
 
         The agent loop already tolerates an unparseable emission, so a failed
@@ -343,6 +391,15 @@ class OpenAIClient:
         if "{" not in text:
             logger.debug("Remote output is prose, not JSON; skipping repair round-trip")
             return text
+        if cancel_check is not None and cancel_check():
+            logger.info("Skipping JSON repair for cancelled LLM generation")
+            return text
+        remaining = (deadline - time.monotonic()) if deadline is not None else self._generation_timeout
+        if remaining <= 0:
+            error = TimeoutError("LLM generation deadline elapsed before JSON repair")
+            if self._recover_local_server(str(error)):
+                raise RemoteUnreachable(f"Local llama-server timed out and was restarted: {error}") from error
+            raise RemoteUnreachable(str(error)) from error
         logger.debug("Remote JSON invalid; attempting one repair")
         try:
             from openai import APIConnectionError, APITimeoutError
@@ -360,13 +417,37 @@ class OpenAIClient:
                 temperature=0.0,
                 max_tokens=max_new_tokens,
                 response_format={"type": "json_object"},
+                timeout=min(self._read_timeout, remaining),
             )
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("LLM generation deadline elapsed during JSON repair")
+            if cancel_check is not None and cancel_check():
+                logger.info("Discarding JSON repair result for cancelled LLM generation")
+                return text
             fixed = resp.choices[0].message.content or text
             json.loads(fixed)
             return fixed
         except (APIConnectionError, APITimeoutError) as e:
+            if self._recover_local_server(f"JSON repair {type(e).__name__}: {e}"):
+                raise RemoteUnreachable(
+                    f"Local llama-server failed and was restarted during JSON repair: {type(e).__name__}: {e}"
+                ) from e
             raise RemoteUnreachable(f"{type(e).__name__}: {e}") from e
-        except Exception:
+        except TimeoutError as e:
+            if self._recover_local_server(str(e)):
+                raise RemoteUnreachable(f"Local llama-server timed out and was restarted: {e}") from e
+            raise RemoteUnreachable(str(e)) from e
+        except Exception as e:
+            # A 5xx from the local server is a server failure even though the
+            # original streaming response completed. Preserve diagnostics and
+            # recycle it just like a stream disconnect; malformed repair output
+            # itself remains a normal parse failure for the agent loop to handle.
+            status_code = getattr(e, "status_code", 0)
+            if status_code >= 500:
+                if self._recover_local_server(f"JSON repair {type(e).__name__}: {e}"):
+                    raise RemoteUnreachable(
+                        f"Local llama-server failed and was restarted during JSON repair: {type(e).__name__}: {e}"
+                    ) from e
             return text  # let the agent loop's parse-failure path handle it
 
 
@@ -404,6 +485,11 @@ def load_openai(
         api_key=_resolve_api_key(),
         connect_timeout=float(connect_timeout) if connect_timeout else DEFAULT_CONNECT_TIMEOUT,
         read_timeout=float(read_timeout) if read_timeout else DEFAULT_READ_TIMEOUT,
+        generation_timeout=(
+            float(opts["generation_timeout"])
+            if opts.get("generation_timeout") is not None
+            else DEFAULT_GENERATION_TIMEOUT
+        ),
     )
     logger.info("Remote LLM backend: %s @ %s", model, base_url)
     return AGENT_JSON_SENTINEL, client

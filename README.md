@@ -28,6 +28,8 @@ Fulloch is your privacy-focused local voice assistant running on your own PC or 
 
 > **Higgs TTS 3:** The optional Higgs GPU backend is available only under Boson AI's Research and Non-Commercial License, not Fulloch's MIT license. It requires explicit consent for every voice reference. See [Model Sources and Licenses](MODELS.md#higgs-tts-3-license).
 
+> **Pocket TTS PyTorch:** The experimental GPU streaming option uses Kyutai's official gated model. Accept its Hugging Face terms before selecting it. If the download is denied, the wizard prompts for a Hugging Face read token, saves it in `data/credentials.json`, and retries. See [Model Sources and Licenses](MODELS.md#hugging-face-access).
+
 ## Quick installation
 
 The default stack runs on **CPU (mac/linux/windows)**. Audio runs through the browser dashboard. The LLM is either regex-only (simple commands) or off-box via an OpenAI-compatible endpoint you configure in the wizard (e.g. Ollama / LM Studio / another machine on your LAN). The dashboard avatar swaps to Parloch, the **Par**tially-**loc**al **h**ome voice assistant, when the LLM is running off-device.
@@ -40,6 +42,8 @@ Install Docker Desktop (or Docker Engine) first. The first run downloads the sel
 docker run -d \
   --name fulloch-ai \
   --restart unless-stopped \
+  --log-opt max-size=10m \
+  --log-opt max-file=5 \
   -p 8765:8765 \
   -e DASHBOARD_HOST=0.0.0.0 \
   -v fulloch-data:/app/data:rw \
@@ -58,6 +62,8 @@ Swap `:cpu` for `:latest` (the CUDA image with Qwen3-TTS voice cloning and the o
 docker run -d \
   --name fulloch-ai \
   --restart unless-stopped \
+  --log-opt max-size=10m \
+  --log-opt max-file=5 \
   --gpus all \
   -p 8765:8765 \
   -e DASHBOARD_HOST=0.0.0.0 \
@@ -84,7 +90,7 @@ Just add your vault's directory as a volume when launching Docker container `-v 
 
 The Obsidian wizard's "Auto-detect" scans the container filesystem for a vault, so it'll find `/vault` (or wherever you mounted it) without further config.
 
-A plugin is being developed that allows editing and live writing assistance of currently open documents. More information about getting the plugin setup in [technical details document](TECHNICAL_DETAILS.md).
+The included Obsidian plugin adds live assistance for the active document. Install it from the dashboard's Obsidian tab; see the [Obsidian setup details](TECHNICAL_DETAILS.md#obsidian-integration).
 
 ## Home Assistant Integration
 
@@ -151,7 +157,7 @@ Voices in `data/voices/`:
 - **`cori`** - sample from [Piper](https://github.com/rhasspy/piper) `en_GB/cori/high` by Bryce Beattie, trained on LibriVox recordings (MIT / public domain)
 - **`All Kokoro voices`** - generated with [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) (Apache-2.0)
 
-Pocket TTS uses a selected `data/voices/<name>.wav` reference for one-shot cloning; use only voices you have permission to reproduce.
+Pocket TTS uses a selected `data/voices/<name>.wav` reference for one-shot cloning; use only voices you have permission to reproduce. The experimental official PyTorch backend streams PCM as it generates; the GGUF and ONNX options use independent conversions.
 
 ## License
 

@@ -122,6 +122,41 @@ def test_weather_forecast_uses_default_days_for_invalid_count(monkeypatch):
     assert "currently cloudy at 8 degrees Celsius" in result
 
 
+def test_weather_forecast_includes_todays_low_and_high(monkeypatch):
+    """Forecast dates must be evaluated in Home Assistant's local timezone."""
+    import tools.home_assistant as ha
+
+    monkeypatch.setattr(ha, "HA_TOKEN", "token")
+    monkeypatch.setattr(ha, "_DEFAULT_WEATHER_ENTITY", "weather.home")
+    monkeypatch.setattr(ha._local_tz, "today", lambda: datetime.date(2026, 8, 13))
+    monkeypatch.setattr(ha._local_tz, "get_tz", lambda: datetime.timezone.utc)
+    monkeypatch.setattr(
+        ha,
+        "_get_state",
+        lambda _entity: {"state": "cloudy", "attributes": {"temperature": 14}},
+    )
+    response = MagicMock()
+    response.json.return_value = {
+        "service_response": {
+            "weather.home": {
+                "forecast": [
+                    {
+                        "datetime": "2026-08-13T00:00:00+00:00",
+                        "condition": "cloudy",
+                        "templow": 12,
+                        "temperature": 18,
+                    }
+                ]
+            }
+        }
+    }
+    monkeypatch.setattr(ha.requests, "post", lambda *args, **kwargs: response)
+
+    result = ha.get_weather_forecast(days=1)
+
+    assert "Today cloudy 12 to 18 degrees Celsius" in result
+
+
 def test_calendar_window_today_is_midnight_to_midnight():
     from tools.home_assistant import _calendar_window
 
@@ -283,11 +318,12 @@ def test_when_is_it_on_no_calendar_configured():
 
 
 def test_calendar_normalises_timed_event():
-    from tools.home_assistant import _normalise_ha_event
+    import tools.home_assistant as ha
 
     ha_event = {"start": "2026-05-25T10:00:00+10:00", "end": "...", "summary": "Dentist"}
-    norm = _normalise_ha_event(ha_event)
-    assert norm == {"start": "2026-05-25T10:00:00+10:00", "summary": "Dentist", "all_day": False}
+    with patch.object(ha._local_tz, "get_tz", return_value=datetime.timezone.utc):
+        norm = ha._normalise_ha_event(ha_event)
+    assert norm == {"start": "2026-05-25T00:00:00+00:00", "summary": "Dentist", "all_day": False}
 
 
 def test_calendar_normalises_all_day_event():
@@ -296,6 +332,49 @@ def test_calendar_normalises_all_day_event():
     ha_event = {"start": "2026-05-26", "end": "2026-05-27", "summary": "Public holiday"}
     norm = _normalise_ha_event(ha_event)
     assert norm == {"start": "2026-05-26", "summary": "Public holiday", "all_day": True}
+
+
+def test_named_calendar_event_normalises_timezone_before_relative_date():
+    import tools.home_assistant as ha
+
+    response = {
+        "calendar.primary": {
+            "events": [{"start": "2026-05-25T10:00:00+10:00", "summary": "Dentist"}]
+        }
+    }
+    now = datetime.datetime(2026, 5, 24, 12, tzinfo=datetime.timezone.utc)
+    with (
+        patch.object(ha, "CALENDAR_ENTITY", "calendar.primary"),
+        patch.object(ha, "_reminder_calendar_entity", return_value=None),
+        patch.object(ha, "_call_service_with_response", return_value=response),
+        patch.object(ha._local_tz, "now", return_value=now),
+        patch.object(ha._local_tz, "get_tz", return_value=datetime.timezone.utc),
+    ):
+        out = ha._ha_get_events_name("dentist")
+
+    assert out == "Dentist is at 12:00 AM tomorrow."
+
+
+def test_calendar_events_sort_by_normalised_timestamp():
+    import tools.home_assistant as ha
+
+    response = {
+        "calendar.primary": {
+            "events": [
+                {"start": "2026-06-26T01:00:00+00:00", "summary": "Second"},
+                {"start": "2026-06-26T10:00:00+10:00", "summary": "First"},
+            ]
+        }
+    }
+    with (
+        patch.object(ha, "CALENDAR_ENTITY", "calendar.primary"),
+        patch.object(ha, "_reminder_calendar_entity", return_value=None),
+        patch.object(ha, "_call_service_with_response", return_value=response),
+        patch.object(ha._local_tz, "get_tz", return_value=datetime.timezone.utc),
+    ):
+        out = ha._ha_get_events("2026-06-26")
+
+    assert out.index("First") < out.index("Second")
 
 
 # ---------------------------------------------------------------------------
@@ -822,6 +901,48 @@ def test_entity_history_returns_full_change_list_for_the_agent():
         result = ha.get_entity_history("dining room lights")
     assert "History for" in result
     assert ": on" in result and ": off" in result
+
+
+def test_entity_history_uses_ha_local_date_for_relative_labels():
+    import contextlib
+
+    import tools.home_assistant as ha
+
+    states = [{"state": "on", "last_changed": "2026-06-25T00:30:00+00:00"}]
+    with contextlib.ExitStack() as stack:
+        for cm in _patch_history(ha, states):
+            stack.enter_context(cm)
+        stack.enter_context(patch.object(ha._local_tz, "today", return_value=datetime.date(2026, 6, 25)))
+        stack.enter_context(patch.object(ha._local_tz, "get_tz", return_value=datetime.timezone.utc))
+        result = ha.get_entity_history("dining room lights")
+
+    assert "today at 12:30 AM" in result
+
+
+def test_conversation_history_sorts_normalised_timestamps(monkeypatch):
+    import tools.home_assistant as ha
+
+    monkeypatch.setattr(ha, "HA_TOKEN", "tok")
+    monkeypatch.setattr(
+        ha,
+        "_fetch_history_states",
+        lambda entity, _start, _end: (
+            [{"state": "question", "last_changed": "2026-06-24T10:00:00+10:00"}]
+            if entity.endswith("utterance")
+            else [{"state": "answer", "last_changed": "2026-06-24T00:30:00+00:00"}]
+        ),
+    )
+    monkeypatch.setattr(ha._local_tz, "today", lambda: datetime.date(2026, 6, 24))
+    monkeypatch.setattr(ha._local_tz, "get_tz", lambda: datetime.timezone.utc)
+    monkeypatch.setattr(
+        ha._local_tz,
+        "now",
+        lambda: datetime.datetime(2026, 6, 25, tzinfo=datetime.timezone.utc),
+    )
+
+    result = ha.get_conversation_history("2026-06-24")
+
+    assert result.index("You: question") < result.index("Fulloch: answer")
 
 
 def test_get_entity_state_not_found_is_reactive():

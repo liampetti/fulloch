@@ -17,6 +17,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from .inference_safety import TTS_JOB_QUEUE_MAXSIZE, submit_tts_job
 from .tts_session import TtsSession
 from .turn_stats import TurnStats
 
@@ -97,7 +98,7 @@ class _Job:
     session: TtsSession
 
 
-_jobs: "queue.Queue[_Job]" = queue.Queue()
+_jobs: "queue.Queue[_Job]" = queue.Queue(maxsize=TTS_JOB_QUEUE_MAXSIZE)
 
 
 def _worker_loop() -> None:
@@ -134,7 +135,7 @@ def _submit(text: str, prompt: Optional[Path], session: TtsSession, maxsize: int
     if voice is None:
         raise RuntimeError("Pocket TTS voice is not configured")
     out: "queue.Queue" = queue.Queue(maxsize=maxsize)
-    _jobs.put(_Job(text=text, voice=voice, out=out, session=session))
+    submit_tts_job(_jobs, _Job(text=text, voice=voice, out=out, session=session))
     return out
 
 

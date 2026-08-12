@@ -72,6 +72,11 @@ def _personality(host) -> Optional[str]:
     return getattr(host, "personality", None)
 
 
+def _llm_unavailable_label(host) -> str:
+    """Name the configured backend rather than its shared transport contract."""
+    return "Local llama-server unavailable" if getattr(host, "llm_backend", None) == "local" else "Remote LLM unreachable"
+
+
 def _should_style_satellite_message(host, emission: Optional[dict]) -> bool:
     """Let non-balanced LLM personalities phrase outbound announcements."""
     if not getattr(host, "llm_enabled", False) or _personality(host) in (None, "balanced"):
@@ -380,7 +385,7 @@ class AgentLoop:
                 except ContextExhaustedError:
                     return host._context_exhausted_reply()
                 except RemoteUnreachable as e:
-                    logger.warning("Remote LLM unreachable; regex-only this turn")
+                    logger.warning("%s; regex-only this turn: %s", _llm_unavailable_label(host), e)
                     host._note_llm_remote_status(False, str(e))
                     if first_emission is None and regex_emission is None:
                         return remote_fallback()
@@ -649,7 +654,7 @@ class AgentLoop:
                                     step.text, cancel_check, stats=stats
                                 )
                         except RemoteUnreachable as e:
-                            logger.warning("Remote LLM unreachable mid-turn; regex-only")
+                            logger.warning("%s mid-turn; regex-only: %s", _llm_unavailable_label(host), e)
                             host._note_llm_remote_status(False, str(e))
                             if first_emission is None:
                                 return host._speak_llm_error_fallback(
@@ -765,7 +770,7 @@ class AgentLoop:
                 except ContextExhaustedError:
                     return host._context_exhausted_reply()
                 except RemoteUnreachable as e:
-                    logger.warning("Remote LLM unreachable mid-think; regex-only")
+                    logger.warning("%s mid-think; regex-only: %s", _llm_unavailable_label(host), e)
                     host._note_llm_remote_status(False, str(e))
                     if first_emission is None:
                         return host._speak_llm_error_fallback(

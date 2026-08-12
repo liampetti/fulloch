@@ -87,6 +87,21 @@ def test_rejected_soft_wake_returns_satellite_to_idle(assistant):
     assistant._start_turn.assert_not_called()
 
 
+def test_model_wake_is_emitted_before_asr_and_can_be_rejected(assistant):
+    events = []
+    assistant.register_turn_listener(events.append)
+
+    assistant._on_wakeword_model_match("sat-a")
+
+    assert [event["state"] for event in events] == ["wake_detected", "listening"]
+    assert assistant.satellites["sat-a"].protocol_wake_pending is True
+
+    assistant._reject_pending_satellite_wake(assistant.satellites["sat-a"])
+
+    assert [event["state"] for event in events] == ["wake_detected", "listening", "idle"]
+    assert assistant.satellites["sat-a"].protocol_turn_id is None
+
+
 def test_bare_hard_wake_starts_lifecycle_before_follow_up(assistant):
     events = []
     assistant.register_turn_listener(events.append)

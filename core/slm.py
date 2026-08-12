@@ -5,7 +5,9 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.error import URLError
@@ -26,6 +28,9 @@ N_CONTEXT = 12288
 N_THREADS = 4
 N_BATCH = 512
 SERVER_LOG_PATH = Path("./data/logs/llama-server.log")
+SERVER_EVENT_LOG_PATH = Path("./data/logs/llama-server-events.log")
+DIAGNOSTIC_LOG_MAX_BYTES = 10 * 1024 * 1024
+DIAGNOSTIC_LOG_BACKUP_COUNT = 5
 
 
 class ContextExhaustedError(RuntimeError):
@@ -109,6 +114,23 @@ def _server_log_tail(limit: int = 6000) -> str:
         return ""
 
 
+def _rotate_diagnostic_log(path: Path) -> None:
+    """Rotate a full diagnostic log, preserving five timestamped archives."""
+    try:
+        if not path.exists() or path.stat().st_size < DIAGNOSTIC_LOG_MAX_BYTES:
+            return
+        oldest = path.with_name(f"{path.name}.{DIAGNOSTIC_LOG_BACKUP_COUNT}")
+        oldest.unlink(missing_ok=True)
+        for index in range(DIAGNOSTIC_LOG_BACKUP_COUNT - 1, 0, -1):
+            source = path.with_name(f"{path.name}.{index}")
+            if source.exists():
+                source.replace(path.with_name(f"{path.name}.{index + 1}"))
+        path.replace(path.with_name(f"{path.name}.1"))
+    except OSError as exc:
+        # Diagnostics must never prevent the model server from starting.
+        logger.warning("Could not rotate llama-server diagnostic log %s: %s", path, exc)
+
+
 def _server_failure_detail(returncode: int | None = None) -> str:
     """Classify CUDA failures while retaining the server-log location."""
     tail = _server_log_tail()
@@ -138,7 +160,9 @@ def _wait_for_local_server(process: subprocess.Popen, port: int, timeout: float 
         try:
             with urlopen(health_url, timeout=1):
                 return
-        except (URLError, TimeoutError):
+        except (URLError, TimeoutError, OSError):
+            # A server that is still binding, or has just exited, can reset the
+            # loopback connection before urllib wraps it in a URLError.
             time.sleep(0.1)
     process.terminate()
     raise RuntimeError("Timed out loading the local model in llama-server")
@@ -153,8 +177,83 @@ def _stop_local_server(process: subprocess.Popen) -> None:
             process.kill()
 
 
+def _capture_local_server_failure(reason: str, process: subprocess.Popen) -> None:
+    """Persist diagnostics before killing a stuck local inference process."""
+    SERVER_EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_diagnostic_log(SERVER_EVENT_LOG_PATH)
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    try:
+        gpu = subprocess.run(
+            ["nvidia-smi"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5
+        ).stdout.strip()
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not block recovery
+        gpu = f"nvidia-smi unavailable: {type(exc).__name__}: {exc}"
+    try:
+        process_info = subprocess.run(
+            ["ps", "-o", "pid,ppid,stat,etime,%cpu,%mem,command", "-p", str(process.pid)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=5,
+        ).stdout.strip()
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not block recovery
+        process_info = f"process inspection unavailable: {type(exc).__name__}: {exc}"
+    with SERVER_EVENT_LOG_PATH.open("a", encoding="utf-8") as event_log:
+        event_log.write(
+            f"\n--- {timestamp} local llama-server recovery ---\n"
+            f"reason: {reason}\n"
+            f"pid: {process.pid}; returncode: {process.poll()}\n"
+            f"process:\n{process_info}\n"
+            f"gpu:\n{gpu}\n"
+            f"llama-server log tail:\n{_server_log_tail()}\n"
+        )
+
+
+def _record_local_server_request_failure(reason: str, process: subprocess.Popen) -> None:
+    """Persist the request failure before asynchronous recovery can be interrupted."""
+    SERVER_EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_diagnostic_log(SERVER_EVENT_LOG_PATH)
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    detail = (
+        f"--- {timestamp} local llama-server request failure ---\n"
+        f"reason: {reason}\n"
+        f"pid: {process.pid}; returncode: {process.poll()}\n"
+        f"llama-server log tail:\n{_server_log_tail()}\n"
+    )
+    with SERVER_EVENT_LOG_PATH.open("a", encoding="utf-8") as event_log:
+        event_log.write("\n" + detail)
+    snapshot_name = f"llama-server-failure-{timestamp.replace(':', '-').replace('+', '_')}.log"
+    try:
+        (SERVER_EVENT_LOG_PATH.parent / snapshot_name).write_text(detail, encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not write llama-server failure snapshot: %s", exc)
+
+
+def _start_local_server(command: list[str], port: int) -> subprocess.Popen:
+    """Launch a server while retaining all prior server output in one log."""
+    SERVER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_diagnostic_log(SERVER_LOG_PATH)
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    with SERVER_LOG_PATH.open("a", encoding="utf-8") as server_log:
+        server_log.write(f"\n--- {timestamp} llama-server starting ---\n")
+        server_log.flush()
+        process = subprocess.Popen(command, stdout=server_log, stderr=subprocess.STDOUT)
+    try:
+        _wait_for_local_server(process, port)
+    except Exception:
+        _stop_local_server(process)
+        raise
+    return process
+
+
 def _load_local_slm(
-    model_path: str, n_ctx: int, n_threads: int, n_batch: int, mtp: bool, flash_attn: bool
+    model_path: str,
+    n_ctx: int,
+    n_threads: int,
+    n_batch: int,
+    mtp: bool,
+    flash_attn: bool,
+    generation_timeout: float | None,
 ):
     """Start llama-server and return its OpenAI-compatible client."""
     from .llm_openai import load_openai
@@ -169,22 +268,54 @@ def _load_local_slm(
     )
     mode = "MTP speculative decoding" if effective_mtp else "standard decoding"
     logger.info("Loading %s with native llama-server (%s)...", model_path, mode)
-    SERVER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with SERVER_LOG_PATH.open("w", encoding="utf-8") as server_log:
-        try:
-            process = subprocess.Popen(command, stdout=server_log, stderr=subprocess.STDOUT)
-        except Exception:
-            logger.exception("Could not start llama-server; see %s", SERVER_LOG_PATH)
-            raise
     try:
-        _wait_for_local_server(process, port)
+        process = _start_local_server(command, port)
     except Exception:
-        _stop_local_server(process)
+        logger.exception("Could not start llama-server; see %s", SERVER_LOG_PATH)
         raise
-    atexit.register(_stop_local_server, process)
-    grammar, client = load_openai(model="default", base_url=f"http://{LOCAL_SERVER_HOST}:{port}/v1")
+    grammar, client = load_openai(
+        model="default",
+        base_url=f"http://{LOCAL_SERVER_HOST}:{port}/v1",
+        generation_timeout=generation_timeout,
+    )
     client._fulloch_local_server = True
     client._fulloch_local_process = process
+    restart_lock = threading.Lock()
+    restart_in_progress = threading.Event()
+
+    def restart(reason: str) -> None:
+        """Recycle a failed server without holding the caller through model load."""
+        with restart_lock:
+            if restart_in_progress.is_set():
+                logger.warning("Local llama-server recovery already in progress")
+                return
+            restart_in_progress.set()
+
+        def recover() -> None:
+            try:
+                current = client._fulloch_local_process
+                _capture_local_server_failure(reason, current)
+                _stop_local_server(current)
+                client._fulloch_local_process = _start_local_server(command, port)
+                logger.warning(
+                    "Restarted local llama-server after request failure; diagnostics: %s",
+                    SERVER_EVENT_LOG_PATH,
+                )
+            except Exception:
+                logger.exception("Could not restart local llama-server; see %s", SERVER_LOG_PATH)
+            finally:
+                restart_in_progress.clear()
+
+        threading.Thread(target=recover, daemon=True, name="llama-server-recovery").start()
+
+    def stop_current() -> None:
+        _stop_local_server(client._fulloch_local_process)
+
+    client._fulloch_restart_local_server = restart
+    client._fulloch_record_local_server_failure = lambda reason: _record_local_server_request_failure(
+        reason, client._fulloch_local_process
+    )
+    atexit.register(stop_current)
     logger.info("Local llama-server ready (%s)", mode)
     return grammar, client
 
@@ -197,10 +328,11 @@ def load_slm(
     n_batch: int = N_BATCH,
     mtp: bool = False,
     flash_attn: bool = False,
+    generation_timeout: float | None = None,
 ):
     """Load a local GGUF through the bundled llama-server."""
     del grammar_path  # The shared OpenAI client loads GRAMMAR_FILE for constrained requests.
-    return _load_local_slm(model_path, n_ctx, n_threads, n_batch, mtp, flash_attn)
+    return _load_local_slm(model_path, n_ctx, n_threads, n_batch, mtp, flash_attn, generation_timeout)
 
 
 def generate_slm(

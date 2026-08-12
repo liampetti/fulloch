@@ -6,6 +6,7 @@ import logging
 import queue
 import secrets
 import threading
+import time
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -18,6 +19,8 @@ from .lifecycle import AppContext
 logger = logging.getLogger(__name__)
 
 _KEEPALIVE_SECONDS = 15
+_SSE_SUBSCRIBER_QUEUE_SIZE = 100
+_PROACTIVE_REQUEST_LIMIT = 2
 
 
 class _TextRequest(BaseModel):
@@ -41,6 +44,7 @@ def create_integration_app(context: AppContext) -> FastAPI:
     app = FastAPI(title="Fulloch Integration API", docs_url=None, redoc_url=None, openapi_url=None)
     subscribers: list[queue.Queue] = []
     subscribers_lock = threading.Lock()
+    proactive_slots = threading.BoundedSemaphore(_PROACTIVE_REQUEST_LIMIT)
     last_utterance = ""
     last_response = ""
     history_lock = threading.Lock()
@@ -72,10 +76,25 @@ def create_integration_app(context: AppContext) -> FastAPI:
             for subscriber in subscribers:
                 try:
                     subscriber.put_nowait(event)
+                except queue.Full:
+                    dead.append(subscriber)
                 except Exception:
                     dead.append(subscriber)
             for subscriber in dead:
                 subscribers.remove(subscriber)
+
+    def start_proactive(text: str) -> bool:
+        if not proactive_slots.acquire(blocking=False):
+            return False
+
+        def run() -> None:
+            try:
+                context.assistant.speak_proactive(text)
+            finally:
+                proactive_slots.release()
+
+        threading.Thread(target=run, daemon=True, name="integration-proactive").start()
+        return True
 
     context.on_attach(lambda assistant: assistant.register_turn_listener(on_turn))
 
@@ -104,7 +123,8 @@ def create_integration_app(context: AppContext) -> FastAPI:
         text = req.text.strip()
         if not text:
             raise HTTPException(status_code=400, detail="empty text")
-        threading.Thread(target=context.assistant.speak_proactive, args=(text,), daemon=True).start()
+        if not start_proactive(text):
+            raise HTTPException(status_code=429, detail="too many pending speech requests")
         return {"ok": True}
 
     @app.post("/chat")
@@ -120,17 +140,22 @@ def create_integration_app(context: AppContext) -> FastAPI:
 
     @app.get("/stream")
     async def stream(request: Request) -> StreamingResponse:
-        subscriber: queue.Queue = queue.Queue()
+        subscriber: queue.Queue = queue.Queue(maxsize=_SSE_SUBSCRIBER_QUEUE_SIZE)
         with subscribers_lock:
             subscribers.append(subscriber)
 
         async def events():
             try:
+                next_keepalive = time.monotonic() + _KEEPALIVE_SECONDS
                 while not await request.is_disconnected():
                     try:
-                        event = await asyncio.to_thread(subscriber.get, True, _KEEPALIVE_SECONDS)
+                        event = subscriber.get_nowait()
                     except queue.Empty:
-                        yield ": keepalive\n\n"
+                        now = time.monotonic()
+                        if now >= next_keepalive:
+                            yield ": keepalive\n\n"
+                            next_keepalive = now + _KEEPALIVE_SECONDS
+                        await asyncio.sleep(0.1)
                     else:
                         yield f"data: {json.dumps(event)}\n\n"
             finally:

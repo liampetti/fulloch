@@ -4,6 +4,7 @@
 .venv/
 venv/
 env/
+.venv-wakeword-train
 __pycache__/
 *.py[cod]
 *$py.class
@@ -74,10 +75,14 @@ data/backups
 data/models/**
 !data/models/grammars/
 !data/models/grammars/agent.gbnf
+!data/models/wakeword/
+!data/models/wakeword/hey_atticus_v0.3.onnx
 data/cache/
 *.gguf
 config.yml
 credentials.json
+scripts/wakeword/data
+data/config.yml
 
 # =============================================================================
 # Logs and Databases

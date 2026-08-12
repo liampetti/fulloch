@@ -240,12 +240,31 @@ def write_models(models: dict, path: str = DEFAULT_CONFIG_PATH) -> None:
         not isinstance(llm["n_context"], int) or isinstance(llm["n_context"], bool) or llm["n_context"] <= 0
     ):
         raise ValueError("models.llm.n_context must be a positive integer")
+    if "generation_timeout" in llm and (
+        not isinstance(llm["generation_timeout"], (int, float))
+        or isinstance(llm["generation_timeout"], bool)
+        or llm["generation_timeout"] <= 0
+    ):
+        raise ValueError("models.llm.generation_timeout must be a positive number of seconds")
     for option in ("mtp", "flash_attn"):
         if option in llm and not isinstance(llm[option], bool):
             raise ValueError(f"models.llm.{option} must be true or false")
+    wakeword = models.get("wakeword")
+    if wakeword is not None:
+        if not isinstance(wakeword, dict):
+            raise ValueError("models.wakeword must be an object")
+        if wakeword.get("backend", "asr") not in {"asr", "openwakeword"}:
+            raise ValueError("models.wakeword.backend must be asr or openwakeword")
+        if wakeword.get("backend") == "openwakeword":
+            if not isinstance(wakeword.get("model"), str) or not wakeword["model"].strip():
+                raise ValueError("openwakeword requires models.wakeword.model")
+            for key, low, high in (("threshold", 0.0, 1.0), ("smoothing_frames", 1, 100), ("cooldown_ms", 0, 60000)):
+                value = wakeword.get(key)
+                if not isinstance(value, (int, float)) or isinstance(value, bool) or not low <= value <= high:
+                    raise ValueError(f"models.wakeword.{key} must be between {low} and {high}")
     doc = _load_doc(path)
     block = CommentedMap()
-    for domain in ("asr", "tts", "llm"):
+    for domain in ("asr", "tts", "llm", "wakeword"):
         if domain in models:
             inner = CommentedMap()
             for k, v in models[domain].items():

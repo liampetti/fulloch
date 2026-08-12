@@ -1,4 +1,5 @@
 # Files excluded from `git archive` exports (used by transfer_to_pub_dir.sh).
 CLAUDE.md export-ignore
 docs/ export-ignore
+scripts/wakeword/** export-ignore
 transfer_to_pub_dir.sh export-ignore

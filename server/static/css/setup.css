@@ -148,6 +148,12 @@ details.advanced summary { cursor: pointer; font-size: 0.85rem; color: var(--tex
 .banner { padding: 0.7rem 0.9rem; border-radius: 10px; margin-bottom: 1rem; font-size: 0.88rem; }
 .banner.warn { background: color-mix(in srgb, var(--warn) 15%, transparent); border: 1px solid var(--warn); }
 .banner.error { background: color-mix(in srgb, var(--error) 15%, transparent); border: 1px solid var(--error); }
+.hf-token-help { margin-top: .8rem; padding-top: .8rem; border-top: 1px solid color-mix(in srgb, var(--error) 45%, var(--border)); }
+.hf-token-help p { margin: .3rem 0 .5rem; }
+.hf-token-help a { color: inherit; font-weight: 600; }
+.hf-token-help label { margin-top: .75rem; }
+.hf-token-help input { max-width: 28rem; }
+.hf-token-help button { margin-top: .6rem; }
 /* TLS banner — first-step nudge that pre-empts the browser's self-signed-
    cert warning and gives the user a copyable dashboard URL. */
 .banner.tls-info {

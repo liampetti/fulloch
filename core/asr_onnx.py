@@ -24,7 +24,7 @@ from typing import Generator, Optional, Union
 import numpy as np
 import onnxruntime as ort
 
-from .asr import stream_generator  # noqa: F401  (generic queue drainer, re-exported)
+from .asr import AsrInput, stream_generator  # noqa: F401  (generic queue drainer, re-exported)
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +330,9 @@ class QwenOnnxASRPipelineWrapper:
             logger.warning("ASR warmup skipped: %s", e)
 
     def _transcribe(self, buf, max_new_tokens: int) -> str:
+        context = self.context if not isinstance(buf, AsrInput) or buf.context is None else buf.context
+        if isinstance(buf, AsrInput):
+            buf = buf.pcm
         if isinstance(buf, np.ndarray):
             arr = buf
         else:  # torch tensor / list
@@ -337,7 +340,7 @@ class QwenOnnxASRPipelineWrapper:
         t0 = time.monotonic()
         text = self.pipeline.transcribe(
             arr,
-            context=self.context,
+            context=context,
             language=self.language,
             max_new_tokens=max_new_tokens,
         )

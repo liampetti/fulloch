@@ -30,6 +30,8 @@ from dateutil.relativedelta import (
     relativedelta,
 )
 
+import utils.local_time as _local_time
+
 from .tool_registry import tool
 
 logger = logging.getLogger(__name__)
@@ -223,7 +225,7 @@ def _parse_date(value: str) -> date:
     dateutil's `default`, so "25 December" resolves to this year.
     """
     v = (value or "").strip().lower()
-    today = date.today()
+    today = _local_time.today()
     if v in ("today", "now"):
         return today
     if v == "tomorrow":
@@ -282,7 +284,7 @@ def date_of(weekday: str, which: str = "next") -> str:
             "Reactive question: That doesn't look like a weekday. Ask the user which day they mean."
         )
     mod = (which or "next").strip().lower()
-    today = date.today()
+    today = _local_time.today()
     if mod in ("this", "coming", "upcoming"):
         result = today + relativedelta(weekday=wd(+1))  # nearest, incl. today
     elif mod in ("last", "previous"):

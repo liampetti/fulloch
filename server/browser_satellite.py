@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import queue
+import time
 import uuid
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,9 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
+
+MAX_BROWSER_AUDIO_BYTES = 64 * 1024  # At most one second of 16 kHz float32 PCM.
+INITIAL_BROWSER_PLAYBACK_BUFFER_SECONDS = 0.5
 
 if TYPE_CHECKING:
     from .lifecycle import AppContext, Lifecycle
@@ -37,9 +41,12 @@ def register_browser_satellite_route(
             return
 
         await ws.accept()
-        playback_credit: asyncio.Queue[float] = asyncio.Queue()
         satellite_id = uuid.uuid4().hex
-        tts_q: queue.Queue = queue.Queue(maxsize=200)
+        # Pocket emits 80 ms frames over ten times faster than real time. The
+        # browser sender paces them to playback, so capping this hand-off queue
+        # would block generation after roughly 2.5 seconds. satellite-v2 uses
+        # the same unbounded hand-off before pacing its downlink.
+        tts_q: queue.Queue = queue.Queue()
         requested_mode = ws.query_params.get("conversation")
         conversation_mode = None if requested_mode is None else requested_mode == "1"
         ha_area = ws.query_params.get("area", "").strip() or None
@@ -75,10 +82,20 @@ def register_browser_satellite_route(
                     if msg.get("type") == "websocket.disconnect":
                         return
                     if msg.get("bytes"):
+                        payload = msg["bytes"]
+                        if len(payload) > MAX_BROWSER_AUDIO_BYTES or len(payload) % np.dtype(np.float32).itemsize:
+                            await ws.close(code=1003, reason="invalid audio frame")
+                            return
                         try:
-                            chunk_q.put_nowait(np.frombuffer(msg["bytes"], dtype=np.float32).copy())
+                            chunk = np.frombuffer(payload, dtype=np.float32)
+                            if not chunk.size or not np.isfinite(chunk).all():
+                                await ws.close(code=1003, reason="invalid audio frame")
+                                return
+                            chunk_q.put_nowait(chunk.copy())
                         except queue.Full:
-                            pass
+                            # Preserve bounded memory and low latency: stale
+                            # microphone frames are less useful than new ones.
+                            continue
                     elif msg.get("text"):
                         try:
                             data = json.loads(msg["text"])
@@ -93,10 +110,10 @@ def register_browser_satellite_route(
                                     "half_duplex": not (context.assistant.barge_in == "wakeword" or active),
                                     "message": reason,
                                 })
-                            elif data.get("type") == "tts_credit":
-                                seconds = data.get("seconds", 0)
-                                if isinstance(seconds, (int, float)) and seconds > 0:
-                                    playback_credit.put_nowait(float(seconds))
+                            # Browser clients before the paced downlink protocol
+                            # acknowledge scheduled playback with tts_credit. It
+                            # is intentionally ignored: a bounded credit queue
+                            # can drop fast Pocket frames and starve the stream.
                         except (json.JSONDecodeError, Exception):
                             pass
             except (WebSocketDisconnect, RuntimeError):
@@ -104,7 +121,8 @@ def register_browser_satellite_route(
 
         async def send() -> None:
             sample_rate = 0
-            credit_seconds = 0.0
+            sent_audio_seconds = 0.0
+            pace_origin = None
             while True:
                 try:
                     item = await asyncio.to_thread(lambda: tts_q.get(timeout=0.5))
@@ -115,7 +133,7 @@ def register_browser_satellite_route(
                     return
                 try:
                     if isinstance(kind, str) and kind == "start":
-                        sample_rate, credit_seconds = item[1], 0.0
+                        sample_rate, sent_audio_seconds, pace_origin = item[1], 0.0, None
                         await ws.send_json({"type": "tts_start", "sr": item[1]})
                     elif isinstance(kind, str) and kind == "end":
                         await ws.send_json({"type": "tts_end"})
@@ -126,10 +144,19 @@ def register_browser_satellite_route(
                         for start in range(0, len(kind), frame_samples):
                             frame = kind[start : start + frame_samples]
                             frame_seconds = len(frame) / sample_rate
-                            while credit_seconds + 1e-9 < frame_seconds:
-                                credit_seconds += await playback_credit.get()
-                            credit_seconds -= frame_seconds
+                            now = time.monotonic()
+                            if pace_origin is None:
+                                pace_origin = now
+                            elif sent_audio_seconds >= INITIAL_BROWSER_PLAYBACK_BUFFER_SECONDS:
+                                due_at = (
+                                    pace_origin
+                                    + sent_audio_seconds
+                                    - INITIAL_BROWSER_PLAYBACK_BUFFER_SECONDS
+                                )
+                                if due_at > now:
+                                    await asyncio.sleep(due_at - now)
                             await ws.send_bytes(frame.astype(np.float32).tobytes())
+                            sent_audio_seconds += frame_seconds
                 except Exception as error:
                     logger.warning("Browser satellite %s TTS delivery failed: %s", satellite_id, error)
                     return

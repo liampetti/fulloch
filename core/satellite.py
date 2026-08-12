@@ -90,6 +90,12 @@ class SatelliteSession:
     # native lifecycle early, but never dispatches an incomplete command.
     early_wake_probe_started_at: float = 0.0
     early_wake_probe_emitted: bool = False
+    # Idle openWakeWord gate state. Recorder-thread owned and reset on disconnect
+    # or when an endpoint completes.
+    kws_pre_roll: list = field(default_factory=list)
+    kws_candidate: bool = False
+    kws_score: float = 0.0
+    kws_detected_at: float = 0.0
     # Onset timestamp of a soft-endpoint provisional that was committed early.
     # The hard VAD endpoint fires ~200ms later for the same speech; without this
     # guard the duplicate transcription is treated as a barge-in and cancels the

@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from core.agent_loop import _llm_unavailable_label  # noqa: E402
 from core.slm import RemoteUnreachable  # noqa: E402
 from core.turn_stats import TurnStats  # noqa: E402
 
@@ -28,6 +29,10 @@ def _host(**overrides):
     }
     base.update(overrides)
     return types.SimpleNamespace(**base)
+
+
+def test_local_llm_failure_label_names_llama_server():
+    assert _llm_unavailable_label(_host(llm_backend="local")) == "Local llama-server unavailable"
 
 
 def test_route_is_regex_when_catchall_reply_resolves_without_slm(monkeypatch):

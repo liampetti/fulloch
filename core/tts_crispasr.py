@@ -34,7 +34,8 @@ from typing import Callable, Optional
 import numpy as np
 
 from .crispasr_worker import CrispASRWorker
-from .text_utils import split_clauses
+from .inference_safety import TTS_JOB_QUEUE_MAXSIZE, submit_tts_job
+from .text_utils import split_clauses, split_sentences
 from .tts_session import TtsSession
 from .turn_stats import TurnStats
 
@@ -72,6 +73,10 @@ _pocket_tts = False
 # Keep long note/news replies bounded so a full 16 GB GPU stack retains room for
 # the decoder graph rather than aborting the worker on one oversized clause.
 _MAX_SYNTHESIS_CHARS = 240
+# Pocket returns PCM only after a complete request.  Keep later requests long
+# enough to cover the next decode, while leaving the first sentence independent
+# so playback can begin without waiting for an entire multi-sentence reply.
+_POCKET_MAX_SYNTHESIS_CHARS = 240
 # CrispASR's direct Qwen TTS ABI retains ggml scheduler buffers between stream
 # calls. Recycle before its allocation growth can consume the Full stack's
 # remaining 16 GB headroom. Pocket TTS uses its separate complete-buffer API,
@@ -81,15 +86,17 @@ _MAX_STREAMS_PER_WORKER = 8
 # Pocket TTS's embedded English SentencePiece tokenizer can return no audio for
 # typographic punctuation emitted by the SLM. Keep this at its backend boundary
 # so other TTS backends retain their native Unicode handling.
-_POCKET_TEXT_TRANSLATION = str.maketrans({
-    "\u2018": "'",
-    "\u2019": "'",
-    "\u201c": '"',
-    "\u201d": '"',
-    "\u2013": "-",
-    "\u2014": "-",
-    "\u2026": "...",
-})
+_POCKET_TEXT_TRANSLATION = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2026": "...",
+    }
+)
 
 
 def force_cancel_playback(sink: Optional["queue.Queue"] = None) -> None:
@@ -164,7 +171,9 @@ def load_tts(
                 sys.path.insert(0, str(lib_root))
             import crispasr  # heavy ctypes-backed import, deferred to load time
 
-            _session = crispasr.Session(str(model_path), backend=backend, n_threads=int(num_threads))
+            _session = crispasr.Session(
+                str(model_path), backend=backend, n_threads=int(num_threads)
+            )
         logger.info("CrispASR Pocket TTS ready in %.1fs", time.monotonic() - t0)
         return _session
 
@@ -200,7 +209,9 @@ def load_tts(
             sys.path.insert(0, str(lib_root))
         import crispasr  # heavy ctypes-backed import, deferred to load time
 
-        _session = crispasr.Session(str(talker_path), backend=backend_name, n_threads=int(num_threads))
+        _session = crispasr.Session(
+            str(talker_path), backend=backend_name, n_threads=int(num_threads)
+        )
         _session.set_codec_path(str(codec_path))
     logger.info("CrispASR Qwen3-TTS ready in %.1fs", time.monotonic() - t0)
     return _session
@@ -238,15 +249,17 @@ def set_speed(speed) -> None:
     global _speed_warned
     if speed in (None, 1.0) or _speed_warned:
         return
-    logger.warning(
-        "CrispASR Qwen3-TTS has no speed control — tts_speed=%s ignored.", speed
-    )
+    logger.warning("CrispASR Qwen3-TTS has no speed control — tts_speed=%s ignored.", speed)
     _speed_warned = True
 
 
 def _synth(text: str) -> np.ndarray:
     """Synthesise one (short) text span to float32 PCM at 24 kHz on the warm session."""
-    audio = _session.call("synthesize", text=text) if isinstance(_session, CrispASRWorker) else _session.synthesize(text)
+    audio = (
+        _session.call("synthesize", text=text)
+        if isinstance(_session, CrispASRWorker)
+        else _session.synthesize(text)
+    )
     # PLACEHOLDER — watermarking (not implemented yet). crispasr's Python
     # package watermark_embed()/watermark_load_model() (v0.4.9, the release
     # this module targets) call an undefined `_get_lib()` helper — a real
@@ -264,7 +277,12 @@ def _synth_stream(text: str):
     if _pocket_tts:
         # Pocket's CrispASR API returns a complete PCM buffer; it has no native
         # streaming callback like Qwen3-TTS.
-        yield _synth(text.translate(_POCKET_TEXT_TRANSLATION))
+        # The assistant has already applied its shared TTS cleanup and numeric
+        # expansion. Normalise the remaining Pocket-specific tokenizer hazards
+        # here so direct callers receive the same safe input.
+        prepared = " ".join(text.translate(_POCKET_TEXT_TRANSLATION).split())
+        if prepared:
+            yield _synth(prepared)
         return
     if isinstance(_session, CrispASRWorker):
         yield from _session.stream("synthesize_stream", text=text)
@@ -284,6 +302,47 @@ def _synthesis_fragments(text: str):
             remaining = remaining[cut:].strip()
         if remaining:
             yield remaining
+
+
+def _pocket_synthesis_fragments(text: str):
+    """Yield Pocket requests with enough audio to hide the next full decode.
+
+    Unlike direct Qwen, Pocket's public GGUF API does not expose PCM callbacks.
+    Splitting each comma into an independent request therefore creates a decode
+    pause that browser buffering cannot hide. Keep the first sentence separate
+    for time-to-first-audio, then roll following sentences together up to the
+    safe request limit.
+    """
+    sentences = list(split_sentences(text)) or [text]
+    pending = ""
+    for sentence_index, sentence in enumerate(sentences):
+        for fragment in _split_bounded(sentence, _POCKET_MAX_SYNTHESIS_CHARS):
+            if sentence_index == 0 and not pending:
+                yield fragment
+                continue
+            if not pending:
+                pending = fragment
+                continue
+            if len(pending) + 1 + len(fragment) <= _POCKET_MAX_SYNTHESIS_CHARS:
+                pending = f"{pending} {fragment}"
+            else:
+                yield pending
+                pending = fragment
+    if pending:
+        yield pending
+
+
+def _split_bounded(text: str, max_chars: int):
+    """Split an over-limit request on a word boundary without dropping text."""
+    remaining = text.strip()
+    while len(remaining) > max_chars:
+        cut = remaining.rfind(" ", 0, max_chars + 1)
+        if cut <= 0:
+            cut = max_chars
+        yield remaining[:cut].strip()
+        remaining = remaining[cut:].strip()
+    if remaining:
+        yield remaining
 
 
 def _restart_dead_worker(force: bool = False) -> None:
@@ -315,6 +374,14 @@ def _recycle_worker_if_needed() -> None:
         _restart_dead_worker(force=True)
 
 
+def shutdown() -> None:
+    """Release the isolated native worker before the application exits."""
+    global _session
+    if isinstance(_session, CrispASRWorker):
+        _session.close()
+    _session = None
+
+
 def _to_chunks(audio: np.ndarray) -> list:
     return [audio[i : i + _CHUNK_SAMPLES] for i in range(0, len(audio), _CHUNK_SAMPLES)]
 
@@ -326,7 +393,7 @@ class _Job:
     session: TtsSession
 
 
-_job_queue: "queue.Queue[_Job]" = queue.Queue()
+_job_queue: "queue.Queue[_Job]" = queue.Queue(maxsize=TTS_JOB_QUEUE_MAXSIZE)
 
 
 def _worker_loop() -> None:
@@ -338,7 +405,12 @@ def _worker_loop() -> None:
     while True:
         job = _job_queue.get()
         try:
-            for fragment in _synthesis_fragments(job.text):
+            fragments = (
+                _pocket_synthesis_fragments(job.text)
+                if _pocket_tts
+                else _synthesis_fragments(job.text)
+            )
+            for fragment in fragments:
                 if job.session.cancelled:
                     break
                 _recycle_worker_if_needed()
@@ -358,7 +430,8 @@ def _worker_loop() -> None:
                             if first_chunk:
                                 first_chunk = False
                                 logger.debug(
-                                    "CrispASR TTS queue first PCM after %.3fs", time.monotonic() - stream_started
+                                    "CrispASR TTS queue first PCM after %.3fs",
+                                    time.monotonic() - stream_started,
                                 )
                 if isinstance(_session, CrispASRWorker):
                     _worker_stream_count += 1
@@ -380,7 +453,7 @@ _worker.start()
 
 def _submit(text: str, session: TtsSession, maxsize: int = 8) -> "queue.Queue":
     out: "queue.Queue" = queue.Queue(maxsize=maxsize)
-    _job_queue.put(_Job(text=text, out=out, session=session))
+    submit_tts_job(_job_queue, _Job(text=text, out=out, session=session))
     return out
 
 

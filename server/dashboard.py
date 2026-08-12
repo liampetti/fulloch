@@ -104,7 +104,7 @@ _VOICES_DIR = _SERVER_DIR.parent / "data" / "voices"
 
 HISTORY_LIMIT = 200
 
-def _schedule_restart(delay: float = 0.5) -> None:
+def _schedule_restart(delay: float = 0.5, assistant=None) -> None:
     """Re-exec the process shortly, so a fresh start re-reads config.yml.
 
     Used by the dashboard Restart button and by the setup wizard when it
@@ -119,6 +119,8 @@ def _schedule_restart(delay: float = 0.5) -> None:
     def _go():
         time.sleep(delay)
         try:
+            if assistant is not None:
+                assistant.shutdown()
             os.execv(sys.executable, [sys.executable, *sys.argv])
         except Exception:  # noqa: BLE001 — last resort: exit, let the orchestrator restart
             os._exit(0)
@@ -149,7 +151,22 @@ _BACKUP_DIRS = (
 )
 # Restrict backup names to a strict shape so a user-supplied name can't escape
 # data_dir via path traversal.
-_SAFE_BACKUP_NAME_RE = _re.compile(r"^\d{4}-\d{2}-\d{2}T\d{6}$")
+_SAFE_BACKUP_NAME_RE = _re.compile(r"^\d{4}-\d{2}-\d{2}T\d{6}(?:-\d+)?$")
+_MAX_SETUP_BACKUPS = 10
+
+
+def _prune_backups(backups_root: Path) -> None:
+    """Keep only the ten newest valid setup snapshots."""
+    try:
+        backups = sorted(
+            (path for path in backups_root.iterdir() if path.is_dir() and _SAFE_BACKUP_NAME_RE.match(path.name)),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+        for backup in backups[_MAX_SETUP_BACKUPS:]:
+            shutil.rmtree(backup)
+    except OSError as exc:
+        logger.warning("Could not prune setup backups in %s: %s", backups_root, exc)
 
 
 def _create_backup(data_dir: Path) -> Path:
@@ -191,6 +208,7 @@ def _create_backup(data_dir: Path) -> Path:
         ),
         encoding="utf-8",
     )
+    _prune_backups(backups_root)
     return target
 
 
@@ -287,10 +305,12 @@ def start_auto_download(context: AppContext) -> None:
 
 
 SUBSCRIBER_IDLE_KEEPALIVE_S = 15
+SSE_SUBSCRIBER_QUEUE_SIZE = 100
+PROACTIVE_REQUEST_LIMIT = 2
 
 # Credential keys the UI can read/write via /setup/credentials and /setup/credential.
 # dashboard_password has its own dedicated /setup/password endpoint.
-_SETTABLE_CREDENTIALS = frozenset({"ha_token", "llm_api_key", "obsidian_token"})
+_SETTABLE_CREDENTIALS = frozenset({"ha_token", "llm_api_key", "obsidian_token", "hf_token"})
 
 # Session-cookie auth gate. When dashboard_password is set in credentials.json,
 # every route except the login page, static assets, and the liveness probe
@@ -541,6 +561,7 @@ def create_app(
     history_lock = threading.Lock()
     subscribers: list[queue.Queue] = []
     subscribers_lock = threading.Lock()
+    proactive_slots = threading.BoundedSemaphore(PROACTIVE_REQUEST_LIMIT)
     startup_greeting_seeded = False
 
     def on_turn(event: dict) -> None:
@@ -558,10 +579,28 @@ def create_app(
             for q in subscribers:
                 try:
                     q.put_nowait(event)
+                except queue.Full:
+                    # An SSE reader that cannot keep up is no longer useful;
+                    # disconnect it rather than retaining an unbounded history.
+                    dead.append(q)
                 except Exception:
                     dead.append(q)
             for q in dead:
                 subscribers.remove(q)
+
+    def _start_proactive(*args, **kwargs) -> bool:
+        """Start bounded dashboard speech work without growing request threads."""
+        if not proactive_slots.acquire(blocking=False):
+            return False
+
+        def run() -> None:
+            try:
+                context.assistant.speak_proactive(*args, **kwargs)
+            finally:
+                proactive_slots.release()
+
+        threading.Thread(target=run, daemon=True, name="dashboard-proactive").start()
+        return True
 
     def _seed_startup_greeting(assistant) -> None:
         """Add the warmed greeting once, even if dashboard attachment races boot."""
@@ -682,7 +721,7 @@ def create_app(
         just after the response so the client gets the 200 and can poll /status.
         """
         logger.info("Restart requested via dashboard")
-        _schedule_restart()
+        _schedule_restart(assistant=context.assistant)
         return JSONResponse({"restarting": True})
 
     @app.get("/ready")
@@ -793,6 +832,10 @@ def create_app(
                 # ASR/LLM/TTS seconds, route, endpoint kind) — None until the
                 # first turn finishes. Seeds the deferred turn-trace dashboard.
                 "last_turn_stats": context.assistant._last_turn_stats,
+                "wakeword": {
+                    **getattr(context.assistant, "wakeword_metrics", {"status": "asr"}),
+                    **getattr(context.assistant.audio_capture, "wakeword_metrics", {}),
+                },
             }
         )
         return JSONResponse(payload)
@@ -803,9 +846,8 @@ def create_app(
         text = (req.text or "").strip()
         if not text:
             raise HTTPException(status_code=400, detail="empty text")
-        threading.Thread(
-            target=context.assistant.speak_proactive, args=(text,), daemon=True
-        ).start()
+        if not _start_proactive(text):
+            raise HTTPException(status_code=429, detail="too many pending speech requests")
         return {"ok": True}
 
     @app.post("/replay")
@@ -814,11 +856,8 @@ def create_app(
         text = (req.text or "").strip()
         if not text:
             raise HTTPException(status_code=400, detail="empty text")
-        threading.Thread(
-            target=context.assistant.speak_proactive,
-            kwargs={"text": text, "emit_event": False},
-            daemon=True,
-        ).start()
+        if not _start_proactive(text=text, emit_event=False):
+            raise HTTPException(status_code=429, detail="too many pending speech requests")
         return {"ok": True}
 
     @app.post("/mic")
@@ -933,19 +972,19 @@ def create_app(
 
     @app.post("/setup/timezone")
     def setup_timezone(req: TimezoneRequest) -> JSONResponse:
-        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        from utils import local_time
 
-        try:
-            ZoneInfo(req.tz)
-        except (ZoneInfoNotFoundError, KeyError) as e:
-            raise HTTPException(status_code=422, detail=f"Unknown timezone: {req.tz!r}") from e
-        from utils.local_time import set_tz
+        if not local_time.is_valid_tz(req.tz):
+            raise HTTPException(status_code=422, detail=f"Unknown timezone: {req.tz!r}")
 
-        from .config_store import update_config
+        from .config_store import read_config, update_config
 
+        configured_tz = ((read_config(context.config_path).get("general") or {}).get("timezone") or "").strip()
+        if configured_tz:
+            return JSONResponse({"ok": True, "configured": True})
         update_config({"general.timezone": req.tz}, context.config_path)
-        set_tz(req.tz)
-        return JSONResponse({"ok": True})
+        local_time.set_tz(req.tz)
+        return JSONResponse({"ok": True, "configured": False})
 
     @app.get("/setup/schema")
     def setup_schema() -> JSONResponse:
@@ -965,8 +1004,13 @@ def create_app(
 
     @app.put("/config")
     def config_update(req: ConfigUpdateRequest) -> JSONResponse:
+        from utils import local_time
+
         from .config_store import ConfigValidationError, update_config
 
+        timezone = req.updates.get("general.timezone")
+        if "general.timezone" in req.updates and not local_time.is_valid_tz(timezone):
+            raise HTTPException(status_code=422, detail={"general.timezone": "unknown IANA timezone"})
         try:
             applied = update_config(req.updates, context.config_path)
         except ConfigValidationError as e:
@@ -987,6 +1031,10 @@ def create_app(
             from tools.notes_root import refresh_notes_root
 
             refresh_notes_root()
+        for change in applied:
+            if change["path"] == "general.timezone":
+                local_time.set_tz(change["value"])
+                hot.add(change["path"])
         # Dashboard preferences are read when the dashboard page is served;
         # they do not need an assistant reload to take effect.
         hot.update({
@@ -1113,7 +1161,7 @@ def create_app(
                     # from an ERROR where the first config failed to load).
                     # main() has long passed the setup `proceed` wait, so the
                     # only way to load the new backends is a fresh process.
-                    _schedule_restart()
+                    _schedule_restart(assistant=context.assistant)
                 else:
                     # First-run: release the setup block so main() builds and
                     # runs the assistant (which flips LOADING -> READY).
@@ -1150,7 +1198,7 @@ def create_app(
                     pass
                 context.lifecycle.set(LOADING, "starting assistant")
                 if context.assistant is not None:
-                    _schedule_restart()
+                    _schedule_restart(assistant=context.assistant)
                 else:
                     context.lifecycle.signal_proceed()
             else:
@@ -1173,7 +1221,7 @@ def create_app(
             raise HTTPException(status_code=409, detail="startup is not in progress")
         _reset_marker_for(context).touch()
         lifecycle.set("NEEDS_SETUP", "startup cancelled; returning to setup")
-        _schedule_restart(delay=0.1)
+        _schedule_restart(delay=0.1, assistant=context.assistant)
         return JSONResponse({"ok": True, "restarting": True})
 
     @app.post("/setup/reset")
@@ -1513,19 +1561,24 @@ def create_app(
 
     @app.get("/stream")
     async def stream(request: Request) -> StreamingResponse:
-        q: queue.Queue = queue.Queue()
+        q: queue.Queue = queue.Queue(maxsize=SSE_SUBSCRIBER_QUEUE_SIZE)
         with subscribers_lock:
             subscribers.append(q)
 
         async def gen():
             try:
+                next_keepalive = time.monotonic() + SUBSCRIBER_IDLE_KEEPALIVE_S
                 while True:
                     if await request.is_disconnected():
                         break
                     try:
-                        event = await asyncio.to_thread(q.get, True, SUBSCRIBER_IDLE_KEEPALIVE_S)
+                        event = q.get_nowait()
                     except queue.Empty:
-                        yield ": keepalive\n\n"
+                        now = time.monotonic()
+                        if now >= next_keepalive:
+                            yield ": keepalive\n\n"
+                            next_keepalive = now + SUBSCRIBER_IDLE_KEEPALIVE_S
+                        await asyncio.sleep(0.1)
                         continue
                     yield f"data: {json.dumps(event)}\n\n"
             finally:

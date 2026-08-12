@@ -164,6 +164,14 @@ def force_cancel_playback(sink: Optional["queue.Queue"] = None) -> None:
         worker.close()
 
 
+def shutdown() -> None:
+    """Stop the isolated Higgs server before application shutdown."""
+    global _worker
+    worker, _worker = _worker, None
+    if worker is not None:
+        worker.close()
+
+
 def synthesize(text: str, prompt=None):
     return [_synthesize_fragment(fragment) for fragment in _synthesis_fragments(text)], SAMPLE_RATE
 

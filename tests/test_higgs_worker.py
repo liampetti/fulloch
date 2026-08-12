@@ -71,6 +71,9 @@ def test_synthesize_stream_decodes_native_pcm_frames(monkeypatch, assets):
         def sendall(self, data):
             self.sent += data
 
+        def settimeout(self, _timeout):
+            pass
+
         def recv(self, length):
             result = self.data[:length]
             del self.data[:length]
@@ -92,3 +95,22 @@ def test_synthesize_stream_decodes_native_pcm_frames(monkeypatch, assets):
     assert len(frames) == 1
     assert np.allclose(frames[0], [0.25, -0.5])
     assert connection.sent.endswith(b"Hello")
+
+
+def test_synthesis_timeout_restarts_the_worker(monkeypatch, assets):
+    worker = HiggsWorker(
+        server_path=assets["higgs_server"],
+        model_path=assets["model.gguf"],
+        tokenizer_path=assets["tokenizer.json"],
+        reference_wav=assets["voice.wav"],
+        reference_text="A voice reference.",
+    )
+    worker.process = type("Process", (), {"poll": lambda self: None})()
+    restarted = []
+    monkeypatch.setattr(worker, "close", lambda: restarted.append("closed"))
+    monkeypatch.setattr(worker, "start", lambda: restarted.append("started"))
+    monkeypatch.setattr("core.higgs_worker.socket.create_connection", lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError()))
+
+    with pytest.raises(TimeoutError, match="restarted"):
+        list(worker.synthesize_stream("Hello"))
+    assert restarted == ["closed", "started"]

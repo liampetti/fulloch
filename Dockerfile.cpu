@@ -54,6 +54,11 @@ COPY requirements-cpu.txt /tmp/requirements-cpu.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-cpu.txt
 RUN python -m spacy download en_core_web_sm
 
+# openWakeWord's wheel excludes its feature extractors. They are required for
+# every custom classifier, so package both runtime variants without bundling
+# any of openWakeWord's unrelated pre-trained wakeword classifiers.
+RUN python -c "from pathlib import Path; from urllib.request import urlretrieve; import openwakeword; target = Path(openwakeword.__file__).parent / 'resources' / 'models'; target.mkdir(parents=True, exist_ok=True); urls = [model['download_url'] for model in openwakeword.FEATURE_MODELS.values()]; [urlretrieve(url, target / url.rsplit('/', 1)[-1]) for url in urls + [url.replace('.tflite', '.onnx') for url in urls]]"
+
 # Non-root user
 RUN useradd -m -u 1000 -s /bin/bash appuser
 USER appuser

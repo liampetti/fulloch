@@ -43,6 +43,7 @@ silero-vad==5.1.2
 transformers==4.57.6
 accelerate==1.12.0
 onnxruntime==1.23.2
+openwakeword==0.6.0       # optional experimental idle wakeword gate
 onnx==1.22.0                # FP16→FP32 patching for qwen3-tts-onnx CPU backend
 qwen-asr==0.0.6
 sentence-transformers==5.1.2
@@ -52,6 +53,7 @@ misaki[en]==0.9.4   # G2P for the Kokoro ONNX TTS backend (pulls spacy en_core_w
 librosa==0.11.0   # Qwen3-ASR ONNX backend (asr.backend: qwen-onnx) mel features
 sentencepiece==0.2.1  # Pocket TTS ONNX tokenizer
 scipy==1.15.3         # Pocket TTS WAV reference resampling
+pocket-tts==2.1.0     # official Kyutai Pocket TTS PyTorch streaming backend
 
 # These packages require special install flags - see Dockerfile
 # qwen-tts: pip install --no-deps git+https://github.com/liampetti/Qwen3-TTS-streaming.git@97da215

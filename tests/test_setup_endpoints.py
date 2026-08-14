@@ -391,6 +391,21 @@ def test_voice_save_without_generate_409(tmp_path):
     assert client.post("/setup/voice/save", json={"name": "x"}).status_code == 409
 
 
+def test_voice_preview_unloads_design_model(tmp_path, monkeypatch):
+    import core.voice_clone as vc
+
+    client, _, _ = _client(tmp_path)
+    monkeypatch.setattr(vc, "generate", lambda *_args: (__import__("numpy").zeros(8), 24000))
+    monkeypatch.setattr(vc, "audio_to_wav_bytes", lambda *_args: b"wav")
+    unloaded = []
+    monkeypatch.setattr(vc, "unload_model", lambda: unloaded.append(True))
+
+    response = client.post("/setup/voice", json={"instruct": "warm voice"})
+
+    assert response.status_code == 200
+    assert unloaded == [True]
+
+
 def test_restart_endpoint_reexecs(tmp_path, monkeypatch):
     import os
     import sys

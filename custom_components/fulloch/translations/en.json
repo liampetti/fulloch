@@ -3,15 +3,16 @@
         "step": {
             "user": {
                 "title": "Connect to Fulloch",
-                "description": "Enter the host and port where Fulloch's dashboard is running.",
+                "description": "Enter the host, integration API port, and token configured in Fulloch.",
                 "data": {
                     "host": "Host",
-                    "port": "Port"
+                    "port": "Integration API port",
+                    "token": "Integration token"
                 }
             }
         },
         "error": {
-            "cannot_connect": "Cannot connect to Fulloch. Make sure the dashboard is running and the host/port are correct."
+            "cannot_connect": "Cannot connect to Fulloch. Check that the integration API is enabled and the host, port, and token are correct."
         },
         "abort": {
             "already_configured": "This Fulloch instance is already configured."

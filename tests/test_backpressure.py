@@ -37,7 +37,7 @@ def test_completed_audio_queue_is_bounded_and_drops_when_asr_is_busy():
     assert capture.audio_queue.empty()
 
 
-def test_nonblocking_tts_sink_replaces_stale_audio_with_cancel():
+def test_tts_sink_replaces_stale_audio_with_cancel():
     output = queue.Queue(maxsize=1)
     sink = _safe_sink(output)
     sink.put((np.ones(160, dtype=np.float32), None))
@@ -45,6 +45,24 @@ def test_nonblocking_tts_sink_replaces_stale_audio_with_cancel():
     sink.put(("cancel",))
 
     assert output.get_nowait() == ("cancel",)
+
+
+def test_tts_sink_backpressures_instead_of_dropping_audio():
+    output = queue.Queue(maxsize=1)
+    sink = _safe_sink(output)
+    first = np.ones(160, dtype=np.float32)
+    second = np.full(160, 2.0, dtype=np.float32)
+    sink.put((first, None))
+
+    producer = threading.Thread(target=lambda: sink.put((second, None)))
+    producer.start()
+    producer.join(timeout=0.05)
+    assert producer.is_alive()
+
+    np.testing.assert_array_equal(output.get_nowait()[0], first)
+    producer.join(timeout=1)
+    assert not producer.is_alive()
+    np.testing.assert_array_equal(output.get_nowait()[0], second)
 
 
 def test_disconnect_does_not_block_on_a_full_microphone_queue_and_cancels_turn():

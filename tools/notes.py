@@ -313,6 +313,10 @@ def _to_spoken(md: str) -> str:
 
 _index = None  # type: ignore[var-annotated]
 _index_init_lock = threading.Lock()
+_index_queue: "queue.Queue[Path]" = queue.Queue(maxsize=32)
+_index_pending: set[Path] = set()
+_index_pending_lock = threading.Lock()
+_index_worker_started = False
 
 # When the Obsidian plugin is connected, the dashboard sets this queue so
 # _after_write can tell the plugin to navigate to newly-written files.
@@ -360,15 +364,30 @@ def _get_index():
 
 
 def _after_write(path: Path) -> None:
-    """Re-embed a single note after a successful write. Runs in background."""
+    """Queue one coalesced background re-index after a successful write."""
+    global _index_worker_started
+    with _index_pending_lock:
+        if path not in _index_pending:
+            try:
+                _index_queue.put_nowait(path)
+                _index_pending.add(path)
+            except queue.Full:
+                logger.warning("Skipping note re-index; queue is full: %s", path)
+        if not _index_worker_started:
+            _index_worker_started = True
 
-    def _run():
-        try:
-            _get_index().index_file(path)
-        except Exception as e:
-            logger.error(f"Failed to re-index {path}: {e}")
+            def _run():
+                while True:
+                    queued_path = _index_queue.get()
+                    try:
+                        _get_index().index_file(queued_path)
+                    except Exception as e:
+                        logger.error(f"Failed to re-index {queued_path}: {e}")
+                    finally:
+                        with _index_pending_lock:
+                            _index_pending.discard(queued_path)
 
-    threading.Thread(target=_run, daemon=True).start()
+            threading.Thread(target=_run, daemon=True, name="notes-indexer").start()
 
     q = _obsidian_cmd_q
     if q is not None:

@@ -138,6 +138,21 @@ def test_fetch_sends_browser_user_agent(monkeypatch):
     assert "Mozilla/5.0" in seen["headers"].get("User-Agent", "")
 
 
+def test_fetch_limits_downloaded_page_bytes(monkeypatch):
+    class Response:
+        encoding = "utf-8"
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, _chunk_size):
+            yield b"x" * (search_web.MAX_WEBSITE_BYTES + 1)
+
+    monkeypatch.setattr(search_web.requests, "get", lambda *args, **kwargs: Response())
+
+    assert search_web.fetch_website_summary("http://x", fallback="snippet") == "snippet"
+
+
 def test_fetch_falls_back_to_snippet(monkeypatch):
     def fake_get(url, timeout=None, **kw):
         return FakeResp(text="<html><body><nav>junk</nav></body></html>")

@@ -30,6 +30,8 @@ def _record_timeout(reason: str) -> None:
     timestamp = datetime.now(timezone.utc).isoformat()
     message = f"{timestamp} inference watchdog timeout: {reason}"
     logger.critical(message)
+    if os.environ.get("FULLOCH_PERSISTENT_LOGGING_ENABLED") != "1":
+        return
     try:
         _DIAGNOSTIC_PATH.parent.mkdir(parents=True, exist_ok=True)
         with _DIAGNOSTIC_PATH.open("a", encoding="ascii") as diagnostic_file:

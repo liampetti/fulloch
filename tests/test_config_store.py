@@ -45,6 +45,8 @@ def test_update_coerces_types(tmp_path):
             "general.use_vad": "false",
             "general.vad_threshold": "0.7",
             "general.vad_min_speech_ms": "400",
+            "general.persistent_logging_enabled": "true",
+            "general.telemetry_enabled": "true",
         },
         path,
     )
@@ -52,6 +54,20 @@ def test_update_coerces_types(tmp_path):
     assert cfg["general"]["use_vad"] is False
     assert cfg["general"]["vad_threshold"] == 0.7
     assert cfg["general"]["vad_min_speech_ms"] == 400
+    assert cfg["general"]["persistent_logging_enabled"] is True
+    assert cfg["general"]["telemetry_enabled"] is True
+
+
+def test_persistent_logging_defaults_to_disabled():
+    field = field_for("general.persistent_logging_enabled")
+    assert field is not None
+    assert field.default is False
+
+
+def test_update_coerces_voice_satellite_limit(tmp_path):
+    path = _write(tmp_path, "general:\n  wakeword: hi\n")
+    cs.update_config({"general.max_voice_satellites": "3"}, path)
+    assert cs.read_config(path)["general"]["max_voice_satellites"] == 3
 
 
 def test_unknown_key_raises_before_writing(tmp_path):

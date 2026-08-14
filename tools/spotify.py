@@ -469,6 +469,9 @@ def _enqueue_remaining_tracks(entity_ids: list, track_uris: list) -> None:
             logger.exception("Failed to enqueue track %s onto %s", uri, entity_ids)
 
 
+_enqueue_slots = threading.BoundedSemaphore(2)
+
+
 def _dispatch_queue_via_ha(
     entity_ids: Optional[list],
     success_message: str,
@@ -485,9 +488,18 @@ def _dispatch_queue_via_ha(
     first, rest = track_uris[0], track_uris[1:]
     result = _dispatch_via_ha(entity_ids, success_message, first, "music")
     if result == success_message and rest:
+        if not _enqueue_slots.acquire(blocking=False):
+            logger.warning("Skipping playlist queue; too many enqueue jobs are active")
+            return result
+
+        def _enqueue() -> None:
+            try:
+                _enqueue_remaining_tracks(entity_ids, rest)
+            finally:
+                _enqueue_slots.release()
+
         threading.Thread(
-            target=_enqueue_remaining_tracks,
-            args=(entity_ids, rest),
+            target=_enqueue,
             daemon=True,
         ).start()
     return result

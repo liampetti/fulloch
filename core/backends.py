@@ -182,13 +182,13 @@ _register(
         vram_gb=0.0,
         ram_gb=4.5,  # all model data resident in system RAM (onnxruntime CPU provider)
         deps=("onnxruntime", "librosa", "tokenizers"),
-        notes="CPU Qwen3-ASR 1.7B int4: the Full stack's ASR. Accurate, multilingual, "
+        notes="CPU Qwen3-ASR 1.7B int4: the CPU-tier default. Accurate, multilingual, "
         "supports wakeword/context biasing (asr_context_hint). No torch. RTF figure "
         "measured on AMD Ryzen 9 7900 + 32GB RAM; much slower on weaker CPUs (e.g. "
         "Mac M2 Air) — prefer qwen-onnx-small there.",
     )
 )
-# Smaller CPU Qwen3-ASR (0.6B int8 ONNX) — the CPU-tier default. ~3x fewer
+# Smaller CPU Qwen3-ASR (0.6B int8 ONNX). ~3x fewer
 # params than the 1.7B (autoregressive decoder cost scales with size), so much
 # faster per utterance; same Qwen3-ASR chat-template contract, so context/
 # wakeword biasing still works (unlike Moonshine). Tradeoff: more prone to
@@ -207,7 +207,7 @@ _register(
         vram_gb=0.0,
         ram_gb=0.8,
         deps=("onnxruntime", "librosa", "tokenizers"),
-        notes="CPU Qwen3-ASR 0.6B: the CPU-tier default. Faster than the 1.7B "
+        notes="CPU Qwen3-ASR 0.6B. Faster than the 1.7B "
         "but less accurate (misspelling/hallucination source). Still supports "
         "wakeword/context biasing. onnxruntime-only, no torch.",
     )
@@ -337,7 +337,7 @@ _register(
         domain=TTS,
         backend="kokoro-onnx",
         cpu_ok=True,
-        display_name="Kokoro 82M (default CPU)",
+        display_name="Kokoro 82M (CPU)",
         loader="core.tts_onnx:load_tts",
         default_model="./data/models/kokoro-82m-onnx",
         hf_repo="onnx-community/Kokoro-82M-v1.0-ONNX",
@@ -639,8 +639,8 @@ def get_module(domain: str, backend: str):
     return importlib.import_module(module_path)
 
 
-# Defaults used when `models:` is absent. The GPU stack uses the direct-streaming
-# CrispASR GGUF models; CPU tier presets select their ONNX/Kokoro alternatives.
+# Defaults used when `models:` is absent. Tier presets explicitly select their
+# CPU or GPU backends; an absent models block uses the GPU PyTorch Qwen stack.
 _DEFAULT_BACKENDS = {ASR: "qwen", TTS: "qwen", LLM: "llama"}
 
 

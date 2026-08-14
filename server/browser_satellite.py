@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 
 MAX_BROWSER_AUDIO_BYTES = 64 * 1024  # At most one second of 16 kHz float32 PCM.
 INITIAL_BROWSER_PLAYBACK_BUFFER_SECONDS = 0.5
+# TTS is allowed to get ahead of browser playback, but never without bound.
+# Pocket emits half-second chunks, so this retains at most sixteen seconds.
+BROWSER_TTS_QUEUE_MAX_ITEMS = 32
+BROWSER_HEARTBEAT_SECONDS = 15
+BROWSER_HEARTBEAT_MISSES = 3
 
 if TYPE_CHECKING:
     from .lifecycle import AppContext, Lifecycle
@@ -42,11 +47,7 @@ def register_browser_satellite_route(
 
         await ws.accept()
         satellite_id = uuid.uuid4().hex
-        # Pocket emits 80 ms frames over ten times faster than real time. The
-        # browser sender paces them to playback, so capping this hand-off queue
-        # would block generation after roughly 2.5 seconds. satellite-v2 uses
-        # the same unbounded hand-off before pacing its downlink.
-        tts_q: queue.Queue = queue.Queue()
+        tts_q: queue.Queue = queue.Queue(maxsize=BROWSER_TTS_QUEUE_MAX_ITEMS)
         requested_mode = ws.query_params.get("conversation")
         conversation_mode = None if requested_mode is None else requested_mode == "1"
         ha_area = ws.query_params.get("area", "").strip() or None
@@ -59,6 +60,7 @@ def register_browser_satellite_route(
                 conversation_mode=conversation_mode,
                 ha_area=ha_area,
                 ha_area_name=ha_area_name,
+                initial_grace=True,
             )
         except ConversationModeUnavailable as error:
             await ws.send_json({"type": "error", "code": "conversation_mode_active", "message": str(error)})
@@ -78,7 +80,14 @@ def register_browser_satellite_route(
         async def receive() -> None:
             try:
                 while True:
-                    msg = await ws.receive()
+                    try:
+                        msg = await asyncio.wait_for(
+                            ws.receive(), BROWSER_HEARTBEAT_SECONDS * BROWSER_HEARTBEAT_MISSES
+                        )
+                    except asyncio.TimeoutError:
+                        logger.info("Browser satellite %s expired after missed heartbeats", satellite_id)
+                        await ws.close(code=1001, reason="heartbeat timeout")
+                        return
                     if msg.get("type") == "websocket.disconnect":
                         return
                     if msg.get("bytes"):
@@ -99,6 +108,8 @@ def register_browser_satellite_route(
                     elif msg.get("text"):
                         try:
                             data = json.loads(msg["text"])
+                            if data.get("type") == "satellite.heartbeat":
+                                continue
                             if data.get("type") == "conversation_mode.set":
                                 enabled, reason = context.assistant.set_satellite_conversation_mode(
                                     satellite_id, bool(data.get("enabled", False))

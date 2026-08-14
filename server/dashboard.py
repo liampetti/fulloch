@@ -1538,12 +1538,14 @@ def create_app(
 
     @app.post("/setup/voice")
     def setup_voice_generate(req: VoiceRequest) -> Response:
-        from core.voice_clone import audio_to_wav_bytes, generate
+        from core.voice_clone import audio_to_wav_bytes, generate, unload_model
 
         try:
             audio, sr = generate(req.instruct, req.phrase)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
+        finally:
+            unload_model()
         return Response(content=audio_to_wav_bytes(audio, sr), media_type="audio/wav")
 
     @app.post("/setup/voice/save")
@@ -1924,8 +1926,8 @@ def start_dashboard(
             port=backend_port,
             log_level="warning",
             access_log=False,
-            # ESP32 WebSocket clients use the satellite protocol heartbeat for
-            # liveness; Uvicorn's transport ping timeout disconnects them.
+            # ESP32 WebSocket clients may not reliably service ping/pong while
+            # idle. Native health reports are telemetry rather than liveness.
             ws_ping_interval=None,
             **ssl_kwargs,
         )

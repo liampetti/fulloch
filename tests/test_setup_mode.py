@@ -73,7 +73,11 @@ def test_cpu_variant_forces_setup_for_gpu_only_backends(tmp_path, monkeypatch):
     config = {"general": {"wakeword": "hey atticus"}}
 
     monkeypatch.setattr(setup, "variant", lambda: "cpu")
-    d = detect_setup_state(config, models_dir=str(models))
+    d = detect_setup_state(
+        config,
+        models_dir=str(models),
+        completion_marker=str(tmp_path / ".setup_complete"),
+    )
     assert d.needs_setup and d.config_present
     assert "GPU-only" in d.reason
 
@@ -165,7 +169,11 @@ def test_missing_model_assets_needs_setup(tmp_path, monkeypatch):
             "llm": {"backend": "none"},
         },
     }
-    d = detect_setup_state(config, models_dir=str(models))
+    d = detect_setup_state(
+        config,
+        models_dir=str(models),
+        completion_marker=str(tmp_path / ".setup_complete"),
+    )
     assert d.needs_setup
     # Both selected Qwen GGUF backend assets are absent.
     joined = " ".join(d.missing_assets)

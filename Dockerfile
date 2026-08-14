@@ -58,10 +58,13 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
     pip install flash-attn --no-build-isolation && \
     python -m spacy download en_core_web_sm
 
-# openWakeWord's wheel excludes its feature extractors. They are required for
-# every custom classifier, so package both runtime variants without bundling
-# any of openWakeWord's unrelated pre-trained wakeword classifiers.
-RUN python -c "from pathlib import Path; from urllib.request import urlretrieve; import openwakeword; target = Path(openwakeword.__file__).parent / 'resources' / 'models'; target.mkdir(parents=True, exist_ok=True); urls = [model['download_url'] for model in openwakeword.FEATURE_MODELS.values()]; [urlretrieve(url, target / url.rsplit('/', 1)[-1]) for url in urls + [url.replace('.tflite', '.onnx') for url in urls]]"
+# openWakeWord's wheel excludes its CC BY-NC-SA 4.0 feature extractors. They
+# are vendored with their attribution notice, avoiding an external build-time
+# download while excluding unrelated pre-trained wakeword classifiers.
+COPY third_party/openwakeword-models/ /tmp/openwakeword-models/
+RUN set -eux; \
+    target="$(python -c 'from pathlib import Path; import openwakeword; target = Path(openwakeword.__file__).parent / "resources" / "models"; target.mkdir(parents=True, exist_ok=True); print(target)')"; \
+    cp /tmp/openwakeword-models/*.tflite /tmp/openwakeword-models/*.onnx "$target/"
 
 # Stage 2: Runtime (no CUDA compilers/headers)
 FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
@@ -136,13 +139,17 @@ COPY --chown=appuser:appuser tools/ tools/
 COPY --chown=appuser:appuser utils/ utils/
 COPY --chown=appuser:appuser audio/ audio/
 COPY --chown=appuser:appuser server/ server/
+# Retain attribution for the vendored CC BY-NC-SA 4.0 feature extractors in
+# the published runtime image.
+COPY --chown=appuser:appuser third_party/openwakeword-models/NOTICE.md /app/THIRD_PARTY_NOTICES/openwakeword-models.md
 
 # First-run seeds (copied into the empty ./data volume by core/bootstrap.py):
 # the config template the wizard fills in, the app's own GBNF grammar (which
-# the wizard's downloader can't fetch), and the timer alert tone. Weights stay
-# OUT of the image — the wizard pulls them on first run.
+# the wizard's downloader can't fetch), the default wakeword classifier, and
+# the timer alert tone. Downloadable model weights stay out of the image.
 COPY --chown=appuser:appuser data/config.example.yml /app/seed/config.example.yml
 COPY --chown=appuser:appuser data/models/grammars/agent.gbnf /app/seed/grammars/agent.gbnf
+COPY --chown=appuser:appuser data/models/wakeword/hey_atticus_v0.3.onnx /app/seed/wakeword/hey_atticus_v0.3.onnx
 COPY --chown=appuser:appuser data/wav/ /app/seed/wav/
 COPY --chown=appuser:appuser data/voices/ /app/seed/voices/
 
@@ -163,8 +170,8 @@ ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 # Liveness probe: the dashboard's GET /ready returns 200 as soon as the
 # web server is up. A user who hits the URL right now sees the wizard,
 # download progress, or an actionable error — never connection-refused.
-# `docker compose ps` flips this to "healthy" the moment the UI is
-# reachable. Task 7a of docs/ease-of-use-tasks.md.
+# Docker marks this "healthy" the moment the UI is reachable. Read the live
+# config because users can change the dashboard port.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
-  CMD python -c "import ssl,urllib.request,sys; ctx=ssl._create_unverified_context(); sys.exit(0 if urllib.request.urlopen('https://127.0.0.1:8765/ready', context=ctx, timeout=2).status == 200 else 1)"
+  CMD python -c "import ssl,sys,urllib.request,yaml; cfg=yaml.safe_load(open('/app/data/config.yml')) or {}; general=cfg.get('general') or {}; port=general.get('dashboard_port', 8765); scheme='https' if general.get('dashboard_ssl_certfile') and general.get('dashboard_ssl_keyfile') else 'http'; opts={'context': ssl._create_unverified_context()} if scheme == 'https' else {}; sys.exit(0 if urllib.request.urlopen(f'{scheme}://127.0.0.1:{port}/ready', timeout=2, **opts).status == 200 else 1)"
 CMD ["python", "app.py"]

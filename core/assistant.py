@@ -43,6 +43,7 @@ from .higgs_controls import apply_delivery, extract_delivery_request
 from .satellite import SatelliteSession
 from .satellite_context import current_satellite_id as _current_satellite_id
 from .slm import ContextExhaustedError, RemoteUnreachable, generate_slm, load_slm
+from .telemetry import event as telemetry_event
 from .text_utils import clean_for_tts, split_sentences, spoken_for_tts
 from .tts_session import TtsSession, parse_barge_time
 from .turn_arbiter import TurnArbiter
@@ -257,6 +258,7 @@ REMOTE_LLM_RETRY_COOLDOWN_S = 30.0
 # Conversation mode is permissive by design, so give overlapping speakers a
 # brief chance to finish before sending only the latest request to the agent.
 CONVERSATION_TURN_SETTLE_S = 0.75
+DEFAULT_MAX_VOICE_SATELLITES = 6
 
 # A bare wakeword (no command following) is the shape the ASR decoder most
 # readily fabricates from voiced non-speech: the `asr_context_hint` prompt primes
@@ -298,33 +300,32 @@ class _GainSink:
 
 
 class _NonBlockingSink:
-    """Make a browser TTS queue safe for synchronous TTS producers.
+    """Apply transport backpressure without delaying cancellation controls.
 
-    Browser delivery deliberately waits for playback credit. TTS backends run on
-    regular worker threads and must never wait behind that network pacing. Audio
-    is dropped when the bounded queue is full; control messages replace stale
-    audio so cancellation and disconnect take effect promptly.
+    TTS PCM must remain contiguous: dropping frames when a transport queue fills
+    causes audible garbling and truncates fast backends such as Pocket TTS.
+    Producers therefore wait for audio space. Start, cancel, and stop still
+    replace queued audio immediately so a new or cancelled turn is responsive.
     """
 
     def __init__(self, sink: "queue.Queue"):
         self._sink = sink
 
     def put(self, item, *args, **kwargs) -> None:
+        kind = item[0] if isinstance(item, tuple) and item else None
+        if not isinstance(kind, str):
+            self._sink.put(item, *args, **kwargs)
+            return
         try:
             self._sink.put_nowait(item)
             return
         except queue.Full:
             pass
-        kind = item[0] if isinstance(item, tuple) and item else None
-        if not isinstance(kind, str):
-            return  # Audio is best-effort once the browser falls behind.
         if kind in {"start", "cancel", "stop"}:
             self._drain()
-        else:  # Preserve stream completion by making room for the end marker.
-            try:
-                self._sink.get_nowait()
-            except queue.Empty:
-                return
+        else:  # Never displace PCM merely to enqueue a completion marker.
+            self._sink.put(item, *args, **kwargs)
+            return
         try:
             self._sink.put_nowait(item)
         except queue.Full:
@@ -345,8 +346,8 @@ class _NonBlockingSink:
 
 
 def _safe_sink(sink: Optional["queue.Queue"]):
-    # Browser sinks are unbounded and already decoupled from playback pacing.
-    # Only native satellites use bounded hand-off queues that need drop-on-full.
+    # Both browser and native transports use bounded hand-off queues. Preserve
+    # every PCM frame by letting their send loops pace the TTS producer.
     return _NonBlockingSink(sink) if sink is not None and sink.maxsize > 0 else sink
 
 
@@ -373,6 +374,7 @@ class Assistant:
         personality_custom: str = "",
         barge_in: str = "off",
         conversation_mode_default: bool = False,
+        max_voice_satellites: int = DEFAULT_MAX_VOICE_SATELLITES,
         barge_in_threshold_dbfs: Optional[float] = None,
         follow_up_time: str = "0s",
         asr_language: Optional[str] = None,
@@ -383,6 +385,8 @@ class Assistant:
         vad_endpoint_silence_ms: Optional[int] = None,
         vad_min_speech_ms: Optional[int] = None,
         vad_soft_endpoint_silence_ms: Optional[int] = None,
+        save_wakeword_wavs: bool = False,
+        persistent_logging_enabled: bool = False,
         models: Optional[dict] = None,
         lifecycle=None,
     ):
@@ -406,6 +410,8 @@ class Assistant:
             conversation_mode_default: Let the first connected satellite enter
                 exclusive Conversation mode automatically, disconnecting other
                 voice satellites until it is disabled.
+            max_voice_satellites: Maximum concurrent voice clients. Each one
+                owns stateful VAD and optional wake-word models.
             barge_in_threshold_dbfs: Silence floor while TTS plays, in dBFS
                 (the unit transcription volume is logged in). An interrupting
                 voice must exceed it to be captured — lower = easier to barge
@@ -417,6 +423,7 @@ class Assistant:
                 which a wakeword-free utterance counts as a follow-up turn.
         """
         self.wakeword = wakeword.lower()
+        self.max_voice_satellites = max(1, int(max_voice_satellites))
         # Spoken name for self-introduction: the bare wakeword with any
         # leading greeting token stripped ("hey atticus" -> "Atticus"), so
         # the greeting introduces it by what the user actually calls it.
@@ -468,6 +475,7 @@ class Assistant:
         # containing it. Empty when the hint is off.
         self._context_prompt_marker = ""
         self.use_vad = use_vad
+        self.persistent_logging_enabled = bool(persistent_logging_enabled)
         # Built in `_load_models()` once the TTS model is in memory.
         self.voice_clone_prompt = None
         self.audio_capture = AudioCapture(
@@ -477,6 +485,7 @@ class Assistant:
             vad_endpoint_silence_ms=vad_endpoint_silence_ms,
             vad_min_speech_ms=vad_min_speech_ms,
             vad_soft_endpoint_silence_ms=vad_soft_endpoint_silence_ms,
+            save_wakeword_wavs=save_wakeword_wavs,
         )
         self.audio_capture.set_wakeword_detected_callback(self._on_wakeword_model_match)
         # Mic stays muted through model load and the opening greeting;
@@ -676,6 +685,9 @@ class Assistant:
         # It can confirm a wakeword to the satellite, never dispatch a command.
         self._asr_wake_probe: dict = {"flag": False}
         self._asr_kws_candidate: dict = {"flag": False}
+        # Path of the complete candidate utterance, attached to the queued audio
+        # so recorder cleanup cannot lose it before ASR verifies the wakeword.
+        self._asr_kws_wav_path: dict = {"path": None}
         self.wakeword_metrics = {"accepted": 0, "rejected": 0, "status": "asr"}
         # A2: the last completed turn's stats payload (`TurnStats.to_payload()`),
         # for `GET /status` to expose without the caller needing to scrape SSE
@@ -960,7 +972,11 @@ class Assistant:
                 }
                 if llm_cfg["n_context"]:
                     load_kwargs["n_ctx"] = llm_cfg["n_context"]
-                self.grammar, self.slm_model = load_slm(**load_kwargs, **llm_cfg["opts"])
+                self.grammar, self.slm_model = load_slm(
+                    **load_kwargs,
+                    **llm_cfg["opts"],
+                    persistent_logging_enabled=self.persistent_logging_enabled,
+                )
             self.greeting_prompt = get_greeting_system_prompt(
                 self.wakeword_name, self._personality_for_prompt()
             )
@@ -1649,6 +1665,7 @@ class Assistant:
         server_vad: bool = True,
         auth_token: Optional[str] = None,
         device_id: Optional[str] = None,
+        initial_grace: bool = False,
     ) -> "queue.Queue":
         """Start a satellite session (browser `/ws/satellite` or a
         `/ws/satellite-v2` client). Returns the audio chunk queue.
@@ -1666,7 +1683,9 @@ class Assistant:
         `label`/`server_vad`/`auth_token`/`device_id` are the satellite-v2 forward-compat
         fields (#12/#13) — the browser path leaves them at their defaults
         (`None`/`True`/`None`/`None`); only the `/ws/satellite-v2` handler passes
-        real values. `ha_area` (#14, 6b) IS set by the browser path too, from
+        real values. `initial_grace` is browser-only: the user explicitly enters
+        Voice mode there, while an always-on native satellite must start gated by
+        its wakeword. `ha_area` (#14, 6b) IS set by the browser path too, from
         the `?area=` query param on `/ws/satellite` — the user's one-time
         room picker choice, persisted client-side in `localStorage`.
         `ha_area_name` is that same choice's display name (`?area_name=`),
@@ -1704,6 +1723,9 @@ class Assistant:
         with self._conversation_lock:
             if self._conversation_owner_id is not None:
                 raise ConversationModeUnavailable("Conversation mode is active on another device.")
+            voice_sessions = [sid for sid in self.satellites if sid != "dashboard-text"]
+            if len(voice_sessions) >= self.max_voice_satellites:
+                raise ConversationModeUnavailable("The maximum number of voice satellites is connected.")
             self.satellites[satellite_id] = session
         requested_mode = (
             self.conversation_mode_default if conversation_mode is None else conversation_mode
@@ -1721,9 +1743,10 @@ class Assistant:
             name="satellite-recorder",
         )
         session.recorder_thread.start()
-        # Open a generous initial window so the user can speak immediately
-        # without having to say the wakeword after clicking the button.
-        if not session.conversation_mode:
+        # A browser user explicitly clicked into Voice mode and expects to speak
+        # immediately. Native satellites are always listening, so a reconnect
+        # must not turn nearby conversation into a wakeword-free follow-up.
+        if initial_grace and not session.conversation_mode:
             session.last_turn_end = time.monotonic()
             self.audio_capture.arm_follow_up(session, 60)
         logger.info(
@@ -1740,8 +1763,9 @@ class Assistant:
         self.set_satellite_conversation_mode(satellite_id, False)
         session = self.satellites.pop(satellite_id, None)
         if session is not None:
-            # Cancel the active turn before losing its session/sink. No joins:
-            # websocket disconnect paths must return even if model work is slow.
+            # Cancel the active turn before losing its session/sink. The recorder
+            # gets a sentinel immediately; a short join releases its per-session
+            # VAD/KWS models promptly without delaying a slow model turn.
             if session.active_session is not None:
                 session.active_session.stop()
             if session.turn_session is not None:
@@ -1763,6 +1787,8 @@ class Assistant:
                     session.chunk_q.put_nowait(None)
                 except queue.Empty:
                     pass
+            if session.recorder_thread is not None and session.recorder_thread is not threading.current_thread():
+                session.recorder_thread.join(timeout=1.0)
         # A mid-turn disconnect must release the arbiter like a stop would —
         # otherwise a satellite that vanished mid-reply would wedge every
         # other satellite's turns behind a lock nobody will ever release.
@@ -3160,7 +3186,10 @@ class Assistant:
         stream_kwargs = {}
         if "verification_context" in stream_params:
             stream_kwargs["verification_context"] = self._asr_verification_context
+        if "kws_candidate_sink" in stream_params:
             stream_kwargs["kws_candidate_sink"] = self._asr_kws_candidate
+        if "kws_wav_path_sink" in stream_params:
+            stream_kwargs["kws_wav_path_sink"] = self._asr_kws_wav_path
         for result in self.asr_pipe(
             self.asr_stream_generator(*stream_args, **stream_kwargs),
             batch_size=1,
@@ -3179,6 +3208,9 @@ class Assistant:
                 if sat is None:
                     # The satellite disconnected between recording this
                     # utterance and it reaching the transcriber.
+                    self.audio_capture.mark_wakeword_wav(
+                        self._asr_kws_wav_path.get("path"), accepted=False
+                    )
                     logger.debug(
                         "Dropping ASR result for disconnected satellite %s: %r",
                         turn_satellite_id,
@@ -3189,9 +3221,21 @@ class Assistant:
                 provisional = self._asr_provisional.get("flag", False)
                 wake_probe = self._asr_wake_probe.get("flag", False)
                 kws_candidate = self._asr_kws_candidate.get("flag", False)
+                kws_wav_path = self._asr_kws_wav_path.get("path")
+                audio = self._asr_audio.get("buf")
+                telemetry_event(
+                    "asr_complete",
+                    satellite_id=turn_satellite_id,
+                    seconds=getattr(self.asr_pipe, "last_transcribe_seconds", None),
+                    audio_seconds=round(float(audio.size) / 16000, 3) if isinstance(audio, np.ndarray) else None,
+                    kws_candidate=kws_candidate,
+                    provisional=provisional,
+                    has_text=bool(text),
+                )
                 if not text:
                     if kws_candidate:
                         self.wakeword_metrics["rejected"] += 1
+                        self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=False)
                     if not provisional:
                         self._reject_pending_satellite_wake(sat)
                     continue
@@ -3201,10 +3245,14 @@ class Assistant:
                     # fires; this transcript used the normal ASR term context.
                     if self._wakeword_re.search(text.lower()) is None:
                         self.wakeword_metrics["rejected"] += 1
+                        self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=False)
                         logger.info("openWakeWord activation rejected by ASR: %r", text)
+                        telemetry_event("wakeword_rejected", satellite_id=turn_satellite_id)
                         self._reject_pending_satellite_wake(sat)
                         continue
                     self.wakeword_metrics["accepted"] += 1
+                    self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=True)
+                    telemetry_event("wakeword_accepted", satellite_id=turn_satellite_id)
 
                 if time.monotonic() < sat.drop_results_until:
                     logger.debug(f"Dropping post-cancel ASR result: {text}")

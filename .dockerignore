@@ -62,6 +62,8 @@ data/token.json
 data/models/*
 !data/models/grammars/
 !data/models/grammars/agent.gbnf
+!data/models/wakeword/
+!data/models/wakeword/hey_atticus_v0.3.onnx
 # The image seeds these repository-owned starter references on first run.
 # Private/custom references should live under data/voices/private/ (ignored by
 # git) and are never copied into release builds.

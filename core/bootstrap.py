@@ -4,11 +4,14 @@ The container ships application code only — weights and config live in the
 single persisted `./data` volume, which is empty on first run. This seeds the
 minimum so the app boots into the setup wizard with no host-side steps:
 
-  - creates the `data/` subtree (models/grammars, models/hub, voices, notes, certs)
+  - creates the `data/` subtree (models/grammars, models/hub, models/wakeword,
+    voices, notes, certs)
   - seeds `data/config.yml` from the bundled template (the wizard fills it in)
   - seeds `data/models/grammars/agent.gbnf` — the app's own grammar, which the
     wizard's downloader can't fetch (it's not on HF), so it must ship in the
     image and be copied into the volume here, or first-run setup would loop.
+  - seeds the repository-provided default openWakeWord model so its configured
+    wizard preset works without a model download
   - generates a self-signed HTTPS cert and wires it into the fresh config, so
     the browser satellite's microphone access works from a phone/other device
     on the LAN out of the box (see core.tls_certs).
@@ -26,7 +29,15 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 DEFAULT_SEED_DIR = "/app/seed"
-_SUBDIRS = ("models/grammars", "models/hub", "voices", "notes", "certs", "wav")
+_SUBDIRS = (
+    "models/grammars",
+    "models/hub",
+    "models/wakeword",
+    "voices",
+    "notes",
+    "certs",
+    "wav",
+)
 
 
 def _seed_https_cert(data: Path) -> None:
@@ -80,6 +91,15 @@ def ensure_scaffolding(data_dir: str = "./data", seed_dir: str = None) -> None:
     if not grammar.is_file() and seed_grammar.is_file():
         shutil.copy2(seed_grammar, grammar)
         logger.info("Seeded agent grammar into %s", grammar)
+
+    # The default wakeword preset points to this repository-owned classifier.
+    # It is an app asset rather than a setup download, so seed it like the
+    # grammar and never overwrite a user-supplied replacement.
+    wakeword_model = data / "models" / "wakeword" / "hey_atticus_v0.3.onnx"
+    seed_wakeword_model = seed / "wakeword" / "hey_atticus_v0.3.onnx"
+    if not wakeword_model.is_file() and seed_wakeword_model.is_file():
+        shutil.copy2(seed_wakeword_model, wakeword_model)
+        logger.info("Seeded default wakeword model into %s", wakeword_model)
 
     # Timer alert tone (core/assistant.py: ALARM_WAV_PATH) — same reasoning
     # as the grammar above: it's an app asset, not something the wizard

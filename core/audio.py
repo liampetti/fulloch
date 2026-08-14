@@ -5,12 +5,16 @@ import math
 import queue
 import threading
 import time
+import wave
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import torch
 
 from .satellite import SatelliteSession
+from .telemetry import event as telemetry_event
 
 logger = logging.getLogger(__name__)
 
@@ -185,8 +189,11 @@ class AudioCapture:
         vad_endpoint_silence_ms: Optional[int] = None,
         vad_min_speech_ms: Optional[int] = None,
         vad_soft_endpoint_silence_ms: Optional[int] = None,
+        save_wakeword_wavs: bool = False,
     ):
         self.sample_rate = sample_rate
+        self.save_wakeword_wavs = bool(save_wakeword_wavs)
+        self.wakeword_wav_dir = Path("./data/logs/wake_wavs")
         self.chunk_duration_ms = chunk_duration_ms
         self.silence_threshold = silence_threshold
         # Barge-in capture floor while TTS plays (see BARGE_IN_THRESHOLD_DBFS).
@@ -278,7 +285,7 @@ class AudioCapture:
         # State
         # Each item is
         # `(buf, speech_onset_monotonic, loudness_dbfs, provisional, satellite_id,
-        # endpoint_monotonic[, wake_probe[, kws_candidate]])` — the onset lets the transcriber measure the
+        # endpoint_monotonic[, wake_probe[, kws_candidate[, kws_wav_path]]])` — the onset lets the transcriber measure the
         # follow-up window from when the speaker began, the loudness tags the
         # utterance with its dBFS volume (voiced-window RMS where VAD is
         # active) for noise-baseline logging, satellite_id says which
@@ -324,16 +331,31 @@ class AudioCapture:
             and not session.conversation_mode
         )
 
-    def _feed_wakeword_gate(self, session: SatelliteSession, chunk: np.ndarray) -> None:
+    def _feed_wakeword_gate(
+        self, session: SatelliteSession, chunk: np.ndarray, *, append_pre_roll: bool = True
+    ) -> None:
         if not self._wakeword_gate_active(session):
             return
-        session.kws_pre_roll.append(chunk)
-        max_chunks = max(1, int(self.sample_rate / max(1, chunk.size)))
-        del session.kws_pre_roll[:-max_chunks]
+        if append_pre_roll:
+            session.kws_pre_roll.append(chunk)
+            max_chunks = max(1, int(self.sample_rate / max(1, chunk.size)))
+            del session.kws_pre_roll[:-max_chunks]
         if session.kws_candidate:
             return
+        # Do not run the acoustic classifier over idle room sound. Apart from
+        # avoiding false wake candidates, this prevents each false candidate
+        # from forcing an expensive Qwen ASR verification pass. Once VAD sees
+        # speech, feed its one-second pre-roll so the beginning of a wake phrase
+        # is still available to openWakeWord.
+        endpointer = session.vad_endpointer
+        if endpointer is not None and not endpointer.speech_started:
+            return
+        pcm = chunk
+        if endpointer is not None and not session.kws_speech_active:
+            pcm = np.concatenate(session.kws_pre_roll)
+            session.kws_speech_active = True
         try:
-            result = self.wakeword_backend.feed_pcm(session.id, chunk)
+            result = self.wakeword_backend.feed_pcm(session.id, pcm)
         except Exception as exc:  # Runtime failures must preserve usable ASR-only voice control.
             logger.warning("Wakeword gate failed; falling back to ASR-only: %s", exc)
             self.wakeword_backend = None
@@ -346,18 +368,52 @@ class AudioCapture:
             self.wakeword_metrics["candidates"] += 1
             self.wakeword_metrics["last_score"] = round(result.score, 3)
             logger.info("openWakeWord activated: score=%.3f (%s)", result.score, session.id)
+            telemetry_event("wakeword_candidate", satellite_id=session.id, score=round(result.score, 3))
             if self.wakeword_detected_callback is not None:
                 self.wakeword_detected_callback(session.id)
 
-    def _discard_wakeword_candidate(self, session: SatelliteSession) -> None:
-        """Prevent an idle false candidate from authorising a later utterance."""
-        if not session.kws_candidate:
+    def _save_wakeword_wav(self, satellite_id: str, pcm: np.ndarray, score: float) -> Optional[str]:
+        """Persist a short candidate clip for wake-word tuning when enabled."""
+        if not self.save_wakeword_wavs or not pcm.size:
+            return None
+        try:
+            self.wakeword_wav_dir.mkdir(parents=True, exist_ok=True)
+            safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in satellite_id)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+            path = self.wakeword_wav_dir / f"{timestamp}_{safe_id}_{score:.3f}_pending.wav"
+            samples = np.clip(pcm, -1.0, 1.0)
+            data = (samples * 32767).astype("<i2", copy=False).tobytes()
+            with wave.open(str(path), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(self.sample_rate)
+                wav.writeframes(data)
+            return str(path)
+        except Exception as exc:  # Diagnostics must never interrupt listening.
+            logger.warning("Failed to save wakeword WAV: %s", exc)
+            return None
+
+    def mark_wakeword_wav(self, raw_path: Optional[str], accepted: bool) -> None:
+        """Label a candidate capture with its downstream ASR verification result."""
+        if not raw_path:
             return
+        try:
+            path = Path(raw_path)
+            status = "accepted" if accepted else "rejected"
+            path.rename(path.with_name(path.name.replace("_pending.wav", f"_{status}.wav")))
+        except Exception as exc:
+            logger.warning("Failed to label wakeword WAV: %s", exc)
+
+    def _discard_wakeword_candidate(self, session: SatelliteSession) -> None:
+        """Reset idle-gate state at an utterance boundary."""
+        classifier_ran = session.kws_speech_active or session.kws_candidate
         session.kws_candidate = False
         session.kws_score = 0.0
         session.kws_detected_at = 0.0
+        session.kws_wav_path = None
+        session.kws_speech_active = False
         session.kws_pre_roll.clear()
-        if self.wakeword_backend is not None:
+        if classifier_ran and self.wakeword_backend is not None:
             self.wakeword_backend.reset(session.id)
 
     def _enqueue(self, session, buf, onset, loudness_db, provisional, endpoint_t, wake_probe=False):
@@ -365,12 +421,23 @@ class AudioCapture:
         if gated and not session.kws_candidate:
             return
         if session.kws_candidate:
+            endpoint_buf = buf
             # Keep the one-second independent pre-roll so classifier latency never
             # clips the beginning of the phrase passed to Qwen verification.
             prefix = np.concatenate(session.kws_pre_roll) if session.kws_pre_roll else np.empty(0, np.float32)
             if prefix.size:
                 buf = np.concatenate((prefix, buf))
-            self._put_utterance((buf, onset, loudness_db, provisional, session.id, endpoint_t, wake_probe, True))
+            wav_path = None
+            # The gate fires on an individual classifier frame (typically 20 ms),
+            # but tuning needs the complete endpointed utterance. A provisional
+            # ASR snapshot is not authoritative, so only persist the final one.
+            if not provisional:
+                wav_path = self._save_wakeword_wav(session.id, endpoint_buf, session.kws_score)
+            queued = self._put_utterance(
+                (buf, onset, loudness_db, provisional, session.id, endpoint_t, wake_probe, True, wav_path)
+            )
+            if wav_path and not queued:
+                Path(wav_path).unlink(missing_ok=True)
             # A soft endpoint is feedback-only; retain the candidate until the
             # authoritative hard endpoint can dispatch the full command.
             if not provisional:
@@ -382,12 +449,14 @@ class AudioCapture:
         else:
             self._put_utterance((buf, onset, loudness_db, provisional, session.id, endpoint_t))
 
-    def _put_utterance(self, item) -> None:
+    def _put_utterance(self, item) -> bool:
         """Queue one completed utterance without letting ASR backlog block capture."""
         try:
             self.audio_queue.put_nowait(item)
+            return True
         except queue.Full:
             logger.warning("Dropping completed utterance; ASR queue is full")
+            return False
 
     # --- Live config setters (settings console hot-apply) ------------------
     # Each mutates a single derived value the recorder reads on its next loop
@@ -573,6 +642,8 @@ class AudioCapture:
                     break
 
                 if chunk is not FLUSH and self.mic_globally_enabled and session.transcribing:
+                    # Keep a short pre-roll while idle. The VAD path below
+                    # decides whether this same frame may be classified.
                     self._feed_wakeword_gate(session, chunk)
 
                 if not session.server_vad:
@@ -591,6 +662,10 @@ class AudioCapture:
                     if speech_onset_t is None:
                         speech_onset_t = time.monotonic()
                     sat_buf.append(chunk)
+                    if sum(c.size for c in sat_buf) >= self.max_utterance_samples:
+                        logger.warning("Dropping unflushed client-endpointed audio (%s)", session.id)
+                        sat_buf.clear()
+                        speech_onset_t = None
                     continue
 
                 sat_buf.append(chunk)
@@ -616,6 +691,7 @@ class AudioCapture:
                 # survives for the transcriber's duplicate-endpoint guard.
                 if endpointer is not None and (not tts_active or endpointer.speech_started):
                     endpointer.process(sat_buf[-1])
+                    self._feed_wakeword_gate(session, chunk, append_pre_roll=False)
                     buffer_samples = sum(c.size for c in sat_buf)
 
                     # Discard accumulating noise before any speech is detected

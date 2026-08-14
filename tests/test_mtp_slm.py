@@ -20,6 +20,7 @@ def test_mtp_server_command_enables_native_speculation(monkeypatch):
     assert command[command.index("--spec-draft-n-max") + 1] == str(slm.MTP_DRAFT_TOKENS)
     assert command[command.index("--host") + 1] == "127.0.0.1"
     assert command[command.index("--no-mmproj")] == "--no-mmproj"
+    assert command[command.index("--parallel") + 1] == "1"
 
 
 def test_mtp_server_command_can_disable_flash_attention(monkeypatch):
@@ -81,8 +82,8 @@ def test_failure_capture_is_timestamped_and_appended(monkeypatch, tmp_path):
         def poll():
             return None
 
-    slm._capture_local_server_failure("deadline exceeded", _Process())
-    slm._capture_local_server_failure("deadline exceeded", _Process())
+    slm._capture_local_server_failure("deadline exceeded", _Process(), True)
+    slm._capture_local_server_failure("deadline exceeded", _Process(), True)
 
     text = events.read_text()
     assert text.count("local llama-server recovery") == 2
@@ -104,7 +105,7 @@ def test_request_failure_is_persisted_before_recovery(monkeypatch, tmp_path):
         def poll():
             return None
 
-    slm._record_local_server_request_failure("APIConnectionError: reset", _Process())
+    slm._record_local_server_request_failure("APIConnectionError: reset", _Process(), True)
 
     text = events.read_text()
     assert "local llama-server request failure" in text
@@ -114,6 +115,23 @@ def test_request_failure_is_persisted_before_recovery(monkeypatch, tmp_path):
     assert len(snapshots) == 1
     assert "2026" in snapshots[0].name
     assert snapshots[0].read_text().strip() == text.strip()
+
+
+def test_failure_diagnostics_are_not_persisted_without_opt_in(monkeypatch, tmp_path):
+    events = tmp_path / "llama-server-events.log"
+    monkeypatch.setattr(slm, "SERVER_EVENT_LOG_PATH", events)
+
+    class _Process:
+        pid = 42
+
+        @staticmethod
+        def poll():
+            return None
+
+    slm._capture_local_server_failure("deadline exceeded", _Process(), False)
+    slm._record_local_server_request_failure("APIConnectionError: reset", _Process(), False)
+
+    assert not events.exists()
 
 
 def test_diagnostic_log_rotation_keeps_five_archives(monkeypatch, tmp_path):

@@ -124,3 +124,14 @@ def test_tts_does_not_send_end_before_all_pcm():
         for _ in range(5):
             assert len(ws.receive_bytes()) == 2400 * 4
         assert ws.receive_json() == {"type": "tts_end"}
+
+
+def test_browser_heartbeat_is_accepted_without_touching_audio_ingress():
+    a = _stub_assistant()
+    client = TestClient(create_app(a))
+
+    with client.websocket_connect("/ws/satellite") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "satellite.heartbeat"})
+
+    assert a.disconnect_satellite.call_count == 1

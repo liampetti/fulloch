@@ -104,6 +104,32 @@ SCHEMA: tuple = (
     ),
     Field(
         "general",
+        "persistent_logging_enabled",
+        "bool",
+        "General",
+        False,
+        "Save application and local llama-server logs under data/logs/. Off by default; "
+        "container stdout/stderr logging remains enabled. A restart is required.",
+    ),
+    Field(
+        "general",
+        "telemetry_enabled",
+        "bool",
+        "General",
+        False,
+        "Write local, content-free performance events to data/logs/telemetry.jsonl. "
+        "Off by default; a restart is required.",
+    ),
+    Field(
+        "general",
+        "save_wakeword_wavs",
+        "bool",
+        "General",
+        False,
+        "Save timestamped openWakeWord candidate WAV files under data/logs/wake_wavs/. Contains microphone audio; off by default.",
+    ),
+    Field(
+        "general",
         "asr_context_hint",
         "bool",
         "General",
@@ -187,6 +213,14 @@ SCHEMA: tuple = (
         "Let the first connected voice satellite enter exclusive Conversation mode. "
         "It disconnects other satellites, keeps the mic live during replies, and skips the wakeword.",
         apply=HOT,
+    ),
+    Field(
+        "general",
+        "max_voice_satellites",
+        "int",
+        "Voice",
+        6,
+        "Maximum connected voice satellites. Each has its own VAD and optional wake-word state; reduce on low-RAM hosts.",
     ),
     Field(
         "general",

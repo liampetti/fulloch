@@ -127,12 +127,13 @@ def stream_generator(
     wake_probe_sink: Optional[dict] = None,
     verification_context: Optional[str] = None,
     kws_candidate_sink: Optional[dict] = None,
+    kws_wav_path_sink: Optional[dict] = None,
 ) -> Generator:
     """Yield audio buffers from a queue until a None sentinel.
 
     Queue items are
     `(buf, speech_onset_monotonic, loudness_dbfs[, provisional[, satellite_id[,
-    endpoint_monotonic[, wake_probe]]]])` tuples (everything past `buf`/`onset`
+    endpoint_monotonic[, wake_probe[, kws_candidate[, kws_wav_path]]]]]])` tuples (everything past `buf`/`onset`
     is optional
     for backward compatibility). When `onset_sink` / `loudness_sink` /
     `provisional_sink` / `audio_sink` / `satellite_id_sink` / `endpoint_wait_sink`
@@ -159,6 +160,7 @@ def stream_generator(
         endpoint_t = item[5] if len(item) > 5 else None
         wake_probe = item[6] if len(item) > 6 else False
         kws_candidate = item[7] if len(item) > 7 else False
+        kws_wav_path = item[8] if len(item) > 8 else None
         if onset_sink is not None:
             onset_sink["t"] = onset_t
         if loudness_sink is not None:
@@ -175,4 +177,6 @@ def stream_generator(
             wake_probe_sink["flag"] = wake_probe
         if kws_candidate_sink is not None:
             kws_candidate_sink["flag"] = kws_candidate
+        if kws_wav_path_sink is not None:
+            kws_wav_path_sink["path"] = kws_wav_path
         yield AsrInput(buf, verification_context) if kws_candidate else buf

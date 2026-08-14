@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from server.dashboard import create_app
 
@@ -30,7 +31,7 @@ def _hello(**overrides):
     message = {
         "type": "satellite.hello",
         "token": "device-token",
-        "protocol": {"name": "satellite-v2", "major": 2, "minor": 2},
+        "protocol": {"name": "satellite-v2", "major": 2, "minor": 3},
         "device": {"id": "kitchen-01", "name": "Kitchen"},
         "capabilities": {"audio_input": True, "audio_output": True},
     }
@@ -51,12 +52,11 @@ def test_hello_returns_exact_welcome_audio_contract():
     assert welcome == {
         "type": "satellite.welcome",
         "session_id": welcome["session_id"],
-        "protocol": {"major": 2, "minor": 2},
+        "protocol": {"major": 2, "minor": 3},
         "audio": {
             "uplink": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1, "frame_duration_ms": 20},
             "downlink": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1},
         },
-        "heartbeat_interval_ms": 15000,
     }
     assert welcome["session_id"]
     assert assistant.connect_satellite.call_args.kwargs["device_id"] == "kitchen-01"
@@ -65,7 +65,7 @@ def test_hello_returns_exact_welcome_audio_contract():
 @pytest.mark.parametrize("message", [
     {"type": "audio.frame"},
     _hello(protocol={"name": "satellite-v2", "major": 1, "minor": 1}),
-    _hello(protocol={"name": "satellite-v2", "major": 2, "minor": 3}),
+    _hello(protocol={"name": "satellite-v2", "major": 2, "minor": 2}),
 ])
 def test_invalid_initial_protocol_is_rejected(message):
     with _client(_stub_assistant()).websocket_connect("/ws/satellite-v2") as ws:
@@ -109,19 +109,44 @@ def test_bad_binary_frame_and_oversized_control_are_rejected():
         assert ws.receive_json()["code"] == "protocol"
 
 
-def test_health_report_receives_a_heartbeat_acknowledgement():
+def test_server_health_challenge_keeps_an_idle_satellite_connected(monkeypatch):
+    import server.satellite_v2 as satellite_v2
+
+    monkeypatch.setattr(satellite_v2, "SATELLITE_V2_HEALTH_CHALLENGE_SECONDS", 0.01)
+    monkeypatch.setattr(satellite_v2, "SATELLITE_V2_HEALTH_RESPONSE_SECONDS", 0.1)
+    assistant = _stub_assistant()
+    chunk_q = assistant.connect_satellite.return_value
+    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
+        ws.receive_json()
+        request = ws.receive_json()
+        assert request["type"] == "satellite.health_request"
+        ws.send_json({
+            "type": "satellite.health_response", "id": request["id"],
+            "dropped_uplink_frames": 0, "dropped_downlink_frames": 0,
+            "capture_overruns": 0, "playback_underruns": 0,
+        })
+        ws.send_bytes(np.zeros(320, dtype="<i2").tobytes())
+
+    assert chunk_q.get_nowait().shape == (320,)
+
+
+def test_server_disconnects_after_three_unanswered_health_challenges(monkeypatch):
+    import server.satellite_v2 as satellite_v2
+
+    monkeypatch.setattr(satellite_v2, "SATELLITE_V2_HEALTH_CHALLENGE_SECONDS", 0.01)
+    monkeypatch.setattr(satellite_v2, "SATELLITE_V2_HEALTH_RESPONSE_SECONDS", 0.01)
     assistant = _stub_assistant()
     with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
         ws.send_json(_hello())
         ws.receive_json()
-        ws.send_json({
-            "type": "satellite.health",
-            "dropped_uplink_frames": 0,
-            "dropped_downlink_frames": 0,
-            "capture_overruns": 0,
-            "playback_underruns": 0,
-        })
-        assert ws.receive_json() == {"type": "satellite.heartbeat"}
+        for _ in range(3):
+            assert ws.receive_json()["type"] == "satellite.health_request"
+        # The third miss is recorded only after its response deadline expires.
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+
+    assert assistant.disconnect_satellite.called
 
 
 def test_tts_is_s16le_bounded_and_completes_with_turn_id():
@@ -217,19 +242,7 @@ def test_satellite_stop_requests_an_immediate_server_stop():
     assistant.request_stop.assert_called_once()
 
 
-def test_minor_one_keeps_raw_downlink_frames():
-    assistant = _stub_assistant()
-    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
-        ws.send_json(_hello(protocol={"name": "satellite-v2", "major": 2, "minor": 1}))
-        assert ws.receive_json()["protocol"] == {"major": 2, "minor": 1}
-        tts_q = assistant.set_satellite_sink.call_args.args[1]
-        tts_q.put(("start", 16000))
-        ws.receive_json()
-        tts_q.put((np.ones(20, dtype=np.float32), None))
-        assert len(ws.receive_bytes()) == 40
-
-
-def test_minor_two_reconnect_replays_requested_tts_frames():
+def test_reconnect_replays_requested_tts_frames():
     assistant = _stub_assistant()
     client = _client(assistant)
     with client.websocket_connect("/ws/satellite-v2") as ws:
@@ -254,7 +267,7 @@ def test_minor_two_reconnect_replays_requested_tts_frames():
         assert assistant.connect_satellite.call_count == 1
 
 
-def test_minor_two_reconnect_delivers_terminal_event_queued_while_disconnected():
+def test_reconnect_delivers_terminal_event_queued_while_disconnected():
     assistant = _stub_assistant()
     client = _client(assistant)
     with client.websocket_connect("/ws/satellite-v2") as ws:

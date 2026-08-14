@@ -27,6 +27,9 @@ MTP_DRAFT_TOKENS = 3
 N_CONTEXT = 12288
 N_THREADS = 4
 N_BATCH = 512
+# Fulloch serializes local LLM calls under Assistant._turn_lock. llama-server's
+# automatic slot count otherwise provisions several independent KV caches.
+N_PARALLEL = 1
 SERVER_LOG_PATH = Path("./data/logs/llama-server.log")
 SERVER_EVENT_LOG_PATH = Path("./data/logs/llama-server-events.log")
 DIAGNOSTIC_LOG_MAX_BYTES = 10 * 1024 * 1024
@@ -92,6 +95,8 @@ def _local_server_command(
         str(n_batch),
         "--ubatch-size",
         str(n_batch),
+        "--parallel",
+        str(N_PARALLEL),
         "--n-gpu-layers",
         "-1" if torch.cuda.is_available() else "0",
         "--no-mmproj",
@@ -147,7 +152,7 @@ def _server_failure_detail(returncode: int | None = None) -> str:
         last_line = next((line.strip() for line in reversed(tail.splitlines()) if line.strip()), "")
         if last_line:
             summary += f" ({last_line[:400]})"
-    return f"{summary}. See {SERVER_LOG_PATH}"
+    return f"{summary}. See {SERVER_LOG_PATH}."
 
 
 def _wait_for_local_server(process: subprocess.Popen, port: int, timeout: float = 120.0) -> None:
@@ -177,8 +182,12 @@ def _stop_local_server(process: subprocess.Popen) -> None:
             process.kill()
 
 
-def _capture_local_server_failure(reason: str, process: subprocess.Popen) -> None:
+def _capture_local_server_failure(
+    reason: str, process: subprocess.Popen, persistent_logging_enabled: bool
+) -> None:
     """Persist diagnostics before killing a stuck local inference process."""
+    if not persistent_logging_enabled:
+        return
     SERVER_EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     _rotate_diagnostic_log(SERVER_EVENT_LOG_PATH)
     timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -209,8 +218,12 @@ def _capture_local_server_failure(reason: str, process: subprocess.Popen) -> Non
         )
 
 
-def _record_local_server_request_failure(reason: str, process: subprocess.Popen) -> None:
+def _record_local_server_request_failure(
+    reason: str, process: subprocess.Popen, persistent_logging_enabled: bool
+) -> None:
     """Persist the request failure before asynchronous recovery can be interrupted."""
+    if not persistent_logging_enabled:
+        return
     SERVER_EVENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     _rotate_diagnostic_log(SERVER_EVENT_LOG_PATH)
     timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -229,8 +242,18 @@ def _record_local_server_request_failure(reason: str, process: subprocess.Popen)
         logger.warning("Could not write llama-server failure snapshot: %s", exc)
 
 
-def _start_local_server(command: list[str], port: int) -> subprocess.Popen:
+def _start_local_server(
+    command: list[str], port: int, persistent_logging_enabled: bool
+) -> subprocess.Popen:
     """Launch a server while retaining all prior server output in one log."""
+    if not persistent_logging_enabled:
+        process = subprocess.Popen(command)
+        try:
+            _wait_for_local_server(process, port)
+        except Exception:
+            _stop_local_server(process)
+            raise
+        return process
     SERVER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     _rotate_diagnostic_log(SERVER_LOG_PATH)
     timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -254,6 +277,7 @@ def _load_local_slm(
     mtp: bool,
     flash_attn: bool,
     generation_timeout: float | None,
+    persistent_logging_enabled: bool,
 ):
     """Start llama-server and return its OpenAI-compatible client."""
     from .llm_openai import load_openai
@@ -269,9 +293,9 @@ def _load_local_slm(
     mode = "MTP speculative decoding" if effective_mtp else "standard decoding"
     logger.info("Loading %s with native llama-server (%s)...", model_path, mode)
     try:
-        process = _start_local_server(command, port)
+        process = _start_local_server(command, port, persistent_logging_enabled)
     except Exception:
-        logger.exception("Could not start llama-server; see %s", SERVER_LOG_PATH)
+        logger.exception("Could not start llama-server")
         raise
     grammar, client = load_openai(
         model="default",
@@ -294,15 +318,12 @@ def _load_local_slm(
         def recover() -> None:
             try:
                 current = client._fulloch_local_process
-                _capture_local_server_failure(reason, current)
+                _capture_local_server_failure(reason, current, persistent_logging_enabled)
                 _stop_local_server(current)
-                client._fulloch_local_process = _start_local_server(command, port)
-                logger.warning(
-                    "Restarted local llama-server after request failure; diagnostics: %s",
-                    SERVER_EVENT_LOG_PATH,
-                )
+                client._fulloch_local_process = _start_local_server(command, port, persistent_logging_enabled)
+                logger.warning("Restarted local llama-server after request failure")
             except Exception:
-                logger.exception("Could not restart local llama-server; see %s", SERVER_LOG_PATH)
+                logger.exception("Could not restart local llama-server")
             finally:
                 restart_in_progress.clear()
 
@@ -313,7 +334,7 @@ def _load_local_slm(
 
     client._fulloch_restart_local_server = restart
     client._fulloch_record_local_server_failure = lambda reason: _record_local_server_request_failure(
-        reason, client._fulloch_local_process
+        reason, client._fulloch_local_process, persistent_logging_enabled
     )
     atexit.register(stop_current)
     logger.info("Local llama-server ready (%s)", mode)
@@ -329,10 +350,13 @@ def load_slm(
     mtp: bool = False,
     flash_attn: bool = False,
     generation_timeout: float | None = None,
+    persistent_logging_enabled: bool = False,
 ):
     """Load a local GGUF through the bundled llama-server."""
     del grammar_path  # The shared OpenAI client loads GRAMMAR_FILE for constrained requests.
-    return _load_local_slm(model_path, n_ctx, n_threads, n_batch, mtp, flash_attn, generation_timeout)
+    return _load_local_slm(
+        model_path, n_ctx, n_threads, n_batch, mtp, flash_attn, generation_timeout, persistent_logging_enabled
+    )
 
 
 def generate_slm(

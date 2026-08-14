@@ -1311,6 +1311,7 @@
   let satWorkletNode = null;
   let satPlayAt = 0;        // AudioContext scheduled-end time for TTS chunks
   let satTtsSr = 24000;     // sample rate announced by server in tts_start
+  let satTtsActive = false; // false after cancel/end, so stale PCM is ignored
   let satScheduledSources = [];  // AudioBufferSourceNodes pending/playing, so tts_cancel can stop them
   let satPendingPcm = [];
   let satPendingSamples = 0;
@@ -1323,6 +1324,8 @@
   let conversationMode = conversationModeOverride === '1';
   let satPlaybackOnly = false; // replay speaker connection; no microphone stream
   let mySatelliteId = null; // this tab's own id, from the "session" frame
+  let satHeartbeatTimer = null;
+  const SAT_HEARTBEAT_MS = 15000;
 
   // Browser-satellite area picker (6b) — a one-time chat bubble asking which
   // HA zone this device sits in, so bare "turn off the lights" can default
@@ -1432,6 +1435,7 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     satScheduledSources = [];
     satPendingPcm = [];
     satPendingSamples = 0;
+    satTtsActive = false;
     satPlayAt = satAudioCtx ? satAudioCtx.currentTime : 0;
   };
 
@@ -1460,6 +1464,7 @@ registerProcessor('fulloch-resample', ResampleTo16k);
   };
 
   const satDisconnect = () => {
+    if (satHeartbeatTimer !== null) { clearInterval(satHeartbeatTimer); satHeartbeatTimer = null; }
     if (satWorkletNode) { try { satWorkletNode.disconnect(); } catch(_) {} satWorkletNode = null; }
     if (satMicStream) { satMicStream.getTracks().forEach(t => t.stop()); satMicStream = null; }
     if (satWs) { try { satWs.close(); } catch(_) {} satWs = null; }
@@ -1468,6 +1473,7 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     satScheduledSources = [];
     satPendingPcm = [];
     satPendingSamples = 0;
+    satTtsActive = false;
     satMicMuted = false;
     if (satMicResumeTimer !== null) { clearTimeout(satMicResumeTimer); satMicResumeTimer = null; }
     satHalfDuplex = true;
@@ -1595,6 +1601,11 @@ registerProcessor('fulloch-resample', ResampleTo16k);
           }
         };
       }
+      satHeartbeatTimer = setInterval(() => {
+        if (satWs === ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'satellite.heartbeat' }));
+        }
+      }, SAT_HEARTBEAT_MS);
       syncSatBtn();
       if (satPendingConversationMode !== null) {
         ws.send(JSON.stringify({ type: 'conversation_mode.set', enabled: satPendingConversationMode }));
@@ -1632,6 +1643,7 @@ registerProcessor('fulloch-resample', ResampleTo16k);
             alert(msg.message || 'Voice connection unavailable.');
           } else if (msg.type === 'tts_start') {
             satTtsSr = msg.sr || 24000;
+            satTtsActive = true;
             satPlayAt = satAudioCtx ? Math.max(satPlayAt, satAudioCtx.currentTime) : 0;
             satPlaybackGeneration += 1;
             satPendingPcm = [];
@@ -1642,13 +1654,14 @@ registerProcessor('fulloch-resample', ResampleTo16k);
               satCancelPlayback();
             } else {
               satSchedulePendingPcm();
+              satTtsActive = false;
             }
             satUnmuteMicAfterPlayback();
           }
         } catch(_) {}
       } else {
         // Binary Float32 PCM audio chunk from TTS
-        satScheduleChunk(new Float32Array(e.data));
+        if (satTtsActive) satScheduleChunk(new Float32Array(e.data));
       }
     };
 

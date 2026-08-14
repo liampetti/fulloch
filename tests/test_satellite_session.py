@@ -41,7 +41,7 @@ def _blocking_recorder(session):
 
 class TestConnectSatellite:
     def test_two_connects_produce_distinct_sessions(self):
-        a = _make_assistant()
+        a = _make_assistant(max_voice_satellites=2)
         a.audio_capture.satellite_recorder_thread = _blocking_recorder
 
         q_a = a.connect_satellite("sat-a")
@@ -53,6 +53,20 @@ class TestConnectSatellite:
         assert a.satellites["sat-a"].chunk_q is q_a
         assert a.satellites["sat-b"].chunk_q is q_b
         assert q_a is not q_b
+
+        a.disconnect_satellite("sat-a")
+        a.disconnect_satellite("sat-b")
+
+    def test_third_voice_connect_is_rejected_to_bound_model_instances(self):
+        from core.assistant import ConversationModeUnavailable
+
+        a = _make_assistant(max_voice_satellites=2)
+        a.audio_capture.satellite_recorder_thread = _blocking_recorder
+        a.connect_satellite("sat-a")
+        a.connect_satellite("sat-b")
+
+        with pytest.raises(ConversationModeUnavailable, match="maximum number"):
+            a.connect_satellite("sat-c")
 
         a.disconnect_satellite("sat-a")
         a.disconnect_satellite("sat-b")
@@ -83,6 +97,28 @@ class TestConnectSatellite:
         a.connect_satellite("my-id")
         assert a.satellites["my-id"].id == "my-id"
         a.disconnect_satellite("my-id")
+
+    def test_native_session_starts_wakeword_gated(self):
+        a = _make_assistant()
+        a.audio_capture.satellite_recorder_thread = _blocking_recorder
+
+        a.connect_satellite("native", device_id="kitchen-01")
+
+        session = a.satellites["native"]
+        assert session.last_turn_end == 0.0
+        a.audio_capture.arm_follow_up.assert_not_called()
+        a.disconnect_satellite("native")
+
+    def test_browser_initial_grace_allows_immediate_speech(self):
+        a = _make_assistant()
+        a.audio_capture.satellite_recorder_thread = _blocking_recorder
+
+        a.connect_satellite("browser", initial_grace=True)
+
+        session = a.satellites["browser"]
+        assert session.last_turn_end > 0.0
+        a.audio_capture.arm_follow_up.assert_called_once_with(session, 60)
+        a.disconnect_satellite("browser")
 
     def test_same_device_id_replaces_the_existing_session(self):
         a = _make_assistant()

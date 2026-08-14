@@ -9,7 +9,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.inference_safety import InferenceWatchdog, TtsQueueFullError, submit_tts_job
+from core.inference_safety import (
+    InferenceWatchdog,
+    TtsQueueFullError,
+    _record_timeout,
+    submit_tts_job,
+)
 
 
 def test_watchdog_records_reason_then_exits(monkeypatch):
@@ -31,6 +36,16 @@ def test_watchdog_does_not_exit_after_completed_inference(monkeypatch):
         pass
 
     assert not exited.wait(0.05)
+
+
+def test_watchdog_diagnostic_file_requires_persistent_logging(monkeypatch, tmp_path):
+    diagnostic = tmp_path / "inference_watchdog.log"
+    monkeypatch.setattr("core.inference_safety._DIAGNOSTIC_PATH", diagnostic)
+    monkeypatch.delenv("FULLOCH_PERSISTENT_LOGGING_ENABLED", raising=False)
+
+    _record_timeout("test inference")
+
+    assert not diagnostic.exists()
 
 
 def test_tts_job_admission_is_nonblocking_when_full():

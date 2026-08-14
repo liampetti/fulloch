@@ -12,7 +12,7 @@ speak:
 
 chat:
   name: Chat
-  description: Send a query through Fulloch's full agent loop (tools + SLM). The response goes to the dashboard.
+  description: Send a query through Fulloch's full agent loop (tools + SLM), then speak the response.
   fields:
     text:
       name: Query

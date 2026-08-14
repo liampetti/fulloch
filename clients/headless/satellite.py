@@ -54,7 +54,6 @@ class HeadlessSatellite:
         self._turn_id = None
         self._next_seq = 0
         self.downlink_sample_rate = DOWNLINK_SAMPLE_RATE
-        self.heartbeat_interval_s = 15.0
         self.full_duplex = bool(cfg["audio"].get("full_duplex", False))
         self._mic_muted = False
         self._health = {
@@ -102,15 +101,13 @@ class HeadlessSatellite:
 
             send_task = asyncio.create_task(self._send_audio(ws))
             recv_task = asyncio.create_task(self._recv_loop(ws))
-            health_task = asyncio.create_task(self._send_health(ws))
             try:
                 done, pending = await asyncio.wait(
-                    [send_task, recv_task, health_task], return_when=asyncio.FIRST_COMPLETED
+                    [send_task, recv_task], return_when=asyncio.FIRST_COMPLETED
                 )
             except asyncio.CancelledError:
                 send_task.cancel()
                 recv_task.cancel()
-                health_task.cancel()
                 try:
                     await ws.close()
                 except Exception:
@@ -131,7 +128,7 @@ class HeadlessSatellite:
         message = {
             "type": "satellite.hello",
             "token": self.cfg["server"].get("token"),
-            "protocol": {"name": "satellite-v2", "major": 2, "minor": 2},
+            "protocol": {"name": "satellite-v2", "major": 2, "minor": 3},
             "device": {
                 "id": sat.get("id", "headless-satellite"),
                 "name": sat.get("room", "Headless satellite"),
@@ -168,17 +165,7 @@ class HeadlessSatellite:
         }
         if uplink != expected_uplink or downlink != expected_downlink:
             raise websockets.exceptions.WebSocketProtocolError("unsupported satellite-v2 audio contract")
-        interval_ms = welcome.get("heartbeat_interval_ms")
-        if not isinstance(interval_ms, int) or interval_ms <= 0:
-            raise websockets.exceptions.WebSocketProtocolError("welcome missing heartbeat interval")
         self.downlink_sample_rate = downlink["sample_rate_hz"]
-        self.heartbeat_interval_s = interval_ms / 1000
-
-    async def _send_health(self, ws) -> None:
-        """Keep the server session alive even while no audio is being played."""
-        while True:
-            await asyncio.sleep(self.heartbeat_interval_s)
-            await ws.send(json.dumps({"type": "satellite.health", **self._health}))
 
     async def _set_mic_muted(self, ws, muted: bool) -> None:
         """Match the device's local capture gate to the server session state."""
@@ -286,6 +273,11 @@ class HeadlessSatellite:
             elif mtype == "tts.audio":
                 if msg.get("turn_id") == self._turn_id and isinstance(msg.get("seq"), int):
                     expected_audio = msg
+            elif mtype == "satellite.health_request":
+                request_id = msg.get("id")
+                if not isinstance(request_id, str) or not request_id:
+                    raise websockets.exceptions.WebSocketProtocolError("invalid health request")
+                await ws.send(json.dumps({"type": "satellite.health_response", "id": request_id, **self._health}))
             elif mtype == "conversation.transcript":
                 print(f"Heard: {msg.get('text')}")
             elif mtype == "conversation.response":

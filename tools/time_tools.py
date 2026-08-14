@@ -11,7 +11,10 @@ import utils.local_time as _local_time
 
 from .tool_registry import tool
 
+MAX_ACTIVE_TIMERS = 32
+MAX_TIMER_SECONDS = 7 * 24 * 60 * 60
 active_timers: Dict[str, threading.Timer] = {}
+_timers_lock = threading.Lock()
 
 # Injected by Assistant._load_models so a completed timer can speak its
 # reminder through the WebSocket satellite. The local-soundcard beep path is
@@ -194,7 +197,8 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
             raise ValueError(f"Unknown duration unit: {unit.strip()!r}")
 
     def on_timer_complete(timer_id: str, reminder: Optional[str]):
-        active_timers.pop(timer_id, None)
+        with _timers_lock:
+            active_timers.pop(timer_id, None)
         text = reminder or "Your timer is up."
         if _speak_proactive:
             try:
@@ -206,14 +210,17 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
 
     try:
         seconds = parse_duration(duration)
-        timer_id = f"timer_{len(active_timers) + 1}"
-
-        timer = threading.Timer(seconds, on_timer_complete, args=[timer_id, message])
-        timer.daemon = True
-        timer.start_time = time.time()
-        timer.start()
-
-        active_timers[timer_id] = timer
+        if seconds > MAX_TIMER_SECONDS:
+            return "Error: Timers can be at most 7 days."
+        with _timers_lock:
+            if len(active_timers) >= MAX_ACTIVE_TIMERS:
+                return "Error: Too many active timers. Cancel one before starting another."
+            timer_id = f"timer_{time.monotonic_ns()}"
+            timer = threading.Timer(seconds, on_timer_complete, args=[timer_id, message])
+            timer.daemon = True
+            timer.start_time = time.time()
+            active_timers[timer_id] = timer
+            timer.start()
 
         if seconds >= 3600:
             hours = seconds // 3600
@@ -241,10 +248,10 @@ def cancel_timer(timer_id: str) -> str:
     Returns:
         Confirmation message
     """
-    if timer_id in active_timers:
-        timer = active_timers[timer_id]
+    with _timers_lock:
+        timer = active_timers.pop(timer_id, None)
+    if timer is not None:
         timer.cancel()
-        del active_timers[timer_id]
         return f"Timer {timer_id} cancelled"
     return f"Timer {timer_id} not found"
 
@@ -280,21 +287,23 @@ def get_timer_status(timer_id: Optional[str] = None) -> str:
         else:
             return f"{remaining} seconds"
 
-    if not active_timers:
+    with _timers_lock:
+        timers = dict(active_timers)
+    if not timers:
         return "No active timers"
 
     if timer_id:
-        if timer_id not in active_timers:
+        if timer_id not in timers:
             return f"Timer {timer_id} not found"
 
-        timer = active_timers[timer_id]
+        timer = timers[timer_id]
         remaining = max(0, timer.interval - (time.time() - timer.start_time))
         time_str = format_time_remaining(remaining)
         return f"Timer {timer_id} has {time_str} remaining"
 
     # Show status of all timers
     statuses = []
-    for tid, timer in active_timers.items():
+    for tid, timer in timers.items():
         remaining = max(0, timer.interval - (time.time() - timer.start_time))
         time_str = format_time_remaining(remaining)
         statuses.append(f"{tid}: {time_str}")

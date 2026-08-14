@@ -12,6 +12,8 @@ def _make_seed(tmp_path):
     seed = tmp_path / "seed"
     (seed / "grammars").mkdir(parents=True)
     (seed / "grammars" / "agent.gbnf").write_text('root ::= "x"')
+    (seed / "wakeword").mkdir()
+    (seed / "wakeword" / "hey_atticus_v0.3.onnx").write_bytes(b"wakeword model")
     (seed / "config.example.yml").write_text("general:\n  wakeword: hey atticus\n")
     return seed
 
@@ -29,6 +31,20 @@ def test_seeds_config_and_grammar_on_first_run(tmp_path):
     ensure_scaffolding(str(data), seed_dir=str(seed))
     assert (data / "config.yml").read_text().startswith("general:")
     assert (data / "models" / "grammars" / "agent.gbnf").is_file()
+
+
+def test_seeds_default_wakeword_model_without_overwriting_a_replacement(tmp_path):
+    seed = _make_seed(tmp_path)
+    data = tmp_path / "data"
+
+    ensure_scaffolding(str(data), seed_dir=str(seed))
+
+    wakeword = data / "models" / "wakeword" / "hey_atticus_v0.3.onnx"
+    assert wakeword.read_bytes() == b"wakeword model"
+
+    wakeword.write_bytes(b"user replacement")
+    ensure_scaffolding(str(data), seed_dir=str(seed))
+    assert wakeword.read_bytes() == b"user replacement"
 
 
 def test_seeds_bundled_voice_references_without_overwriting_user_voices(tmp_path):

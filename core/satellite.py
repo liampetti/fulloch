@@ -96,6 +96,10 @@ class SatelliteSession:
     kws_candidate: bool = False
     kws_score: float = 0.0
     kws_detected_at: float = 0.0
+    kws_wav_path: Optional[str] = None
+    # The acoustic gate only evaluates active VAD speech. This keeps room audio
+    # from repeatedly triggering expensive ASR verification while idle.
+    kws_speech_active: bool = False
     # Onset timestamp of a soft-endpoint provisional that was committed early.
     # The hard VAD endpoint fires ~200ms later for the same speech; without this
     # guard the duplicate transcription is treated as a barge-in and cancels the

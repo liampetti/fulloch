@@ -10,7 +10,7 @@ Thank you for your interest in contributing to Fulloch! This document provides g
    ```bash
    python -m venv .venv
    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   pip install -r requirements.txt   # full GPU stack (tiny/CPU set: requirements-cpu.txt)
+   pip install -r requirements.txt   # full GPU stack (CPU stack: requirements-cpu.txt)
    # Install special packages (see requirements.txt for details)
    pip install --no-deps git+https://github.com/liampetti/Qwen3-TTS-streaming.git@97da215
    pip install --no-build-isolation --no-deps git+https://github.com/Dao-AILab/flash-attention.git@ef9e6a6
@@ -36,6 +36,7 @@ docker run -d \
   --name fulloch-ai \
   --restart unless-stopped \
   -p 8765:8765 \
+  -p 8766:8766 \
   -e DASHBOARD_HOST=0.0.0.0 \
   -v ./data:/app/data:rw \
   fulloch:cpu

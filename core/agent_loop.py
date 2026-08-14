@@ -37,6 +37,7 @@ from utils.prompts import get_agent_system_prompt, get_thinking_system_prompt
 
 from .satellite_context import current_satellite_id as _current_satellite_id
 from .slm import ContextExhaustedError, RemoteUnreachable
+from .telemetry import event as telemetry_event
 from .text_utils import clean_for_tts
 from .thinking_watchdog import ThinkingWatchdog
 
@@ -339,6 +340,8 @@ class AgentLoop:
                             daemon=True,
                         ).start()
                 logger.debug(f"Agent call (iter {iteration})")
+                telemetry_event("llm_start", iteration=iteration, source=source, history_entries=len(history))
+                llm_started_at = time.monotonic()
                 try:
                     # Periodic progress stalls so a slow generation isn't silent
                     # — esp. a remote LLM, where a long reply can be many seconds
@@ -382,9 +385,18 @@ class AgentLoop:
                             history=host._history_for(self.satellite),
                             stats=stats,
                         )
+                    telemetry_event(
+                        "llm_complete",
+                        iteration=iteration,
+                        source=source,
+                        seconds=round(time.monotonic() - llm_started_at, 3),
+                        response_chars=len(emission_text or ""),
+                    )
                 except ContextExhaustedError:
+                    telemetry_event("llm_error", iteration=iteration, source=source, error="context_exhausted")
                     return host._context_exhausted_reply()
                 except RemoteUnreachable as e:
+                    telemetry_event("llm_error", iteration=iteration, source=source, error="unreachable")
                     logger.warning("%s; regex-only this turn: %s", _llm_unavailable_label(host), e)
                     host._note_llm_remote_status(False, str(e))
                     if first_emission is None and regex_emission is None:

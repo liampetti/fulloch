@@ -83,6 +83,7 @@ config.yml
 credentials.json
 scripts/wakeword/data
 data/config.yml
+data/logs/*
 
 # =============================================================================
 # Logs and Databases
@@ -91,6 +92,7 @@ data/config.yml
 *.sqlite
 *.db
 *_db/
+telemetry.jsonl
 
 # =============================================================================
 # OS Generated

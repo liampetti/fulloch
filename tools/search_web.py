@@ -146,6 +146,9 @@ def extract_main_text(html: str) -> str:
     return text if len(text) >= MIN_BODY_CHARS else ""
 
 
+MAX_WEBSITE_BYTES = 1_000_000
+
+
 def fetch_website_summary(url: str, fallback: str = "", max_length: int = SNIPPET_CHAR_CAP) -> str:
     """Main text of `url` truncated to `max_length`.
 
@@ -154,9 +157,14 @@ def fetch_website_summary(url: str, fallback: str = "", max_length: int = SNIPPE
     and returns "" only when both are empty.
     """
     try:
-        resp = requests.get(url, timeout=10, headers=_BROWSER_HEADERS)
+        resp = requests.get(url, timeout=10, headers=_BROWSER_HEADERS, stream=True)
         resp.raise_for_status()
-        body = extract_main_text(resp.text)
+        raw = bytearray()
+        for part in resp.iter_content(65536):
+            raw.extend(part)
+            if len(raw) > MAX_WEBSITE_BYTES:
+                raise ValueError("website response exceeds size limit")
+        body = extract_main_text(raw.decode(resp.encoding or "utf-8", errors="replace"))
         if body:
             return body[:max_length]
     except Exception:

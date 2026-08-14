@@ -62,15 +62,22 @@ nothing in the timeline surprises you:
    shows the URL banner with a Copy button and a one-line note about
    the self-signed-cert warning. Click through the warning; it's
    expected for a private LAN install.
-3. **Walk the wizard.** Four steps: pick a thinking mode (regex
-   simple / full GPU / remote LLM), pick a name and voice, optionally
-   connect Home Assistant and SearXNG, optionally connect Obsidian.
+3. **Walk the wizard.** Pick a thinking mode (regex simple / full GPU /
+   remote LLM), set a name and voice, optionally connect Home Assistant and
+   SearXNG, then optionally connect Obsidian.
 4. **Models download.** This is the long bit. The CPU stack pulls
      roughly 5 GB (Qwen3 1.7B ONNX + Pocket TTS's English ONNX voice-cloning
      bundle). Kokoro 82M is available as a smaller built-in-voice alternative. The GPU
     stack pulls roughly 13 GB (Qwen3 1.7B PyTorch ASR + Qwen3 1.7B PyTorch TTS + the
    9B language model).
-5. **Startup** Once models are downloaded the assistant can go through startup, this will happen everytime you stop and restart Fulloch. This should only take about a minute or two with the Qwen3 TTS taking the longest to warm-up. Once everything is loaded you are presented with the chat screen. You can type text or click to activate voice mode. Selecting "Always Listen" starts exclusive Conversation mode: it skips the wakeword, keeps the mic live during replies, and disconnects other voice satellites until you turn it off (default wakeword is 'Hey Atticus').
+5. **Startup.** Once models are downloaded, Fulloch loads them on this and every
+   later restart. This normally takes a minute or two; Qwen3 TTS takes longest
+   to warm up. The wizard then shows the final **Almost done** screen, where you
+   can enter your name and an optional dashboard password before opening the
+   dashboard. You can type text or click to activate voice mode. Selecting
+   **Always Listen** starts exclusive Conversation mode: it skips the wakeword,
+   keeps the mic live during replies, and disconnects other voice satellites
+   until you turn it off (the default wakeword is “Hey Atticus”).
 
 ## Trusted LAN HTTPS
 
@@ -127,11 +134,13 @@ satellite, for example: "Tell downstairs that dinner is ready." Browser
 satellites use their selected Home Assistant area as their name; native
 satellites use their configured room name.
 
-Native clients use `/ws/satellite-v2` protocol 2.2. The first message is
+Native clients use `/ws/satellite-v2` protocol 2.3. The first message is
 `satellite.hello`; the server replies with `satellite.welcome`. Uplink audio is
 fixed at 16 kHz mono `pcm_s16le` in exactly 640-byte (20 ms) frames; downlink is
-the same format in frames of at most 4 KiB. Clients send `satellite.health` at
-the negotiated 15-second heartbeat interval. Protocol minor 2 adds sequenced
+the same format in frames of at most 4 KiB. Every 60 seconds the server sends a
+`satellite.health_request`; clients must return its ID in a
+`satellite.health_response`. Three unanswered requests disconnect the native
+satellite. Protocol minor 2 added sequenced
 `tts.audio` frames and a two-second replay window after a same-device reconnect.
 See the [headless client protocol reference](clients/headless/README.md#satellite-v2-protocol).
 

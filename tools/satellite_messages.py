@@ -7,6 +7,8 @@ from core.satellite_context import get_current_assistant
 
 from .tool_registry import tool
 
+_announcement_slots = threading.BoundedSemaphore(2)
+
 
 def _normalise_name(value: str) -> str:
     return " ".join(re.findall(r"\w+", value.lower()))
@@ -58,10 +60,14 @@ def send_satellite_message(target: str, message: str) -> str:
     text = message.strip()
     if not text:
         return "Reactive question: Ask what message to send."
-    threading.Thread(
-        target=assistant.speak_proactive,
-        kwargs={"text": text, "satellite_id": satellite_id},
-        daemon=True,
-        name="satellite-message",
-    ).start()
+    if not _announcement_slots.acquire(blocking=False):
+        return "Reactive question: The assistant is already delivering announcements. Try again shortly."
+
+    def _deliver() -> None:
+        try:
+            assistant.speak_proactive(text=text, satellite_id=satellite_id)
+        finally:
+            _announcement_slots.release()
+
+    threading.Thread(target=_deliver, daemon=True, name="satellite-message").start()
     return f"Announcement queued for {name}."

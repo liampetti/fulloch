@@ -5,7 +5,6 @@ exposes:
   - sensor.fulloch_status / sensor.fulloch_last_utterance / sensor.fulloch_last_response
   - switch.fulloch_mic
   - fulloch.speak / fulloch.chat services
-  - notify.fulloch notification target
   - fulloch_wakeword_detected / fulloch_turn_ended HA events (via SSE)
 """
 

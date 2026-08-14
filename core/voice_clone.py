@@ -83,6 +83,24 @@ def _load_model():
         return _model
 
 
+def unload_model() -> None:
+    """Release VoiceDesign after an on-demand preview.
+
+    It is separate from the runtime voice-clone model and cannot coexist on a
+    tightly provisioned GPU for the remainder of the assistant process.
+    """
+    global _model
+    with _model_lock:
+        _model = None
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
 def generate(instruct: str, phrase: Optional[str] = None) -> tuple:
     """Generate a voice-design sample; cache it for `save_last`. Returns (audio, sr)."""
     global _last

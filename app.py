@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import yaml
 
 # Load env before anything reads os.environ. Root .env covers compose-level
-# vars (FULLOCH_VERSION, DASHBOARD_PORT, etc.); credentials.json covers runtime
+# vars (FULLOCH_VERSION, etc.); credentials.json covers runtime
 # secrets (ha_token, llm_api_key, dashboard_password, …) persisted in the Docker
 # volume so a data-folder copy transfers everything to a new machine.
 from dotenv import load_dotenv
@@ -54,10 +54,14 @@ _LOG_LEVELS = {
 }
 _log_level_name = str(_GENERAL.get("log_level", "info")).lower()
 LOG_LEVEL = _LOG_LEVELS.get(_log_level_name, logging.INFO)
+os.environ["FULLOCH_PERSISTENT_LOGGING_ENABLED"] = (
+    "1" if _GENERAL.get("persistent_logging_enabled", False) else "0"
+)
 # Developer-only switch for diagnosing OpenAI-compatible HTTP traffic. Leave
 # this off for normal debug sessions: the SDK logs full request options.
 DEBUG_LLM_HTTP_LOGS = False
 APP_LOG_PATH = Path("./data/logs/fulloch.log")
+TELEMETRY_LOG_PATH = Path("./data/logs/telemetry.jsonl")
 LOG_MAX_BYTES = 10 * 1024 * 1024
 LOG_BACKUP_COUNT = 5
 
@@ -86,23 +90,41 @@ _log_formatter = _ConfiguredTimezoneFormatter(
 _log_handler = logging.StreamHandler()
 _log_handler.setFormatter(_log_formatter)
 _log_handlers: list[logging.Handler] = [_log_handler]
-try:
-    APP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _app_log_handler = RotatingFileHandler(
-        APP_LOG_PATH,
-        maxBytes=LOG_MAX_BYTES,
-        backupCount=LOG_BACKUP_COUNT,
-        encoding="utf-8",
-    )
-    _app_log_handler.setFormatter(_log_formatter)
-    _log_handlers.append(_app_log_handler)
-except OSError as exc:
-    # Keep the assistant usable when its persistent data directory is unavailable.
-    _log_handler.emit(logging.makeLogRecord({
-        "name": __name__, "levelno": logging.WARNING, "levelname": "WARNING",
-        "msg": "Could not enable application file logging: %s", "args": (exc,),
-    }))
+if _GENERAL.get("persistent_logging_enabled", False):
+    try:
+        APP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _app_log_handler = RotatingFileHandler(
+            APP_LOG_PATH,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        _app_log_handler.setFormatter(_log_formatter)
+        _log_handlers.append(_app_log_handler)
+    except OSError as exc:
+        # Keep the assistant usable when its persistent data directory is unavailable.
+        _log_handler.emit(logging.makeLogRecord({
+            "name": __name__, "levelno": logging.WARNING, "levelname": "WARNING",
+            "msg": "Could not enable application file logging: %s", "args": (exc,),
+        }))
 logging.basicConfig(level=LOG_LEVEL, handlers=_log_handlers)
+if _GENERAL.get("telemetry_enabled", False):
+    try:
+        _telemetry_handler = RotatingFileHandler(
+            TELEMETRY_LOG_PATH,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        _telemetry_handler.setFormatter(logging.Formatter("%(message)s"))
+        _telemetry_logger = logging.getLogger("fulloch.telemetry")
+        _telemetry_logger.setLevel(logging.INFO)
+        _telemetry_logger.addHandler(_telemetry_handler)
+        logging.getLogger(__name__).info("Telemetry file logging enabled: %s", TELEMETRY_LOG_PATH)
+    except OSError as exc:
+        logging.getLogger(__name__).warning("Could not enable telemetry file logging: %s", exc)
+else:
+    logging.getLogger(__name__).info("Telemetry file logging disabled by general.telemetry_enabled")
 logger = logging.getLogger(__name__)
 if _log_level_name not in _LOG_LEVELS:
     logger.warning(f"Unknown general.log_level {_log_level_name!r}; using info")
@@ -202,6 +224,7 @@ _ASSISTANT_OPTION_KEYS = (
     "whisper_gain",
     "barge_in",
     "conversation_mode_default",
+    "max_voice_satellites",
     "barge_in_threshold_dbfs",
     "follow_up_time",
     "asr_language",
@@ -212,6 +235,8 @@ _ASSISTANT_OPTION_KEYS = (
     "vad_endpoint_silence_ms",
     "vad_min_speech_ms",
     "vad_soft_endpoint_silence_ms",
+    "save_wakeword_wavs",
+    "persistent_logging_enabled",
     "personality",
     "personality_custom",
 )

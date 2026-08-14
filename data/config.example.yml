@@ -9,6 +9,9 @@ general:
 
   asr_language: "English"        # English only for now
   log_level: "info"              # debug | info | warning | error
+  persistent_logging_enabled: false # Save application and local llama-server logs under data/logs/ (restart required).
+  telemetry_enabled: false        # Write local content-free performance events to data/logs/telemetry.jsonl (restart required).
+  save_wakeword_wavs: false       # Save timestamped openWakeWord candidate audio to data/logs/wake_wavs/ (restart required; diagnostic audio).
 
   asr_context_hint: true         # bias ASR decoder toward your wakeword spelling
   # asr_context_terms:            # extra proper nouns/names (max 10)
@@ -24,6 +27,7 @@ general:
   # personality_custom: "Warm and reassuring; use pauses sparingly."  # Used when personality: custom.
   barge_in: "wakeword"           # off | wakeword — interrupt mid-response
   conversation_mode_default: false # exclusive full-duplex, no-wakeword session; disconnects other satellites until disabled.
+  max_voice_satellites: 6         # Concurrent voice satellites; reduce on low-RAM hosts (minimum 1). Restart required.
   follow_up_time: "5s"           # wakeword-free reply window after TTS; "0s" disables.
 
   # === Endpointing ==========================================================
@@ -80,8 +84,8 @@ general:
 #     # pocket-tts-pytorch       # Pocket TTS PyTorch (GPU, experimental streaming English voice clone; HF_TOKEN + accepted terms required)
 #     # pocket-tts-gguf          # Pocket TTS Q8_0 GGUF (GPU, experimental English voice clone)
 #     # qwen-small               # Qwen3 0.6B PyTorch (GPU)
-#     # kokoro-onnx              # Kokoro 82M (default CPU)
-#     # pocket-tts-onnx          # Pocket TTS ONNX (experimental CPU one-shot WAV voice clone)
+#     # kokoro-onnx              # Kokoro 82M (CPU built-in voices)
+#     # pocket-tts-onnx          # Pocket TTS ONNX (default CPU; experimental one-shot WAV voice clone)
 #   llm:
 #     backend: local             # local | external | none (regex-only commands)
 #     local_model: qwen          # qwen (recommended) | gemma | custom

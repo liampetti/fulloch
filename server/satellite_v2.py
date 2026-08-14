@@ -23,14 +23,15 @@ if TYPE_CHECKING:
 
 
 SATELLITE_V2_PROTOCOL_MAJOR = 2
-SATELLITE_V2_PROTOCOL_MINOR = 2
+SATELLITE_V2_PROTOCOL_MINOR = 3
 SATELLITE_V2_CONTROL_MAX_BYTES = 2 * 1024
 SATELLITE_V2_UPLINK_BYTES = 640
 SATELLITE_V2_DOWNLINK_MAX_BYTES = 4 * 1024
 SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ = 16000
 SATELLITE_V2_DOWNLINK_INITIAL_BUFFER_SECONDS = 1.0
-SATELLITE_V2_HEARTBEAT_MS = 15_000
-SATELLITE_V2_HEARTBEAT_MISSES = 3
+SATELLITE_V2_HEALTH_CHALLENGE_SECONDS = 60
+SATELLITE_V2_HEALTH_RESPONSE_SECONDS = 10
+SATELLITE_V2_HEALTH_MAX_MISSES = 3
 SATELLITE_V2_RESUME_SECONDS = 2.0
 # PCM S16LE at 16 kHz: retain three seconds, rounded up to full downlink frames.
 SATELLITE_V2_REPLAY_FRAMES = 24
@@ -122,8 +123,7 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
         if (
             not isinstance(protocol, dict) or protocol.get("name") != "satellite-v2"
             or protocol.get("major") != SATELLITE_V2_PROTOCOL_MAJOR
-            or not isinstance(protocol.get("minor"), int)
-            or not 1 <= protocol["minor"] <= SATELLITE_V2_PROTOCOL_MINOR
+            or protocol.get("minor") != SATELLITE_V2_PROTOCOL_MINOR
             or not isinstance(device, dict)
             or not isinstance(device.get("id"), str) or not device["id"].strip()
             or not isinstance(capabilities, dict)
@@ -138,7 +138,7 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
 
         resume = first.get("resume")
         session = None
-        if protocol["minor"] >= 2 and isinstance(resume, dict):
+        if isinstance(resume, dict):
             resume_id, resume_turn_id, next_seq = resume.get("session_id"), resume.get("turn_id"), resume.get("next_seq")
             candidate = recovery_sessions.get(resume_id) if isinstance(resume_id, str) else None
             if (
@@ -186,40 +186,31 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
         session.connection = connection_id
         satellite_id = session.satellite_id
         tts_q, protocol_events = session.tts_q, session.protocol_events
-        supports_resume = protocol["minor"] >= 2
-        negotiated_minor = min(protocol["minor"], SATELLITE_V2_PROTOCOL_MINOR)
         await ws.send_json({
             "type": "satellite.welcome", "session_id": satellite_id,
-            "protocol": {"major": SATELLITE_V2_PROTOCOL_MAJOR, "minor": negotiated_minor},
+            "protocol": {"major": SATELLITE_V2_PROTOCOL_MAJOR, "minor": SATELLITE_V2_PROTOCOL_MINOR},
             "audio": {
                 "uplink": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1, "frame_duration_ms": 20},
                 "downlink": {"encoding": "pcm_s16le", "sample_rate_hz": SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ, "channels": 1},
             },
-            "heartbeat_interval_ms": SATELLITE_V2_HEARTBEAT_MS,
         })
-        if supports_resume and session.turn_id is not None:
+        if session.turn_id is not None:
             await ws.send_json({"type": "assistant.state", "state": "speaking", "turn_id": session.turn_id})
             requested_seq = resume["next_seq"] if isinstance(resume, dict) else session.next_seq
             for frame_turn_id, seq, frame in session.replay:
                 if frame_turn_id == session.turn_id and seq >= requested_seq:
                     await ws.send_json({"type": "tts.audio", "turn_id": frame_turn_id, "seq": seq, "bytes": len(frame)})
                     await ws.send_bytes(frame)
-        last_health_at = time.monotonic()
+        pending_health_id: Optional[str] = None
+        health_response = asyncio.Event()
+        health_failed = False
 
         async def receive() -> None:
-            nonlocal last_health_at
-            timeout = SATELLITE_V2_HEARTBEAT_MS * SATELLITE_V2_HEARTBEAT_MISSES / 1000
+            nonlocal pending_health_id
             try:
                 while True:
-                    try:
-                        msg = await asyncio.wait_for(ws.receive(), timeout)
-                    except asyncio.TimeoutError:
-                        await reject("heartbeat_timeout", "satellite.health was not received")
-                        return
+                    msg = await ws.receive()
                     if msg.get("type") == "websocket.disconnect":
-                        return
-                    if time.monotonic() - last_health_at > timeout:
-                        await reject("heartbeat_timeout", "satellite.health was not received")
                         return
                     if "bytes" in msg:
                         raw = msg["bytes"]
@@ -253,21 +244,51 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                     elif mtype == "conversation_mode.disable":
                         context.assistant.set_satellite_conversation_mode(satellite_id, False)
                         await ws.send_json({"type": "conversation_mode.changed", "enabled": False, "owner": False, "session_id": data.get("session_id")})
-                    elif mtype == "satellite.health":
+                    elif mtype == "satellite.health_response":
+                        response_id = data.get("id")
                         keys = ("dropped_uplink_frames", "dropped_downlink_frames", "capture_overruns", "playback_underruns")
-                        if not all(isinstance(data.get(key), int) and data[key] >= 0 for key in keys):
-                            await reject("protocol", "invalid satellite.health")
+                        if (
+                            not isinstance(response_id, str)
+                            or not pending_health_id
+                            or not secrets.compare_digest(response_id, pending_health_id)
+                            or not all(isinstance(data.get(key), int) and data[key] >= 0 for key in keys)
+                        ):
+                            await reject("protocol", "invalid satellite.health_response")
                             return
-                        last_health_at = time.monotonic()
-                        try:
-                            protocol_events.put_nowait({"type": "satellite.heartbeat"})
-                        except queue.Full:
-                            pass
+                        health_response.set()
                     else:
                         await reject("protocol", "unsupported control message")
                         return
             except WebSocketDisconnect:
                 return
+
+        async def challenge_health() -> None:
+            nonlocal health_failed, pending_health_id
+            misses = 0
+            while True:
+                await asyncio.sleep(SATELLITE_V2_HEALTH_CHALLENGE_SECONDS)
+                pending_health_id = secrets.token_hex(16)
+                health_response.clear()
+                try:
+                    protocol_events.put_nowait({"type": "satellite.health_request", "id": pending_health_id})
+                except queue.Full:
+                    logger.warning("Satellite %s health request queue is full", satellite_id)
+                    return
+                try:
+                    await asyncio.wait_for(health_response.wait(), SATELLITE_V2_HEALTH_RESPONSE_SECONDS)
+                    misses = 0
+                except asyncio.TimeoutError:
+                    misses += 1
+                    logger.warning(
+                        "Satellite %s missed health challenge %d/%d",
+                        satellite_id, misses, SATELLITE_V2_HEALTH_MAX_MISSES,
+                    )
+                    if misses >= SATELLITE_V2_HEALTH_MAX_MISSES:
+                        health_failed = True
+                        await ws.close(code=1001, reason="health challenge timeout")
+                        return
+                finally:
+                    pending_health_id = None
 
         async def send() -> None:
             while True:
@@ -276,7 +297,7 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                 except queue.Empty:
                     event = None
                 if event is not None:
-                    if event.get("type") == "satellite.heartbeat":
+                    if event.get("type") == "satellite.health_request":
                         await ws.send_json(event)
                     elif event.get("type") == "assistant.state":
                         payload = {key: value for key, value in event.items() if key != "satellite_id"}
@@ -328,8 +349,7 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                                 due_at = session.pace_origin + session.sent_audio_seconds - SATELLITE_V2_DOWNLINK_INITIAL_BUFFER_SECONDS
                                 if due_at > now:
                                     await asyncio.sleep(due_at - now)
-                            if supports_resume:
-                                await ws.send_json({"type": "tts.audio", "turn_id": session.turn_id, "seq": seq, "bytes": len(frame)})
+                            await ws.send_json({"type": "tts.audio", "turn_id": session.turn_id, "seq": seq, "bytes": len(frame)})
                             await ws.send_bytes(frame)
                             session.sent_audio_seconds += frame_seconds
                 except Exception as error:
@@ -338,8 +358,9 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
 
         recv_task = asyncio.create_task(receive())
         send_task = asyncio.create_task(send())
+        health_task = asyncio.create_task(challenge_health())
         try:
-            done, pending = await asyncio.wait([recv_task, send_task], return_when=asyncio.FIRST_COMPLETED)
+            done, pending = await asyncio.wait([recv_task, send_task, health_task], return_when=asyncio.FIRST_COMPLETED)
             for task in pending:
                 task.cancel()
                 try:
@@ -352,5 +373,11 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
             # an old handler tear down its replacement.
             if session.connection == connection_id:
                 session.connection = None
-                session.expires_at = time.monotonic() + SATELLITE_V2_RESUME_SECONDS
-                session.cleanup_task = asyncio.create_task(expire_session(session))
+                if health_failed:
+                    recovery_sessions.pop(session.satellite_id, None)
+                    context.assistant.unregister_turn_listener(session.listener)
+                    context.assistant.disconnect_satellite(session.satellite_id)
+                    context.assistant.set_satellite_sink(session.satellite_id, None)
+                else:
+                    session.expires_at = time.monotonic() + SATELLITE_V2_RESUME_SECONDS
+                    session.cleanup_task = asyncio.create_task(expire_session(session))

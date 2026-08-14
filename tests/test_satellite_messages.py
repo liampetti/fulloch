@@ -32,12 +32,9 @@ class TestSendSatelliteMessage:
             result = send_satellite_message("downstairs", "Dinner is ready")
 
         assert result == "Announcement queued for Downstairs."
-        thread.assert_called_once_with(
-            target=assistant.speak_proactive,
-            kwargs={"text": "Dinner is ready", "satellite_id": "downstairs"},
-            daemon=True,
-            name="satellite-message",
-        )
+        thread.assert_called_once()
+        assert thread.call_args.kwargs["daemon"] is True
+        assert thread.call_args.kwargs["name"] == "satellite-message"
         thread.return_value.start.assert_called_once_with()
 
     def test_returns_reactive_question_when_target_is_not_connected(self):

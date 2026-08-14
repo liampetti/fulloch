@@ -30,6 +30,8 @@ Fulloch is your privacy-focused local voice assistant running on your own PC or 
 
 > **Pocket TTS PyTorch:** The experimental GPU streaming option uses Kyutai's official gated model. Accept its Hugging Face terms before selecting it. If the download is denied, the wizard prompts for a Hugging Face read token, saves it in `data/credentials.json`, and retries. See [Model Sources and Licenses](MODELS.md#hugging-face-access).
 
+> **openWakeWord feature extractors:** The optional wakeword gate includes unmodified pre-trained feature extractor models from openWakeWord v0.5.1 under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/), not Fulloch's MIT license. See [Model Sources and Licenses](MODELS.md#wakeword).
+
 ## Quick installation
 
 The default stack runs on **CPU (mac/linux/windows)**. Audio runs through the browser dashboard. The LLM is either regex-only (simple commands) or off-box via an OpenAI-compatible endpoint you configure in the wizard (e.g. Ollama / LM Studio / another machine on your LAN). The dashboard avatar swaps to Parloch, the **Par**tially-**loc**al **h**ome voice assistant, when the LLM is running off-device.
@@ -45,6 +47,7 @@ docker run -d \
   --log-opt max-size=10m \
   --log-opt max-file=5 \
   -p 8765:8765 \
+  -p 8766:8766 \
   -e DASHBOARD_HOST=0.0.0.0 \
   -v fulloch-data:/app/data:rw \
   ghcr.io/liampetti/fulloch:cpu
@@ -66,6 +69,7 @@ docker run -d \
   --log-opt max-file=5 \
   --gpus all \
   -p 8765:8765 \
+  -p 8766:8766 \
   -e DASHBOARD_HOST=0.0.0.0 \
   -v fulloch-data:/app/data:rw \
   ghcr.io/liampetti/fulloch:latest

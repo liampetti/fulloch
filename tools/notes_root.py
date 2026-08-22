@@ -88,7 +88,7 @@ _current_root: Optional[Path] = None
 # Test-only in-memory override retained for isolated note-tool tests. No
 # production path calls this helper and it is never written to disk.
 _override: Optional[Path] = None
-_migrated = False  # Compatibility sentinel for isolated legacy tests.
+_migrated = False  # Test compatibility sentinel.
 _index_listener: Optional[Callable[[Optional[Path], Optional[Path]], None]] = None
 
 
@@ -120,10 +120,9 @@ def get_notes_root() -> Path:
 
 
 def set_notes_root(path: Optional[Path], persist: bool = False) -> bool:
-    """Test helper for temporarily selecting an isolated notes directory.
+    """Temporarily select an isolated notes directory for tests.
 
-    Production storage is configured only through notes.path; `persist` is
-    accepted for old callers but intentionally ignored.
+    `persist` is accepted for compatibility and ignored.
     """
     del persist
     global _override

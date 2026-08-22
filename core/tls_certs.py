@@ -19,9 +19,7 @@ logger = logging.getLogger(__name__)
 
 CERT_FILENAME = "dashboard.crt"
 KEY_FILENAME = "dashboard.key"
-# No renewal flow exists yet, so this is long-lived by design (common practice
-# for self-signed LAN certs — e.g. router/NAS admin UIs do the same). Browsers
-# don't apply the public-CA lifetime caps to a manually-trusted self-signed cert.
+# Self-signed LAN certificates are manually trusted and do not need public-CA renewal limits.
 _VALIDITY_DAYS = 3650
 
 
@@ -51,10 +49,7 @@ def _detect_local_ips() -> set:
 def ensure_self_signed_cert(certs_dir: str = "./data/certs") -> Tuple[str, str]:
     """Create data/certs/dashboard.{crt,key} if they don't already exist.
 
-    Returns (cert_path, key_path) either way, so the caller can always wire
-    them into config.yml. Idempotent: an existing pair is left untouched, so a
-    user who's dropped in their own cert (e.g. via mkcert) never gets it
-    silently overwritten.
+    Returns the existing pair unchanged, preserving user-provided certificates.
     """
     certs = Path(certs_dir)
     certs.mkdir(parents=True, exist_ok=True)
@@ -70,11 +65,7 @@ def ensure_self_signed_cert(certs_dir: str = "./data/certs") -> Tuple[str, str]:
 def regenerate_self_signed_cert(certs_dir: str = "./data/certs") -> Tuple[str, str]:
     """Force a fresh cert/key pair, overwriting any existing one.
 
-    Unlike `ensure_self_signed_cert`, this is not idempotent — every browser
-    that already trusted the old cert will see the "not private" warning
-    again on next visit. Used by the dashboard's manual "regenerate
-    certificate" action (e.g. after the LAN IP changes and old SANs go
-    stale), not on normal startup.
+    Browsers must trust the replacement certificate again.
     """
     certs = Path(certs_dir)
     certs.mkdir(parents=True, exist_ok=True)

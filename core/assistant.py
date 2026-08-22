@@ -488,6 +488,7 @@ class Assistant:
             save_wakeword_wavs=save_wakeword_wavs,
         )
         self.audio_capture.set_wakeword_detected_callback(self._on_wakeword_model_match)
+        self.audio_capture.set_asr_work_dropped_callback(self._on_asr_work_dropped)
         # Mic stays muted through model load and the opening greeting;
         # `_warm_and_announce`'s `finally` flips it on once warmup ends. This
         # is the genuinely global HA-switch-facing flag (see
@@ -597,6 +598,7 @@ class Assistant:
         self.no_ai_cache: list = []
         self.llm_error_cache: list = []
         self.tool_unavailable_cache: list = []
+        self.conversation_listening_cache: list = []
         # Pre-rendered opening-greeting clips. `_warm_and_announce` synthesises
         # and attempts to play these during startup — before any browser could
         # possibly be connected (the WebSocket satellite only exists once the
@@ -688,6 +690,7 @@ class Assistant:
         # Path of the complete candidate utterance, attached to the queued audio
         # so recorder cleanup cannot lose it before ASR verifies the wakeword.
         self._asr_kws_wav_path: dict = {"path": None}
+        self._asr_wake_generation: dict = {"value": None}
         self.wakeword_metrics = {"accepted": 0, "rejected": 0, "status": "asr"}
         # A2: the last completed turn's stats payload (`TurnStats.to_payload()`),
         # for `GET /status` to expose without the caller needing to scrape SSE
@@ -1550,6 +1553,15 @@ class Assistant:
         if dispatch is not None:
             dispatch(event)
 
+    def _emit_satellite_stand_down_after_tts(self, sat: SatelliteSession) -> None:
+        """Close a short server-generated response after its final PCM drains."""
+        if sat.protocol_turn_id is not None:
+            self._dispatch_event({
+                "type": "assistant.stand_down_after_tts",
+                "satellite_id": sat.id,
+                "turn_id": sat.protocol_turn_id,
+            })
+
     def _begin_satellite_turn(self, sat: SatelliteSession) -> None:
         """Establish a new native-satellite turn when its wakeword is accepted."""
         sat.protocol_state_generation += 1
@@ -1560,13 +1572,46 @@ class Assistant:
         self._emit_satellite_state(sat.id, "wake_detected", turn_id=sat.protocol_turn_id)
         self._emit_satellite_state(sat.id, "listening", turn_id=sat.protocol_turn_id)
 
+    def _set_pending_satellite_wake(self, sat: SatelliteSession) -> None:
+        """Bound optimistic wake feedback until its final ASR verification completes."""
+        if sat.protocol_wake_timer is not None:
+            sat.protocol_wake_timer.cancel()
+        sat.protocol_wake_pending = True
+        generation = sat.protocol_state_generation
+
+        def expire() -> None:
+            if sat.protocol_wake_pending and sat.protocol_state_generation == generation:
+                logger.warning("Wake verification timed out (%s)", sat.id)
+                self.audio_capture.flush(sat.id)
+                self._reject_pending_satellite_wake(sat)
+
+        timer = threading.Timer(10, expire)
+        timer.daemon = True
+        sat.protocol_wake_timer = timer
+        timer.start()
+
+    @staticmethod
+    def _clear_pending_satellite_wake(sat: SatelliteSession) -> None:
+        sat.protocol_wake_pending = False
+        if sat.protocol_wake_timer is not None:
+            sat.protocol_wake_timer.cancel()
+            sat.protocol_wake_timer = None
+
     def _on_wakeword_model_match(self, satellite_id: str) -> None:
         """Give native satellites immediate feedback while ASR verifies the KWS."""
         sat = self.satellites.get(satellite_id)
         if sat is None or sat.protocol_turn_id is not None:
             return
         self._begin_satellite_turn(sat)
-        sat.protocol_wake_pending = True
+        self._set_pending_satellite_wake(sat)
+
+    def _on_asr_work_dropped(self, satellite_id: str, kind: str, candidate: bool, reason: str) -> None:
+        """Close optimistic native wake feedback when its ASR work is discarded."""
+        sat = self.satellites.get(satellite_id)
+        if sat is None or not candidate or not sat.protocol_wake_pending:
+            return
+        logger.info("Standing down pending wake after %s ASR work was %s (%s)", kind, reason, satellite_id)
+        self._reject_pending_satellite_wake(sat)
 
     def _begin_satellite_follow_up_turn(self, sat: SatelliteSession) -> None:
         """Replace an expiring follow-up window with the spoken continuation."""
@@ -1580,12 +1625,13 @@ class Assistant:
     def _reject_pending_satellite_wake(self, sat: SatelliteSession) -> None:
         """Close a turn opened by a soft transcript that the final ASR rejected."""
         if sat.protocol_wake_pending:
-            sat.protocol_wake_pending = False
+            self._clear_pending_satellite_wake(sat)
             self._satellite_idle(sat)
 
     def _satellite_thinking(self, sat: SatelliteSession) -> None:
         """The recorder endpoint was accepted and processing is about to begin."""
         if sat.protocol_turn_id is not None:
+            self._clear_pending_satellite_wake(sat)
             self._emit_satellite_state(sat.id, "thinking", turn_id=sat.protocol_turn_id)
 
     def _schedule_satellite_follow_up(
@@ -1623,11 +1669,11 @@ class Assistant:
 
     def _satellite_idle(self, sat: SatelliteSession) -> None:
         sat.protocol_state_generation += 1
+        self._clear_pending_satellite_wake(sat)
         if sat.protocol_follow_up_timer is not None:
             sat.protocol_follow_up_timer.cancel()
             sat.protocol_follow_up_timer = None
         sat.protocol_turn_id = None
-        sat.protocol_wake_pending = False
         self._emit_satellite_state(sat.id, "idle", turn_id=None)
 
     def set_llm_model(self, model: str) -> dict:
@@ -1809,6 +1855,7 @@ class Assistant:
                 return False, "Satellite is no longer connected."
             if not enabled:
                 session.conversation_mode = False
+                session.conversation_listening_pending = False
                 self._clear_pending_conversation_turn(session)
                 if self._conversation_owner_id == satellite_id:
                     self._conversation_owner_id = None
@@ -1817,9 +1864,17 @@ class Assistant:
                 return True, ""
             if self._conversation_owner_id not in (None, satellite_id):
                 return False, "Conversation mode is active on another device."
+            was_enabled = session.conversation_mode
             self._conversation_owner_id = satellite_id
             session.conversation_mode = True
+            if not was_enabled:
+                session.conversation_listening_pending = True
             self.audio_capture.arm_follow_up(session, 3600)
+            # Native satellites require a lifecycle turn ID before they can
+            # accept a wakeword-free request. Dashboard activation previously
+            # changed only the mode flag, leaving the ESP32 idle with no turn.
+            if session.device_id and not was_enabled:
+                self._begin_satellite_follow_up_turn(session)
             satellites_to_disconnect = [
                 sid for sid in self.satellites if sid not in ("dashboard-text", satellite_id)
             ]
@@ -1829,18 +1884,74 @@ class Assistant:
         for other_id in satellites_to_disconnect:
             self.request_stop(other_id)
             self.disconnect_satellite(other_id)
+        self._play_conversation_listening_phrase(session)
         logger.info("Conversation mode enabled for satellite %s", satellite_id)
         return True, ""
+
+    def set_satellite_user_muted(self, satellite_id: str, muted: bool) -> tuple[bool, str]:
+        """Persistently pause or resume listening for one connected satellite."""
+        session = self.satellites.get(satellite_id)
+        if session is None or satellite_id == "dashboard-text":
+            return False, "Satellite is no longer connected."
+        session.user_muted = muted
+        if muted:
+            self.audio_capture.clear_follow_up(session)
+        return True, ""
+
+    def send_satellite_control(self, satellite_id: str, event: dict) -> None:
+        """Best-effort delivery of a dashboard-originated control event."""
+        session = self.satellites.get(satellite_id)
+        if session is None or session.control_sink is None:
+            return
+        try:
+            session.control_sink.put_nowait(event)
+        except queue.Full:
+            logger.warning("Satellite %s control queue is full", satellite_id)
 
     def set_satellite_sink(self, satellite_id: str, q: Optional["queue.Queue"]) -> None:
         """Route TTS output to `satellite_id`'s WebSocket queue (or None to clear it)."""
         session = self.satellites.get(satellite_id)
         if session is not None:
             session.tts_sink = q
+            self._play_conversation_listening_phrase(session)
+
+    def _play_conversation_listening_phrase(self, sat: SatelliteSession) -> None:
+        """Play the one-time acknowledgement when Conversation mode starts."""
+        if not sat.conversation_listening_pending or sat.tts_sink is None:
+            return
+        if not self.conversation_listening_cache:
+            return
+        sat.conversation_listening_pending = False
+        chunks, sr = self.conversation_listening_cache[0]
+        prev_sink = getattr(self._turn_local, "sink", None)
+        prev_active = getattr(self._turn_local, "tts_active_event", None)
+        self._turn_local.sink = _safe_sink(sat.tts_sink)
+        self._turn_local.tts_active_event = sat.tts_active
+        try:
+            self.play_chunks(chunks, sr, session=self.tts_session)
+            # Cached playback bypasses speak_proactive(), so explicitly open
+            # the native satellite's follow-up state after this acknowledgement.
+            playback_end = time.monotonic() + sum(len(chunk) for chunk in chunks) / sr
+            self._mark_turn_end(sat.id, playback_end)
+        except Exception:
+            logger.exception("Conversation-mode acknowledgement playback failed")
+        finally:
+            self._turn_local.sink = prev_sink
+            self._turn_local.tts_active_event = prev_active
 
     def _sink_for(self, satellite_id: Optional[str]) -> Optional["queue.Queue"]:
         session = self.satellites.get(satellite_id) if satellite_id else None
         return _safe_sink(session.tts_sink) if session is not None else None
+
+    def _tts_lock_for_sink(self, sink) -> Optional[threading.RLock]:
+        """Find the owning satellite's stream lock through sink decorators."""
+        raw_sink = sink
+        while isinstance(raw_sink, (_GainSink, _NonBlockingSink)):
+            raw_sink = raw_sink._sink
+        for sat in self.satellites.values():
+            if sat.tts_sink is raw_sink:
+                return sat.tts_stream_lock
+        return None
 
     def play_chunks(
         self,
@@ -1869,13 +1980,15 @@ class Assistant:
         gain = getattr(self._turn_local, "tts_gain", 1.0)
         if sink is not None and gain != 1.0:
             sink = _GainSink(sink, gain)
-        return self._tts_module.play_chunks(
-            chunks,
-            sample_rate,
-            session=session,
-            sink=sink,
-            tts_active_event=tts_active_event,
-        )
+        lock = self._tts_lock_for_sink(sink)
+        if lock is None:
+            return self._tts_module.play_chunks(
+                chunks, sample_rate, session=session, sink=sink, tts_active_event=tts_active_event
+            )
+        with lock:
+            return self._tts_module.play_chunks(
+                chunks, sample_rate, session=session, sink=sink, tts_active_event=tts_active_event
+            )
 
     def speak_stream(
         self,
@@ -1893,15 +2006,18 @@ class Assistant:
         gain = getattr(self._turn_local, "tts_gain", 1.0)
         if sink is not None and gain != 1.0:
             sink = _GainSink(sink, gain)
-        return self._tts_module.speak_stream(
-            spoken_for_tts(text),
-            prompt,
-            session=session,
-            stats=stats,
-            on_first_audio=on_first_audio,
-            sink=sink,
-            tts_active_event=getattr(self._turn_local, "tts_active_event", None),
-        )
+        kwargs = {
+            "session": session,
+            "stats": stats,
+            "on_first_audio": on_first_audio,
+            "sink": sink,
+            "tts_active_event": getattr(self._turn_local, "tts_active_event", None),
+        }
+        lock = self._tts_lock_for_sink(sink)
+        if lock is None:
+            return self._tts_module.speak_stream(spoken_for_tts(text), prompt, **kwargs)
+        with lock:
+            return self._tts_module.speak_stream(spoken_for_tts(text), prompt, **kwargs)
 
     def _prepare_delivery_request(self, user_prompt: str, sat: SatelliteSession) -> str:
         """Extract delivery controls and retain the cross-backend quiet setting."""
@@ -2219,7 +2335,7 @@ class Assistant:
             self._turn_local.sink = prev_sink
             self._turn_local.tts_active_event = prev_active
 
-    def _play_busy_phrase(self, sat: SatelliteSession) -> None:
+    def _play_busy_phrase(self, sat: SatelliteSession) -> bool:
         """Play a `BUSY_PHRASES` clip on `sat`'s own sink — the audible
         bounce when `sat` loses the `TurnArbiter` to another satellite (or
         the dashboard's text turn). Not wrapped in a turn, so resolves
@@ -2227,8 +2343,9 @@ class Assistant:
         the usual per-turn setup in `_run_half_duplex`/`_run_turn`.
         """
         if not self.busy_cache:
-            return
+            return False
         chunks, sr = random.choice(self.busy_cache)
+        self._emit_satellite_stand_down_after_tts(sat)
         self._turn_local.sink = _safe_sink(sat.tts_sink)
         self._turn_local.tts_active_event = sat.tts_active
         try:
@@ -2238,6 +2355,7 @@ class Assistant:
         finally:
             self._turn_local.sink = None
             self._turn_local.tts_active_event = None
+        return True
 
     def _speak_no_ai_fallback(
         self, session: Optional[TtsSession], source: str, satellite_id: Optional[str] = None
@@ -2435,8 +2553,10 @@ class Assistant:
             # the arbiter — bounce audibly on this satellite's own sink
             # rather than interleaving into the winner's turn.
             logger.info("Turn bounced (busy): satellite %s", satellite_id)
-            self._play_busy_phrase(sat)
+            if not self._play_busy_phrase(sat):
+                self._satellite_idle(sat)
             return
+        self._satellite_thinking(sat)
         # Resolve which satellite's sink/tts_active this turn's TTS goes to
         # before anything downstream (ack, fallback phrases, the final
         # reply) can call play_chunks/speak_stream — those read
@@ -2577,8 +2697,10 @@ class Assistant:
             # A different satellite (or the dashboard's text turn) owns the
             # arbiter — bounce audibly rather than interleaving into it.
             logger.info("Turn bounced (busy): satellite %s", satellite_id)
-            self._play_busy_phrase(sat)
+            if not self._play_busy_phrase(sat):
+                self._satellite_idle(sat)
             return
+        self._satellite_thinking(sat)
         # A real turn is starting — close the prior follow-up window; the new
         # turn re-arms it at its end via `_mark_turn_end`.
         self.audio_capture.clear_follow_up(sat)
@@ -2767,7 +2889,7 @@ class Assistant:
                 # onset ≈ last_turn_end (speech_onset_t was never set because
                 # the residue stayed below the barge-in floor) and falls
                 # inside the follow-up window as a spurious new turn.
-                self.audio_capture.flush()
+                self.audio_capture.flush(satellite_id)
                 sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
                 self._mark_turn_end(satellite_id, playback_end)
         except Exception as e:
@@ -2854,7 +2976,7 @@ class Assistant:
                     # Barge-in worker: flush the mic and drop in-flight ASR
                     # so our own speech captured mid-turn doesn't replay,
                     # mirroring a voice barge-in.
-                    self.audio_capture.flush()
+                    self.audio_capture.flush(target)
                     sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
                 # A stop means stand down — no wakeword-free follow-up window.
                 sat.last_turn_end = 0.0
@@ -3190,6 +3312,8 @@ class Assistant:
             stream_kwargs["kws_candidate_sink"] = self._asr_kws_candidate
         if "kws_wav_path_sink" in stream_params:
             stream_kwargs["kws_wav_path_sink"] = self._asr_kws_wav_path
+        if "wake_generation_sink" in stream_params:
+            stream_kwargs["wake_generation_sink"] = self._asr_wake_generation
         for result in self.asr_pipe(
             self.asr_stream_generator(*stream_args, **stream_kwargs),
             batch_size=1,
@@ -3216,6 +3340,14 @@ class Assistant:
                         turn_satellite_id,
                         text,
                     )
+                    continue
+
+                wake_generation = self._asr_wake_generation.get("value")
+                if wake_generation is not None and wake_generation != sat.protocol_state_generation:
+                    self.audio_capture.mark_wakeword_wav(
+                        self._asr_kws_wav_path.get("path"), accepted=False
+                    )
+                    logger.debug("Dropping expired wake verification result (%s)", turn_satellite_id)
                     continue
 
                 provisional = self._asr_provisional.get("flag", False)
@@ -3299,7 +3431,7 @@ class Assistant:
                         and sat.protocol_turn_id is None
                     ):
                         self._begin_satellite_turn(sat)
-                        sat.protocol_wake_pending = True
+                        self._set_pending_satellite_wake(sat)
                     continue
 
                 # Provisional (soft-endpoint) snapshot of an unfinished
@@ -3389,7 +3521,7 @@ class Assistant:
                     # audio gets discarded — without swallowing the user's
                     # real reply, which can't arrive for ≥1.5s.
                     if not bare_barge_wakeword:
-                        self.audio_capture.flush()
+                        self.audio_capture.flush(turn_satellite_id)
                         sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
                     just_barged_in = True
                 elif not wakeword_present:
@@ -3530,7 +3662,7 @@ class Assistant:
                     and not sat.protocol_wake_pending
                 ):
                     self._begin_satellite_turn(sat)
-                    sat.protocol_wake_pending = True
+                    self._set_pending_satellite_wake(sat)
 
                 if not user_prompt:
                     # A provisional with no command yet (e.g. "Hey Atticus…"
@@ -3554,7 +3686,7 @@ class Assistant:
                         # suppressed as self-echo when it shares words
                         # with the response we just cancelled.
                         if sat.protocol_wake_pending:
-                            sat.protocol_wake_pending = False
+                            self._clear_pending_satellite_wake(sat)
                         else:
                             self._begin_satellite_turn(sat)
                         self._mark_turn_end(turn_satellite_id)
@@ -3578,7 +3710,7 @@ class Assistant:
                     # the hard endpoint's duplicate of this same utterance (still
                     # accumulating) is discarded, and briefly guard any in-flight
                     # result on the contaminated tail.
-                    self.audio_capture.flush()
+                    self.audio_capture.flush(turn_satellite_id)
                     sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
                     sat.provisional_committed_onset = self._asr_onset.get("t", 0.0)
                     sat.provisional_committed_text = re.sub(
@@ -3602,13 +3734,13 @@ class Assistant:
                 # the first authoritative wakeword-acceptance point.
                 if wakeword_present and not in_follow_up:
                     if sat.protocol_wake_pending:
-                        sat.protocol_wake_pending = False
+                        self._clear_pending_satellite_wake(sat)
                     else:
                         self._begin_satellite_turn(sat)
                 elif in_follow_up:
                     self._begin_satellite_follow_up_turn(sat)
-                self._satellite_thinking(sat)
                 if sat.conversation_mode:
+                    self._satellite_thinking(sat)
                     self._queue_conversation_turn(
                         user_prompt,
                         turn_satellite_id,

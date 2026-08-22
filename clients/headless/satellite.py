@@ -128,7 +128,7 @@ class HeadlessSatellite:
         message = {
             "type": "satellite.hello",
             "token": self.cfg["server"].get("token"),
-            "protocol": {"name": "satellite-v2", "major": 2, "minor": 3},
+            "protocol": {"name": "satellite-v2", "major": 2, "minor": 4},
             "device": {
                 "id": sat.get("id", "headless-satellite"),
                 "name": sat.get("room", "Headless satellite"),
@@ -136,7 +136,11 @@ class HeadlessSatellite:
                 "build": sat.get("build", "dev"),
                 "board": sat.get("board", "headless"),
             },
-            "capabilities": {"audio_input": True, "audio_output": True},
+            "capabilities": {
+                "audio_input": True,
+                "audio_output": True,
+                "conversation_mode_control": True,
+            },
         }
         if self.satellite_id and self._turn_id:
             message["resume"] = {"session_id": self.satellite_id, "turn_id": self._turn_id, "next_seq": self._next_seq}
@@ -146,7 +150,7 @@ class HeadlessSatellite:
         """Validate the fixed audio contract advertised by the server."""
         protocol = welcome.get("protocol")
         audio = welcome.get("audio")
-        if not isinstance(protocol, dict) or protocol.get("major") != 2:
+        if not isinstance(protocol, dict) or protocol.get("major") != 2 or protocol.get("minor") != 4:
             raise websockets.exceptions.WebSocketProtocolError("unsupported satellite-v2 version")
         if not isinstance(audio, dict):
             raise websockets.exceptions.WebSocketProtocolError("welcome missing audio contract")
@@ -173,6 +177,12 @@ class HeadlessSatellite:
             return
         self._mic_muted = muted
         await ws.send(json.dumps({"type": "satellite.mute", "muted": muted}))
+
+    async def set_conversation_mode(self, ws, enabled: bool) -> None:
+        """Request exclusive wakeword-free conversation mode for this satellite."""
+        await ws.send(json.dumps({
+            "type": "conversation_mode.enable" if enabled else "conversation_mode.disable"
+        }))
 
     async def _send_audio(self, ws) -> None:
         import queue as _queue

@@ -264,7 +264,7 @@ def _assistant_args(cfg):
     """Extract the Assistant constructor args from a fresh config dict."""
     general = cfg.get("general") or {}
     options = {k: general[k] for k in _ASSISTANT_OPTION_KEYS if general.get(k) is not None}
-    # Preserve the former Higgs-only setting for existing installations.
+    # Map deprecated Higgs settings to personality settings.
     if "personality" not in options and general.get("higgs_personality") is not None:
         options["personality"] = general["higgs_personality"]
     if "personality_custom" not in options and general.get("higgs_personality_custom") is not None:
@@ -273,12 +273,7 @@ def _assistant_args(cfg):
 
 
 def _start_dashboard(context, host, port, certfile, keyfile, http_redirect_port=None):
-    """Start the single dashboard server (setup + run share it). Never fatal.
-
-    The ``http_redirect_port`` arg is accepted for backward compatibility but
-    ignored — the dashboard now serves both schemes on the same port via a
-    TLS-sniffing dispatcher (see server.dashboard.start_dashboard).
-    """
+    """Start the shared setup/dashboard server. The deprecated redirect-port argument is ignored."""
     try:
         from server.dashboard import start_dashboard
 
@@ -381,10 +376,7 @@ def main():
                 pass
             return
         if decision.auto_download:
-            # An already-configured install (e.g. the user picked a new model in
-            # Settings and restarted) is just missing the assets on disk — the
-            # wizard has nothing left to ask, so skip straight to downloading
-            # instead of re-showing it.
+            # A completed setup with missing assets can resume downloading automatically.
             from server.dashboard import start_auto_download
 
             logger.info("Completed setup is missing model assets — downloading now.")

@@ -175,6 +175,57 @@ class TestConnectSatellite:
         a.disconnect_satellite("sat-a")
         a.disconnect_satellite("sat-c")
 
+    def test_native_conversation_mode_opens_a_listening_turn(self):
+        a = _make_assistant()
+        a.audio_capture.satellite_recorder_thread = _blocking_recorder
+        events = []
+        a.register_turn_listener(events.append)
+        a.connect_satellite("native", device_id="kitchen-01")
+
+        enabled, _ = a.set_satellite_conversation_mode("native", True)
+
+        assert enabled is True
+        assert a.satellites["native"].protocol_turn_id is not None
+        assert events[-1] == {
+            "type": "assistant.state",
+            "state": "listening",
+            "satellite_id": "native",
+            "turn_id": a.satellites["native"].protocol_turn_id,
+        }
+        a.disconnect_satellite("native")
+
+    def test_conversation_mode_announces_listening_once_sink_is_attached(self):
+        a = _make_assistant()
+        a.audio_capture.satellite_recorder_thread = _blocking_recorder
+        a.conversation_listening_cache = [("audio", 24000)]
+        a.play_chunks = MagicMock()
+
+        a.connect_satellite("sat-a", conversation_mode=True)
+
+        a.play_chunks.assert_not_called()
+        a.set_satellite_sink("sat-a", queue.Queue())
+
+        a.play_chunks.assert_called_once_with("audio", 24000, session=a.tts_session)
+        a.set_satellite_conversation_mode("sat-a", True)
+        a.play_chunks.assert_called_once()
+        a.disconnect_satellite("sat-a")
+
+    def test_enabling_conversation_mode_announces_listening_immediately(self):
+        a = _make_assistant()
+        a.audio_capture.satellite_recorder_thread = _blocking_recorder
+        a.conversation_listening_cache = [("audio", 24000)]
+        a.play_chunks = MagicMock()
+        a._mark_turn_end = MagicMock()
+        a.connect_satellite("sat-a")
+        a.set_satellite_sink("sat-a", queue.Queue())
+
+        a.set_satellite_conversation_mode("sat-a", True)
+
+        a.play_chunks.assert_called_once_with("audio", 24000, session=a.tts_session)
+        a._mark_turn_end.assert_called_once()
+        assert a._mark_turn_end.call_args.args[0] == "sat-a"
+        a.disconnect_satellite("sat-a")
+
 
 class TestDisconnectSatellite:
     def test_disconnect_leaves_other_session_intact(self):
@@ -406,6 +457,7 @@ class _ScriptedEndpointer:
 
     def __init__(self, script):
         self._script = list(script)
+        self.processed = []
         self.speech_started = False
         self.soft_endpointed = False
         self.endpointed = False
@@ -415,6 +467,7 @@ class _ScriptedEndpointer:
         self.reset_calls = 0
 
     def process(self, samples) -> None:
+        self.processed.append(samples.copy())
         if not self._script:
             return
         state = self._script.pop(0)
@@ -469,6 +522,29 @@ class TestVadEndpointing:
 
         assert [r[3] for r in results] == [True, False]  # one provisional, one final
         assert results[0][4] == results[1][4] == "sat-a"
+
+    def test_stereo_utterance_selects_one_best_channel_after_endpointing(self):
+        ac = AudioCapture(use_vad=False, min_utterance_ms=100, max_utterance_ms=10000)
+        ac._use_vad_enabled = True
+        ac.vad_min_speech_samples = 100
+        endpointer = _ScriptedEndpointer([
+            {"speech_started": True},
+            {"endpointed": True, "last_speech_samples": 5000},
+        ])
+        ac._build_endpointer = lambda: endpointer
+        chunk_q: "queue.Queue" = queue.Queue()
+        session = SatelliteSession(id="sat-a", chunk_q=chunk_q)
+        chunk = np.column_stack((np.full(2000, 0.1, dtype=np.float32), np.full(2000, 0.5, dtype=np.float32)))
+        chunk_q.put(chunk)
+        chunk_q.put(chunk)
+        chunk_q.put(None)
+
+        ac.satellite_recorder_thread(session)
+
+        buf, *_ = ac.audio_queue.get_nowait()
+        assert buf.shape == (4000,)
+        assert np.allclose(buf, 0.5)
+        assert np.allclose(endpointer.processed[0], 0.5)
 
     def test_hard_endpoint_keeps_its_vad_onset_when_tts_starts_after_soft_probe(self):
         ac = AudioCapture(use_vad=False, min_utterance_ms=100, max_utterance_ms=10000)

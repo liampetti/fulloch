@@ -1,17 +1,4 @@
-"""Pre-flight checks for the wizard: disk space + GPU/VRAM + system RAM, with
-tier-fit badges (v2.2 Step 4).
-
-Lets the wizard warn before a multi-GB download won't fit, or before picking a
-tier the GPU can't hold, or before a CPU tier needs more RAM than is available.
-GPU detection imports torch lazily (and tolerates its absence) so this stays
-usable in setup mode on a CPU-only box.
-
-The `check_*` functions are the *blocking* preflight that runs at the moment
-the user clicks "Start download" (Task 3 of docs/ease-of-use-tasks.md): they
-return `(ok, message)` pairs and are intentionally short and loud rather than
-informative. The wizard's role is to translate each message into a clear
-"X is the problem, here's what to do" UI line.
-"""
+"""Wizard preflight checks for disk, GPU/VRAM, and RAM."""
 
 import logging
 import shutil
@@ -168,12 +155,7 @@ def preflight(models_dir: str = "./data") -> dict:
     }
 
 
-# --- blocking preflight: runs at "Start download" click -------------------
-#
-# Each `check_*` returns (ok, message). The wizard reads the messages and
-# surfaces them in the error pane. The check is intentionally synchronous
-# (urllib HEAD, stat, file system) — no background work, no streaming — so
-# the user gets an immediate pass/fail before any download bytes flow.
+# Blocking checks run before downloading begins.
 
 
 def check_disk_for_models(models: dict, models_dir: str = "./data") -> tuple[bool, str]:

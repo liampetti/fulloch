@@ -81,6 +81,35 @@ def test_wakeword_activation_optionally_saves_timestamped_wav(tmp_path):
     assert capture.audio_queue.get_nowait()[8] == str(files[0])
 
 
+def test_wakeword_candidate_does_not_prepend_overlapping_preroll():
+    class Backend:
+        def reset(self, _satellite_id):
+            pass
+
+    capture = AudioCapture(use_vad=False)
+    capture.set_wakeword_backend(Backend())
+    session = SatelliteSession("satellite")
+    session.kws_candidate = True
+    session.kws_pre_roll.append(np.full(1600, -1.0, dtype=np.float32))
+    utterance = np.full(3200, 0.5, dtype=np.float32)
+
+    capture._enqueue(session, utterance, 0.0, -10.0, False, 0.0)
+
+    queued = capture.audio_queue.get_nowait()[0]
+    assert np.array_equal(queued, utterance)
+
+
+def test_wakeword_candidate_waits_for_final_endpoint_before_asr():
+    capture = AudioCapture(use_vad=False)
+    session = SatelliteSession("satellite")
+    session.kws_candidate = True
+
+    capture._enqueue(session, np.ones(3200, dtype=np.float32), 0.0, -10.0, True, 0.0)
+
+    assert capture.audio_queue.empty()
+    assert session.kws_candidate is True
+
+
 def test_wakeword_wav_is_labelled_after_asr_verification(tmp_path):
     capture = AudioCapture(use_vad=False, save_wakeword_wavs=True)
     capture.wakeword_wav_dir = tmp_path

@@ -104,6 +104,10 @@ _VOICES_DIR = _SERVER_DIR.parent / "data" / "voices"
 
 HISTORY_LIMIT = 200
 
+
+class SatelliteSettingRequest(BaseModel):
+    enabled: bool
+
 def _schedule_restart(delay: float = 0.5, assistant=None) -> None:
     """Re-exec the process shortly, so a fresh start re-reads config.yml.
 
@@ -398,10 +402,7 @@ class MicRequest(BaseModel):
 
 
 class StopRequest(BaseModel):
-    # None (the default, and what the dashboard's Stop button sends today)
-    # falls back to whichever satellite currently owns the TurnArbiter — the
-    # dashboard has no per-connection satellite identity yet to supply one
-    # explicitly (that lands with Phase 5's satellite-v2 protocol).
+    # Defaults to the active turn owner when omitted.
     satellite_id: Optional[str] = None
 
 
@@ -746,7 +747,6 @@ def create_app(
             refused → Docker marks unhealthy via the connection
             failure, not via the HTTP code).
 
-        Task 7a of docs/ease-of-use-tasks.md.
         """
         return JSONResponse({"ready": True})
 
@@ -828,14 +828,19 @@ def create_app(
                 "active_owner_label": (
                     (owner_sat.label or owner_sat.ha_area_name) if owner_sat is not None else None
                 ),
-                # A2: the last completed turn's latency breakdown (endpoint-wait,
-                # ASR/LLM/TTS seconds, route, endpoint kind) — None until the
-                # first turn finishes. Seeds the deferred turn-trace dashboard.
+                # Last completed turn's latency breakdown.
                 "last_turn_stats": context.assistant._last_turn_stats,
                 "wakeword": {
                     **getattr(context.assistant, "wakeword_metrics", {"status": "asr"}),
                     **getattr(context.assistant.audio_capture, "wakeword_metrics", {}),
                 },
+                "asr_queue": (
+                    metrics
+                    if isinstance(
+                        metrics := getattr(context.assistant.audio_capture, "asr_queue_metrics", {}), dict
+                    )
+                    else {}
+                ),
             }
         )
         return JSONResponse(payload)
@@ -880,6 +885,55 @@ def create_app(
         _require_ready()
         context.assistant.request_stop(req.satellite_id)
         return {"ok": True}
+
+    @app.get("/satellites")
+    def satellites() -> dict:
+        _require_ready()
+        owner_id = context.assistant.conversation_owner_id
+        items = []
+        for satellite_id, session in context.assistant.satellites.items():
+            if satellite_id == "dashboard-text":
+                continue
+            transport = "native" if session.device_id else "browser"
+            state = "speaking" if session.tts_active.is_set() else "thinking" if session.active_session else "idle"
+            items.append({
+                "id": satellite_id,
+                "label": session.label or session.ha_area_name or "This browser",
+                "area": session.ha_area_name or "",
+                "transport": transport,
+                "device_id": session.device_id or "",
+                "conversation_mode": session.conversation_mode,
+                "conversation_owner": satellite_id == owner_id,
+                "muted": session.user_muted,
+                "state": state,
+                "server_vad": session.server_vad,
+            })
+        items.sort(key=lambda item: (not item["conversation_owner"], item["label"].lower()))
+        return {"satellites": items, "conversation_owner_id": owner_id}
+
+    @app.post("/satellites/{satellite_id}/conversation-mode")
+    def set_satellite_conversation_mode(satellite_id: str, req: SatelliteSettingRequest) -> dict:
+        _require_ready()
+        ok, message = context.assistant.set_satellite_conversation_mode(satellite_id, req.enabled)
+        session = context.assistant.satellites.get(satellite_id)
+        active = bool(session and session.conversation_mode)
+        context.assistant.send_satellite_control(satellite_id, {
+            "type": "conversation_mode.changed",
+            "enabled": active,
+            "owner": active and context.assistant.conversation_owner_id == satellite_id,
+            "message": message,
+        })
+        return {
+            "ok": ok,
+            "enabled": active,
+            "message": message,
+        }
+
+    @app.post("/satellites/{satellite_id}/mute")
+    def set_satellite_mute(satellite_id: str, req: SatelliteSettingRequest) -> dict:
+        _require_ready()
+        ok, message = context.assistant.set_satellite_user_muted(satellite_id, req.enabled)
+        return {"ok": ok, "muted": req.enabled if ok else False, "message": message}
 
     @app.post("/chat")
     def chat(req: ChatRequest) -> dict:
@@ -1098,7 +1152,6 @@ def create_app(
         Called on the "Start download" click so the user gets a clear
         pass/fail with one structured error per failed check before any
         model bytes flow. `ok` is True only when every check passes.
-        Task 3 of docs/ease-of-use-tasks.md.
         """
 
         from .config_schema import TIER_PRESETS
@@ -1149,22 +1202,17 @@ def create_app(
         def _done(ok: bool) -> None:
             if ok:
                 _completion_marker_path().touch()
-                # Setup finished — clear any reset marker so the next restart
-                # stays in run mode instead of re-entering the wizard.
+                # Clear the reset marker after setup completes.
                 try:
                     _reset_marker_path().unlink(missing_ok=True)
                 except OSError:
                     pass
                 context.lifecycle.set(LOADING, "starting assistant")
                 if context.assistant is not None:
-                    # Reconfigure of an already-running assistant (recovering
-                    # from an ERROR where the first config failed to load).
-                    # main() has long passed the setup `proceed` wait, so the
-                    # only way to load the new backends is a fresh process.
+                    # Restart an existing assistant to load the selected backends.
                     _schedule_restart(assistant=context.assistant)
                 else:
-                    # First-run: release the setup block so main() builds and
-                    # runs the assistant (which flips LOADING -> READY).
+                    # Continue first-run startup.
                     context.lifecycle.signal_proceed()
             else:
                 snap = context.downloader.snapshot()
@@ -1226,16 +1274,7 @@ def create_app(
 
     @app.post("/setup/reset")
     def setup_reset() -> JSONResponse:
-        """Arm a re-run of the setup wizard on the next start.
-
-        Backs up the user's state (config, credentials, obsidian override,
-        voice denylist, voice clones) into a timestamped folder under
-        data/backups/, then drops the reset marker that detect_setup_state
-        honours. On restart, the wizard re-runs; credentials are reused from
-        disk where the user already filled them in (they aren't wiped). Models
-        and certs are NOT backed up — they're re-creatable on demand. The
-        user can restore from any backup via /setup/backups/restore.
-        """
+        """Back up user state and request the setup wizard on next startup."""
         data_dir = Path(context.config_path).resolve().parent
         backup_dir = _create_backup(data_dir)
         _reset_marker_path().write_text("setup reset requested\n")
@@ -1276,21 +1315,7 @@ def create_app(
 
     @app.post("/setup/regen-cert")
     def setup_regen_cert() -> JSONResponse:
-        """Enable or force-regenerate the dashboard's self-signed HTTPS cert.
-
-        No cert configured yet: generates a fresh pair under data/certs and
-        wires the paths into config.yml (same outcome as core.bootstrap's
-        first-run seed, but via update_config since this is a live settings
-        save rather than a fresh template — comments in config.yml are
-        already stripped on any settings-console save, so no regression
-        there). Cert already configured: overwrites the pair in place —
-        unlike the idempotent startup path in core.bootstrap, so every
-        device that already trusted the old cert will see the browser's
-        "not private" warning again next visit. Useful after the LAN IP
-        changes and the old cert's SANs go stale. Either way, a restart is
-        needed to pick up the new files (uvicorn only reads them at
-        startup).
-        """
+        """Regenerate the self-signed dashboard certificate and require restart."""
         from core.tls_certs import regenerate_self_signed_cert
 
         from .config_store import read_config, update_config
@@ -1988,31 +2013,7 @@ async def _dispatch_connection(
     backend_port: int,
     https_port: int,
 ) -> None:
-    """Peek the first byte of a new connection; route to TLS proxy or 308.
-
-    Module-level (rather than nested in start_tls_dispatcher) so tests can
-    exercise the routing logic without binding a socket.
-
-    Security note for future maintainers
-    ------------------------------------
-    This is an in-process port multiplexer — the same idea as sslh / hitch /
-    HAProxy's `req_ssl_hello_type 1` check, but inside the Python process
-    rather than as a separate reverse proxy. The protocol handling is
-    standard (the 0x16 first byte is the IANA TLS record-type byte, peeked
-    with MSG_PEEK so the kernel's socket buffer is untouched).
-
-    For Fulloch's single-LAN-user use case that's fine. The classic
-    cross-cutting risks for this pattern are resource-exhaustion rather than
-    protocol ones — see sslh's security review by Matthias Gerstner
-    (OpenSUSE, 2025) for the canonical writeup. Concretely, if this is ever
-    exposed to anything beyond the home LAN, add:
-      - a per-connection read timeout (a client that opens a TCP connection
-        and never sends the first byte currently holds the dispatcher slot
-        until the OS's TCP keepalive eventually reaps it — several minutes);
-      - a cap on concurrent in-flight connections, with oldest dropped.
-    A reverse-proxy deployment (Caddy / nginx / Traefik in front) sidesteps
-    both concerns and is the right move for any multi-tenant exposure.
-    """
+    """Route TLS connections to uvicorn and redirect plain HTTP to HTTPS."""
     try:
         sock_info = writer.transport.get_extra_info("socket")
         if sock_info is None:

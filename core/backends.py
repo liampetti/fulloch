@@ -484,8 +484,7 @@ _register(
         gpu_only=True,
         display_name="Qwen3.5 9B MTP (local)",
         loader="core.slm:load_slm",
-        # The old non-MTP model used the same filename. Keep this in a dedicated
-        # directory so an existing cache cannot be mistaken for an MTP GGUF.
+        # A dedicated directory prevents cache collisions with the non-MTP model.
         default_model="./data/models/qwen3.5-9b-mtp/Qwen3.5-9B-UD-Q4_K_XL.gguf",
         hf_repo="unsloth/Qwen3.5-9B-MTP-GGUF",
         hf_file="Qwen3.5-9B-UD-Q4_K_XL.gguf",  # Unsloth Dynamic 2.0 — ~Q5 quality, smaller

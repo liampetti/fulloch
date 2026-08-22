@@ -5,8 +5,6 @@ These complement the *advisory* preflight snapshot in `preflight()`
 hard-fail gate just before bytes start flowing. The user clicked
 "Start download"; we owe them a clear "X is broken" before the
 download itself produces a less-specific error.
-
-Task 3 of docs/ease-of-use-tasks.md.
 """
 
 import sys

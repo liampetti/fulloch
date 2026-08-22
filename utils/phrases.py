@@ -26,6 +26,7 @@ BUSY_PHRASES = ["I'm helping in another room right now."]
 NO_AI_PHRASES = ["I can't do that without an AI model running."]
 LLM_ERROR_PHRASES = ["I can't reach the AI server right now. Basic commands still work."]
 TOOL_UNAVAILABLE_PHRASES = ["I don't have a tool for that setup yet."]
+CONVERSATION_LISTENING_PHRASE = "I'm listening."
 
 # (cache attribute, phrases, LLM-only)
 STARTUP_CACHE_SPECS = (
@@ -35,6 +36,7 @@ STARTUP_CACHE_SPECS = (
     ("no_ai_cache", NO_AI_PHRASES, False),
     ("llm_error_cache", LLM_ERROR_PHRASES, True),
     ("tool_unavailable_cache", TOOL_UNAVAILABLE_PHRASES, True),
+    ("conversation_listening_cache", [CONVERSATION_LISTENING_PHRASE], False),
 )
 
 REMINDER_PREFIX_PHRASES = ["Just a reminder -", "Heads up -"]

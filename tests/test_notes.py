@@ -72,6 +72,28 @@ def test_insert_at_obsidian_cursor_queues_explicit_text(monkeypatch):
     assert commands.get_nowait() == {"type": "insert", "text": "## Liam's daily tasks"}
 
 
+def test_notes_index_is_persisted_in_project_data_not_beside_vault(tmp_path, monkeypatch):
+    import tools.notes_index as notes_index
+
+    monkeypatch.chdir(tmp_path)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    captured = {}
+
+    class FakeIndex:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(notes, "_index", None)
+    monkeypatch.setattr(notes_index, "NotesIndex", FakeIndex)
+    monkeypatch.setattr(notes_root, "get_notes_root", lambda: vault)
+
+    notes._get_index()
+
+    assert captured["notes_root"] == vault
+    assert captured["index_path"] == Path("data/notes_index")
+
+
 def test_rename_active_obsidian_note_requires_a_connected_plugin(monkeypatch):
     monkeypatch.setattr(notes, "_obsidian_cmd_q", None)
     monkeypatch.setitem(notes.config, "obsidian", {"allow_edit_delete": True})

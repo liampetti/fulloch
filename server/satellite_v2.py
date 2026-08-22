@@ -23,7 +23,8 @@ if TYPE_CHECKING:
 
 
 SATELLITE_V2_PROTOCOL_MAJOR = 2
-SATELLITE_V2_PROTOCOL_MINOR = 3
+SATELLITE_V2_PROTOCOL_MINOR = 5
+SATELLITE_V2_LEGACY_PROTOCOL_MINOR = 4
 SATELLITE_V2_CONTROL_MAX_BYTES = 2 * 1024
 SATELLITE_V2_UPLINK_BYTES = 640
 SATELLITE_V2_DOWNLINK_MAX_BYTES = 4 * 1024
@@ -53,6 +54,7 @@ class _RecoverySession:
     sent_audio_seconds: float = 0.0
     pace_origin: Optional[float] = None
     replay: deque = field(default_factory=lambda: deque(maxlen=SATELLITE_V2_REPLAY_FRAMES))
+    stand_down_turn_id: Optional[str] = None
     connection: Optional[str] = None
     expires_at: float = 0.0
     cleanup_task: Optional[asyncio.Task] = None
@@ -120,18 +122,31 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
             await reject("protocol", "expected satellite.hello")
             return
         protocol, device, capabilities = first.get("protocol"), first.get("device"), first.get("capabilities")
+        client_minor = protocol.get("minor") if isinstance(protocol, dict) else None
         if (
             not isinstance(protocol, dict) or protocol.get("name") != "satellite-v2"
             or protocol.get("major") != SATELLITE_V2_PROTOCOL_MAJOR
-            or protocol.get("minor") != SATELLITE_V2_PROTOCOL_MINOR
+            or client_minor not in (SATELLITE_V2_LEGACY_PROTOCOL_MINOR, SATELLITE_V2_PROTOCOL_MINOR)
             or not isinstance(device, dict)
             or not isinstance(device.get("id"), str) or not device["id"].strip()
             or not isinstance(capabilities, dict)
         ):
             await reject("protocol", "invalid satellite.hello")
             return
+        supported_uplink_channels = capabilities.get("aec_uplink_channels") if client_minor >= 5 else None
+        if supported_uplink_channels is None:
+            supported_uplink_channels = [1]
+        if (not isinstance(supported_uplink_channels, list) or not supported_uplink_channels or
+                any(channel not in (1, 2) or isinstance(channel, bool) for channel in supported_uplink_channels)):
+            await reject("protocol", "invalid AEC uplink channels")
+            return
+        config = config_store.read_config()
+        satellite_config = config.get("satellite")
+        preferred_uplink_channels = satellite_config.get("uplink_channels", 1) if isinstance(satellite_config, dict) else 1
+        uplink_channels = 2 if preferred_uplink_channels == 2 and 2 in supported_uplink_channels else 1
+        uplink_bytes = SATELLITE_V2_UPLINK_BYTES * uplink_channels
         auth_token = first.get("token")
-        tokens = config_store.read_config().get("satellite_tokens") or []
+        tokens = config.get("satellite_tokens") or []
         if tokens and not any(auth_token and secrets.compare_digest(str(auth_token), str(token)) for token in tokens):
             await reject("auth", "invalid token")
             return
@@ -149,6 +164,12 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                 and candidate.turn_id == resume_turn_id
                 and isinstance(next_seq, int) and next_seq >= 0
             ):
+                # The satellite resumes from its last fully played frame. Do
+                # not accept a cursor that cannot be replayed or continued.
+                first_replay_seq = candidate.replay[0][1] if candidate.replay else candidate.next_seq
+                if not first_replay_seq <= next_seq <= candidate.next_seq:
+                    await reject("protocol", "resume next_seq is outside the replay range")
+                    return
                 session = candidate
                 if session.cleanup_task is not None:
                     session.cleanup_task.cancel()
@@ -167,6 +188,9 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                 await reject("conversation_mode_active", str(error))
                 return
             context.assistant.set_satellite_sink(session.satellite_id, session.tts_q)
+            assistant_session = context.assistant.satellites.get(session.satellite_id)
+            if assistant_session is not None:
+                assistant_session.control_sink = session.protocol_events
             session.chunk_q = chunk_q
 
             def on_turn_event(event: dict) -> None:
@@ -175,7 +199,13 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                 try:
                     session.protocol_events.put_nowait(event)
                 except queue.Full:
-                    pass
+                    if event.get("type") != "assistant.state":
+                        return
+                    try:
+                        session.protocol_events.get_nowait()
+                        session.protocol_events.put_nowait(event)
+                    except (queue.Empty, queue.Full):
+                        pass
 
             session.listener = on_turn_event
             context.assistant.register_turn_listener(on_turn_event)
@@ -188,9 +218,10 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
         tts_q, protocol_events = session.tts_q, session.protocol_events
         await ws.send_json({
             "type": "satellite.welcome", "session_id": satellite_id,
-            "protocol": {"major": SATELLITE_V2_PROTOCOL_MAJOR, "minor": SATELLITE_V2_PROTOCOL_MINOR},
+            "protocol": {"major": SATELLITE_V2_PROTOCOL_MAJOR, "minor": client_minor},
             "audio": {
-                "uplink": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1, "frame_duration_ms": 20},
+                "uplink": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": uplink_channels,
+                           "frame_duration_ms": 20},
                 "downlink": {"encoding": "pcm_s16le", "sample_rate_hz": SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ, "channels": 1},
             },
         })
@@ -204,9 +235,10 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
         pending_health_id: Optional[str] = None
         health_response = asyncio.Event()
         health_failed = False
+        uplink_frames_received = 0
 
         async def receive() -> None:
-            nonlocal pending_health_id
+            nonlocal pending_health_id, uplink_frames_received
             try:
                 while True:
                     msg = await ws.receive()
@@ -214,11 +246,20 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                         return
                     if "bytes" in msg:
                         raw = msg["bytes"]
-                        if not raw or len(raw) != SATELLITE_V2_UPLINK_BYTES:
-                            await reject("protocol", "uplink frames must be exactly 640 bytes")
+                        if not raw or len(raw) != uplink_bytes:
+                            await reject("protocol", f"uplink frames must be exactly {uplink_bytes} bytes")
                             return
                         try:
-                            chunk_q.put_nowait(np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0)
+                            samples = np.frombuffer(raw, dtype="<i2")
+                            if uplink_channels == 2:
+                                samples = samples.reshape(-1, 2)
+                            chunk_q.put_nowait(samples.astype(np.float32) / 32768.0)
+                            uplink_frames_received += 1
+                            if uplink_frames_received <= 5 or uplink_frames_received % 250 == 0:
+                                logger.info(
+                                    "Satellite %s received uplink frame %d: %d bytes, %d channels",
+                                    satellite_id, uplink_frames_received, len(raw), uplink_channels,
+                                )
                         except queue.Full:
                             pass
                         continue
@@ -241,9 +282,22 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                             session.transcribing = not data["muted"]
                     elif mtype == "satellite.stop":
                         context.assistant.request_stop(satellite_id)
-                    elif mtype == "conversation_mode.disable":
-                        context.assistant.set_satellite_conversation_mode(satellite_id, False)
-                        await ws.send_json({"type": "conversation_mode.changed", "enabled": False, "owner": False, "session_id": data.get("session_id")})
+                    elif mtype in ("conversation_mode.enable", "conversation_mode.disable"):
+                        if capabilities.get("conversation_mode_control") is not True:
+                            await reject("protocol", "satellite did not declare conversation mode control")
+                            return
+                        requested_enabled = mtype == "conversation_mode.enable"
+                        enabled, reason = context.assistant.set_satellite_conversation_mode(
+                            satellite_id, requested_enabled
+                        )
+                        session = context.assistant.satellites.get(satellite_id)
+                        active = bool(getattr(session, "conversation_mode", False))
+                        await ws.send_json({
+                            "type": "conversation_mode.changed",
+                            "enabled": enabled and active,
+                            "owner": enabled and active and context.assistant.conversation_owner_id == satellite_id,
+                            "message": reason,
+                        })
                     elif mtype == "satellite.health_response":
                         response_id = data.get("id")
                         keys = ("dropped_uplink_frames", "dropped_downlink_frames", "capture_overruns", "playback_underruns")
@@ -291,16 +345,35 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                     pending_health_id = None
 
         async def send() -> None:
+            def discard_queued_tts() -> None:
+                while True:
+                    try:
+                        tts_q.get_nowait()
+                    except queue.Empty:
+                        return
+
             while True:
                 try:
                     event = protocol_events.get_nowait()
                 except queue.Empty:
                     event = None
                 if event is not None:
-                    if event.get("type") == "satellite.health_request":
+                    if event.get("type") in ("satellite.health_request", "conversation_mode.changed"):
                         await ws.send_json(event)
+                    elif event.get("type") == "assistant.stand_down_after_tts":
+                        turn_id = event.get("turn_id")
+                        if isinstance(turn_id, str) and turn_id == session.lifecycle_turn_id:
+                            session.stand_down_turn_id = turn_id
                     elif event.get("type") == "assistant.state":
                         payload = {key: value for key, value in event.items() if key != "satellite_id"}
+                        # A new listening/thinking/follow-up state supersedes
+                        # an active TTS turn. Send its cancel before the state;
+                        # otherwise the satellite correctly rejects old PCM
+                        # after it has left speaking.
+                        if payload.get("state") != "speaking" and session.turn_id is not None:
+                            await ws.send_json({"type": "tts.cancel", "turn_id": session.turn_id})
+                            session.turn_id = None
+                            discard_queued_tts()
                         session.lifecycle_turn_id = payload.get("turn_id", session.lifecycle_turn_id)
                         await ws.send_json(payload)
                     elif event.get("role") == "user" and getattr(context.assistant.satellites.get(satellite_id), "conversation_mode", False):
@@ -327,8 +400,13 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                         await ws.send_json({"type": "tts.cancel", "turn_id": session.turn_id})
                         session.turn_id = None
                     elif isinstance(kind, str) and kind == "end" and session.turn_id is not None:
-                        await ws.send_json({"type": "tts.end", "turn_id": session.turn_id})
+                        completed_turn_id = session.turn_id
+                        await ws.send_json({"type": "tts.end", "turn_id": completed_turn_id})
                         session.turn_id = None
+                        if session.stand_down_turn_id == completed_turn_id:
+                            await ws.send_json({"type": "assistant.state", "state": "idle", "turn_id": completed_turn_id})
+                            session.lifecycle_turn_id = None
+                            session.stand_down_turn_id = None
                     elif not isinstance(kind, str) and session.turn_id is not None:
                         if session.source_sample_rate != SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ and len(kind):
                             positions = np.linspace(0, len(kind) - 1, round(len(kind) * SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ / session.source_sample_rate))

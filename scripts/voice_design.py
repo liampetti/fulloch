@@ -1,13 +1,4 @@
-"""Interactive Voice Designer.
-
-Generate a `data/voices/<name>.{wav,txt}` reference pair from a natural-
-language voice description using Qwen3-TTS-12Hz-1.7B-VoiceDesign. The
-runtime Base clone (`core/tts.py`) picks that pair up via the
-`general.voice_clone` config key on next launch.
-
-Standalone CLI alternative to the in-app voice designer (the setup wizard's
-`/setup/voice`); run with the project venv: `python scripts/voice_design.py`.
-"""
+"""Interactive CLI for creating a Qwen3-TTS voice-clone reference pair."""
 
 import os
 import re
@@ -116,9 +107,7 @@ def generate(model, phrase: str, instruct: str):
 
 
 def write_preview(audio: np.ndarray, sr: int) -> None:
-    """No local audio output (WebSocket satellite is the only I/O in the
-    running app) — write a preview wav to disk and tell the user to play it
-    themselves rather than trying to speak through this host."""
+    """Write generated audio as a preview WAV; this CLI has no playback output."""
     duration = len(audio) / sr if sr else 0
     VOICES_DIR.mkdir(parents=True, exist_ok=True)
     sf.write(str(PREVIEW_PATH), np.clip(audio, -1.0, 1.0), sr, subtype="PCM_16")

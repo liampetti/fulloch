@@ -1,4 +1,4 @@
-"""Backend registry + no-LLM gate (v2.2 Step 1).
+"""Backend registry and no-LLM gate.
 
 `core.backends` is the single source of truth mapping `(domain, backend)` to
 a loader + metadata. These tests lock in the default resolution (the v2.1.9

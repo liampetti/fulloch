@@ -1,13 +1,4 @@
-"""Read / validate / write `config.yml`, preserving comments (v2.2 Step 4).
-
-`config.yml` is the single source of truth. The settings console reads it
-through `settings_view()` (schema + current values), and writes go through
-`update_config()`, which validates every key against `config_schema.SCHEMA`,
-coerces it to the declared type, and writes atomically. Writes produce a clean,
-**comment-free** config (see `_strip_comments`) so the active values are easy to
-read; the shipped `config.example.yml` is the inline documentation reference. A
-brand-new config is still seeded from the example to inherit its default values.
-"""
+"""Read, validate, and atomically write `config.yml`."""
 
 import json
 import logging
@@ -111,10 +102,11 @@ def _coerce(field, raw: Any) -> Optional[Any]:
         except (TypeError, ValueError):
             raise ValueError(f"expected a number, got {raw!r}") from None
     if t == "enum":
-        s = str(raw)
-        if s not in field.choices:
-            raise ValueError(f"must be one of {', '.join(field.choices)}")
-        return s
+        for choice in field.choices:
+            if str(raw) == str(choice):
+                return choice
+        if raw not in field.choices:
+            raise ValueError(f"must be one of {', '.join(map(str, field.choices))}")
     if t == "list":
         if isinstance(raw, list):
             items = [str(x).strip() for x in raw if str(x).strip()]
@@ -148,14 +140,7 @@ def _set_value(doc: CommentedMap, section: str, name: str, value: Any) -> None:
 
 
 def _strip_comments(node) -> None:
-    """Recursively drop every comment from a ruamel doc (in place).
-
-    The seed `config.example.yml` carries the full inline documentation, which
-    made a written `config.yml` hard to read — the active values were buried in
-    template comments, and console-set keys appeared appended among them. We keep
-    the example as the documentation reference and write a clean, comment-free
-    config so it's obvious what's actually set.
-    """
+    """Remove ruamel comment metadata before writing `config.yml`."""
     if isinstance(node, CommentedBase):
         try:
             node.ca.comment = None

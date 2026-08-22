@@ -1,35 +1,4 @@
-"""One-time fetch for the CrispASR-hosted Qwen3-TTS GGUF backends
-(core/tts_crispasr.py, backend ids `crispasr-qwen3-tts` [1.7B] and
-`crispasr-qwen3-tts-0.6b` [0.6B]).
-
-Not wired into the setup wizard yet — these backends are experimental/
-selectable, so fetching is manual for now. Pulls three things:
-
-  1. The CrispASR Python runtime (ctypes binding + bundled libcrispasr.so and
-     its ggml/whisper .so dependencies) from a pinned GitHub release —
-     extracted to data/models/crispasr-python/. Shared by both talker sizes.
-     Pass --gpu to also (or instead) assemble a CUDA-enabled copy at
-     data/models/crispasr-python-cuda/ — see fetch_lib_gpu()'s docstring for
-     why that needs assembling rather than a straight download.
-   2. The requested talker GGUFs (1.7B F16, 0.6B q8_0):
-       1.7B: huggingface.co/cstr/qwen3-tts-1.7b-base-GGUF
-       0.6B: huggingface.co/cstr/qwen3-tts-0.6b-base-GGUF
-  3. The companion codec GGUF (fixed at f16 regardless of talker size —
-     quantizing it hurts more than the talker does) from
-     huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF. Downloaded once,
-     symlinked into whichever talker dir(s) are fetched.
-
-1.7B lands in data/models/qwen3-tts-crispasr-gguf/, 0.6B in
-data/models/qwen3-tts-crispasr-0.6b-gguf/ (core/tts_crispasr.py's
-DEFAULT_MODEL_DIR / DEFAULT_MODEL_DIR_0_6B).
-
-Usage:
-    .venv/bin/python scripts/fetch_crispasr_tts.py                # both talkers, CPU runtime (default)
-    .venv/bin/python scripts/fetch_crispasr_tts.py --gpu          # + CUDA-enabled runtime (needs an NVIDIA GPU + driver)
-    .venv/bin/python scripts/fetch_crispasr_tts.py --model 1.7b   # just the 1.7B
-    .venv/bin/python scripts/fetch_crispasr_tts.py --model 0.6b   # just the 0.6B
-    .venv/bin/python scripts/fetch_crispasr_tts.py --force        # re-fetch even if present
-"""
+"""Download the CrispASR runtime and requested Qwen3-TTS GGUF models."""
 
 import argparse
 import logging
@@ -47,7 +16,7 @@ MODELS_ROOT = Path("data/models")
 LIB_DIR = MODELS_ROOT / "crispasr-python"
 LIB_DIR_GPU = MODELS_ROOT / "crispasr-python-cuda"
 
-CRISPASR_RELEASE_TAG = "v0.8.7"  # pinned to the version validated during backend selection
+CRISPASR_RELEASE_TAG = "v0.8.7"
 _ARCH_TARBALLS = {
     "x86_64": "crispasr-python-linux-x86_64.tar.gz",
     "amd64": "crispasr-python-linux-x86_64.tar.gz",
@@ -107,23 +76,7 @@ def fetch_lib(force: bool = False):
 
 
 def fetch_lib_gpu(force: bool = False):
-    """Assemble a CUDA-enabled crispasr Python package.
-
-    CrispASR doesn't publish a CUDA build of the *Python* binding — only the
-    CLI/C-library release (`libcrispasr-linux-x86_64-cuda.tar.gz`), which has
-    the native .so's (including libggml-cuda) but not the ctypes glue
-    (_binding.py/__init__.py) or libcrispasr_helpers.so (python-binding-only,
-    no CUDA-specific build exists). Verified by hand (2026-07-05, RTX 5060 Ti):
-    those two pieces are backend-agnostic, so this hybrid — CPU release's
-    Python glue + CUDA release's native libs — loads cleanly and genuinely
-    dispatches to the GPU (~3.3GB VRAM observed synthesising the 1.7B q8_0
-    talker, RTF ~0.6x vs the CPU build's ~1.5-2.5x).
-
-    The two releases use different SONAMEs for the shared ggml libs (CPU:
-    bare `libggml.so`; CUDA: versioned `libggml.so.0`) — libcrispasr.so's own
-    NEEDED entries expect the CUDA build's versioned names, so the extracted
-    files are renamed to match rather than the bare names fetch_lib() uses.
-    """
+    """Assemble the CUDA runtime from the Python binding and CUDA native libraries."""
     fetch_lib(force=force)  # need its Python glue + libcrispasr_helpers.so
     dst = LIB_DIR_GPU / "crispasr"
     if (dst / "libggml-cuda.so.0").is_file() and not force:

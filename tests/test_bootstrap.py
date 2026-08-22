@@ -1,4 +1,4 @@
-"""First-run scaffolding for the precompiled image (v2.2 Step 7)."""
+"""First-run data-directory scaffolding."""
 
 import sys
 from pathlib import Path

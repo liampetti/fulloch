@@ -1,12 +1,4 @@
-"""Voice-clone reference generation, refactored out of the interactive CLI
-(`scripts/voice_design.py`) into importable functions for the wizard (v2.2
-Step 4).
-
-The dashboard drives generate → preview (audio bytes the browser plays) → save
-(`data/voices/<name>.{wav,txt}`), which the runtime Qwen Base clone picks up via
-`general.voice_clone`. The heavy Qwen3-TTS VoiceDesign model is imported and
-loaded lazily (and cached) so importing this module costs nothing.
-"""
+"""Voice-clone reference generation for the CLI and setup wizard."""
 
 import io
 import logging

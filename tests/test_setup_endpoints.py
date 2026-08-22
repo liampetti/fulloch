@@ -1,4 +1,4 @@
-"""Setup / settings console endpoints (v2.2 Step 4).
+"""Setup and settings-console endpoints.
 
 Drives the config/install/voice/preflight routes against a setup-mode app
 (no assistant) with a fake download manager — no network, no models.

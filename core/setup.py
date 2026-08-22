@@ -23,11 +23,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = "./data/config.yml"
 DEFAULT_MODELS_DIR = "./data/models"
-# Dropped by the dashboard's "Re-run setup" action; forces the wizard on the
-# next start regardless of config/assets. The wizard clears it on completion.
+# Forces the setup wizard on the next startup.
 DEFAULT_RESET_MARKER = "./data/.setup_pending"
-# Written only after the wizard has downloaded the selected assets successfully.
-# A seeded config.yml is deliberately not enough to authorise automatic downloads.
+# Authorizes automatic recovery downloads after a successful wizard install.
 DEFAULT_COMPLETE_MARKER = "./data/.setup_complete"
 SNAPSHOT_COMPLETE_MARKER = ".fulloch_complete"
 

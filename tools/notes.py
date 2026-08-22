@@ -29,10 +29,7 @@ from .tool_registry import tool
 logger = logging.getLogger(__name__)
 
 _notes_config = config.get("notes", {}) or {}
-# Legacy default — what `notes.path` in config.yml pointed at before any
-# plugin adoption. The migration endpoint reads from here when copying into
-# the new vault. Kept around as a constant so the migration remains
-# deterministic even if the override is updated.
+# Stable source directory for vault migration.
 NOTES_DIR_LEGACY = Path(_notes_config.get("path", "./data/notes")).expanduser().resolve()
 
 # `append_to_today` writes to <NOTES_DIR>/<DAILY_SUBDIR>/YYYY-MM-DD.md so daily
@@ -54,6 +51,9 @@ SEMANTIC_MIN_SCORE = 0.25
 MAX_HYBRID_MATCHES = 5
 FACTS_NOTE = "fulloch_facts"
 INDEX_BASENAME = "notes_index"
+# The vault is commonly a read-only or externally mounted directory. Keep the
+# derived cache with Fulloch's other writable runtime data instead of beside it.
+INDEX_PATH = Path("./data") / INDEX_BASENAME
 
 # Lightweight hand-off for the dashboard stats panel: the semantic-search paths
 # record the number of matched chunks here, and the assistant pops it after a
@@ -357,7 +357,7 @@ def _get_index():
 
         _index = NotesIndex(
             notes_root=notes_root.get_notes_root(),
-            index_path=notes_root.get_notes_root().parent / INDEX_BASENAME,
+            index_path=INDEX_PATH,
             spoken_filter=_to_spoken,
         )
         return _index

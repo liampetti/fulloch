@@ -1,25 +1,4 @@
-"""First-run scaffolding for the precompiled image (v2.2 Step 7).
-
-The container ships application code only — weights and config live in the
-single persisted `./data` volume, which is empty on first run. This seeds the
-minimum so the app boots into the setup wizard with no host-side steps:
-
-  - creates the `data/` subtree (models/grammars, models/hub, models/wakeword,
-    voices, notes, certs)
-  - seeds `data/config.yml` from the bundled template (the wizard fills it in)
-  - seeds `data/models/grammars/agent.gbnf` — the app's own grammar, which the
-    wizard's downloader can't fetch (it's not on HF), so it must ship in the
-    image and be copied into the volume here, or first-run setup would loop.
-  - seeds the repository-provided default openWakeWord model so its configured
-    wizard preset works without a model download
-  - generates a self-signed HTTPS cert and wires it into the fresh config, so
-    the browser satellite's microphone access works from a phone/other device
-    on the LAN out of the box (see core.tls_certs).
-
-Seed files live at `FULLOCH_SEED_DIR` (default `/app/seed`, populated by the
-Dockerfile). In a native dev checkout that dir doesn't exist and `data/` is
-already populated, so this is a no-op there.
-"""
+"""First-run data-directory scaffolding."""
 
 import logging
 import os

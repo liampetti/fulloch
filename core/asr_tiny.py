@@ -1,15 +1,4 @@
-"""Moonshine-tiny ASR — CPU-friendly alternative to the default Qwen3 ASR.
-
-Ported from the v1.0 tiny tier onto the v2.1.9 ASR contract: the wrapper
-mimics the same generator-streaming pipeline API as
-`core.asr.QwenASRPipelineWrapper` (callable over a buffer generator, yielding
-`{"text": ...}` dicts) and exposes `.context` and `.last_transcribe_seconds`
-so the transcriber thread and stats panel work unchanged. Moonshine can't
-bias on a context prompt, so `.context` is accepted and ignored.
-
-The model load is deferred behind `load_asr_model()` (selected via the backend
-registry), so `import core.asr_tiny` itself loads nothing.
-"""
+"""Moonshine CPU ASR backend. It accepts but does not use context biasing."""
 
 import logging
 import time

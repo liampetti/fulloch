@@ -10,9 +10,8 @@ ggml libraries from colliding with other CUDA model runtimes
 inside the main assistant process, while retaining a warm session between
 clauses.
 
-The GPU image bakes the pinned CUDA runtime into `/opt`; the setup wizard
-downloads the talker and codec GGUF files. The legacy fetch script remains
-useful for native development.
+The GPU image includes the CUDA runtime; setup downloads the talker and codec
+GGUF files.
 
 Consent/disclaimer note: the CrispASR *CLI*'s `--i-have-rights` gate and
 `--no-spoken-disclaimer`/watermark handling live in the CLI application layer,
@@ -138,7 +137,7 @@ def load_tts(
     if lib_dir is None:
         lib_dir = DEFAULT_LIB_DIR_GPU if gpu else DEFAULT_LIB_DIR
         if gpu and not Path(lib_dir).is_dir():
-            # Native development installs created by the legacy fetch script.
+            # Fallback path for native CUDA runtime installs.
             lib_dir = "./data/models/crispasr-python-cuda"
     lib_root = Path(lib_dir)
     if not (lib_root / "crispasr" / "__init__.py").is_file():
@@ -260,15 +259,7 @@ def _synth(text: str) -> np.ndarray:
         if isinstance(_session, CrispASRWorker)
         else _session.synthesize(text)
     )
-    # PLACEHOLDER — watermarking (not implemented yet). crispasr's Python
-    # package watermark_embed()/watermark_load_model() (v0.4.9, the release
-    # this module targets) call an undefined `_get_lib()` helper — a real
-    # packaging bug upstream, not a design limitation — so they crash as
-    # shipped. Workaround once needed: bypass the free function and call
-    # `_session._lib.crispasr_watermark_embed(...)` directly (the ctypes
-    # handle is already loaded on the warm session). Re-check latency on a
-    # realistic clause-length clip before enabling by default — that's what
-    # this comment is standing in for.
+    # Watermarking is unavailable because the targeted CrispASR Python helpers fail upstream.
     return np.asarray(audio, dtype=np.float32).reshape(-1)
 
 

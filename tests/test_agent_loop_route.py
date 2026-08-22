@@ -7,6 +7,7 @@ touches before returning, not a full Assistant.
 """
 
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.agent_loop import _llm_unavailable_label  # noqa: E402
 from core.slm import RemoteUnreachable  # noqa: E402
 from core.turn_stats import TurnStats  # noqa: E402
+from utils.intents import StepKind, StepResult  # noqa: E402
 
 
 def _host(**overrides):
@@ -120,6 +122,44 @@ def test_route_is_agent_once_slm_call_starts(monkeypatch):
     # is known — even though this particular call fails over to a fallback.
     assert out == "LLM SERVER UNREACHABLE"
     assert stats.route == "agent"
+
+
+def test_replan_ack_finishes_before_the_final_reply_returns(monkeypatch):
+    """A late ack `tts_end` must not deactivate the final browser TTS stream."""
+    import core.agent_loop as al
+
+    monkeypatch.setattr(al, "catchAll", lambda prompt: None)
+    monkeypatch.setattr(al.intents, "is_registered_tool", lambda _intent: True)
+    monkeypatch.setattr(
+        al.intents,
+        "classify_step",
+        lambda _result: StepResult(StepKind.REACTIVE, "try again", False),
+    )
+    monkeypatch.setattr(al.intents, "handle_action", lambda _action: "ignored")
+    emissions = iter([
+        '{"actions": [{"intent": "lookup", "args": []}]}',
+        '{"reply": "The final answer."}',
+    ])
+    ack_finished = []
+
+    def play_ack(*_args, **_kwargs):
+        time.sleep(0.03)
+        ack_finished.append(True)
+
+    host = _host(
+        grammar=object(),
+        wakeword_name="Fulloch",
+        tts_session=None,
+        replan_stall_cache=[([], 24000)],
+        _play_random_ack=play_ack,
+        play_chunks=lambda *args, **kwargs: None,
+        _note_llm_remote_status=lambda *args: None,
+        _generate_with_context_recovery=lambda **kwargs: next(emissions),
+        _record_spoken=lambda _text: None,
+    )
+
+    assert al.AgentLoop(host, source="voice").run("look it up") == "The final answer."
+    assert ack_finished == [True]
 
 
 def test_route_stays_none_without_a_stats_object():

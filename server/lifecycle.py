@@ -1,4 +1,4 @@
-"""Runtime lifecycle for the two-phase startup (v2.2 Step 3).
+"""Runtime lifecycle for two-phase startup.
 
 Phase A (this object exists from the very first line of `main`) parses config,
 starts the web server, and decides whether first-run setup is needed. Phase B
@@ -11,8 +11,7 @@ download/loading screens.
          └────────────── (existing install) ──────┘
     any phase ──► ERROR  (config update needed, fatal load failure)
 
-Import-light (stdlib only) so it can be created before — and independently of —
-torch / llama / the model stack.
+Import-light so it can be created before model loading.
 """
 
 import collections
@@ -25,14 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class LogBuffer:
-    """Thread-safe ring buffer of recent log lines for the loading screen.
-
-    The loading screen polls `/status` while models load; surfacing the tail of
-    the project's own INFO logs there turns the bare spinner into a live
-    "here's what's happening" terminal. Each line carries a monotonic `seq` so
-    the browser can tell which lines it hasn't shown yet (and animate just
-    those) without the server tracking per-client state.
-    """
+    """Thread-safe recent-log buffer for the loading screen."""
 
     def __init__(self, maxlen: int = 80):
         self._lock = threading.Lock()
@@ -160,10 +152,7 @@ class AppContext:
         # PBKDF2 hash loaded from credentials.json at startup. None = no auth
         # (zero-config local-only). Set by /setup/password without restart.
         self.dashboard_password_hash: Optional[str] = None
-        # Session store: {session_id: created_timestamp}. Persisted to
-        # auth.SESSIONS_PATH (server/auth.py) so a restart doesn't force a
-        # re-login within COOKIE_MAX_AGE (1 year) — dashboard.py's login/
-        # logout handlers save on every change.
+        # Persisted dashboard sessions.
         from .auth import load_sessions
         self.sessions: dict = load_sessions()
         self._on_attach: list = []
@@ -189,10 +178,7 @@ class AppContext:
 
     def set_assistant(self, assistant) -> None:
         self.assistant = assistant
-        # Registers the live instance so tool modules (which never import
-        # core.assistant itself — too heavy) can reach per-satellite state
-        # like SatelliteSession.ha_area via core.satellite_context instead of
-        # needing an assistant handle threaded through tool dispatch (#14 6b).
+        # Expose the live assistant through the lightweight satellite context.
         from core.satellite_context import set_current_assistant
 
         set_current_assistant(assistant)

@@ -128,6 +128,7 @@ def stream_generator(
     verification_context: Optional[str] = None,
     kws_candidate_sink: Optional[dict] = None,
     kws_wav_path_sink: Optional[dict] = None,
+    wake_generation_sink: Optional[dict] = None,
 ) -> Generator:
     """Yield audio buffers from a queue until a None sentinel.
 
@@ -161,6 +162,7 @@ def stream_generator(
         wake_probe = item[6] if len(item) > 6 else False
         kws_candidate = item[7] if len(item) > 7 else False
         kws_wav_path = item[8] if len(item) > 8 else None
+        wake_generation = item[9] if len(item) > 9 else None
         if onset_sink is not None:
             onset_sink["t"] = onset_t
         if loudness_sink is not None:
@@ -179,4 +181,6 @@ def stream_generator(
             kws_candidate_sink["flag"] = kws_candidate
         if kws_wav_path_sink is not None:
             kws_wav_path_sink["path"] = kws_wav_path
+        if wake_generation_sink is not None:
+            wake_generation_sink["value"] = wake_generation
         yield AsrInput(buf, verification_context) if kws_candidate else buf

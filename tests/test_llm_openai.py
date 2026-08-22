@@ -1,4 +1,4 @@
-"""OpenAI-compatible remote LLM backend + graceful degradation (v2.2 Step 6)."""
+"""OpenAI-compatible remote LLM backend and graceful degradation."""
 
 import sys
 import types

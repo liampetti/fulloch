@@ -1,16 +1,4 @@
-"""Declarative schema for every `config.yml` key — the single source the
-settings console UI is generated from (v2.2 Step 4).
-
-Each `Field` carries its YAML location (section + name), type, default, a help
-string (mirrors the `config.example.yml` comment, surfaced as a hover popover
-in the browser), a UI group, and an apply mode (`hot` vs `restart`). The
-config store validates writes against this schema; the wizard renders the
-dropdowns and the settings console renders the grouped form from it.
-
-Also defines the wakeword presets and tier presets the wizard offers.
-
-Import-light (stdlib only) so it loads in setup mode before anything heavy.
-"""
+"""Configuration schema, wizard presets, and settings-form metadata."""
 
 import os
 from dataclasses import dataclass
@@ -25,6 +13,7 @@ RESTART = "restart"  # read once at startup; needs a restart to apply
 GROUPS = (
     "General",
     "Voice",
+    "Satellites",
     "Endpointing",
     "Dashboard",
     "Home Assistant",
@@ -90,7 +79,7 @@ SCHEMA: tuple = (
         "str",
         "General",
         "English",
-        "Force transcription to one language (English only for now).",
+        "Force transcription to one language (currently English only).",
     ),
     Field(
         "general",
@@ -231,6 +220,25 @@ SCHEMA: tuple = (
         "Wakeword-free reply window after TTS ('0s' to disable), for "
         "back-and-forth in quiet rooms.",
         apply=HOT,
+    ),
+    # --- Satellites --------------------------------------------------------
+    Field(
+        "satellite",
+        "uplink_channels",
+        "enum",
+        "Satellites",
+        1,
+        "Preferred maximum AEC output channels for native satellites. One channel preserves the existing mono uplink.",
+        choices=(1, 2),
+    ),
+    Field(
+        "satellite",
+        "dual_mic_processing",
+        "enum",
+        "Satellites",
+        "best_channel",
+        "Server processing for a negotiated two-channel uplink. Select one echo-cancelled channel for each utterance.",
+        choices=("best_channel",),
     ),
     # --- Endpointing -------------------------------------------------------
     Field(
@@ -542,14 +550,7 @@ class TierPreset:
     recommended: bool = False
 
 
-# Three ready-made stacks. The Full stack is GPU end-to-end — ASR, TTS, and
-# the 9B LLM all GPU-resident. It defaults to the 1.7B PyTorch ASR/TTS pair.
-# The two CPU-only stacks use the accurate 1.7B ONNX ASR with
-# Pocket TTS voice cloning by default; Kokoro is a smaller built-in-voice
-# alternative. The CPU stacks otherwise differ only in the LLM — a separate
-# OpenAI-compatible server on your network, or regex-only/no LLM.
-# (A 4B "balanced" tier was dropped — at the quant needed to be reliable it
-# costs roughly the same VRAM as the 9B, so the 9B is the local minimum.)
+# Ready-made backend stacks offered by the wizard.
 TIER_PRESETS: tuple = (
     TierPreset(
         "full",

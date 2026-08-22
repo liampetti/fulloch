@@ -1,4 +1,4 @@
-"""Download manager + pre-flight (v2.2 Step 4)."""
+"""Download manager and preflight checks."""
 
 import os
 import sys

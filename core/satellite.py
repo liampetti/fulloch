@@ -1,13 +1,4 @@
-"""`SatelliteSession` — per-connection state for one `/ws/satellite` client.
-
-Multiple browsers (or, from Phase 5 onward, `/ws/satellite-v2` clients) can be
-connected at once; each gets its own `SatelliteSession` keyed in
-`Assistant.satellites` by `id`. `id` is minted by the caller (the WS handler)
-and passed in, not generated inside `Assistant.connect_satellite` — later
-phases (the dashboard busy-status banner, the satellite-v2 protocol) need the
-handler to know the id synchronously at connect time, before any audio has
-been exchanged.
-"""
+"""Per-connection state for one browser or native satellite."""
 
 import queue
 import threading
@@ -38,8 +29,15 @@ class SatelliteSession:
     id: str
     chunk_q: Optional["queue.Queue"] = None
     tts_sink: Optional["queue.Queue"] = None
+    # TTS producers can run on agent, acknowledgement, and watchdog threads.
+    # A transport stream's start/PCM/end markers must remain contiguous.
+    tts_stream_lock: threading.RLock = field(default_factory=threading.RLock)
+    control_sink: Optional["queue.Queue"] = None
     recorder_thread: Optional[threading.Thread] = None
     conversation_mode: bool = False
+    # A connection can enter Conversation mode before its WebSocket TTS sink is
+    # attached. Deliver the listening acknowledgement once that route exists.
+    conversation_listening_pending: bool = False
 
     # --- Turn / echo / follow-up / noise-baseline state ---------------------
     # A barge-in / follow-up / self-echo / noise-baseline decision for this
@@ -68,6 +66,7 @@ class SatelliteSession:
     protocol_turn_id: Optional[str] = None
     protocol_state_generation: int = 0
     protocol_follow_up_timer: Optional[threading.Timer] = None
+    protocol_wake_timer: Optional[threading.Timer] = None
     # True after a soft-endpoint transcript matched the wakeword. The recorder
     # keeps collecting the same utterance; its hard endpoint either accepts
     # this turn ID or rejects the provisional match and returns to idle.
@@ -77,6 +76,9 @@ class SatelliteSession:
     # reply plays) — distinct from AudioCapture.mic_globally_enabled, the
     # HA-switch-facing "don't listen anywhere" override that ANDs with this.
     transcribing: bool = True
+    # Dashboard-controlled listening pause. Unlike `transcribing`, this survives
+    # half-duplex and TTS state transitions.
+    user_muted: bool = False
     tts_active: threading.Event = field(default_factory=threading.Event)
     # Per-satellite streaming VAD endpointer (see core/vad.py:VadEndpointer) and
     # its soft-endpoint provisional-probe debounce. `VADIterator` advances its
@@ -112,10 +114,7 @@ class SatelliteSession:
     provisional_committed_text: str = ""
     provisional_committed_at: float = 0.0
 
-    # --- Forward-compat hooks (phases 4-6) ---------------------------------
-    # All optional/default-None so a Phase 1 connect leaves them inert. They
-    # land here so later phases read them off the session rather than
-    # re-refactoring the connect path a second time.
+    # Native-satellite metadata is optional for browser clients.
     label: Optional[str] = None  # human-readable ("kitchen"); #13/#14
     ha_area: Optional[str] = None  # HA area_id default for this satellite; #14
     # Display name for ha_area, as resolved client-side from GET /ha/areas

@@ -57,6 +57,7 @@
     <button class="tab" data-tab="facts" role="tab" aria-selected="false">Facts</button>
     <button class="tab" data-tab="entities" role="tab" aria-selected="false">Entities</button>
     <button class="tab obsidian-tab" data-tab="obsidian" role="tab" aria-selected="false">Obsidian<span id="obs-edit-alert" hidden aria-label="Edit/delete mode active" title="Obsidian edit/delete mode active"></span></button>
+    <button class="tab" data-tab="satellites" role="tab" aria-selected="false">Satellites</button>
     <button id="llm-alert" type="button" hidden aria-label="Remote language model unreachable"
             title="Remote language model unreachable — running in regex / fast-path mode only. Check the OpenAI endpoint and model in settings. Click to show details.">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
@@ -102,6 +103,10 @@
 
       <div class="obs-actions" id="obs-actions"></div>
       <p class="facts-hint" id="obsidian-hint"></p>
+    </section>
+
+    <section id="satellites" class="view satellites-view" hidden>
+      <div id="satellites-stage"></div>
     </section>
   </main>
 

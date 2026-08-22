@@ -603,6 +603,7 @@
     facts: document.getElementById('facts'),
     entities: document.getElementById('entities'),
     obsidian: document.getElementById('obsidian'),
+    satellites: document.getElementById('satellites'),
   };
   const chatFooter = document.getElementById('chat-footer');
   const factsList = document.getElementById('facts-list');
@@ -992,10 +993,6 @@
     return `unzip -o ~/Downloads/fulloch.zip -d ${quoteShell(target)}`;
   };
 
-  // Pre-submission: zip is the only install path. Once the plugin is accepted
-  // into the community store, replace the "Install via zip" section with an
-  // `obsidian://show-plugin?id=fulloch` button (one-line change). The
-  // `community_store_available` flag is the single switch to flip.
   const obsidianCommunityStoreAvailable = false;
 
   const openObsidianSetup = async () => {
@@ -1141,6 +1138,190 @@
 
   }
 
+  // ---- Satellites workspace ----
+  const satellitesStage = document.getElementById('satellites-stage');
+
+  const satelliteIcon = (satellite) => {
+    const name = `${satellite.label || ''} ${satellite.area || ''}`.toLowerCase();
+    const rooms = [
+      [/bed(room)?|nursery|guest/, '🛏️'],
+      [/living|lounge|family|media|theat(er|re)/, '🛋️'],
+      [/kitchen|pantry|scullery/, '🍳'],
+      [/dining|breakfast/, '🍽️'],
+      [/office|study|desk|workshop/, '💻'],
+      [/bath(room)?|ensuite|toilet|powder/, '🛁'],
+      [/garage|carport/, '🚗'],
+      [/garden|yard|patio|deck|outdoor|porch|veranda/, '🌿'],
+      [/laundry|utility/, '🧺'],
+      [/hall|entry|foyer|corridor/, '🚪'],
+      [/gym|fitness/, '🏋️'],
+    ];
+    const match = rooms.find(([pattern]) => pattern.test(name));
+    return match ? match[1] : satellite.transport === 'native' ? '📡' : '🎙️';
+  };
+
+  const satelliteButton = (label, className, action) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = className;
+    button.textContent = label;
+    button.addEventListener('click', action);
+    return button;
+  };
+
+  const setSatelliteSetting = async (satellite, setting, enabled) => {
+    const route = setting === 'conversation'
+      ? `/satellites/${encodeURIComponent(satellite.id)}/conversation-mode`
+      : `/satellites/${encodeURIComponent(satellite.id)}/mute`;
+    if (setting === 'conversation' && enabled && !confirm(
+      'Start conversation mode here?\n\nOther connected voice satellites will be disconnected.'
+    )) return;
+    try {
+      const r = await fetch(route, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const body = await r.json();
+      if (!r.ok || !body.ok) throw new Error(body.message || 'Satellite unavailable');
+      loadSatellites();
+    } catch (error) {
+      console.warn('satellite setting failed', error);
+      loadSatellites('Could not update that satellite.');
+    }
+  };
+
+  const stopSatellite = async (satellite) => {
+    try {
+      await fetch('/stop', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ satellite_id: satellite.id }),
+      });
+    } finally {
+      loadSatellites();
+    }
+  };
+
+  const renderSatellite = (satellite, index) => {
+    const card = document.createElement('article');
+    card.className = `satellite-card ${satellite.transport} ${satellite.conversation_owner ? 'conversation-owner' : ''}`;
+    card.style.setProperty('--sat-delay', `${index * 55}ms`);
+    const beacon = document.createElement('div');
+    beacon.className = 'satellite-beacon';
+    beacon.textContent = satelliteIcon(satellite);
+    const head = document.createElement('div');
+    head.className = 'satellite-card-head';
+    const title = document.createElement('div');
+    title.className = 'satellite-title';
+    const name = document.createElement('h2');
+    name.textContent = satellite.label;
+    const meta = document.createElement('p');
+    meta.textContent = satellite.transport === 'native'
+      ? (satellite.area || 'Native room satellite')
+      : (satellite.area || 'Dashboard voice satellite');
+    title.append(name, meta);
+    const state = document.createElement('span');
+    state.className = `satellite-state ${satellite.state}`;
+    state.textContent = satellite.muted ? 'Listening paused' : satellite.conversation_owner ? 'In conversation' : satellite.state;
+    head.append(beacon, title, state);
+
+    const orbit = document.createElement('div');
+    orbit.className = 'satellite-orbit';
+    const mode = document.createElement('span');
+    mode.textContent = satellite.conversation_owner ? 'Wakeword-free room' : 'Wakeword gated';
+    const type = document.createElement('span');
+    type.textContent = satellite.transport === 'native' ? 'Native satellite' : 'Browser satellite';
+    orbit.append(mode, type);
+
+    const controls = document.createElement('div');
+    controls.className = 'satellite-controls';
+    controls.append(
+      satelliteButton(
+        satellite.conversation_mode ? 'End conversation' : 'Start conversation',
+        `satellite-action ${satellite.conversation_mode ? 'active' : ''}`,
+        () => setSatelliteSetting(satellite, 'conversation', !satellite.conversation_mode),
+      ),
+      satelliteButton(
+        satellite.muted ? 'Resume listening' : 'Pause listening',
+        'satellite-action quiet',
+        () => setSatelliteSetting(satellite, 'mute', !satellite.muted),
+      ),
+    );
+    if (satellite.state !== 'idle') {
+      controls.append(satelliteButton('Stop', 'satellite-action stop', () => stopSatellite(satellite)));
+    }
+
+    const details = document.createElement('details');
+    details.className = 'satellite-details';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Satellite details';
+    const detailGrid = document.createElement('div');
+    detailGrid.className = 'satellite-detail-grid';
+    const detail = (label, value) => {
+      const cell = document.createElement('div');
+      const key = document.createElement('span');
+      key.textContent = label;
+      const val = document.createElement('code');
+      val.textContent = value;
+      cell.append(key, val);
+      return cell;
+    };
+    detailGrid.append(
+      detail('Transport', satellite.transport),
+      detail('Endpointing', satellite.server_vad ? 'Server VAD' : 'Device VAD'),
+      detail('Session', satellite.id.slice(0, 12)),
+    );
+    if (satellite.device_id) detailGrid.append(detail('Device', satellite.device_id));
+    details.append(summary, detailGrid);
+    card.append(head, orbit, controls, details);
+    return card;
+  };
+
+  const renderSatellites = (state, error = '') => {
+    satellitesStage.innerHTML = '';
+    const satellites = state.satellites || [];
+    const masthead = document.createElement('section');
+    masthead.className = 'satellite-masthead';
+    const eyebrow = document.createElement('p');
+    eyebrow.textContent = satellites.length ? `${satellites.length} room${satellites.length === 1 ? '' : 's'} online` : 'No rooms online';
+    const heading = document.createElement('h1');
+    heading.textContent = satellites.length ? 'Your home, in listening range.' : 'The house is quiet.';
+    const copy = document.createElement('p');
+    copy.className = 'satellite-masthead-copy';
+    copy.textContent = satellites.length
+      ? 'Conversation mode belongs to one room at a time. Pause listening without disconnecting a room.'
+      : 'Open Voice mode in the dashboard or connect a native satellite to bring a room online.';
+    const refresh = satelliteButton('Refresh rooms', 'satellite-refresh', () => loadSatellites());
+    masthead.append(eyebrow, heading, copy, refresh);
+    satellitesStage.append(masthead);
+    if (error) {
+      const message = document.createElement('p');
+      message.className = 'satellite-error';
+      message.textContent = error;
+      satellitesStage.append(message);
+    }
+    const map = document.createElement('div');
+    map.className = 'satellite-map';
+    if (satellites.length) satellites.forEach((satellite, index) => map.append(renderSatellite(satellite, index)));
+    else {
+      const empty = document.createElement('div');
+      empty.className = 'satellite-empty';
+      empty.textContent = 'No connected satellites yet.';
+      map.append(empty);
+    }
+    satellitesStage.append(map);
+  };
+
+  const loadSatellites = async (error = '') => {
+    try {
+      const r = await fetch('/satellites');
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      renderSatellites(await r.json(), error);
+    } catch (e) {
+      console.warn('satellites load failed', e);
+      renderSatellites({ satellites: [] }, error || 'Could not reach the satellite service.');
+    }
+  };
+
   const setTab = (name) => {
     tabs.forEach((t) => {
       const on = t.dataset.tab === name;
@@ -1152,6 +1333,7 @@
     if (name === 'facts') loadFacts();
     if (name === 'entities') loadEntities();
     if (name === 'obsidian') loadObsidian();
+    if (name === 'satellites') loadSatellites();
   };
 
   tabs.forEach((t) => t.addEventListener('click', () => setTab(t.dataset.tab)));

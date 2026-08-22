@@ -453,11 +453,6 @@ function setBranding(remote) {
 }
 
 // ---- step 2: set up (wakeword + voice) -------------------------------------
-// HA + SearXNG used to live here as collapsed <details> cards. They were
-// moved to a dedicated sub-step (`stepConnect`) so the "skip by default"
-// treatment is the page's primary affordance instead of a footnote — the
-// step's own Skip button (and an explicit "this is optional" lead) make
-// the choice obvious. Task 4 of docs/ease-of-use-tasks.md.
 async function stepSetup() {
   curStep = 1; renderSteps(1);
   const isKokoro = ttsBackend() === 'kokoro-onnx';
@@ -528,18 +523,11 @@ async function stepSetup() {
   }
 
   $('back2').addEventListener('click', stepBrain);
-  // "Get started" goes to the new "Connect (optional)" sub-step where HA
-  // and SearXNG are configured. Both cards default-collapsed, and the
-  // sub-step's own Skip button drops the user straight into Obsidian
-  // (which itself has a Skip). Task 4 of docs/ease-of-use-tasks.md.
+  // Optional integrations are configured in a separate step.
   $('get-started').addEventListener('click', stepConnect);
 }
 
 // ---- step 2.4: connect HA + SearXNG (optional) ----------------------------
-// Same sub-step shape as Obsidian (step 2.5): one screen, one Skip button,
-// every card collapsed by default. The "skip by default" treatment matches
-// the pattern Obsidian already uses — the user only expands a card if
-// they want to configure that integration right now.
 function stepConnect() {
   const haUrl = (sel.ha.url || '').replace(/"/g, '&quot;');
   const haToken = (sel.ha.token || '').replace(/"/g, '&quot;');
@@ -786,7 +774,7 @@ async function doInstall() {
   // Blocking preflight before the model download starts: disk space,
   // network reach to the model hub, and (for GPU tiers) an NVIDIA GPU
   // being visible. Each failed check becomes one bullet in the error
-  // pane so the user knows exactly which to fix. Task 3 of
+  // pane so the user knows exactly which to fix.
   // docs/ease-of-use-tasks.md.
   const models = chosenModels();
   const pre = await postJSON('/setup/preflight-download', { models });

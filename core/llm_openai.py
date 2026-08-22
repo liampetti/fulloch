@@ -1,20 +1,4 @@
-"""OpenAI-compatible remote LLM backend (v2.2 Step 6).
-
-An advanced alternative to the local llama.cpp path: drives the agent loop
-against any OpenAI-compatible chat-completions endpoint (llama.cpp server,
-vLLM, Ollama, LM Studio, or a hosted API). `OpenAIClient.generate` mirrors
-`core.slm.generate_slm`'s contract, so `generate_slm` can dispatch to it
-transparently.
-
-Design notes (from the plan):
-  - Structured output: when the agent grammar is in play we request JSON mode
-    and validate-and-repair, since there's no GBNF on a remote endpoint.
-  - Reachability is call-and-catch, not a pre-flight probe: a tight *connect*
-    timeout (separate from the read timeout) means the happy path adds zero
-    latency, and a down endpoint costs one failed LAN connect → `RemoteUnreachable`,
-    which the agent loop turns into the regex-only no-LLM bypass.
-  - Streaming with `cancel_check` polling so barge-in/stop abort mid-response.
-"""
+"""OpenAI-compatible remote LLM backend with structured-output repair and fallback."""
 
 import json
 import logging

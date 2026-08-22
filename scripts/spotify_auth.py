@@ -1,26 +1,4 @@
-"""One-time Spotify auth: obtain a refresh token and store it in credentials.json.
-
-tools/spotify.py talks to the Spotify Web API directly and needs a
-user-authorized refresh token to control playback (search/queue scopes alone
-aren't enough — playback control requires the user to grant consent once).
-The running Fulloch server is headless with no OAuth callback route, so this
-script does the interactive part standalone, on a machine with a browser:
-it prints an authorize URL, you log in and paste back the redirected URL,
-and it exchanges that for a refresh token and writes it to
-data/credentials.json alongside spotify_client_id/spotify_client_secret.
-
-Run once from the project root: `.venv/bin/python scripts/spotify_auth.py`.
-Client id/secret already in data/credentials.json (and a redirect URI already
-set under `spotify:` in data/config.yml) are picked up automatically — you're
-only prompted for whatever's missing.
-
-Prerequisite: create a Spotify app at https://developer.spotify.com/dashboard
-and add this script's redirect URI to the app's "Redirect URIs" allow-list —
-Spotify rejects the auth request otherwise. Spotify's dashboard flags
-redirect URIs as insecure unless they're either https, or http on the literal
-loopback IP `127.0.0.1` (the hostname `localhost` doesn't count as loopback
-for this check) — hence the `127.0.0.1` default below rather than `localhost`.
-"""
+"""Run Spotify OAuth and save refresh credentials for the Spotify tool."""
 
 import sys
 from pathlib import Path

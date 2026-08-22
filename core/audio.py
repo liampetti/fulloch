@@ -6,6 +6,8 @@ import queue
 import threading
 import time
 import wave
+from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -103,6 +105,96 @@ VAD_IDLE_RESET_MS = 3000
 VAD_MIN_SPEECH_MS = 300
 
 
+@dataclass
+class AsrWorkItem:
+    """One bounded ASR work item, with enough metadata for admission policy."""
+
+    payload: tuple
+    satellite_id: str
+    kind: str
+    candidate: bool = False
+
+
+class AsrWorkQueue:
+    """Bounded single-consumer ASR scheduler with protected wake verification."""
+
+    def __init__(self, maxsize: int):
+        self.maxsize = maxsize
+        self._candidates: deque[AsrWorkItem] = deque()
+        self._ordinary: deque[AsrWorkItem] = deque()
+        self._candidate_satellites: set[str] = set()
+        self._closed = False
+        self._condition = threading.Condition()
+
+    def offer(self, item: AsrWorkItem) -> tuple[bool, list[AsrWorkItem]]:
+        """Admit work without blocking, evicting only older ordinary work for a candidate."""
+        with self._condition:
+            if self._closed or (item.candidate and item.satellite_id in self._candidate_satellites):
+                return False, []
+            evicted: list[AsrWorkItem] = []
+            if self.qsize() >= self.maxsize:
+                if not item.candidate or not self._ordinary:
+                    return False, []
+                evicted.append(self._ordinary.popleft())
+            if item.candidate:
+                self._candidates.append(item)
+                self._candidate_satellites.add(item.satellite_id)
+            else:
+                self._ordinary.append(item)
+            self._condition.notify()
+            return True, evicted
+
+    def get(self):
+        with self._condition:
+            while not self._closed and not self._candidates and not self._ordinary:
+                self._condition.wait()
+            if self._candidates:
+                item = self._candidates.popleft()
+                self._candidate_satellites.remove(item.satellite_id)
+                return item.payload
+            if self._ordinary:
+                return self._ordinary.popleft().payload
+            return None
+
+    def get_nowait(self):
+        with self._condition:
+            if self._candidates:
+                item = self._candidates.popleft()
+                self._candidate_satellites.remove(item.satellite_id)
+                return item.payload
+            if self._ordinary:
+                return self._ordinary.popleft().payload
+            raise queue.Empty
+
+    def discard(self, satellite_id: Optional[str] = None) -> list[AsrWorkItem]:
+        """Discard queued work, optionally only for one satellite."""
+        with self._condition:
+            discarded: list[AsrWorkItem] = []
+            for items in (self._candidates, self._ordinary):
+                retained = deque()
+                while items:
+                    item = items.popleft()
+                    if satellite_id is None or item.satellite_id == satellite_id:
+                        discarded.append(item)
+                        if item.candidate:
+                            self._candidate_satellites.discard(item.satellite_id)
+                    else:
+                        retained.append(item)
+                items.extend(retained)
+            return discarded
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+
+    def qsize(self) -> int:
+        return len(self._candidates) + len(self._ordinary)
+
+    def empty(self) -> bool:
+        return self.qsize() == 0
+
+
 def is_silent(chunk: np.ndarray, threshold: float = SILENCE_THRESHOLD) -> bool:
     """True if `chunk`'s RMS energy is below `threshold`."""
     if chunk.size == 0:
@@ -121,6 +213,23 @@ def _buf_rms(buf: np.ndarray) -> float:
     if buf.size == 0:
         return 0.0
     return float(np.sqrt(np.mean(buf**2)))
+
+
+def _endpoint_mono(chunk: np.ndarray) -> np.ndarray:
+    """Return the loudest channel for endpointing a mono/stereo chunk."""
+    if chunk.ndim != 2:
+        return chunk
+    channel = int(np.argmax(np.mean(chunk**2, axis=0)))
+    return chunk[:, channel]
+
+
+def _utterance_mono(chunks: deque) -> np.ndarray:
+    """Materialize an utterance, selecting its strongest persisted channel once."""
+    buf = np.concatenate(list(chunks), axis=0)
+    if buf.ndim == 1:
+        return buf
+    channel = int(np.argmax(np.mean(buf**2, axis=0)))
+    return buf[:, channel]
 
 
 def rms_to_dbfs(rms: float) -> float:
@@ -294,7 +403,7 @@ class AudioCapture:
         # (utterance-end) — diffed against ASR dequeue time by
         # `core.asr.stream_generator`'s `endpoint_wait_sink` for the A2
         # endpoint-wait turn stat. None is the stop pill.
-        self.audio_queue: "queue.Queue" = queue.Queue(maxsize=AUDIO_QUEUE_MAX_ITEMS)
+        self.audio_queue: "AsrWorkQueue | queue.Queue" = AsrWorkQueue(AUDIO_QUEUE_MAX_ITEMS)
         self.running = True
         # Genuinely global, HA-switch-facing "don't listen anywhere" override
         # (see `server/dashboard.py`'s `POST /mic` / the HACS mic switch
@@ -305,6 +414,13 @@ class AudioCapture:
         # Set by Assistant. The recorder owns KWS inference but the assistant
         # owns native-satellite lifecycle events.
         self.wakeword_detected_callback = None
+        self.asr_work_dropped_callback = None
+        self.asr_queue_metrics = {
+            "admitted": 0,
+            "dropped": 0,
+            "evicted": 0,
+            "peak_depth": 0,
+        }
         self.wakeword_metrics = {
             "candidates": 0,
             "backend_errors": 0,
@@ -318,6 +434,10 @@ class AudioCapture:
     def set_wakeword_detected_callback(self, callback) -> None:
         """Set the callback invoked immediately when the acoustic KWS matches."""
         self.wakeword_detected_callback = callback
+
+    def set_asr_work_dropped_callback(self, callback) -> None:
+        """Set the callback used when bounded ASR work cannot be retained."""
+        self.asr_work_dropped_callback = callback
 
     def _wakeword_gate_active(self, session: SatelliteSession) -> bool:
         return bool(
@@ -416,17 +536,21 @@ class AudioCapture:
         if classifier_ran and self.wakeword_backend is not None:
             self.wakeword_backend.reset(session.id)
 
+    def _reject_unqueued_wake_candidate(self, session: SatelliteSession, reason: str) -> None:
+        """Tell lifecycle ownership when recorder filtering rejects a KWS candidate."""
+        if session.kws_candidate and self.asr_work_dropped_callback is not None:
+            self.asr_work_dropped_callback(session.id, "wake_candidate", True, reason)
+
     def _enqueue(self, session, buf, onset, loudness_db, provisional, endpoint_t, wake_probe=False):
         gated = self._wakeword_gate_active(session)
         if gated and not session.kws_candidate:
             return
         if session.kws_candidate:
+            # The acoustic model already provided immediate wake feedback. Only
+            # the final endpoint can authoritatively verify and dispatch it.
+            if provisional:
+                return
             endpoint_buf = buf
-            # Keep the one-second independent pre-roll so classifier latency never
-            # clips the beginning of the phrase passed to Qwen verification.
-            prefix = np.concatenate(session.kws_pre_roll) if session.kws_pre_roll else np.empty(0, np.float32)
-            if prefix.size:
-                buf = np.concatenate((prefix, buf))
             wav_path = None
             # The gate fires on an individual classifier frame (typically 20 ms),
             # but tuning needs the complete endpointed utterance. A provisional
@@ -434,7 +558,11 @@ class AudioCapture:
             if not provisional:
                 wav_path = self._save_wakeword_wav(session.id, endpoint_buf, session.kws_score)
             queued = self._put_utterance(
-                (buf, onset, loudness_db, provisional, session.id, endpoint_t, wake_probe, True, wav_path)
+                (buf, onset, loudness_db, provisional, session.id, endpoint_t, wake_probe, True, wav_path,
+                 session.protocol_state_generation),
+                satellite_id=session.id,
+                kind="wake_candidate",
+                candidate=True,
             )
             if wav_path and not queued:
                 Path(wav_path).unlink(missing_ok=True)
@@ -445,12 +573,34 @@ class AudioCapture:
                 session.kws_pre_roll.clear()
                 self.wakeword_backend.reset(session.id)
         elif wake_probe:
-            self._put_utterance((buf, onset, loudness_db, provisional, session.id, endpoint_t, True))
+            self._put_utterance((buf, onset, loudness_db, provisional, session.id, endpoint_t, True),
+                                satellite_id=session.id, kind="wake_probe")
         else:
-            self._put_utterance((buf, onset, loudness_db, provisional, session.id, endpoint_t))
+            self._put_utterance((buf, onset, loudness_db, provisional, session.id, endpoint_t),
+                                satellite_id=session.id, kind="provisional" if provisional else "final")
 
-    def _put_utterance(self, item) -> bool:
+    def _put_utterance(self, item, *, satellite_id: str = "", kind: str = "final", candidate: bool = False) -> bool:
         """Queue one completed utterance without letting ASR backlog block capture."""
+        if isinstance(self.audio_queue, AsrWorkQueue):
+            queued, evicted = self.audio_queue.offer(AsrWorkItem(item, satellite_id, kind, candidate))
+            for displaced in evicted:
+                self.asr_queue_metrics["evicted"] += 1
+                logger.warning("Dropping queued %s ASR work to admit wake candidate (%s)",
+                               displaced.kind, displaced.satellite_id)
+                if self.asr_work_dropped_callback is not None:
+                    self.asr_work_dropped_callback(displaced.satellite_id, displaced.kind,
+                                                   displaced.candidate, "evicted")
+            if queued:
+                self.asr_queue_metrics["admitted"] += 1
+                self.asr_queue_metrics["peak_depth"] = max(
+                    self.asr_queue_metrics["peak_depth"], self.audio_queue.qsize()
+                )
+                return True
+            self.asr_queue_metrics["dropped"] += 1
+            logger.warning("Dropping %s ASR work; queue is full (%s)", kind, satellite_id)
+            if self.asr_work_dropped_callback is not None:
+                self.asr_work_dropped_callback(satellite_id, kind, candidate, "full")
+            return False
         try:
             self.audio_queue.put_nowait(item)
             return True
@@ -558,20 +708,30 @@ class AudioCapture:
         return session.follow_up_deadline > 0.0 and time.monotonic() < session.follow_up_deadline
 
     def _audio_callback(self, indata, frames, time_info, status):
-        # Local-mic callback removed — voice input is exclusively via the
-        # browser satellite (WebSocket → satellite_recorder_thread). The
-        # method is kept as a stub so old test stubs that monkey-patch it
-        # don't crash; new code should not call it.
+        # Compatibility stub for monkey-patched callback users.
         return None
 
-    def flush(self) -> None:
-        """Drain the audio queue after a barge-in cancel.
+    def flush(self, satellite_id: Optional[str] = None) -> None:
+        """Discard queued audio after a cancel, optionally for one satellite.
 
         No in-progress buffer to clear (the satellite recorder owns its
         own `sat_buf`); we just drop anything already enqueued so the
         contaminated TTS-bleed audio from the cancelled turn doesn't
         reach the transcriber.
         """
+        if isinstance(self.audio_queue, AsrWorkQueue):
+            discarded = self.audio_queue.discard(satellite_id)
+            for item in discarded:
+                if self.asr_work_dropped_callback is not None:
+                    self.asr_work_dropped_callback(item.satellite_id, item.kind, item.candidate, "flushed")
+            if discarded:
+                logger.debug("Flushed %d queued utterances%s", len(discarded),
+                             f" for {satellite_id}" if satellite_id is not None else "")
+            return
+        if satellite_id is not None:
+            # The production scheduler supports atomic per-satellite removal.
+            # Do not risk draining other sources when a test supplies Queue.
+            return
         drained = 0
         while True:
             try:
@@ -641,28 +801,28 @@ class AudioCapture:
                 if chunk is None:
                     break
 
-                if chunk is not FLUSH and self.mic_globally_enabled and session.transcribing:
+                if chunk is not FLUSH and self.mic_globally_enabled and session.transcribing and not session.user_muted:
                     # Keep a short pre-roll while idle. The VAD path below
                     # decides whether this same frame may be classified.
-                    self._feed_wakeword_gate(session, chunk)
+                    self._feed_wakeword_gate(session, _endpoint_mono(chunk))
 
                 if not session.server_vad:
                     if chunk is FLUSH:
-                        if sat_buf and self.mic_globally_enabled and session.transcribing:
-                            buf = np.concatenate(list(sat_buf), axis=0)
+                        if sat_buf and self.mic_globally_enabled and session.transcribing and not session.user_muted:
+                            buf = _utterance_mono(sat_buf)
                             onset = speech_onset_t if speech_onset_t is not None else time.monotonic()
                             self._enqueue(session, buf, onset, rms_to_dbfs(_buf_rms(buf)), False, time.monotonic())
                         sat_buf.clear()
                         speech_onset_t = None
                         continue
-                    if not self.mic_globally_enabled or not session.transcribing:
+                    if not self.mic_globally_enabled or not session.transcribing or session.user_muted:
                         sat_buf.clear()
                         speech_onset_t = None
                         continue
                     if speech_onset_t is None:
                         speech_onset_t = time.monotonic()
                     sat_buf.append(chunk)
-                    if sum(c.size for c in sat_buf) >= self.max_utterance_samples:
+                    if sum(len(c) for c in sat_buf) >= self.max_utterance_samples:
                         logger.warning("Dropping unflushed client-endpointed audio (%s)", session.id)
                         sat_buf.clear()
                         speech_onset_t = None
@@ -670,7 +830,7 @@ class AudioCapture:
 
                 sat_buf.append(chunk)
 
-                if not self.mic_globally_enabled or not session.transcribing:
+                if not self.mic_globally_enabled or not session.transcribing or session.user_muted:
                     sat_buf.clear()
                     silence_counter = 0
                     speech_onset_t = None
@@ -690,9 +850,9 @@ class AudioCapture:
                 # in-flight VAD segment on the VAD path so its original onset
                 # survives for the transcriber's duplicate-endpoint guard.
                 if endpointer is not None and (not tts_active or endpointer.speech_started):
-                    endpointer.process(sat_buf[-1])
-                    self._feed_wakeword_gate(session, chunk, append_pre_roll=False)
-                    buffer_samples = sum(c.size for c in sat_buf)
+                    endpointer.process(_endpoint_mono(sat_buf[-1]))
+                    self._feed_wakeword_gate(session, _endpoint_mono(chunk), append_pre_roll=False)
+                    buffer_samples = sum(len(c) for c in sat_buf)
 
                     # Discard accumulating noise before any speech is detected
                     # so a noisy room neither inflates onset latency nor hands
@@ -718,7 +878,7 @@ class AudioCapture:
                         and time.monotonic() - session.early_wake_probe_started_at
                         >= self.early_wake_probe_seconds
                     ):
-                        buf = np.concatenate(list(sat_buf), axis=0)
+                        buf = _utterance_mono(sat_buf)
                         onset = endpointer.speech_onset or time.monotonic()
                         rms = endpointer.voiced_rms
                         if rms is None:
@@ -753,7 +913,7 @@ class AudioCapture:
                                 self.min_utterance_samples,
                             )
                             if buffer_samples >= min_required:
-                                buf = np.concatenate(list(sat_buf), axis=0)
+                                buf = _utterance_mono(sat_buf)
                                 onset = endpointer.speech_onset or time.monotonic()
                                 rms = endpointer.voiced_rms
                                 if rms is None:
@@ -796,6 +956,7 @@ class AudioCapture:
                         logger.debug(
                             "VAD: speech span %.2fs < min — dropped as noise (%s)", secs, session.id
                         )
+                        self._reject_unqueued_wake_candidate(session, "too_short")
                         sat_buf.clear()
                         endpointer.reset()
                         self._discard_wakeword_candidate(session)
@@ -811,7 +972,7 @@ class AudioCapture:
                         if self._follow_up_open(session)
                         else self.min_utterance_samples
                     )
-                    buf = np.concatenate(list(sat_buf), axis=0)
+                    buf = _utterance_mono(sat_buf)
                     if buf.size >= min_required and endpointer.speech_started:
                         onset = endpointer.speech_onset or time.monotonic()
                         # Tag with the voiced-window loudness; fall back to
@@ -837,14 +998,14 @@ class AudioCapture:
                 # hard-endpoint VAD silence window).
                 threshold = self._barge_in_rms if tts_active else self.silence_threshold
 
-                if is_silent(sat_buf[-1], threshold):
+                if is_silent(_endpoint_mono(sat_buf[-1]), threshold):
                     silence_counter += 1
                 else:
                     silence_counter = 0
                     if speech_onset_t is None:
                         speech_onset_t = time.monotonic()
 
-                buffer_samples = sum(c.size for c in sat_buf)
+                buffer_samples = sum(len(c) for c in sat_buf)
                 max_s = self.tts_max_utterance_samples if tts_active else self.max_utterance_samples
                 min_s = (
                     self.tts_min_utterance_samples
@@ -858,7 +1019,7 @@ class AudioCapture:
                 if not (hit_silence or hit_max):
                     continue
 
-                buf = np.concatenate(list(sat_buf), axis=0)
+                buf = _utterance_mono(sat_buf)
                 if buf.size >= min_s and (
                     self._vad_model is None
                     or _contains_speech(buf, self._vad_model, self._vad_get_timestamps, self.sample_rate)
@@ -870,9 +1031,9 @@ class AudioCapture:
                     logger.debug("Satellite: enqueued %.2fs for transcription", buf.size / self.sample_rate)
 
                 if tts_active and hit_max and not hit_silence:
-                    total = sum(c.size for c in sat_buf)
-                    while len(sat_buf) > 1 and total - sat_buf[0].size >= self.tts_overlap_samples:
-                        total -= sat_buf.popleft().size
+                    total = sum(len(c) for c in sat_buf)
+                    while len(sat_buf) > 1 and total - len(sat_buf[0]) >= self.tts_overlap_samples:
+                        total -= len(sat_buf.popleft())
                     continue
 
                 sat_buf.clear()
@@ -888,6 +1049,9 @@ class AudioCapture:
     def stop(self):
         """Signal the recorder to stop and inject poison pill."""
         self.running = False
+        if isinstance(self.audio_queue, AsrWorkQueue):
+            self.audio_queue.close()
+            return
         try:
             self.audio_queue.put_nowait(None)
         except queue.Full:

@@ -1,19 +1,4 @@
-"""Qwen3-ASR-0.6B ONNX backend — CPU speech recognition, no GPU/PyTorch.
-
-Adapted from the model's bundled `onnx_inference.py` (ggml-org/UsefulSensors-style
-"full ONNX CPU" Qwen3-ASR) into the v2.1.9 ASR pipeline contract, so it drops in
-as `asr.backend: qwen-onnx-small` alongside the Qwen (GPU) and Moonshine (CPU) backends.
-
-Why this over Moonshine for the CPU tier:
-  - Qwen-family accuracy, 30 languages, real-time on a low-power CPU (int8 decoder).
-  - **Context biasing works** — unlike Moonshine, this is the same Qwen3-ASR chat
-    template, so `wrapper.context` ("Technical terms: <wakeword>, …") is injected
-    into the system message and biases the decoder toward the wakeword spelling.
-
-Runtime deps: onnxruntime + librosa + tokenizers (no torch). The model directory
-(`default_model`) holds `onnx_models/*.onnx` + `embed_tokens.bin` and a
-`tokenizer.json`.
-"""
+"""Qwen3-ASR-0.6B ONNX CPU backend with multilingual recognition and context biasing."""
 
 import logging
 import platform

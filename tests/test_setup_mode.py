@@ -1,4 +1,4 @@
-"""First-run setup detection, lifecycle, and dashboard setup mode (v2.2 Step 3).
+"""First-run setup detection, lifecycle, and dashboard setup mode.
 
 An empty `data/models` (or missing config) must boot into setup mode: the
 dashboard serves a setup page, reports NEEDS_SETUP on `/status`, and every

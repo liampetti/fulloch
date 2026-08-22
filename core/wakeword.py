@@ -48,4 +48,3 @@ class ScoreGate:
 
     def reset(self, satellite_id: str) -> None:
         self._scores.pop(satellite_id, None)
-        self._cooldown_until.pop(satellite_id, None)

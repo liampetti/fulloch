@@ -59,7 +59,7 @@ def _local_server_binary() -> str:
 
 
 def _local_server_port() -> int:
-    # Keep the old MTP-specific name working for native installations.
+    # Honor the deprecated MTP-specific port as a fallback.
     return int(os.environ.get("FULLOCH_LOCAL_LLM_PORT", os.environ.get("FULLOCH_MTP_PORT", LOCAL_SERVER_PORT)))
 
 

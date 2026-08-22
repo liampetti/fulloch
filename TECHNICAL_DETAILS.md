@@ -134,15 +134,33 @@ satellite, for example: "Tell downstairs that dinner is ready." Browser
 satellites use their selected Home Assistant area as their name; native
 satellites use their configured room name.
 
-Native clients use `/ws/satellite-v2` protocol 2.3. The first message is
-`satellite.hello`; the server replies with `satellite.welcome`. Uplink audio is
-fixed at 16 kHz mono `pcm_s16le` in exactly 640-byte (20 ms) frames; downlink is
-the same format in frames of at most 4 KiB. Every 60 seconds the server sends a
-`satellite.health_request`; clients must return its ID in a
-`satellite.health_response`. Three unanswered requests disconnect the native
-satellite. Protocol minor 2 added sequenced
-`tts.audio` frames and a two-second replay window after a same-device reconnect.
-See the [headless client protocol reference](clients/headless/README.md#satellite-v2-protocol).
+Native clients use `/ws/satellite-v2`. The first message is `satellite.hello`;
+the server replies with `satellite.welcome`. Protocol v2.4's uplink is fixed at
+16 kHz mono `pcm_s16le` in exactly 640-byte (20 ms) frames. Protocol v2.5 adds
+negotiated AEC output channels: a client advertises its supported counts in
+`capabilities`, and the server selects one in the welcome audio contract. A
+selected two-channel uplink is interleaved 16 kHz `pcm_s16le` in exactly
+1,280-byte (20 ms) frames. The server must continue to select the v2.4 mono
+contract for v2.4 and mono-only clients, even when its configuration prefers two
+channels. Downlink remains mono `pcm_s16le` in frames of at most 4 KiB.
+
+Every 60 seconds the server sends a `satellite.health_request`; clients must
+return its ID in a `satellite.health_response`. Three unanswered requests
+disconnect the native satellite. Protocol minor 2 added sequenced `tts.audio`
+frames and a two-second replay window after a same-device reconnect. Clients
+that declare `conversation_mode_control: true` can request exclusive
+wakeword-free conversation mode with `conversation_mode.enable` or return to
+normal wakeword-gated operation with `conversation_mode.disable`; the server
+confirms either request with `conversation_mode.changed`.
+
+When the optional openWakeWord gate is enabled, it gives a native satellite
+immediate wake feedback, then ASR verifies the final endpointed utterance.
+Verification work has priority in the bounded, single-consumer ASR scheduler,
+with one pending candidate per satellite. A new candidate may replace the
+oldest ordinary queued request rather than wait behind stale speech. A candidate
+that cannot be retained, or is not verified within ten seconds, returns its
+satellite to idle. This preserves real-time capture and prevents an optimistic
+listening indicator from becoming stuck during ASR overload.
 
 ## OpenAI Endpoint Grammar
 > **Note:** When `agent.gbnf` is available, Fulloch sends it as the `grammar`

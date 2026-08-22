@@ -68,7 +68,9 @@ def test_soft_wake_is_emitted_before_final_transcript(assistant):
         before_final=assert_listening_before_final,
     )
 
-    assert [event["state"] for event in events] == ["wake_detected", "listening", "thinking"]
+    # Thinking is emitted by the turn worker after it owns the arbiter; this
+    # transcriber test replaces that worker with a mock.
+    assert [event["state"] for event in events] == ["wake_detected", "listening"]
     assert len({event["turn_id"] for event in events}) == 1
     assert assistant.satellites["sat-a"].protocol_wake_pending is False
     assistant._start_turn.assert_called_once()
@@ -152,5 +154,31 @@ def test_follow_up_replaces_the_prior_protocol_turn_before_thinking(assistant):
 
     assert sat.protocol_turn_id != "prior-turn"
     expiry.cancel.assert_called_once()
-    assert [event["state"] for event in events] == ["listening", "thinking"]
+    assert [event["state"] for event in events] == ["listening"]
     assert len({event["turn_id"] for event in events}) == 1
+
+
+def test_dropping_ordinary_work_keeps_a_pending_wake(assistant):
+    sat = assistant.satellites["sat-a"]
+    events = []
+    assistant.register_turn_listener(events.append)
+
+    assistant._on_wakeword_model_match("sat-a")
+    assistant._on_asr_work_dropped("sat-a", "final", False, "evicted")
+
+    assert [event["state"] for event in events] == ["wake_detected", "listening"]
+    assert sat.protocol_wake_pending is True
+    assert sat.protocol_turn_id is not None
+
+
+def test_dropping_wake_candidate_stands_down_pending_wake(assistant):
+    sat = assistant.satellites["sat-a"]
+    events = []
+    assistant.register_turn_listener(events.append)
+
+    assistant._on_wakeword_model_match("sat-a")
+    assistant._on_asr_work_dropped("sat-a", "wake_candidate", True, "full")
+
+    assert [event["state"] for event in events] == ["wake_detected", "listening", "idle"]
+    assert sat.protocol_wake_pending is False
+    assert sat.protocol_turn_id is None

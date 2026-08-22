@@ -65,6 +65,37 @@ def test_tts_sink_backpressures_instead_of_dropping_audio():
     np.testing.assert_array_equal(output.get_nowait()[0], second)
 
 
+def test_satellite_tts_streams_are_serialised_across_producers():
+    assistant = _assistant()
+    sink = queue.Queue()
+    assistant.satellites["sat-a"] = SatelliteSession(id="sat-a", tts_sink=sink)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def play_chunks(*_args, **_kwargs):
+        calls.append("entered")
+        entered.set()
+        release.wait(timeout=1)
+
+    assistant._tts_module = MagicMock(play_chunks=play_chunks)
+    safe_sink = assistant._sink_for("sat-a")
+    first = threading.Thread(target=assistant.play_chunks, args=([], 16000), kwargs={"sink": safe_sink})
+    second = threading.Thread(target=assistant.play_chunks, args=([], 16000), kwargs={"sink": safe_sink})
+
+    first.start()
+    assert entered.wait(timeout=1)
+    second.start()
+    second.join(timeout=0.05)
+    assert second.is_alive()
+    assert calls == ["entered"]
+
+    release.set()
+    first.join(timeout=1)
+    second.join(timeout=1)
+    assert calls == ["entered", "entered"]
+
+
 def test_disconnect_does_not_block_on_a_full_microphone_queue_and_cancels_turn():
     assistant = _assistant()
     chunks = queue.Queue(maxsize=1)

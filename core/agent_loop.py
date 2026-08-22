@@ -284,6 +284,11 @@ class AgentLoop:
             )
 
         slm_started = False
+        # A replan acknowledgement may play while its next LLM call runs. It
+        # must finish before that call's result can start another TTS stream:
+        # browser TTS controls are not stream-id scoped, so a late ack `end`
+        # would otherwise deactivate the final reply and discard its PCM.
+        replan_ack_thread: Optional[threading.Thread] = None
         # Holds the most recent web-search summary produced this turn.
         # Persists across replan iterations so a follow-up action (e.g. a
         # note save the agent composes after seeing the findings) doesn't
@@ -329,7 +334,7 @@ class AgentLoop:
                     # Replan iterations get the same short acknowledgement as
                     # the initial call; do not narrate internal model work.
                     if session is None or not session.cancelled:
-                        threading.Thread(
+                        replan_ack_thread = threading.Thread(
                             target=host._play_random_ack,
                             args=(session or host.tts_session,),
                             kwargs={
@@ -338,7 +343,8 @@ class AgentLoop:
                                 "tts_active_event": getattr(host._turn_local, "tts_active_event", None),
                             },
                             daemon=True,
-                        ).start()
+                        )
+                        replan_ack_thread.start()
                 logger.debug(f"Agent call (iter {iteration})")
                 telemetry_event("llm_start", iteration=iteration, source=source, history_entries=len(history))
                 llm_started_at = time.monotonic()
@@ -408,6 +414,10 @@ class AgentLoop:
                     return self._run_without_llm(
                         user_prompt, first_emission or regex_emission, unavailable_fallback=remote_fallback
                     )
+                finally:
+                    if replan_ack_thread is not None:
+                        replan_ack_thread.join()
+                        replan_ack_thread = None
                 host._note_llm_remote_status(True)
                 logger.debug(f"Agent emission: {emission_text}")
 

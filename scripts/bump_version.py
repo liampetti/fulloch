@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
-"""Bump the Fulloch version in both files that carry it, in one shot.
-
-The version lives in two places that can't reference each other —
-`pyproject.toml` (Python packaging) and `custom_components/fulloch/manifest.json`
-(HACS / Home Assistant). This script sets both to the same value so they never
-drift; `tests/test_version_consistency.py` enforces that they agree.
-
-Usage:
-    python scripts/bump_version.py 2.1.6        # set an explicit version
-    python scripts/bump_version.py --show       # print the current version
-
-After bumping, commit both files and tag the release, e.g.:
-    git commit -am "Release 2.1.6" && git tag v2.1.6
-"""
+"""Set the package and HACS manifest versions together."""
 
 import argparse
 import json

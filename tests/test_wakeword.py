@@ -32,3 +32,13 @@ def test_score_gate_reset_discards_debounce_state():
     gate.feed("kitchen", 0.9)
     gate.reset("kitchen")
     assert not gate.feed("kitchen", 0.9).matched
+
+
+def test_score_gate_reset_preserves_wakeword_cooldown(monkeypatch):
+    now = iter((1.0, 1.1, 1.2))
+    monkeypatch.setattr("core.wakeword.time.monotonic", lambda: next(now))
+    gate = ScoreGate(threshold=0.5, smoothing_frames=1, cooldown_ms=1000)
+
+    assert gate.feed("kitchen", 0.9).matched
+    gate.reset("kitchen")
+    assert not gate.feed("kitchen", 0.9).matched

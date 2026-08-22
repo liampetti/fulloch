@@ -1,4 +1,4 @@
-"""Config store: schema-validated read/write, clean comment-free output (v2.2 Step 4)."""
+"""Schema-validated config-store reads and writes."""
 
 import sys
 from pathlib import Path
@@ -68,6 +68,21 @@ def test_update_coerces_voice_satellite_limit(tmp_path):
     path = _write(tmp_path, "general:\n  wakeword: hi\n")
     cs.update_config({"general.max_voice_satellites": "3"}, path)
     assert cs.read_config(path)["general"]["max_voice_satellites"] == 3
+
+
+def test_satellite_uplink_channels_is_a_constrained_integer_enum(tmp_path):
+    path = _write(tmp_path, "general:\n  wakeword: hi\n")
+    cs.update_config({"satellite.uplink_channels": "2"}, path)
+    assert cs.read_config(path)["satellite"]["uplink_channels"] == 2
+    with pytest.raises(cs.ConfigValidationError):
+        cs.update_config({"satellite.uplink_channels": 3}, path)
+
+
+def test_satellite_audio_defaults_preserve_mono_best_channel_fallback():
+    uplink_channels = field_for("satellite.uplink_channels")
+    processing = field_for("satellite.dual_mic_processing")
+    assert uplink_channels is not None and uplink_channels.default == 1
+    assert processing is not None and processing.default == "best_channel"
 
 
 def test_unknown_key_raises_before_writing(tmp_path):

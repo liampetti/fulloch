@@ -1,17 +1,4 @@
-"""In-container model download manager (v2.2 Step 4).
-
-Runs the `hf download` steps in Python so the wizard can pull the selected
-backends' weights on a background thread and stream per-asset progress to the
-browser. Online only during setup; the runtime stays `HF_HUB_OFFLINE=1`.
-
-Asset kinds:
-    - ``snapshot`` — an HF repo (optionally pattern-limited) into the hub cache
-  - ``file``     — a single file from an HF repo (the GGUF SLM)
-  - ``url``      — a plain HTTP file (json.gbnf grammar)
-
-The heavy `huggingface_hub` / network calls are injected (defaulting to lazy
-real implementations) so tests drive the manager with fakes — no network.
-"""
+"""Background model downloader with per-asset setup-wizard progress."""
 
 import logging
 import os
@@ -262,23 +249,7 @@ def plan_assets(resolved: dict, models_dir: str = "./data/models") -> list:
 
 
 def _make_asset_tqdm(asset: Asset, lock: threading.Lock):
-    """Return a silent tqdm-compatible class for the *outer* per-repo bar
-    passed as `snapshot_download`'s `tqdm_class=` kwarg.
-
-    This bar only ever sees a `total` of *files to fetch*, not bytes — HF's own
-    docstring says "the tqdm_class is not passed to each individual download" —
-    so it's just used to suppress console spam; real byte counts come from
-    `_byte_progress` below. Must still actually iterate the wrapped iterable
-    (a `concurrent.futures.Executor.map()` result iterator): swallowing it
-    would silently discard exceptions raised by failed per-file downloads.
-
-    huggingface_hub's parallel snapshot download drives per-file bars through
-    ``tqdm.contrib.concurrent.ensure_lock``, which reads/writes/deletes a real
-    ``_lock`` *class* attribute (not just via get_lock/set_lock calls) — it does
-    `getattr(cls, '_lock', None)` and `del cls._lock`. Mirror real tqdm's
-    get_lock/set_lock (which assign `cls._lock` directly) rather than stashing
-    the lock in a closure var, or `del cls._lock` raises AttributeError.
-    """
+    """Return a no-op tqdm-compatible class while preserving iteration errors."""
 
     class _T:
         def __init__(self, iterable=None, *, total=None, **_kw):
@@ -340,16 +311,7 @@ def _make_asset_tqdm(asset: Asset, lock: threading.Lock):
 
 @contextmanager
 def _byte_progress(asset: Asset, lock: threading.Lock):
-    """Monkeypatch huggingface_hub's internal per-file progress-bar class so
-    real byte counts reach `asset.bytes_total`/`bytes_done`.
-
-    `_get_progress_bar_context` (huggingface_hub/utils/tqdm.py) instantiates
-    the module-level `tqdm` name directly for each file's byte-level bar —
-    that's the only place actual transfer sizes are known, since
-    `snapshot_download`'s own `tqdm_class=` kwarg is documented as not being
-    passed down to individual file downloads. Patched for the duration of one
-    asset's download call, then restored.
-    """
+    """Temporarily patch Hugging Face progress bars to record byte progress."""
     # Neither `from huggingface_hub.utils import tqdm` nor `import
     # huggingface_hub.utils.tqdm as m` reach the actual submodule here:
     # `huggingface_hub/utils/__init__.py` does `from .tqdm import tqdm`, which
@@ -492,19 +454,7 @@ def _default_url_with_progress(url: str, dest: str, asset: Asset, lock: threadin
 
 @contextmanager
 def _hf_online():
-    """Force huggingface_hub online for the duration of a download.
-
-    `HF_HUB_OFFLINE` is cached by `huggingface_hub.constants` as a plain
-    module-level bool at *import* time (see `constants.py`), so once that
-    module has been imported anywhere in this process — e.g. an earlier
-    download, or a model load — flipping `os.environ["HF_HUB_OFFLINE"]`
-    afterward has no effect on it. Every offline check in the library reads
-    `constants.HF_HUB_OFFLINE` back off that same module object though (not a
-    `from constants import HF_HUB_OFFLINE` copy), so patching the attribute
-    directly does take effect immediately, import order notwithstanding.
-    Restores both the attribute and the env var on exit so the runtime goes
-    back to offline once the download finishes.
-    """
+    """Temporarily force Hugging Face online and restore its prior state."""
     import huggingface_hub.constants as hf_constants
     from huggingface_hub import configure_http_backend
 

@@ -119,6 +119,9 @@ general:
 # unauthenticated. The browser dashboard's /ws/satellite is unaffected.
 # satellite_tokens:
 #   - "a-long-random-token-per-device-or-shared-is-fine"
+# satellite:
+#   uplink_channels: 1            # 1 = current mono AEC uplink; 2 = prefer negotiated stereo AEC uplink
+#   dual_mic_processing: best_channel
 
 # === Home Assistant ========================================================
 # Long-lived access token: ha_token in data/credentials.json. Rename entities

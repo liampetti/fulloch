@@ -37,6 +37,14 @@ def test_zero_satellites_idle():
     assert body["satellite_count"] == 0
     assert body["active_owner_id"] is None
     assert body["active_owner_label"] is None
+    assert body["asr_queue"] == {}
+
+
+def test_status_includes_asr_queue_metrics():
+    a = _assistant()
+    a.audio_capture.asr_queue_metrics = {"admitted": 2, "dropped": 1, "evicted": 1, "peak_depth": 16}
+
+    assert _client(a).get("/status").json()["asr_queue"] == a.audio_capture.asr_queue_metrics
 
 
 def test_last_turn_stats_none_before_any_turn():

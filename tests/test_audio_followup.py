@@ -13,8 +13,12 @@ audio stream, so this is exercised below construction).
 
 import queue
 import sys
+import threading
 import time
 from pathlib import Path
+from unittest.mock import MagicMock
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -97,3 +101,36 @@ def test_follow_up_is_per_satellite():
 def test_follow_up_min_below_full_min():
     ac = make_capture()
     assert ac.follow_up_min_utterance_samples < ac.min_utterance_samples
+
+
+def test_early_wake_probe_suppresses_duplicate_soft_probe():
+    class Endpointer:
+        speech_started = True
+        soft_endpointed = True
+        endpointed = False
+        speech_onset = 1.0
+        voiced_rms = 0.1
+
+        def process(self, _chunk):
+            pass
+
+        def reset(self):
+            pass
+
+    ac = make_capture()
+    ac._use_vad_enabled = True
+    ac._build_endpointer = lambda: Endpointer()
+    ac.early_wake_probe_seconds = 0.0
+    ac._enqueue = MagicMock()
+    session = make_session()
+    session.chunk_q.put(np.zeros(320, dtype=np.float32))
+    session.chunk_q.put(None)
+
+    recorder = threading.Thread(target=ac.satellite_recorder_thread, args=(session,))
+    recorder.start()
+    recorder.join(timeout=1)
+
+    assert not recorder.is_alive()
+    assert ac._enqueue.call_count == 1
+    assert ac._enqueue.call_args.kwargs == {}
+    assert ac._enqueue.call_args.args[-1] is True

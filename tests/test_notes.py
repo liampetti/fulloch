@@ -163,6 +163,12 @@ class TestWriteRead:
         assert "Vaillant ecoTEC" in result
         # Markdown header is stripped for spoken output
         assert "#" not in result
+        assert result.artifact == {
+            "type": "note",
+            "title": "boiler",
+            "excerpt": "Vaillant ecoTEC",
+            "truncated": False,
+        }
 
     def test_read_does_not_repeat_title(self, notes_dir):
         # The leading `# <title>` header duplicates the spoken `Note '<title>':`
@@ -379,6 +385,9 @@ class TestSearch:
         notes.write_note("Boiler", "Vaillant ecoTEC")
         result = notes.search_notes("vaillant")
         assert result.startswith("Reactive question:")
+        assert result.artifact["type"] == "notes_search"
+        assert result.artifact["query"] == "vaillant"
+        assert result.artifact["matches"][0]["title"] == "boiler"
 
 
 class TestQueryTerms:

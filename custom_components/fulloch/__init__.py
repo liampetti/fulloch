@@ -27,6 +27,7 @@ from .const import (
     CONF_PORT,
     CONF_TOKEN,
     DOMAIN,
+    EVENT_THINKING_TASK_UPDATED,
     EVENT_TURN_ENDED,
     EVENT_WAKEWORD_DETECTED,
     PLATFORMS,
@@ -100,6 +101,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await _post("/mic", {"enabled": call.data["enabled"]})
         await coordinator.async_refresh()
 
+    async def handle_run_thinking(call: ServiceCall) -> None:
+        await _post("/thinking/run", {"task": call.data["task"]})
+
+    async def handle_cancel_thinking(call: ServiceCall) -> None:
+        await _post(f"/thinking/{call.data['job_id']}/cancel", {})
+
+    async def handle_thinking_status(call: ServiceCall) -> None:
+        try:
+            async with session.get(
+                f"{url}/thinking/{call.data['job_id']}", headers=headers, timeout=aiohttp.ClientTimeout(total=10)
+            ):
+                pass
+        except aiohttp.ClientError as exc:
+            logger.warning("Fulloch thinking status call failed: %s", exc)
+
     hass.services.async_register(
         DOMAIN,
         "speak",
@@ -118,6 +134,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         handle_mic,
         schema=vol.Schema({vol.Required("enabled"): bool}),
     )
+    hass.services.async_register(DOMAIN, "run_thinking_task", handle_run_thinking, schema=vol.Schema({vol.Required("task"): str}))
+    hass.services.async_register(DOMAIN, "cancel_thinking_task", handle_cancel_thinking, schema=vol.Schema({vol.Required("job_id"): str}))
+    hass.services.async_register(DOMAIN, "get_thinking_task_status", handle_thinking_status, schema=vol.Schema({vol.Required("job_id"): str}))
 
     # SSE listener — fires HA events and refreshes coordinator on turns ------
     sse_task = entry.async_create_background_task(
@@ -179,6 +198,20 @@ async def _sse_listener(
                                 {**coordinator.data, "last_response": data.get("content", "")}
                             )
 
+                    elif role == "thinking":
+                        event_data = {
+                            "job_id": data.get("job_id", ""),
+                            "status": data.get("status", ""),
+                            "summary": data.get("summary", ""),
+                            "error": data.get("error", ""),
+                            "note_id": data.get("note_id", ""),
+                        }
+                        hass.bus.async_fire(EVENT_THINKING_TASK_UPDATED, event_data)
+                        if coordinator.data:
+                            coordinator.async_set_updated_data(
+                                {**coordinator.data, "thinking_job": event_data}
+                            )
+
         except asyncio.CancelledError:
             return
         except Exception as exc:
@@ -200,6 +233,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_remove(DOMAIN, "speak")
     hass.services.async_remove(DOMAIN, "chat")
     hass.services.async_remove(DOMAIN, "mic")
+    hass.services.async_remove(DOMAIN, "run_thinking_task")
+    hass.services.async_remove(DOMAIN, "cancel_thinking_task")
+    hass.services.async_remove(DOMAIN, "get_thinking_task_status")
 
     hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok

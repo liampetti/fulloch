@@ -1,0 +1,23 @@
+[Unit]
+Description=Fulloch AI Headless Satellite Client
+# Wait for audio (ALSA/PulseAudio/PipeWire) and network connection before launching
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/fulloch
+
+# Command using your Python virtual environment
+ExecStart=/home/pi/fulloch/venv/bin/python /home/pi/fulloch/clients/headless/satellite.py
+
+# Unbuffer stdout so print statements and audio logs appear instantly in journalctl
+Environment=PYTHONUNBUFFERED=1
+
+# Restart automatically if the audio connection or server drops
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

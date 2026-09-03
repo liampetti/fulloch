@@ -29,16 +29,20 @@ import time
 from typing import Optional
 
 from tools import notes
+from tools.capabilities import native_access_class, native_requires_deep_think
+from tools.tool_registry import tool_registry
 from utils import intents
 from utils.intent_catch import catchAll, is_contextual_web_search_request
 from utils.intents import MAX_AGENT_CALLS_PER_TURN, StepKind, StepResult
-from utils.phrases import STALL_PHRASES
-from utils.prompts import get_agent_system_prompt, get_thinking_system_prompt
+from utils.phrases import ACK_PHRASES
+from utils.prompts import (
+    assemble_foreground_history,
+    get_agent_system_prompt,
+)
 
 from .satellite_context import current_satellite_id as _current_satellite_id
 from .slm import ContextExhaustedError, RemoteUnreachable
 from .telemetry import event as telemetry_event
-from .text_utils import clean_for_tts
 from .thinking_watchdog import ThinkingWatchdog
 
 logger = logging.getLogger(__name__)
@@ -51,6 +55,25 @@ NOTE_SEARCH_INTENTS = frozenset({"search_notes", "search_notes_semantic", "read_
 # "!"/"?" so ASR's "Hey Atticus! Stop." yields the bare "stop" without trailing
 # punctuation confusing intent matching.
 _PROMPT_STRIP_CHARS = " ,.!?;:"
+
+_REPORT_FOLLOW_UP_RE = re.compile(
+    r"\b(?:report|summary|findings|conclusion|recommendation|what did (?:it|the report) say|"
+    r"does (?:it|the report) (?:say|show)|is (?:it|that) (?:feasible|possible|worth it|safe)|"
+    r"(?:check|read|explain|clarify) (?:that|it|again)|more (?:detail|details))\b",
+    re.I,
+)
+_REPORT_BYPASS_RE = re.compile(
+    r"\b(?:new question|something else|search again|look up|research again|use other sources)\b",
+    re.I,
+)
+_STARTUP_GREETING_FOLLOW_UP_RE = re.compile(
+    r"\s*(?:(?:can|could|would)\s+you\s+)?(?:"
+    r"(?:tell|give|share)\s+me\s+(?:more|more\s+(?:information|details))\s+(?:about|on)\s+|"
+    r"(?:explain|expand|elaborate)\s+(?:(?:more\s+)?(?:about|on)\s+)?)"
+    r"(?:(?:that|it)(?:\s+(?:topic|fact))?|the\s+(?:topic|fact))"
+    r"\s*(?:please)?[.!?]*\s*\Z",
+    re.I,
+)
 
 # The calling satellite's id for the duration of the current `AgentLoop.run`
 # call (None outside a turn, or for a turn with no satellite — e.g. a fresh
@@ -73,9 +96,44 @@ def _personality(host) -> Optional[str]:
     return getattr(host, "personality", None)
 
 
+def _is_completed_report_follow_up(user_prompt: str) -> bool:
+    """Recognise natural questions about a retained completed investigation."""
+    return bool(
+        _REPORT_FOLLOW_UP_RE.search(user_prompt) and not _REPORT_BYPASS_RE.search(user_prompt)
+    )
+
+
+def _take_startup_greeting_response_follow_up(host, user_prompt: str) -> str | None:
+    """Consume the greeting only on the first, explicit referential turn."""
+    response = getattr(host, "_startup_greeting_response", None)
+    if not response:
+        return None
+    host._startup_greeting_response = None
+    return response if _STARTUP_GREETING_FOLLOW_UP_RE.fullmatch(user_prompt) else None
+
+
 def _llm_unavailable_label(host) -> str:
     """Name the configured backend rather than its shared transport contract."""
-    return "Local llama-server unavailable" if getattr(host, "llm_backend", None) == "local" else "Remote LLM unreachable"
+    return (
+        "Local llama-server unavailable"
+        if getattr(host, "llm_backend", None) == "local"
+        else "Remote LLM unreachable"
+    )
+
+
+def _route_deep_think_only_tools(emission: dict, user_prompt: str) -> dict:
+    """Keep multi-step research and planning calls in the deliberate worker."""
+    actions = emission.get("actions")
+    if (
+        not isinstance(actions, list)
+        or not any(
+            isinstance(action, dict) and native_requires_deep_think(str(action.get("intent") or ""))
+            for action in actions
+        )
+        or not tool_registry.is_available("deep_think")
+    ):
+        return emission
+    return {"actions": [{"intent": "deep_think", "args": [user_prompt]}]}
 
 
 def _should_style_satellite_message(host, emission: Optional[dict]) -> bool:
@@ -83,7 +141,11 @@ def _should_style_satellite_message(host, emission: Optional[dict]) -> bool:
     if not getattr(host, "llm_enabled", False) or _personality(host) in (None, "balanced"):
         return False
     actions = emission.get("actions") if isinstance(emission, dict) else None
-    return isinstance(actions, list) and len(actions) == 1 and actions[0].get("intent") == "send_satellite_message"
+    return (
+        isinstance(actions, list)
+        and len(actions) == 1
+        and actions[0].get("intent") == "send_satellite_message"
+    )
 
 
 _ANNOUNCEMENT_SUFFIXES = {
@@ -107,17 +169,28 @@ def _satellite_message_args(emission: Optional[dict]) -> Optional[list]:
     if not isinstance(action, dict):
         return None
     args = action.get("args")
-    if action.get("intent") != "send_satellite_message" or not isinstance(args, list) or len(args) < 2:
+    if (
+        action.get("intent") != "send_satellite_message"
+        or not isinstance(args, list)
+        or len(args) < 2
+    ):
         return None
     return args
 
 
-def _apply_announcement_fallback(host, user_prompt: str, raw_emission: Optional[dict], emission: dict) -> None:
+def _apply_announcement_fallback(
+    host, user_prompt: str, raw_emission: Optional[dict], emission: dict
+) -> None:
     """Guarantee a built-in personality changes non-verbatim outbound copy."""
     suffix = _ANNOUNCEMENT_SUFFIXES.get(_personality(host))
     raw_args = _satellite_message_args(raw_emission)
     action_args = _satellite_message_args(emission)
-    if not suffix or not raw_args or not action_args or _LITERAL_ANNOUNCEMENT_RE.search(user_prompt):
+    if (
+        not suffix
+        or not raw_args
+        or not action_args
+        or _LITERAL_ANNOUNCEMENT_RE.search(user_prompt)
+    ):
         return
     raw_text, proposed = raw_args[1], action_args[1]
     if not isinstance(raw_text, str) or not isinstance(proposed, str):
@@ -130,7 +203,11 @@ def _can_speak_delivery(host, actions: object) -> bool:
     if _personality(host) in (None, "balanced") or not isinstance(actions, list):
         return False
     return all(
-        not isinstance(action, dict) or action.get("intent") not in _SENSITIVE_DELIVERY_INTENTS
+        not isinstance(action, dict)
+        or (
+            action.get("intent") not in _SENSITIVE_DELIVERY_INTENTS
+            and native_access_class(action.get("intent", "")) == "execute"
+        )
         for action in actions
     )
 
@@ -232,7 +309,37 @@ class AgentLoop:
         self, host, session, source, stats, on_slm_start, cancel_check, user_prompt: str
     ) -> str:
         logger.info(f"Handling turn: {user_prompt}")
+        startup_greeting = _take_startup_greeting_response_follow_up(host, user_prompt)
 
+        is_affirmation = re.fullmatch(
+            r"\s*(?:yes|yeah|yep|go ahead|please do)\s*[.!]?\s*", user_prompt, re.I
+        )
+        is_completed_report_request = re.fullmatch(
+            r"\s*(?:(?:yes|yeah|yep|go ahead|please do)[,!]?\s*)?"
+            r"(?:(?:give|read|tell)\s+me\s+)?(?:(?:a|the)\s+)?"
+            r"(?:(?:short|full)\s+)?(?:summary|report)(?:\s+please)?[.!]?\s*",
+            user_prompt,
+            re.I,
+        )
+        if is_affirmation or is_completed_report_request:
+            completed_report = getattr(
+                host, "consume_completed_thinking_report", lambda _sid: None
+            )(self.satellite_id)
+            if completed_report:
+                return completed_report
+        if not isinstance(catchAll(user_prompt), dict) and _is_completed_report_follow_up(user_prompt):
+            report_answer = getattr(host, "answer_completed_thinking_report", lambda *_args: None)(
+                self.satellite_id, user_prompt, cancel_check, stats
+            )
+            if report_answer:
+                return report_answer
+        active_job = getattr(host, "active_thinking_task", lambda: None)()
+        if (
+            active_job is not None
+            and active_job.get("status") in {"QUEUED", "RUNNING", "PAUSED"}
+            and (is_affirmation or is_completed_report_request)
+        ):
+            return "I'm still working on that. I'll let you know as soon as the report is ready."
         # Every tool result / planning emission in history now belongs to an
         # already-finished turn, so drop them: the conversation is carried by
         # the user messages and Fulloch's recorded replies, and anything a
@@ -243,6 +350,8 @@ class AgentLoop:
 
         history = host._history_for(self.satellite)
         prior_question = _last_user_question(history)
+        if startup_greeting:
+            history.append({"role": "assistant", "content": startup_greeting})
         history.append({"role": "user", "content": user_prompt})
         host._trim_history()
 
@@ -254,7 +363,11 @@ class AgentLoop:
             # Other fast commands stay deterministic. A named outbound message
             # is delivery copy, so let a non-balanced personality phrase it.
             first_emission = None
-        if first_emission is None and prior_question and is_contextual_web_search_request(user_prompt):
+        if (
+            first_emission is None
+            and prior_question
+            and is_contextual_web_search_request(user_prompt)
+        ):
             first_emission = {
                 "actions": [{"intent": "external_information", "args": [prior_question]}]
             }
@@ -294,9 +407,6 @@ class AgentLoop:
         # note save the agent composes after seeing the findings) doesn't
         # bury the result — see the terminal "speak joined outputs" step.
         web_summary_text: Optional[str] = None
-        # The query deep_think tagged this turn (if any). Captured at
-        # dispatch, consumed once by the out-of-loop thinking call.
-        thinking_query: Optional[str] = None
         # Per-turn web-search cache {normalised_query: summary}. A web search
         # always hands control back to the agent; if the agent re-issues the
         # *same* query, reusing the summary avoids a second SearXNG round-trip
@@ -340,13 +450,17 @@ class AgentLoop:
                             kwargs={
                                 "cache": host.replan_stall_cache,
                                 "sink": getattr(host._turn_local, "sink", None),
-                                "tts_active_event": getattr(host._turn_local, "tts_active_event", None),
+                                "tts_active_event": getattr(
+                                    host._turn_local, "tts_active_event", None
+                                ),
                             },
                             daemon=True,
                         )
                         replan_ack_thread.start()
                 logger.debug(f"Agent call (iter {iteration})")
-                telemetry_event("llm_start", iteration=iteration, source=source, history_entries=len(history))
+                telemetry_event(
+                    "llm_start", iteration=iteration, source=source, history_entries=len(history)
+                )
                 llm_started_at = time.monotonic()
                 try:
                     # Periodic progress stalls so a slow generation isn't silent
@@ -383,12 +497,13 @@ class AgentLoop:
                                     and self.satellite.conversation_mode
                                 ),
                                 wakeword_barge_in=bool(
-                                    source == "voice" and getattr(host, "barge_in", None) == "wakeword"
+                                    source == "voice"
+                                    and getattr(host, "barge_in", None) == "wakeword"
                                 ),
                                 obsidian_edit_enabled=notes._obsidian_edit_allowed(),
                             ),
                             cancel_check=cancel_check,
-                            history=host._history_for(self.satellite),
+                            history=assemble_foreground_history(host._history_for(self.satellite)),
                             stats=stats,
                         )
                     telemetry_event(
@@ -399,10 +514,14 @@ class AgentLoop:
                         response_chars=len(emission_text or ""),
                     )
                 except ContextExhaustedError:
-                    telemetry_event("llm_error", iteration=iteration, source=source, error="context_exhausted")
+                    telemetry_event(
+                        "llm_error", iteration=iteration, source=source, error="context_exhausted"
+                    )
                     return host._context_exhausted_reply()
                 except RemoteUnreachable as e:
-                    telemetry_event("llm_error", iteration=iteration, source=source, error="unreachable")
+                    telemetry_event(
+                        "llm_error", iteration=iteration, source=source, error="unreachable"
+                    )
                     logger.warning("%s; regex-only this turn: %s", _llm_unavailable_label(host), e)
                     host._note_llm_remote_status(False, str(e))
                     if first_emission is None and regex_emission is None:
@@ -412,7 +531,9 @@ class AgentLoop:
                     if iteration > 0:
                         return remote_fallback()
                     return self._run_without_llm(
-                        user_prompt, first_emission or regex_emission, unavailable_fallback=remote_fallback
+                        user_prompt,
+                        first_emission or regex_emission,
+                        unavailable_fallback=remote_fallback,
                     )
                 finally:
                     if replan_ack_thread is not None:
@@ -472,8 +593,11 @@ class AgentLoop:
             # on the non-tool `reply`.
             if emission is not regex_emission:
                 _apply_announcement_fallback(host, user_prompt, regex_emission, emission)
+            emission = _route_deep_think_only_tools(emission, user_prompt)
             delivery = emission.get("delivery")
-            if not isinstance(delivery, str) or not _can_speak_delivery(host, emission.get("actions")):
+            if not isinstance(delivery, str) or not _can_speak_delivery(
+                host, emission.get("actions")
+            ):
                 delivery = None
             elif not (delivery := delivery.strip()):
                 delivery = None
@@ -497,13 +621,16 @@ class AgentLoop:
                     # Only a pseudo-reply (no real tools) → it's just a reply.
                     emission = (
                         {"actions": kept, **({"delivery": delivery} if delivery else {})}
-                        if kept else {"reply": bundled_reply or ""}
+                        if kept
+                        else {"reply": bundled_reply or ""}
                     )
                     if not kept:
                         bundled_reply = None
                     emission_text = json.dumps(emission)
 
-            host._history_for(self.satellite).append({"role": "assistant", "content": emission_text})
+            host._history_for(self.satellite).append(
+                {"role": "assistant", "content": emission_text}
+            )
             host._trim_history()
 
             # Emit a `plan` event so dashboards can show what the agent decided.
@@ -539,13 +666,13 @@ class AgentLoop:
                     }
                     return grounded
                 if not reply:
-                    return random.choice(STALL_PHRASES)
+                    return random.choice(ACK_PHRASES)
                 return intents.strip_unfounded_save_claim(reply, note_written)
 
             actions = emission.get("actions") or []
             if not actions:
                 logger.warning("Agent emitted empty actions; stalling")
-                return random.choice(STALL_PHRASES)
+                return random.choice(ACK_PHRASES)
 
             # Hallucinated-tool guard (direct registry match, not a heuristic
             # read of the observation): a weaker model — especially a remote one
@@ -580,8 +707,6 @@ class AgentLoop:
             # Dispatch each action in order. Stop on the first replan trigger.
             result_strs: list = []
             replan = False
-            saw_summary = False
-            saw_thinking = False
             for _action_idx, action in enumerate(actions[:3]):
                 if session is not None and session.cancelled:
                     return ""
@@ -630,6 +755,11 @@ class AgentLoop:
                             return ""
                     elif intent_name == "play_song":
                         _play_music_search_ack(host, session)
+                    if intent_name == "deep_think":
+                        # The foreground agent often compresses the topic. The
+                        # original turn carries the complete constraints needed
+                        # by the deliberate worker and its matching playbooks.
+                        action = {**action, "args": [user_prompt]}
                     _t_dispatch = time.monotonic()
                     # Single typed boundary: handle_action runs the tool,
                     # classify_step maps any leading sentinel to a StepKind so
@@ -669,25 +799,31 @@ class AgentLoop:
                                 host.play_chunks,
                                 session or host.tts_session,
                                 sink=getattr(host._turn_local, "sink", None),
-                                tts_active_event=getattr(host._turn_local, "tts_active_event", None),
+                                tts_active_event=getattr(
+                                    host._turn_local, "tts_active_event", None
+                                ),
                                 max_stalls=2,
                             ):
                                 summary = host._summarise_search_result(
                                     step.text, cancel_check, stats=stats
                                 )
                         except RemoteUnreachable as e:
-                            logger.warning("%s mid-turn; regex-only: %s", _llm_unavailable_label(host), e)
+                            logger.warning(
+                                "%s mid-turn; regex-only: %s", _llm_unavailable_label(host), e
+                            )
                             host._note_llm_remote_status(False, str(e))
                             if first_emission is None:
                                 return host._speak_llm_error_fallback(
-                            self.session, self.source, satellite_id=self.satellite_id
-                        )
+                                    self.session, self.source, satellite_id=self.satellite_id
+                                )
                             return self._run_without_llm(user_prompt, first_emission)
                         if session is not None and session.cancelled:
                             return ""
                         # Replace the raw payload with the summary; the loop
                         # still forces a replan via web_summarised below.
-                        step = StepResult(StepKind.NORMAL, summary, in_output=True)
+                        step = StepResult(
+                            StepKind.NORMAL, summary, in_output=True, artifact=step.artifact
+                        )
                         web_summarised = True
                         web_summary_text = summary
                         if search_query is not None:
@@ -700,22 +836,19 @@ class AgentLoop:
                         "content": step.text,
                     }
                 )
-                host._emit_agent_event(
-                    "observation",
-                    {
-                        "intent": action.get("intent", "?"),
-                        "result": step.text,
-                    },
-                    source=source,
-                )
-                if step.kind is StepKind.SUMMARY:
-                    saw_summary = True
-                elif step.kind is StepKind.THINKING:
-                    # deep_think returns "Thinking question:\n<query>";
-                    # keep the query for the out-of-loop thinking call.
-                    _parts = step.text.split("\n", 1)
-                    thinking_query = _parts[1].strip() if len(_parts) > 1 else user_prompt
-                    saw_thinking = True
+                observation = {"intent": action.get("intent", "?"), "result": step.text}
+                if step.artifact is not None:
+                    observation["artifact"] = step.artifact
+                host._emit_agent_event("observation", observation, source=source)
+                # Deliberate work owns the research plan. Do not let a bundled
+                # foreground search or paper lookup race it and speak an
+                # unrelated result before the background report is ready.
+                if intent_name == "deep_think":
+                    spoken = (
+                        step.text.strip() or "I'll look into that and let you know when I'm done."
+                    )
+                    host._record_spoken(spoken)
+                    return spoken
                 # A data-lookup tool returns raw records (a state-change dump, a
                 # conversation transcript, note chunks), not a spoken answer.
                 # Hand the result — now in history above — back for one composing
@@ -743,76 +876,6 @@ class AgentLoop:
                     replan = True
                     break
             host._trim_history()
-
-            # Special sentinel handling.
-            if saw_summary:
-                # summarize_thinking — surface the captured partial directly.
-                summary = host._summarise_partial_thinking(cancel_check, stats=stats)
-                host._record_spoken(summary)
-                return summary
-
-            if saw_thinking:
-                # deep_think flagged this query. Run ONE free-text reasoning
-                # call (NO agent grammar — the grammar permits only a JSON
-                # object, so it would forbid Qwen3's <think> block) and speak
-                # the result. Handling it here, out of the grammar loop, also
-                # stops the agent from simply re-emitting deep_think forever:
-                # with the sentinel in history and no other obvious move, it
-                # looped until MAX_AGENT_CALLS and never answered.
-                query = thinking_query or user_prompt
-                # Stall before the (slow) reasoning call so the user hears
-                # acknowledgement up front.
-                if host.pre_thinking_stall_cache:
-                    chunks, sr = random.choice(host.pre_thinking_stall_cache)
-                    host.play_chunks(chunks, sr, session=session or host.tts_session)
-                if session is not None and session.cancelled:
-                    return ""
-                # Watchdog plays periodic "still thinking" stalls during the
-                # long /think run.
-                watchdog_session = session or host.tts_session
-                try:
-                    with ThinkingWatchdog(
-                        host.thinking_stall_cache,
-                        host.play_chunks,
-                        watchdog_session,
-                        sink=getattr(host._turn_local, "sink", None),
-                        tts_active_event=getattr(host._turn_local, "tts_active_event", None),
-                    ):
-                        answer = host._generate_with_context_recovery(
-                            user_prompt=query,
-                            system_prompt=get_thinking_system_prompt(
-                                host.wakeword_name,
-                                personality=_personality(host),
-                            ),
-                            cancel_check=cancel_check,
-                            history=host._history_for(self.satellite),
-                            thinking_mode=True,
-                            stats=stats,
-                        )
-                except ContextExhaustedError:
-                    return host._context_exhausted_reply()
-                except RemoteUnreachable as e:
-                    logger.warning("%s mid-think; regex-only: %s", _llm_unavailable_label(host), e)
-                    host._note_llm_remote_status(False, str(e))
-                    if first_emission is None:
-                        return host._speak_llm_error_fallback(
-                            self.session, self.source, satellite_id=self.satellite_id
-                        )
-                    return self._run_without_llm(user_prompt, first_emission)
-                if session is not None and session.cancelled:
-                    # Stash the partial reasoning for a follow-up
-                    # summarize_thinking ("what have you got so far?").
-                    if answer:
-                        host._last_thinking_partial = answer
-                        host._last_thinking_question = query
-                        host._last_thinking_cancelled_at = time.monotonic()
-                        logger.debug(f"Captured {len(answer)} chars of partial thinking")
-                    return ""
-                cleaned = clean_for_tts(answer)
-                if not cleaned:
-                    cleaned = random.choice(STALL_PHRASES)
-                host._record_spoken(cleaned)
-                return cleaned
 
             if replan:
                 # Reactive question: (HA 400/404, multi-event calendar) or
@@ -866,7 +929,9 @@ class AgentLoop:
         fallback = getattr(host, "_remote_llm_unavailable_fallback", None)
         if fallback is not None:
             return fallback(self.session, self.source, satellite_id=self.satellite_id)
-        return host._speak_llm_error_fallback(self.session, self.source, satellite_id=self.satellite_id)
+        return host._speak_llm_error_fallback(
+            self.session, self.source, satellite_id=self.satellite_id
+        )
 
     def _run_without_llm(self, user_prompt: str, first_emission, unavailable_fallback=None) -> str:
         """Regex-only turn for `llm.backend: none` — never calls the SLM.
@@ -890,7 +955,9 @@ class AgentLoop:
         if first_emission is None:
             return fallback()
 
-        host._history_for(self.satellite).append({"role": "assistant", "content": json.dumps(first_emission)})
+        host._history_for(self.satellite).append(
+            {"role": "assistant", "content": json.dumps(first_emission)}
+        )
         host._trim_history()
         host._emit_agent_event("plan", first_emission, source=source)
 
@@ -925,14 +992,10 @@ class AgentLoop:
                     "content": step.text,
                 }
             )
-            host._emit_agent_event(
-                "observation",
-                {
-                    "intent": intent_name,
-                    "result": step.text,
-                },
-                source=source,
-            )
+            observation = {"intent": intent_name, "result": step.text}
+            if step.artifact is not None:
+                observation["artifact"] = step.artifact
+            host._emit_agent_event("observation", observation, source=source)
             # No SLM to replan with. A REACTIVE step still ran the tool and
             # produced a real observation (e.g. HA "couldn't find that entity")
             # — speak that directly rather than the generic "no AI" phrase, since

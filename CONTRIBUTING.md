@@ -95,7 +95,7 @@ _OPTIONAL_TOOLS = {
 }
 
 # Always loaded — no config dependency.
-_ALWAYS_LOAD = ['time_tools', 'thinking', 'notes']
+_ALWAYS_LOAD = ['time_tools', 'thinking', 'notes', 'calculator', 'satellite_messages', 'research', 'travel']
 ```
 
 ### Step 3: Add configuration to the example file

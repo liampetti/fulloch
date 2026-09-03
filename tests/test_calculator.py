@@ -8,12 +8,14 @@ number formatting across magnitudes, date maths, and unit conversion.
 from datetime import date
 
 from tools.calculator import (
+    _calendar_reference,
     _fmt_number,
     _parse_date,
     calculate,
     convert_units,
     date_of,
     days_between,
+    has_relative_calendar_reference,
 )
 
 
@@ -38,6 +40,9 @@ class TestCalculate:
 
     def test_empty_expression_asks(self):
         assert calculate("   ").startswith("Reactive question:")
+
+    def test_iso_date_offsets_bypass_arithmetic_evaluation(self):
+        assert calculate("2026-08-28 + 24 hours") == "Calendar date: 2026-08-29."
 
 
 class TestFormatNumber:
@@ -92,6 +97,30 @@ class TestDays:
         assert days_between("not-a-date", "2026-06-10").startswith("Reactive question:")
 
 
+class TestRelativeCalendar:
+    def test_resolves_week_month_year_and_offset_ranges(self, monkeypatch):
+        import tools.calculator as calculator
+
+        monkeypatch.setattr(calculator._local_time, "today", lambda: date(2026, 8, 27))
+
+        assert _calendar_reference("next week") == (date(2026, 8, 31), date(2026, 9, 6))
+        assert _calendar_reference("next month") == (date(2026, 9, 1), date(2026, 9, 30))
+        assert _calendar_reference("next year") == (date(2027, 1, 1), date(2027, 12, 31))
+        assert _calendar_reference("in 3 months") == (date(2026, 11, 27), date(2026, 11, 27))
+        assert _calendar_reference("next Monday") == (date(2026, 8, 31), date(2026, 8, 31))
+        assert _calendar_reference("last week") == (date(2026, 8, 17), date(2026, 8, 23))
+
+    def test_calculate_returns_calendar_constraints(self, monkeypatch):
+        import tools.calculator as calculator
+
+        monkeypatch.setattr(calculator._local_time, "today", lambda: date(2026, 8, 27))
+
+        assert calculate("find options next month") == "Calendar range: 2026-09-01 through 2026-09-30."
+        assert calculate("remind me in 3 days") == "Calendar date: 2026-08-30."
+        assert has_relative_calendar_reference("compare options next year") is True
+        assert has_relative_calendar_reference("play the next song") is False
+
+
 class TestDateOf:
     def test_resolves_to_correct_weekday(self):
         # The whole point of the tool: the resolved date must be that weekday.
@@ -109,13 +138,41 @@ class TestConvertUnits:
     def test_temperature_offset(self):
         assert convert_units(20, "celsius", "fahrenheit") == "20 celsius is 68 fahrenheit."
 
-    def test_imperial_gallon_default(self):
+    def test_uk_gallon_default(self, monkeypatch):
+        import tools.calculator as calculator
+        from utils.locale import HouseholdLocale
+
+        monkeypatch.setattr(
+            calculator, "household_locale", lambda: HouseholdLocale("Europe/London", "GB", "GBP", "miles", "celsius", "imperial")
+        )
+
         # UK gallon ≈ 4.546 L → 3 gal ≈ 13.64 L.
         assert convert_units(3, "gallons", "litres") == "3 gallons is 13.64 litres."
 
     def test_us_gallon_opt_in(self):
         # US gallon ≈ 3.785 L → 3 gal ≈ 11.36 L.
         assert convert_units(3, "US gallons", "litres") == "3 US gallons is 11.36 litres."
+
+    def test_ambiguous_gallon_follows_household_locale(self, monkeypatch):
+        import tools.calculator as calculator
+        from utils.locale import HouseholdLocale
+
+        monkeypatch.setattr(
+            calculator, "household_locale", lambda: HouseholdLocale("America/Chicago", "US", "USD", "miles", "fahrenheit", "us")
+        )
+
+        assert convert_units(3, "gallons", "litres") == "3 gallons is 11.36 litres."
+
+    def test_omitted_target_uses_household_metric_defaults(self, monkeypatch):
+        import tools.calculator as calculator
+        from utils.locale import HouseholdLocale
+
+        monkeypatch.setattr(
+            calculator, "household_locale", lambda: HouseholdLocale("Australia/Sydney", "AU", "AUD", "kilometres", "celsius", "metric")
+        )
+
+        assert convert_units(5, "miles") == "5 miles is 8.05 kilometres."
+        assert convert_units(68, "fahrenheit") == "68 fahrenheit is 20 celsius."
 
     def test_dimensionality_mismatch_asks(self):
         assert convert_units(5, "kg", "miles").startswith("Reactive question:")

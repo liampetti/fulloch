@@ -64,6 +64,20 @@ def test_persistent_logging_defaults_to_disabled():
     assert field.default is False
 
 
+def test_thinking_settings_expose_only_valid_slot_choices(tmp_path):
+    enabled = field_for("thinking.enabled")
+    slots = field_for("thinking.server_slots")
+    assert enabled is None
+    assert slots is not None and slots.default == 1 and slots.choices == (1, 2)
+
+    path = _write(tmp_path, "general:\n  wakeword: hi\n")
+    cs.update_config({"thinking.server_slots": "2"}, path)
+    assert cs.read_config(path)["thinking"] == {"server_slots": 2}
+
+    with pytest.raises(cs.ConfigValidationError):
+        cs.update_config({"thinking.server_slots": 3}, path)
+
+
 def test_update_coerces_voice_satellite_limit(tmp_path):
     path = _write(tmp_path, "general:\n  wakeword: hi\n")
     cs.update_config({"general.max_voice_satellites": "3"}, path)

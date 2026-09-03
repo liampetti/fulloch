@@ -269,6 +269,15 @@ class TestDisconnectSatellite:
         a = _make_assistant()
         a.disconnect_satellite("never-connected")  # must not raise
 
+    def test_disconnect_flushes_queued_asr_work_for_that_session(self):
+        a = _make_assistant()
+        a.audio_capture.satellite_recorder_thread = _blocking_recorder
+        a.connect_satellite("sat-a")
+
+        a.disconnect_satellite("sat-a")
+
+        a.audio_capture.flush.assert_called_once_with("sat-a")
+
 
 class TestSetSatelliteSink:
     def test_keyed_not_blind_overwrite(self):
@@ -320,6 +329,56 @@ class TestTargetedProactiveSpeech:
         a.speak_proactive("Hello downstairs", satellite_id="missing")
 
         a._tts_module.speak_stream.assert_not_called()
+
+    def test_proactive_speech_stands_down_without_follow_up(self):
+        a = _make_assistant()
+        a.models_ready.set()
+        a._tts_module = MagicMock()
+        a._tts_module.speak_stream.return_value = 0.0
+        session = SatelliteSession(id="sat-a", tts_sink=queue.Queue())
+        a.satellites["sat-a"] = session
+        a._last_connected_satellite_id = "sat-a"
+        emitted = []
+        a._dispatch_event = emitted.append
+
+        a.speak_proactive("Calendar reminder", emit_event=False)
+
+        assert a.audio_capture.clear_follow_up.called
+        assert emitted[0]["state"] == "thinking"
+        assert emitted[1]["type"] == "assistant.stand_down_after_tts"
+        assert emitted[1]["turn_id"] == emitted[0]["turn_id"]
+        assert session.protocol_turn_id is None
+
+    def test_proactive_question_opens_a_follow_up_window(self):
+        a = _make_assistant()
+        a.models_ready.set()
+        a._tts_module = MagicMock()
+        a._tts_module.speak_stream.return_value = 42.0
+        session = SatelliteSession(id="sat-a", tts_sink=queue.Queue())
+        a.satellites["sat-a"] = session
+        a._mark_turn_end = MagicMock()
+
+        a.speak_proactive(
+            "Would you like a summary?", emit_event=False, satellite_id="sat-a", follow_up=True
+        )
+
+        a._mark_turn_end.assert_called_once_with("sat-a", 42.0)
+
+    def test_untargeted_proactive_speech_broadcasts_to_every_satellite(self):
+        a = _make_assistant()
+        a.models_ready.set()
+        a._tts_module = MagicMock()
+        sink_a: "queue.Queue" = queue.Queue()
+        sink_b: "queue.Queue" = queue.Queue()
+        a.satellites["sat-a"] = SatelliteSession(id="sat-a", tts_sink=sink_a)
+        a.satellites["sat-b"] = SatelliteSession(id="sat-b", tts_sink=sink_b)
+
+        a.speak_proactive("Calendar reminder", emit_event=False)
+
+        tts_sink = a._tts_module.speak_stream.call_args.kwargs["sink"]
+        tts_sink.put(("start", 16000))
+        assert sink_a.get_nowait() == ("start", 16000)
+        assert sink_b.get_nowait() == ("start", 16000)
 
 
 class TestSinkFor:

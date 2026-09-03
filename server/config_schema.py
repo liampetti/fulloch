@@ -19,6 +19,7 @@ GROUPS = (
     "Home Assistant",
     "Notes",
     "Search",
+    "Thinking",
     "Obsidian",
 )
 
@@ -134,6 +135,17 @@ SCHEMA: tuple = (
         None,
         "Extra terms appended after the wakeword — proper nouns/names that "
         "get mistranscribed (max 10).",
+    ),
+    # --- Thinking ----------------------------------------------------------
+    Field(
+        "thinking",
+        "server_slots",
+        "enum",
+        "Thinking",
+        1,
+        "Local llama-server slots: 1 runs queued deliberate work while Fulloch is idle; "
+        "2 reserves a foreground and background slot. A restart is required.",
+        choices=(1, 2),
     ),
     # --- Voice -------------------------------------------------------------
     Field(
@@ -514,9 +526,7 @@ WAKEWORD_PRESETS: tuple = (
         "hey atticus",
         r"\b(?:hey|hay|hi)\W+[ao][dtl]{1,2}i?c\W*u[sz]\b",
         "data/models/wakeword/hey_atticus_v0.3.onnx",
-        (
-            ("data/models/wakeword/hey_atticus_v0.3.onnx", "Hey Atticus v0.3 (Recommended)"),
-        ),
+        (("data/models/wakeword/hey_atticus_v0.3.onnx", "Hey Atticus v0.3 (Recommended)"),),
         recommended=True,
     ),
 )
@@ -530,9 +540,7 @@ def wakeword_presets_as_dicts() -> list:
             "wakeword": p.wakeword,
             "pattern": p.pattern,
             "model": p.model,
-            "model_options": [
-                {"path": path, "label": label} for path, label in p.model_options
-            ],
+            "model_options": [{"path": path, "label": label} for path, label in p.model_options],
             "recommended": p.recommended,
         }
         for p in WAKEWORD_PRESETS
@@ -623,8 +631,20 @@ def discover_obsidian_vaults() -> list[dict]:
     roots = [home / "Documents", home / "Obsidian", home / ".config" / "obsidian"]
 
     _SKIP_TOP_LEVEL = {
-        "proc", "sys", "dev", "run", "boot", "lib", "lib64", "bin", "sbin",
-        "usr", "etc", "tmp", "root", "var",
+        "proc",
+        "sys",
+        "dev",
+        "run",
+        "boot",
+        "lib",
+        "lib64",
+        "bin",
+        "sbin",
+        "usr",
+        "etc",
+        "tmp",
+        "root",
+        "var",
     }
     try:
         for entry in sorted(Path("/").iterdir()):

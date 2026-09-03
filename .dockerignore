@@ -94,9 +94,6 @@ Thumbs.db
 Makefile
 docker-compose*.yml
 compose*.yml
-obsidian-plugin/node_modules/
-obsidian-plugin/main.js
-obsidian-plugin/fulloch.zip
 
 # =============================================================================
 # Re-include first-run seed files the Dockerfiles COPY into /app/seed

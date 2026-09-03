@@ -9,6 +9,7 @@ so no real socket is ever bound.
 """
 
 import asyncio
+import logging
 import socket as _socket
 import threading
 from unittest.mock import MagicMock
@@ -69,6 +70,44 @@ def _stub_assistant():
     a = MagicMock()
     a.register_turn_listener = MagicMock()
     return a
+
+
+def test_tls_proxy_logs_which_side_closed_first(monkeypatch, caplog):
+    class _Reader:
+        async def read(self, _size):
+            return b""
+
+    client_writer = MagicMock()
+    client_writer.get_extra_info.return_value = ("192.168.4.99", 45678)
+    backend_writer = MagicMock()
+
+    async def fake_open_connection(_host, _port):
+        return _Reader(), backend_writer
+
+    monkeypatch.setattr(dashboard.asyncio, "open_connection", fake_open_connection)
+    with caplog.at_level(logging.INFO, logger="server.dashboard"):
+        asyncio.run(dashboard._pipe_to_backend(_Reader(), client_writer, "127.0.0.1", 18765))
+
+    assert "TLS dispatcher relay closed by client (EOF, peer=('192.168.4.99', 45678))" in caplog.text
+
+
+def test_tls_proxy_hides_loopback_health_check_closures(monkeypatch, caplog):
+    class _Reader:
+        async def read(self, _size):
+            return b""
+
+    client_writer = MagicMock()
+    client_writer.get_extra_info.return_value = ("127.0.0.1", 45678)
+    backend_writer = MagicMock()
+
+    async def fake_open_connection(_host, _port):
+        return _Reader(), backend_writer
+
+    monkeypatch.setattr(dashboard.asyncio, "open_connection", fake_open_connection)
+    with caplog.at_level(logging.DEBUG, logger="server.dashboard"):
+        asyncio.run(dashboard._pipe_to_backend(_Reader(), client_writer, "127.0.0.1", 18765))
+
+    assert "TLS dispatcher relay closed" not in caplog.text
 
 
 def test_tls_enabled_when_both_files_exist(monkeypatch, tmp_path):

@@ -13,7 +13,6 @@ from .config_schema import TIER_PRESETS
 
 logger = logging.getLogger(__name__)
 
-
 def disk_free_gb(path: str = "./data") -> float:
     """Free space (GB) on the filesystem holding `path` (or its nearest parent)."""
     p = Path(path)

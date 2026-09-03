@@ -31,6 +31,10 @@ class _MicRequest(BaseModel):
     enabled: bool
 
 
+class _ThinkingRequest(BaseModel):
+    task: str
+
+
 def _tokens() -> list[str]:
     """Return only explicitly configured integration tokens, never satellite tokens."""
     value = get_credential("integration_tokens")
@@ -102,6 +106,12 @@ def create_integration_app(context: AppContext) -> FastAPI:
         if context.assistant is None or not context.lifecycle.is_ready():
             raise HTTPException(status_code=503, detail="assistant not ready (setup or model load in progress)")
 
+    def thinking_assistant():
+        require_ready()
+        if not getattr(context.assistant, "thinking_enabled", False):
+            raise HTTPException(status_code=409, detail="deliberate thinking is disabled")
+        return context.assistant
+
     @app.get("/status")
     def status() -> JSONResponse:
         payload = context.lifecycle.snapshot()
@@ -114,6 +124,7 @@ def create_integration_app(context: AppContext) -> FastAPI:
                     "mic_enabled": context.assistant.audio_capture.mic_globally_enabled,
                     "last_utterance": last_utterance,
                     "last_response": last_response,
+                    "thinking_job": context.assistant.active_thinking_task(),
                 })
         return JSONResponse(payload)
 
@@ -137,6 +148,27 @@ def create_integration_app(context: AppContext) -> FastAPI:
         require_ready()
         context.assistant.audio_capture.mic_globally_enabled = req.enabled
         return {"ok": True, "mic_enabled": req.enabled}
+
+    @app.post("/thinking/run")
+    def run_thinking(req: _ThinkingRequest) -> dict:
+        try:
+            job = thinking_assistant().run_thinking_task(req.task)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"job_id": job["id"], "status": job["status"]}
+
+    @app.get("/thinking/{job_id}")
+    def thinking_status(job_id: str) -> dict:
+        job = thinking_assistant().thinking_task_status(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="thinking job not found")
+        return job
+
+    @app.post("/thinking/{job_id}/cancel")
+    def cancel_thinking(job_id: str) -> dict:
+        if not thinking_assistant().cancel_thinking_task(job_id):
+            raise HTTPException(status_code=404, detail="thinking job cannot be cancelled")
+        return {"ok": True}
 
     @app.get("/stream")
     async def stream(request: Request) -> StreamingResponse:

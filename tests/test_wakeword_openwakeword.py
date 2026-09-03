@@ -2,6 +2,7 @@
 
 import queue
 import sys
+import wave
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -118,6 +119,22 @@ def test_wakeword_wav_is_labelled_after_asr_verification(tmp_path):
     capture.mark_wakeword_wav(path, accepted=True)
 
     assert len(list(tmp_path.glob("*_accepted.wav"))) == 1
+
+
+def test_wakeword_wav_preserves_stereo_samples(tmp_path):
+    capture = AudioCapture(use_vad=False, save_wakeword_wavs=True)
+    capture.wakeword_wav_dir = tmp_path
+    pcm = np.array([[0.25, -0.5], [-0.75, 1.0]], dtype=np.float32)
+
+    path = capture._save_wakeword_wav("kitchen", pcm, 0.873)
+
+    with wave.open(path, "rb") as wav:
+        assert wav.getnchannels() == 2
+        assert wav.getnframes() == 2
+        assert np.array_equal(
+            np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2"),
+            (pcm * 32767).astype("<i2").ravel(),
+        )
 
 
 def test_wakeword_wav_path_stays_with_queued_candidate():

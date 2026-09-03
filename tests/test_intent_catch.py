@@ -98,7 +98,10 @@ class TestExtractAfterPlay:
 class TestAreaLightState:
     def test_extracts_area_and_requested_state(self):
         assert extract_area_light_state("what lights are on upstairs") == ("upstairs", "on")
-        assert extract_area_light_state("Which lights are currently off in the office?") == ("the office", "off")
+        assert extract_area_light_state("Which lights are currently off in the office?") == (
+            "the office",
+            "off",
+        )
 
     def test_routes_status_question_to_area_state_tool(self):
         assert catchAll("what lights are on upstairs") == {
@@ -318,7 +321,9 @@ class TestCompoundCommands:
         }
 
     def test_routes_three_independent_commands_in_spoken_order(self):
-        assert extract_compound_actions("turn on the kitchen lights then play music and start a timer for ten minutes") == [
+        assert extract_compound_actions(
+            "turn on the kitchen lights then play music and start a timer for ten minutes"
+        ) == [
             {"intent": "turn_on", "args": ["kitchen lights"]},
             {"intent": "play_song", "args": ["music"]},
             {"intent": "start_countdown", "args": ["ten minutes"]},
@@ -566,8 +571,12 @@ class TestVolume:
         }
 
     def test_targeted_volume_routes_to_the_named_room_or_player(self):
-        assert extract_volume_down_target("turn the volume down in the living room") == "living room"
-        assert extract_volume_up_target("turn up the volume on the Sonos speaker") == "Sonos speaker"
+        assert (
+            extract_volume_down_target("turn the volume down in the living room") == "living room"
+        )
+        assert (
+            extract_volume_up_target("turn up the volume on the Sonos speaker") == "Sonos speaker"
+        )
         assert catchAll("turn the volume down in the living room") == {
             "actions": [{"intent": "ha_volume_down", "args": ["living room"]}]
         }
@@ -860,10 +869,10 @@ class TestExtractSummarizeThinking:
 
     def test_catch_all_routes_to_summarize_thinking(self):
         result = catchAll("summarise your thoughts")
-        assert result == {"actions": [{"intent": "summarize_thinking", "args": []}]}
+        assert result == "summarise your thoughts"
 
     def test_catch_all_summarize_takes_priority_over_deep_think(self):
         # "summarise what you've been thinking" mentions 'thinking' but
         # is asking for a summary, not a fresh deep_think.
         result = catchAll("summarise what you've been thinking")
-        assert result == {"actions": [{"intent": "summarize_thinking", "args": []}]}
+        assert result == "summarise what you've been thinking"

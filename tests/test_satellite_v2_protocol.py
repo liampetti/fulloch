@@ -216,6 +216,40 @@ def test_tts_cancel_uses_the_active_turn_id():
         assert ws.receive_json() == {"type": "tts.cancel", "turn_id": speaking["turn_id"]}
 
 
+def test_tts_sequences_continue_from_acknowledgement_to_final_response():
+    assistant = _stub_assistant()
+    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello())
+        ws.receive_json()
+        tts_q = assistant.set_satellite_sink.call_args.args[1]
+        listener = assistant.register_turn_listener.call_args.args[0]
+        satellite_id = assistant.connect_satellite.call_args.args[0]
+        listener({
+            "type": "assistant.state", "satellite_id": satellite_id,
+            "state": "thinking", "turn_id": "turn-123",
+        })
+        assert ws.receive_json() == {
+            "type": "assistant.state", "state": "thinking", "turn_id": "turn-123"
+        }
+
+        tts_q.put(("start", 16000))
+        acknowledgement = ws.receive_json()
+        tts_q.put((np.ones(2048, dtype=np.float32), None))
+        acknowledgement_audio = ws.receive_json()
+        ws.receive_bytes()
+        tts_q.put(("end",))
+        assert ws.receive_json() == {"type": "tts.end", "turn_id": acknowledgement["turn_id"]}
+
+        tts_q.put(("start", 16000))
+        final_response = ws.receive_json()
+        assert final_response == acknowledgement
+        tts_q.put((np.ones(2048, dtype=np.float32), None))
+        final_audio = ws.receive_json()
+        ws.receive_bytes()
+
+    assert final_audio["seq"] == acknowledgement_audio["seq"] + 1
+
+
 def test_busy_response_stands_down_only_after_tts_ends():
     assistant = _stub_assistant()
     with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:

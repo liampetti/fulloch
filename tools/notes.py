@@ -24,9 +24,22 @@ import utils.local_time as _local_time
 
 from . import notes_root
 from ._config import config
-from .tool_registry import tool
+from .thinking_playbooks import thinking_playbook
+from .tool_registry import ArtifactText, tool
 
 logger = logging.getLogger(__name__)
+
+thinking_playbook(
+    name="notes research",
+    triggers=(r"\b(notes?|remember|recall|journal|saved fact|my vault)\b",),
+    capabilities=("search_notes", "read_note"),
+    solve_path=(
+        "Search notes using the user's terms before making a claim about saved information.",
+        "Read a specific matching note only when the search excerpt needs context.",
+        "Distinguish stored facts from new analysis in the report.",
+    ),
+    completion_rule="The report identifies the note evidence used or states that none was found.",
+)
 
 _notes_config = config.get("notes", {}) or {}
 # Stable source directory for vault migration.
@@ -534,7 +547,10 @@ def read_note(title: str) -> str:
     if len(text) > MAX_READ_CHARS:
         text = text[:MAX_READ_CHARS]
         truncated = " (note continues)"
-    return f"Note '{title_spoken}': {text}{truncated}"
+    return ArtifactText(
+        f"Note '{title_spoken}': {text}{truncated}",
+        {"type": "note", "title": title_spoken, "excerpt": text[:500], "truncated": bool(truncated)},
+    )
 
 
 @tool(
@@ -791,10 +807,15 @@ def search_notes(query: str) -> str:
     # caveat matters: semantic hits are nearest-by-meaning and may not contain
     # the query term, so the agent must not claim a note mentions it blindly.
     n = len(fused)
-    return (
+    return ArtifactText(
         f"Reactive question: Found {n} possible match{_match_plural(n)} for "
         f"'{query}' in the user's notes (matched by keyword or by topic, so "
-        f"some may not contain '{query}' literally). {parts}."
+        f"some may not contain '{query}' literally). {parts}.",
+        {
+            "type": "notes_search",
+            "query": query[:120],
+            "matches": [{"title": title, "excerpt": snippet[:300]} for title, snippet in fused],
+        },
     )
 
 

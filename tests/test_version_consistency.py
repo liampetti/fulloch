@@ -17,8 +17,8 @@ MANIFEST = PROJECT_ROOT / "custom_components" / "fulloch" / "manifest.json"
 
 
 def _pyproject_version() -> str:
-    # Regex rather than tomllib so this runs on Python 3.10 with no extra dep.
-    # Anchored at line start so it can't match `target-version = "py310"`.
+    # Regex rather than a TOML parser keeps this small test dependency-free.
+    # Anchored at line start so it can't match `target-version = "py311"`.
     match = re.search(
         r'^version\s*=\s*["\'](?P<v>[^"\']+)["\']',
         PYPROJECT.read_text(encoding="utf-8"),

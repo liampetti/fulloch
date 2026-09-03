@@ -2,6 +2,7 @@
 
 import logging
 import re
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -10,9 +11,23 @@ import utils.local_time as _local_time
 from core.url_utils import normalize_url
 
 from ._config import config
-from .tool_registry import tool
+from .thinking_playbooks import thinking_playbook
+from .tool_registry import ThinkingResult, tool
 
 logger = logging.getLogger(__name__)
+
+thinking_playbook(
+    name="current information",
+    triggers=(r"\b(latest|current|today|news|price|score|recent|look up|search)\b",),
+    capabilities=("external_information",),
+    solve_path=(
+        "Search with the specific entity, date, and question needed to resolve the task.",
+        "Use the returned source material as evidence; refine the query only when it leaves a material gap.",
+        "State source-backed findings and uncertainty separately.",
+    ),
+    completion_rule="Current claims are supported by retrieved source material.",
+    prohibited_shortcuts=("Do not substitute general knowledge for a requested current fact.",),
+)
 
 # Defensive read so importing this module never crashes when no `search` config
 # is present (e.g. the test suite / CI with no data/config.yml). In production
@@ -26,6 +41,9 @@ SEARXNG_URL = normalize_url(
 # compression downstream.
 SNIPPET_CHAR_CAP = 3000
 NUM_RESULTS = 3
+# One fresh source per geography gives a briefing three distinct perspectives
+# without turning a voice request into six page downloads.
+NEWS_RESULTS_PER_SCOPE = 1
 # Hard ceiling on the SearXNG round-trip. Without it the call inherits no
 # timeout, so a slow / overloaded instance can hang an entire voice turn
 # (observed ~90s). Engines that miss the window are simply dropped.
@@ -47,7 +65,7 @@ _BROWSER_HEADERS = {
 }
 
 
-def _results_from_json(query, num_results):
+def _results_from_json(query, num_results, *, category="general", time_range=None):
     """Parse the SearXNG JSON API into `{url, content}` dicts.
 
     Raises on an empty / non-JSON body so `searxng_search` can fall back to
@@ -56,7 +74,12 @@ def _results_from_json(query, num_results):
     """
     resp = requests.get(
         SEARXNG_URL,
-        params={"q": query, "format": "json", "categories": "general"},
+        params={
+            "q": query,
+            "format": "json",
+            "categories": category,
+            **({"time_range": time_range} if time_range else {}),
+        },
         timeout=SEARXNG_TIMEOUT_S,
     )
     resp.raise_for_status()
@@ -70,7 +93,7 @@ def _results_from_json(query, num_results):
     ]
 
 
-def _results_from_html(query, num_results):
+def _results_from_html(query, num_results, *, category="general", time_range=None):
     """Scrape the SearXNG HTML results page into `{url, content}` dicts.
 
     Fallback for instances whose JSON API is disabled or mis-served. Each
@@ -79,7 +102,11 @@ def _results_from_html(query, num_results):
     """
     resp = requests.get(
         SEARXNG_URL,
-        params={"q": query, "categories": "general"},
+        params={
+            "q": query,
+            "categories": category,
+            **({"time_range": time_range} if time_range else {}),
+        },
         timeout=SEARXNG_TIMEOUT_S,
     )
     resp.raise_for_status()
@@ -101,7 +128,7 @@ def _results_from_html(query, num_results):
     return out
 
 
-def searxng_search(query, num_results=NUM_RESULTS):
+def searxng_search(query, num_results=NUM_RESULTS, *, category="general", time_range=None):
     """Top results as `{url, content}` dicts from the local SearXNG instance.
 
     Tries the JSON API first and falls back to scraping the HTML results
@@ -110,10 +137,10 @@ def searxng_search(query, num_results=NUM_RESULTS):
     body itself can't be fetched.
     """
     try:
-        return _results_from_json(query, num_results)
+        return _results_from_json(query, num_results, category=category, time_range=time_range)
     except Exception as e:
         logger.warning(f"SearXNG JSON search failed ({e}); falling back to HTML")
-        return _results_from_html(query, num_results)
+        return _results_from_html(query, num_results, category=category, time_range=time_range)
 
 
 def extract_main_text(html: str) -> str:
@@ -194,6 +221,43 @@ def _strip_summarise_directive(query: str) -> str:
     return cleaned or query
 
 
+_NEWS_QUERY_RE = re.compile(r"\b(?:news|headlines?|current events?)\b", re.IGNORECASE)
+
+
+def _is_news_query(query: str) -> bool:
+    """Whether this is a broad news briefing rather than a topical web lookup."""
+    return bool(_NEWS_QUERY_RE.search(query or ""))
+
+
+def _news_searches(query: str) -> list[tuple[str, str]]:
+    """Return current-news queries labelled by the household's IANA timezone."""
+    timezone = str((config.get("general") or {}).get("timezone") or "").strip()
+    parts = timezone.split("/")
+    searches = [("Global", query)]
+    # IANA geographic zones normally encode a broad region and locality, e.g.
+    # Australia/Sydney. Fixed-offset zones such as UTC contain no location.
+    if len(parts) >= 2 and parts[0] not in {"Etc", "US", "Canada"}:
+        region = parts[0].replace("_", " ")
+        locality = parts[-1].replace("_", " ")
+        searches.extend(
+            (("Regional", f"{query} {region}"), ("Local", f"{query} {locality} {region}"))
+        )
+    return searches
+
+
+def _web_artifact(query: str, sources: list[dict]) -> dict | None:
+    """Bounded source metadata for the dashboard; never model-provided HTML."""
+    entries = []
+    for source in sources[:NUM_RESULTS]:
+        url = source.get("url") or ""
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        evidence = str(source.get("evidence") or "").strip()
+        entries.append({"url": url, "host": parsed.netloc, "evidence": evidence[:500]})
+    return {"type": "web_research", "query": query[:160], "sources": entries} if entries else None
+
+
 @tool(
     name="external_information",
     description=(
@@ -204,6 +268,7 @@ def _strip_summarise_directive(query: str) -> str:
         "jokes, or anything the assistant can answer from its own training."
     ),
     aliases=["web_search", "current_events", "fact_search"],
+    thinking_outcome=True,
 )
 def external_information(query: str = "get me the latest news stories") -> str:
     """Fetch top SearXNG snippets and wrap them with a `User question:` sentinel
@@ -215,13 +280,38 @@ def external_information(query: str = "get me the latest news stories") -> str:
     # the "User question:" line so the summariser still knows the user's intent.
     search_query = _strip_summarise_directive(query)
     website_snippets = []
+    sources = []
+    search_failed = False
     try:
-        for result in searxng_search(search_query, num_results=NUM_RESULTS):
-            snippet = fetch_website_summary(result["url"], fallback=result["content"])
-            if snippet:
-                website_snippets.append(f"\n\nFrom {result['url']}: {snippet}")
+        if _is_news_query(search_query):
+            # News engines rank recent reporting differently from general web
+            # search. Query each configured geography independently so global
+            # headlines cannot crowd local and regional reporting out. The
+            # location scopes come from general.timezone.
+            searches = _news_searches(search_query)
+            category, time_range = "news", "day"
+        else:
+            searches = [(None, search_query)]
+            category, time_range = "general", None
+
+        seen_hosts = set()
+        for scope, scoped_query in searches:
+            search_kwargs = {"num_results": NEWS_RESULTS_PER_SCOPE if scope else NUM_RESULTS}
+            if category != "general":
+                search_kwargs.update(category=category, time_range=time_range)
+            for result in searxng_search(scoped_query, **search_kwargs):
+                host = urlparse(result["url"]).netloc.casefold()
+                if not host or host in seen_hosts:
+                    continue
+                seen_hosts.add(host)
+                snippet = fetch_website_summary(result["url"], fallback=result["content"])
+                if snippet:
+                    source_scope = f" ({scope} news)" if scope else ""
+                    website_snippets.append(f"\n\nFrom {result['url']}{source_scope}: {snippet}")
+                    sources.append({"url": result["url"], "evidence": snippet})
     except Exception as e:
         logger.error(f"Unable to search web: {e}")
+        search_failed = True
 
     # `User question:` must be the leading sentinel so the assistant's
     # inline summariser (and `should_replan`) recognises this payload and
@@ -245,4 +335,16 @@ def external_information(query: str = "get me the latest news stories") -> str:
             "answer and do not save this as a note."
         )
 
-    return "\n".join(lines)
+    artifact = _web_artifact(query, sources)
+    return ThinkingResult(
+        "\n".join(lines),
+        status="evidence" if sources else "unavailable" if search_failed else "rejected",
+        evidence={"query": query, "sources": artifact["sources"] if artifact else []},
+        scope=(
+            f"{len(sources)} distinct web sources were retrieved."
+            if sources
+            else "The web search did not return usable source material."
+        ),
+        next_actions=("external_information",),
+        artifact=artifact,
+    )

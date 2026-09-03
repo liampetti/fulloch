@@ -166,6 +166,8 @@ class AppContext:
             "connected": False,
             "vault_path": None,
             "vault_resolved_path": None,
+            "plugin_vault_path": None,
+            "path_navigation_mismatch": False,
             "last_connected_at": None,
             "last_error": None,
             "indexing_progress": None,

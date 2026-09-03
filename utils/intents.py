@@ -7,7 +7,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from tools.thinking import SUMMARY_PREFIX, THINKING_PREFIX
 from tools.tool_registry import UnknownToolError, tool_registry
 
 logger = logging.getLogger(__name__)
@@ -81,8 +80,6 @@ class StepKind(enum.Enum):
 
     NORMAL = "normal"  # plain output — joined into the spoken reply
     WEB_SEARCH = "web_search"  # raw SearXNG payload — summarise inline, replan
-    THINKING = "thinking"  # deep_think flagged — run the /think branch
-    SUMMARY = "summary"  # summarize_thinking — surface captured partial
     REACTIVE = "reactive"  # tool error / HA 4xx — replan with failure shown
     ERROR = "error"  # dispatch returned None / raised — replan
 
@@ -90,8 +87,6 @@ class StepKind(enum.Enum):
 # Prefix → kind, in match priority order.
 _SENTINEL_KINDS = (
     (WEB_QUESTION_PREFIX, StepKind.WEB_SEARCH),
-    (THINKING_PREFIX, StepKind.THINKING),
-    (SUMMARY_PREFIX, StepKind.SUMMARY),
     (REACTIVE_PREFIX, StepKind.REACTIVE),
 )
 
@@ -99,8 +94,6 @@ _SENTINEL_KINDS = (
 _REPLAN_KINDS = frozenset(
     {
         StepKind.WEB_SEARCH,
-        StepKind.THINKING,
-        StepKind.SUMMARY,
         StepKind.REACTIVE,
         StepKind.ERROR,
     }
@@ -120,6 +113,7 @@ class StepResult:
     kind: StepKind
     text: str
     in_output: bool
+    artifact: Optional[dict] = None
 
     @property
     def should_replan(self) -> bool:
@@ -141,8 +135,8 @@ def classify_step(raw: Optional[object]) -> StepResult:
     stripped = raw.lstrip()
     for prefix, kind in _SENTINEL_KINDS:
         if stripped.startswith(prefix):
-            return StepResult(kind, raw, in_output=True)
-    return StepResult(StepKind.NORMAL, raw, in_output=True)
+            return StepResult(kind, raw, in_output=True, artifact=getattr(raw, "artifact", None))
+    return StepResult(StepKind.NORMAL, raw, in_output=True, artifact=getattr(raw, "artifact", None))
 
 
 # Sentences in a reactive message that instruct the (absent) agent rather than
@@ -196,6 +190,7 @@ LOOKUP_TOOLS = frozenset(
     {
         "get_entity_history",
         "get_conversation_history",
+        "read_note",
         "search_notes",
     }
 )

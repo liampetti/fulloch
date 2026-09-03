@@ -55,6 +55,7 @@ def test_status_returns_state(ctx):
     assert "connected" in body
     assert "vault_path" in body
     assert "indexing_progress" in body
+    assert body["path_navigation_mismatch"] is False
     assert body["allow_edit_delete"] is False
 
 
@@ -70,6 +71,18 @@ def test_status_does_not_leak_token(ctx):
     client = _client(ctx)
     r = client.get("/api/obsidian/status")
     assert "token" not in r.json()
+
+
+def test_plugin_archive_download(ctx, tmp_path, monkeypatch):
+    archive = tmp_path / "fulloch-obsidian-plugin.zip"
+    archive.write_bytes(b"plugin")
+    monkeypatch.setattr("server.dashboard._OBSIDIAN_PLUGIN_ZIP", archive)
+
+    r = _client(ctx).get("/api/obsidian/plugin.zip")
+
+    assert r.status_code == 200
+    assert r.content == b"plugin"
+    assert r.headers["content-type"] == "application/zip"
 
 
 def test_regenerate_token_writes_new_value(ctx):

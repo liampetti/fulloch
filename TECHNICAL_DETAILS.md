@@ -62,7 +62,7 @@ nothing in the timeline surprises you:
    shows the URL banner with a Copy button and a one-line note about
    the self-signed-cert warning. Click through the warning; it's
    expected for a private LAN install.
-3. **Walk the wizard.** Pick a thinking mode (regex simple / full GPU /
+3. **Walk the wizard.** Pick a language-model stack (regex-only / Full GPU /
    remote LLM), set a name and voice, optionally connect Home Assistant and
    SearXNG, then optionally connect Obsidian.
 4. **Models download.** This is the long bit. The CPU stack pulls
@@ -188,13 +188,14 @@ The dashboard's **Entities** tab blocks specific entities (locks, alarms) from v
 
 ## Obsidian Integration
 
-Connect your Obsidian vault so Fulloch reads, writes, appends, and searches your notes by voice, and knows which note you have open. The first time you connect, Fulloch offers to copy your existing notes into the vault as `Inbox/fulloch-import/`. Cloud sync (Remotely Save, etc.) is unchanged, Fulloch only sees the local vault.
+Connect your Obsidian vault so Fulloch reads, writes, appends, and searches your notes by voice. The folder link is all that these standard note features require; Obsidian itself can be closed. The first time you connect, Fulloch offers to copy your existing notes into the vault as `Inbox/fulloch-import/`. Cloud sync (Remotely Save, etc.) is unchanged, Fulloch only sees the local vault.
+
+The optional Fulloch plugin adds live Obsidian-app integration. It supplies the currently open note's path, tags, links, backlinks, frontmatter, and selected text to the assistant; immediately re-indexes edits made in Obsidian; and opens notes Fulloch has written. With **Enable edit/delete** turned on, it also permits explicit active-editor actions: insert at the cursor, replace selected text, rename the active note, and move it to Obsidian trash. The plugin is therefore useful whenever you want help with the note currently open in Obsidian, not only while typing.
 
 **Setup (about 2 minutes):**
 
 1. **In the Fulloch setup wizard**, the "Connect Obsidian" step lets you auto-detect your vault or paste its path. Click **Save and continue**, or **Skip** to do it later.
-2. **Open the dashboard's Obsidian tab** and click **Show install instructions** to get a download link and your auth token.
-3. **In Obsidian**, extract the downloaded `fulloch.zip` into `<your-vault>/.obsidian/plugins/fulloch/`, then enable the Fulloch plugin in **Settings → Community plugins** and paste the token.
+2. **Open the dashboard's Obsidian tab**, download the transitional plugin archive, extract it into `<your-vault>/.obsidian/plugins/fulloch/`, then enable the Fulloch plugin in **Settings → Community plugins** and paste the dashboard's auth token into its settings.
 
    In the plugin settings, use the HTTPS dashboard URL (for example, `https://localhost` with port `8765`). A plain `localhost` value creates an insecure `ws://` connection, which Fulloch redirects and WebSockets cannot follow. The default self-signed dashboard certificate must be trusted on the computer running Obsidian; use the private-CA instructions above for a permanent trust setup.
 
@@ -213,4 +214,6 @@ The plugin runs on the host, so it reports host paths (e.g. `/Users/you/Document
    obsidian:
      path_translation:
        "/Users/you/Documents/MyVault": "/vault"
-   ```
+    ```
+
+   This mapping is currently host-to-container only. Live context and immediate re-indexing work in Docker, but automatic navigation from a container path such as `/vault/note.md` back to the host-side Obsidian app is unavailable when the two paths differ. Standard filesystem note features are unaffected.

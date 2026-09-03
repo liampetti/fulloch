@@ -1114,6 +1114,13 @@ async function openSettings() {
   screen().appendChild(dz);
   $('reset-setup').addEventListener('click', resetSetup);
   loadBackupList();
+
+  if (new URLSearchParams(location.search).get('section') === 'notes') {
+    categoryCards.Notes.open = true;
+    requestAnimationFrame(() => {
+      $('sec-obs-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
 }
 
 function homeAssistantAccessCard() {
@@ -1247,7 +1254,7 @@ function securityCard() {
         <p class="help" id="sec-obs-vault-hint" style="margin-top:.4rem">This saves <code>notes.path</code> in config.yml. Path must contain a <code>.obsidian/</code> subfolder. Auto-detect scans <code>~/Documents</code>, <code>~/Obsidian</code>, and <code>~/.config/obsidian</code>.</p>
 
          <div class="group-title">Plugin</div>
-         <p class="help" style="margin:0 0 .5rem">The plugin ships in the repo. Until it's in the Obsidian community store, download the zip and extract it into <code>&lt;vault&gt;/.obsidian/plugins/fulloch/</code>, then enable it in <strong>Settings → Community plugins</strong>.</p>
+         <p class="help" style="margin:0 0 .5rem">Download the plugin archive and extract it into <code>&lt;vault&gt;/.obsidian/plugins/fulloch/</code>, then enable it in <strong>Settings → Community plugins</strong>.</p>
          <a class="obs-btn" href="/api/obsidian/plugin.zip" download>Download plugin.zip</a>
          <p class="help" style="margin:.7rem 0 0"><strong>HTTPS trust for Obsidian desktop:</strong> the plugin connects over secure WebSockets and cannot bypass a self-signed certificate warning. Create a private CA on the Fulloch host with <code>python scripts/create_local_ca.py --force --ip &lt;Fulloch-LAN-IP&gt;</code>, then on Linux install only <code>data/certs/fulloch-home-ca.crt</code> with <code>sudo cp data/certs/fulloch-home-ca.crt /usr/local/share/ca-certificates/ &amp;&amp; sudo update-ca-certificates</code>. Restart Fulloch and Obsidian afterwards. Use the HTTPS host/IP in plugin settings; never install or share <code>fulloch-home-ca.key</code>.</p>
 

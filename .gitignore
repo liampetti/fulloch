@@ -68,6 +68,7 @@ data/voice_denylist.json
 data/dashboard_sessions.json
 data/backups
 .setup_complete
+clients/headless/fulloch-satellite.service
 
 # =============================================================================
 # Local Data and Models
@@ -76,7 +77,7 @@ data/models/**
 !data/models/grammars/
 !data/models/grammars/agent.gbnf
 !data/models/wakeword/
-!data/models/wakeword/hey_atticus_v0.3.onnx
+!data/models/wakeword/hey_atticus_v0.5.onnx
 data/cache/
 *.gguf
 config.yml
@@ -84,6 +85,7 @@ credentials.json
 scripts/wakeword/data
 data/config.yml
 data/logs/*
+clients/headless/certs
 
 # =============================================================================
 # Logs and Databases

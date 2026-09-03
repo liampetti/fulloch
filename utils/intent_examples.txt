@@ -57,6 +57,22 @@
   Output:
   {"actions": [{"intent": "date_of", "args": ["Tuesday", "next"]}]}
 
+- User: "How many days until my dentist appointment?"
+  Output:
+  {"actions": [{"intent": "find_calendar_event", "args": ["dentist appointment"]}]}
+
+- Conversation context:
+    User: "How many days until my dentist appointment?"
+    Tool — find_calendar_event: "Reactive question: Calendar search found: Dentist appointment: starts 2026-10-03T18:25:00+10:00."
+  Output:
+  {"actions": [{"intent": "days_between", "args": ["today", "2026-10-03"]}]}
+
+- Conversation context:
+    User: "Tell me the details of my dentist appointment"
+    Tool — find_calendar_event: "Reactive question: Calendar search found: Dentist appointment: starts 2026-10-03T18:25:00+10:00."
+  Output:
+  {"reply": "Your dentist appointment is on 3 October 2026 at 6:25 pm."}
+
 - User: "Can you order pizza"
   Output:
   {"reply": "I can't place orders, but I can add 'order pizza' to your shopping list if you'd like."}

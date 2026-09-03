@@ -102,6 +102,14 @@ def ensure_scaffolding(data_dir: str = "./data", seed_dir: str = None) -> None:
                 shutil.copy2(src, dst)
                 logger.info("Seeded voice reference %s into %s", src.name, dst)
 
+    # The optional Obsidian bridge is distributed separately, but retain a
+    # static archive for dashboard download during the transition.
+    plugin_zip = data / "fulloch-obsidian-plugin.zip"
+    seed_plugin_zip = seed / "fulloch-obsidian-plugin.zip"
+    if not plugin_zip.is_file() and seed_plugin_zip.is_file():
+        shutil.copy2(seed_plugin_zip, plugin_zip)
+        logger.info("Seeded Obsidian plugin archive into %s", plugin_zip)
+
     # First-run config from the bundled template; the wizard writes the rest.
     config = data / "config.yml"
     seed_config = seed / "config.example.yml"

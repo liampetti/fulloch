@@ -57,3 +57,17 @@ class TestCreateSession:
                     ["CoreMLExecutionProvider", "CPUExecutionProvider"],
                 )
         ctor.assert_called_once()
+
+
+def test_onnx_transcription_uses_inference_watchdog():
+    pipeline = MagicMock()
+    pipeline.transcribe.return_value = "hello"
+    wrapper = asr_onnx.QwenOnnxASRPipelineWrapper(pipeline)
+    watchdog = MagicMock()
+    watchdog.__enter__.return_value = watchdog
+    watchdog.__exit__.return_value = False
+
+    with patch.object(asr_onnx, "InferenceWatchdog", return_value=watchdog) as watchdog_ctor:
+        assert wrapper._transcribe([0.0, 0.1], 16) == "hello"
+
+    watchdog_ctor.assert_called_once_with("Qwen3 ASR ONNX transcription")

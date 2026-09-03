@@ -277,8 +277,6 @@ class TestShouldReplan:
         "prefix",
         [
             "User question:",
-            "Thinking question:",
-            "Summary question:",
             "Reactive question:",
         ],
     )
@@ -328,8 +326,6 @@ class TestClassifyStep:
         "prefix,kind",
         [
             ("User question:", "WEB_SEARCH"),
-            ("Thinking question:", "THINKING"),
-            ("Summary question:", "SUMMARY"),
             ("Reactive question:", "REACTIVE"),
         ],
     )
@@ -339,8 +335,8 @@ class TestClassifyStep:
         assert step.should_replan is True
 
     def test_leading_whitespace_still_matches(self):
-        step = intents.classify_step("   Thinking question:\nwhy is the sky blue")
-        assert step.kind is intents.StepKind.THINKING
+        step = intents.classify_step("   Reactive question:\nwhy is the sky blue")
+        assert step.kind is intents.StepKind.REACTIVE
 
     def test_sentinel_must_be_at_start(self):
         # A note whose body merely contains a sentinel mid-string must NOT route.

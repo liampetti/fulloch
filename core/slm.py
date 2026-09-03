@@ -27,8 +27,8 @@ MTP_DRAFT_TOKENS = 3
 N_CONTEXT = 12288
 N_THREADS = 4
 N_BATCH = 512
-# Fulloch serializes local LLM calls under Assistant._turn_lock. llama-server's
-# automatic slot count otherwise provisions several independent KV caches.
+# Fulloch serializes foreground local LLM calls under Assistant._turn_lock. A
+# deliberate-thinking background worker can opt into a second fixed slot.
 N_PARALLEL = 1
 SERVER_LOG_PATH = Path("./data/logs/llama-server.log")
 SERVER_EVENT_LOG_PATH = Path("./data/logs/llama-server-events.log")
@@ -69,6 +69,7 @@ def _local_server_command(
     n_threads: int,
     n_batch: int,
     *,
+    server_slots: int = N_PARALLEL,
     mtp: bool = False,
     flash_attn: bool = False,
 ) -> list[str]:
@@ -79,6 +80,9 @@ def _local_server_command(
             "Local GGUF models require llama-server. Use the GPU container or set "
             "FULLOCH_LLAMA_SERVER to a compatible llama-server binary."
         )
+    if server_slots not in (1, 2):
+        raise ValueError("server_slots must be 1 or 2")
+    total_context = n_ctx * server_slots
     command = [
         binary,
         "--model",
@@ -88,7 +92,7 @@ def _local_server_command(
         "--port",
         str(_local_server_port()),
         "--ctx-size",
-        str(n_ctx),
+        str(total_context),
         "--threads",
         str(n_threads),
         "--batch-size",
@@ -96,7 +100,7 @@ def _local_server_command(
         "--ubatch-size",
         str(n_batch),
         "--parallel",
-        str(N_PARALLEL),
+        str(server_slots),
         "--n-gpu-layers",
         "-1" if torch.cuda.is_available() else "0",
         "--no-mmproj",
@@ -276,6 +280,7 @@ def _load_local_slm(
     n_batch: int,
     mtp: bool,
     flash_attn: bool,
+    server_slots: int,
     generation_timeout: float | None,
     persistent_logging_enabled: bool,
 ):
@@ -288,10 +293,24 @@ def _load_local_slm(
     effective_mtp = mtp
     effective_flash_attn = flash_attn
     command = _local_server_command(
-        model_path, n_ctx, n_threads, n_batch, mtp=effective_mtp, flash_attn=effective_flash_attn
+        model_path,
+        n_ctx,
+        n_threads,
+        n_batch,
+        server_slots=server_slots,
+        mtp=effective_mtp,
+        flash_attn=effective_flash_attn,
     )
     mode = "MTP speculative decoding" if effective_mtp else "standard decoding"
-    logger.info("Loading %s with native llama-server (%s)...", model_path, mode)
+    logger.info(
+        "Loading %s with native llama-server (%s; %d slot%s, %d context tokens per slot, %d total)...",
+        model_path,
+        mode,
+        server_slots,
+        "" if server_slots == 1 else "s",
+        n_ctx,
+        n_ctx * server_slots,
+    )
     try:
         process = _start_local_server(command, port, persistent_logging_enabled)
     except Exception:
@@ -337,7 +356,7 @@ def _load_local_slm(
         reason, client._fulloch_local_process, persistent_logging_enabled
     )
     atexit.register(stop_current)
-    logger.info("Local llama-server ready (%s)", mode)
+    logger.info("Local llama-server ready (%s; %d slot%s)", mode, server_slots, "" if server_slots == 1 else "s")
     return grammar, client
 
 
@@ -349,13 +368,22 @@ def load_slm(
     n_batch: int = N_BATCH,
     mtp: bool = False,
     flash_attn: bool = False,
+    server_slots: int = N_PARALLEL,
     generation_timeout: float | None = None,
     persistent_logging_enabled: bool = False,
 ):
     """Load a local GGUF through the bundled llama-server."""
     del grammar_path  # The shared OpenAI client loads GRAMMAR_FILE for constrained requests.
     return _load_local_slm(
-        model_path, n_ctx, n_threads, n_batch, mtp, flash_attn, generation_timeout, persistent_logging_enabled
+        model_path,
+        n_ctx,
+        n_threads,
+        n_batch,
+        mtp,
+        flash_attn,
+        server_slots,
+        generation_timeout,
+        persistent_logging_enabled,
     )
 
 
@@ -370,6 +398,9 @@ def generate_slm(
     history: Optional[list] = None,
     thinking_mode: bool = False,
     stats: Optional[TurnStats] = None,
+    read_timeout: float | None = None,
+    generation_timeout: float | None = None,
+    recover_on_failure: bool = True,
 ) -> str:
     """Generate through the shared OpenAI-compatible LLM client."""
     if getattr(slm_model, "_fulloch_remote", False) is not True:
@@ -384,4 +415,7 @@ def generate_slm(
         history=history,
         thinking_mode=thinking_mode,
         stats=stats,
+        read_timeout=read_timeout,
+        generation_timeout=generation_timeout,
+        recover_on_failure=recover_on_failure,
     )

@@ -18,18 +18,24 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from tools import notes
-
-# Sentinels returned by the thinking tools — kept as module-level
-# constants so renames only happen in one place.
+from tools import notes, notes_root
+from tools.capabilities import native_capabilities
+from tools.thinking_context import reset_artifacts, set_artifacts
+from tools.thinking_playbooks import matching_playbooks
+from tools.tool_registry import ThinkingResult, thinking_result_error, tool_registry
+from utils import intents
 from utils.completeness import should_commit_provisional
 from utils.intent_catch import catchAll
+from utils.local_time import now as local_now
 from utils.prompts import (
     CACHE_PRIMING_USER_PROMPT,
     get_agent_system_prompt,
     get_greeting_system_prompt,
     get_greeting_user_prompt,
     get_partial_thinking_summary_prompt,
+    get_thinking_report_answer_prompt,
+    get_thinking_report_prompt,
+    get_thinking_worker_prompt,
     get_web_summary_system_prompt,
 )
 
@@ -39,6 +45,7 @@ from .agent_loop import (
 )
 from .audio import AudioCapture
 from .backends import ASR, LLM, TTS, get_module, resolve_models
+from .background_jobs import BackgroundJob, BackgroundJobManager
 from .higgs_controls import apply_delivery, extract_delivery_request
 from .satellite import SatelliteSession
 from .satellite_context import current_satellite_id as _current_satellite_id
@@ -69,10 +76,84 @@ _LOG_LEVELS = {
 # reminder (see Assistant._play_alarm_tone). Regenerate with dev/gen_sound.py.
 ALARM_WAV_PATH = "./data/wav/alarm.wav"
 
+# Background deliberate work needs room to investigate, revise its plan from
+# tool observations, and still produce a final synthesis.
+MAX_THINKING_WORKER_CALLS = 12
+MAX_THINKING_CAPABILITY_CALLS = 3
+# Background investigations can wait through a busy remote model queue without
+# applying those longer waits to foreground conversation turns.
+DEEP_THINK_READ_TIMEOUT_S = 600.0
+DEEP_THINK_GENERATION_TIMEOUT_S = 900.0
+# Planning actions can include structured multi-leg evidence. Leave room for
+# larger models to finish those JSON arguments before the bounded worker loop
+# advances to its next step.
+DEEP_THINK_STEP_MAX_TOKENS = 1024
+DEEP_THINK_TRANSCRIPT_MAX_CHARS = 12_000
+DEEP_THINK_OBSERVATION_MAX_CHARS = 3_000
+
+_THINKING_OBSERVATION_RE = re.compile(r"\n\n(?=\[[^\]\n]+\]\n)")
+
 # Strips every non-word character. The self-echo check uses this so ASR's
 # "1254" / "am" still match the assistant's spoken "12 54" / "a m" — the
 # get_time tool spells digits out with spaces and ASR re-concatenates them.
 _NON_WORD_RE = re.compile(r"\W+")
+
+
+def _thinking_excerpt(text: str, limit: int) -> str:
+    """Keep an observation useful without letting one result crowd out the rest."""
+    if len(text) <= limit:
+        return text
+    marker = "\n...[compacted]...\n"
+    remaining = limit - len(marker)
+    if remaining <= 0:
+        return text[:limit]
+    head = remaining * 2 // 3
+    return text[:head].rstrip() + marker + text[-(remaining - head) :].lstrip()
+
+
+def _compact_thinking_transcript(transcript: str) -> str:
+    """Bound ReAct observations while retaining every prior tool's context."""
+    transcript = transcript.strip()
+    if len(transcript) <= DEEP_THINK_TRANSCRIPT_MAX_CHARS:
+        return transcript
+    entries = _THINKING_OBSERVATION_RE.split(transcript)
+    if len(entries) == 1:
+        return _thinking_excerpt(transcript, DEEP_THINK_TRANSCRIPT_MAX_CHARS)
+    labels = [entry.split("\n", 1)[0] for entry in entries]
+    overhead = sum(len(label) + 2 for label in labels) + 2 * (len(entries) - 1)
+    per_entry = max(160, (DEEP_THINK_TRANSCRIPT_MAX_CHARS - overhead) // len(entries))
+    compacted = []
+    for label, entry in zip(labels, entries, strict=True):
+        body = entry[len(label) :].lstrip("\n")
+        compacted.append(f"{label}\n{_thinking_excerpt(body, per_entry)}")
+    return "\n\n".join(compacted)[:DEEP_THINK_TRANSCRIPT_MAX_CHARS]
+
+
+def _append_thinking_observation(transcript: str, label: str, observation: str) -> str:
+    """Append one bounded observation in a format safe to resume after a pause."""
+    observation = _thinking_excerpt(observation.strip(), DEEP_THINK_OBSERVATION_MAX_CHARS)
+    entry = f"[{label}]\n{observation}"
+    combined = f"{transcript.strip()}\n\n{entry}" if transcript.strip() else entry
+    return _compact_thinking_transcript(combined)
+
+
+def _describe_thinking_capability(name: str, schema) -> str:
+    """Render the callable shape a small ReAct worker needs, without prompt bloat."""
+    args = []
+    for param in schema.params:
+        if param.required:
+            args.append(param.name)
+        else:
+            args.append(f"{param.name}={param.default!r}")
+    description = " ".join(schema.description.split())
+    if len(description) > 240:
+        description = description[:237].rstrip() + "..."
+    return f"- {name}({', '.join(args)}): {description}"
+
+
+def _thinking_action_key(name: str, args: list) -> str:
+    """Identify equivalent worker actions independent of JSON object key order."""
+    return f"{name}:{json.dumps(args, sort_keys=True, separators=(',', ':'), default=str)}"
 
 # Short tokens that Qwen3-ASR (and Whisper) commonly hallucinate from
 # background noise when English is enforced. None of these can match a real
@@ -345,6 +426,32 @@ class _NonBlockingSink:
                 return
 
 
+class _BroadcastSink:
+    """Fan out one TTS stream to every active proactive-speech recipient."""
+
+    def __init__(self, sinks: list):
+        self._sinks = sinks
+
+    def put(self, item, *args, **kwargs) -> None:
+        for sink in self._sinks:
+            sink.put(item, *args, **kwargs)
+
+
+class _BroadcastEvent:
+    """Mirror a TTS backend's active/inactive transition across satellites."""
+
+    def __init__(self, events: list[threading.Event]):
+        self._events = events
+
+    def set(self) -> None:
+        for event in self._events:
+            event.set()
+
+    def clear(self) -> None:
+        for event in self._events:
+            event.clear()
+
+
 def _safe_sink(sink: Optional["queue.Queue"]):
     # Both browser and native transports use bounded hand-off queues. Preserve
     # every PCM frame by letting their send loops pace the TTS producer.
@@ -388,6 +495,7 @@ class Assistant:
         save_wakeword_wavs: bool = False,
         persistent_logging_enabled: bool = False,
         models: Optional[dict] = None,
+        thinking: Optional[dict] = None,
         lifecycle=None,
     ):
         """
@@ -537,6 +645,11 @@ class Assistant:
         #              "name": <intent>?}  (assistant content is raw agent
         # JSON; tool content is the tool's return string).
         self._history: list = []
+        # Completed background reports stay outside compacted history as durable
+        # references. Follow-up answers re-read the saved report rather than
+        # asking the conversational model to reconstruct its findings.
+        self._completed_thinking_reports: dict[str, dict[str, object]] = {}
+        self._pending_thinking_tasks: dict[str, str] = {}
 
         # Partial-thinking capture for the interrupt-and-summarise path.
         # Set when a thinking-mode chat call is cancelled mid-stream;
@@ -557,7 +670,23 @@ class Assistant:
         # truth. `llm_enabled` is False for `llm.backend: none`, which runs a
         # regex-only assistant that never touches the SLM.
         self._models_raw = models or {}
+        thinking = thinking or {}
+        self.thinking_enabled = True
+        try:
+            requested_slots = int(thinking.get("server_slots", 1))
+        except (TypeError, ValueError):
+            requested_slots = 1
+        self.thinking_server_slots = min(max(requested_slots, 1), 2)
+        if self.thinking_server_slots != requested_slots:
+            logger.warning("Invalid thinking.server_slots %r; using %d", requested_slots, self.thinking_server_slots)
         self._models = resolve_models(models)
+        self.thinking_jobs = (
+            BackgroundJobManager(
+                self._run_background_thinking_job,
+                self._on_thinking_job_status,
+                self._background_job_admitted,
+            )
+        )
         self.llm_enabled = self._models[LLM]["backend"] != "none"
         # The resolved LLM backend name (e.g. "llama"/"openai"/"none"). The
         # dashboard reads this to swap to the "Parloch" branding when the model
@@ -609,6 +738,9 @@ class Assistant:
         # on every reconnect (tab refresh, follow-up browser tab, etc).
         self.greeting_cache: list = []
         self.greeting_text = ""
+        # Kept outside conversation history solely for an immediate, explicit
+        # "tell me more about that" response to the startup greeting.
+        self._startup_greeting_response: str | None = None
         self._greeting_delivered = False
 
         # Serializes SLM access. Voice turns run on the transcriber or barge-in
@@ -651,12 +783,8 @@ class Assistant:
         # parallel set of bare `self._text_*` fields. `chunk_q=None` since it
         # never receives audio; `tts_sink=None` since text turns never speak.
         self.satellites["dashboard-text"] = SatelliteSession(id="dashboard-text", chunk_q=None)
-        # The most recently connected (real) satellite's id. Used as the sink
-        # target for satellite-agnostic speech (speak_proactive/reminders)
-        # that isn't a reply to any particular satellite's utterance. With
-        # more than one satellite connected this is a known limitation — a
-        # proactive announcement goes to whichever one connected last, not
-        # every one of them; revisit if that's needed before Phase 6.
+        # Retained for legacy callers that need a default single satellite.
+        # Untargeted proactive speech broadcasts to every connected satellite.
         self._last_connected_satellite_id: Optional[str] = None
         # Per-thread scratch space for whichever turn is running on *this*
         # thread — `.sink` / `.tts_active_event`, resolved fresh at the top of
@@ -916,7 +1044,9 @@ class Assistant:
                 logger.info("Experimental openWakeWord idle gate enabled: %s", wakeword_settings)
             except Exception as exc:  # A gate must never make voice control unavailable.
                 self.wakeword_metrics["status"] = f"asr fallback: {exc}"
-                logger.warning("openWakeWord unavailable; using ASR-only wakeword detection: %s", exc)
+                logger.warning(
+                    "openWakeWord unavailable; using ASR-only wakeword detection: %s", exc
+                )
         self.asr_stream_generator = asr_mod.stream_generator
         # Pay the ONNX cold-start (ORT kernel/arena init) now, not on the user's
         # first command. No-op on backends that don't implement it (e.g. GPU Qwen).
@@ -975,6 +1105,7 @@ class Assistant:
                 }
                 if llm_cfg["n_context"]:
                     load_kwargs["n_ctx"] = llm_cfg["n_context"]
+                load_kwargs["server_slots"] = self.thinking_server_slots
                 self.grammar, self.slm_model = load_slm(
                     **load_kwargs,
                     **llm_cfg["opts"],
@@ -1171,6 +1302,7 @@ class Assistant:
                     "lights, timers, and music."
                 )
             self.greeting_text = cleaned
+            self._startup_greeting_response = cleaned if self.llm_enabled else None
 
             # Splitting the greeting into individual sentences and
             # synthesising each as its own worker job populates the
@@ -1205,7 +1337,7 @@ class Assistant:
         """Daemon thread: speak upcoming Fulloch calendar events via speak_proactive.
 
         Polls every 60 seconds. Fires speak_proactive for any event on the
-        configured reminder calendar that starts within the next 90 seconds and
+        configured reminder calendar that starts within the next 15 minutes and
         hasn't already been spoken this session.
         """
         try:
@@ -1225,7 +1357,7 @@ class Assistant:
                 for k in expired:
                     del self._spoken_reminders[k]
 
-                for event in get_upcoming_events(window_seconds=90):
+                for event in get_upcoming_events(window_seconds=15 * 60):
                     # Key on summary + date only — avoids any timezone/format
                     # variation in the start string returned by HA.
                     date_part = event["start"][:10]
@@ -1389,6 +1521,13 @@ class Assistant:
         request cannot fit an otherwise empty conversation.
         """
         cleared_history = False
+        # A foreground timeout must not restart the shared server underneath a
+        # durable background request. The foreground can use its normal fallback
+        # and the thinking worker remains able to finish on its own slot.
+        thinking_jobs = getattr(self, "thinking_jobs", None)
+        kwargs.setdefault(
+            "recover_on_failure", thinking_jobs is None or thinking_jobs.active() is None
+        )
         while True:
             try:
                 return generate_slm(self.slm_model, **kwargs)
@@ -1445,6 +1584,7 @@ class Assistant:
         source: str,
         stats: Optional[TurnStats] = None,
         satellite_id: Optional[str] = None,
+        artifact: Optional[dict] = None,
     ) -> float:
         """Emit a `user`/`assistant` chat-bubble event to `/stream` subscribers.
 
@@ -1471,6 +1611,8 @@ class Assistant:
             event["tts_backend"] = getattr(self, "_tts_backend", None)
         if stats is not None:
             event["stats"] = stats.to_payload()
+        if artifact is not None:
+            event["artifact"] = artifact
         self._dispatch_event(event)
         return ts
 
@@ -1541,6 +1683,686 @@ class Assistant:
             except Exception as e:
                 logger.warning(f"Turn listener failed: {e}")
 
+    def run_thinking_task(
+        self,
+        task: str,
+        origin_satellite_id: str | None = None,
+        origin_source: str = "integration",
+    ) -> dict:
+        """Queue a bounded, non-speaking thinking task from the integration API."""
+        if self.thinking_jobs is None:
+            raise RuntimeError("thinking is not ready")
+        pending_task = (
+            self._pending_thinking_tasks.get(origin_satellite_id)
+            if origin_source == "conversation" and origin_satellite_id is not None
+            else None
+        )
+        if pending_task:
+            task = f"{pending_task}\n\nAdditional user detail: {task}"
+        job_id = self.thinking_jobs.submit(
+            task,
+            conversation=self._history_for(None),
+            notes=notes.recall_facts(),
+            origin_satellite_id=origin_satellite_id,
+            origin_source=origin_source,
+        )
+        if pending_task:
+            self._pending_thinking_tasks.pop(origin_satellite_id, None)
+        return self.thinking_jobs.status(job_id) or {"id": job_id}
+
+    def thinking_task_status(self, job_id: str) -> dict | None:
+        return self.thinking_jobs.status(job_id) if self.thinking_jobs is not None else None
+
+    def cancel_thinking_task(self, job_id: str) -> bool:
+        return self.thinking_jobs.cancel(job_id) if self.thinking_jobs is not None else False
+
+    def active_thinking_task(self) -> dict | None:
+        return self.thinking_jobs.active() if self.thinking_jobs is not None else None
+
+    def consume_completed_thinking_report(self, satellite_id: str | None) -> str | None:
+        """Deliver a voice summary first, then the complete report on request."""
+        pending = self._completed_thinking_report_entry(satellite_id)
+        if pending is None:
+            return None
+        report = self._read_completed_thinking_report(pending)
+        if report is None:
+            return "I can't retrieve that completed report right now."
+        if pending.get("summary_delivered"):
+            return "Here is the full report. " + report
+        pending["summary_delivered"] = True
+        return (
+            "Here's the short version. "
+            + self._report_summary(report)
+            + " The full report is saved in Fulloch Reports. Would you like me to read the full report?"
+        )
+
+    def _completed_thinking_report_entry(self, satellite_id: str | None) -> dict[str, object] | None:
+        if satellite_id is None:
+            return None
+        pending = self._completed_thinking_reports.get(satellite_id)
+        if pending is not None:
+            return pending
+        # Browser sessions receive a new server-generated ID after a reconnect.
+        # Carry over the sole report whose originating session is gone.
+        disconnected = [
+            sid for sid in self._completed_thinking_reports if sid not in self.satellites
+        ]
+        if len(disconnected) != 1:
+            return None
+        pending = self._completed_thinking_reports.pop(disconnected[0])
+        self._completed_thinking_reports[satellite_id] = pending
+        return pending
+
+    @staticmethod
+    def _read_completed_thinking_report(pending: dict[str, object]) -> str | None:
+        note_id = pending.get("note_id")
+        if not isinstance(note_id, str) or not re.fullmatch(
+            r"fulloch-reports/\d{4}-\d{2}-\d{2}-[0-9a-f]{8}", note_id
+        ):
+            return None
+        path = notes_root.get_notes_root() / f"{note_id}.md"
+        try:
+            path.resolve().relative_to((notes_root.get_notes_root() / "fulloch-reports").resolve())
+            return path.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _read_completed_thinking_evidence(pending: dict[str, object]) -> dict:
+        """Read the bounded artifact ledger paired with a completed report."""
+        note_id = pending.get("note_id")
+        if not isinstance(note_id, str) or not re.fullmatch(
+            r"fulloch-reports/\d{4}-\d{2}-\d{2}-[0-9a-f]{8}", note_id
+        ):
+            return {}
+        path = notes_root.get_notes_root() / f"{note_id}.evidence.json"
+        try:
+            path.resolve().relative_to((notes_root.get_notes_root() / "fulloch-reports").resolve())
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def answer_completed_thinking_report(
+        self, satellite_id: str | None, question: str, cancel_check, stats=None
+    ) -> str | None:
+        """Answer a report follow-up without exposing it to normal agent context."""
+        pending = self._completed_thinking_report_entry(satellite_id)
+        if pending is None:
+            return None
+        report = self._read_completed_thinking_report(pending)
+        if report is None:
+            return "I can't retrieve that completed report right now."
+        evidence = self._read_completed_thinking_evidence(pending)
+        answer = generate_slm(
+            self.slm_model,
+            user_prompt=question,
+            system_prompt=get_thinking_report_answer_prompt(report, evidence),
+            max_new_tokens=SUMMARY_MAX_NEW_TOKENS,
+            temperature=0.0,
+            cancel_check=cancel_check,
+            stats=stats,
+        )
+        return (answer or "The report does not answer that.").strip()
+
+    @staticmethod
+    def _report_summary(report: str) -> str:
+        match = re.search(r"(?ims)^## Summary\s*\n+(.*?)(?=^##\s|\Z)", report)
+        if match:
+            summary = " ".join(match.group(1).split())
+            if summary:
+                return summary[:450].rstrip()
+        return Assistant._spoken_report_summary(report)
+
+    @staticmethod
+    def _spoken_report_summary(report: str) -> str:
+        """Quote the report's conclusion without another model call."""
+        text = re.sub(r"(?m)^#{1,6}\s+", "", report)
+        sentences = split_sentences(text)
+        selected = []
+        total = 0
+        for sentence in reversed(sentences):
+            if len(selected) == 2 or total + len(sentence) > 450:
+                break
+            selected.append(sentence)
+            total += len(sentence) + 1
+        return " ".join(reversed(selected)) or "I completed the research report."
+
+    def _run_background_thinking_job(
+        self, job: BackgroundJob, cancelled: Callable[[], bool]
+    ) -> tuple[str, str]:
+        """Run a bounded, tool-using investigation without altering foreground history."""
+        if self.slm_model is None:
+            raise RuntimeError("local language model is not loaded")
+        capabilities = {
+            name: capability
+            for name, capability in native_capabilities().items()
+            if capability.access_class == "read"
+        }
+        playbooks = matching_playbooks(job.snapshot.task, capabilities)
+        descriptions = []
+        for name in capabilities:
+            schema = tool_registry._schemas.get(name)
+            if schema is not None:
+                descriptions.append(_describe_thinking_capability(name, schema))
+        findings = job.state
+        capability_calls: dict[str, int] = {}
+        attempted_actions: set[str] = set()
+        needs_input: str | None = None
+
+        def fallback_report() -> str:
+            if findings.strip():
+                return (
+                    "I gathered source material but couldn't complete a reliable final report. "
+                    "I have not drawn a conclusion from those incomplete results."
+                )
+            return "I couldn't retrieve enough source material to complete this report."
+
+        def run_capability(name: str, args: list) -> bool:
+            nonlocal findings, needs_input
+            stop_for_preliminary_report = False
+            capability = capabilities.get(name)
+            if capability is None:
+                findings = _append_thinking_observation(
+                    findings, "worker", f"Unavailable capability: {name}"
+                )
+                job.state = findings
+                return False
+            schema = tool_registry._schemas.get(name)
+            if schema is not None:
+                required = sum(param.required for param in schema.params)
+                if not required <= len(args) <= len(schema.params):
+                    findings = _append_thinking_observation(
+                        findings,
+                        "worker",
+                        f"Invalid arguments for {name}; expected {required}-{len(schema.params)} positional values.",
+                    )
+                    job.state = findings
+                    return False
+            if capability_calls.get(name, 0) >= MAX_THINKING_CAPABILITY_CALLS:
+                findings = _append_thinking_observation(
+                    findings,
+                    "worker",
+                    f"Capability budget reached for {name}; synthesise the evidence collected so far.",
+                )
+                job.state = findings
+                return False
+            capability_calls[name] = capability_calls.get(name, 0) + 1
+            self.thinking_jobs.update_stage(
+                job,
+                "Searching flights"
+                if name == "search_flights"
+                else "Comparing accommodation"
+                if name == "search_hotels"
+                else "Searching sources"
+                if name in {"external_information", "search_papers"}
+                else "Reviewing information",
+            )
+            logger.debug("Deep-think job %s dispatching %s with args=%r", job.id, name, args)
+            artifact_token = set_artifacts(job.artifacts)
+            try:
+                result = capability.invoke(args, {})
+            except Exception as exc:
+                result = (
+                    ThinkingResult(
+                        f"Tool {name} failed: {type(exc).__name__}: {exc}",
+                        status="failed",
+                        scope="The requested tool operation raised an exception.",
+                    )
+                    if schema is not None and schema.thinking_outcome
+                    else f"Tool {name} failed: {type(exc).__name__}: {exc}"
+                )
+            finally:
+                reset_artifacts(artifact_token)
+            if schema is not None and schema.thinking_outcome:
+                error = (
+                    "The tool did not provide its required typed evidence envelope."
+                    if not isinstance(result, ThinkingResult)
+                    else thinking_result_error(result)
+                )
+                if error:
+                    result = ThinkingResult(
+                        f"Tool {name} returned an invalid deep-think outcome: {error}",
+                        status="failed",
+                        scope="The tool result was rejected before it entered the evidence ledger.",
+                    )
+            if isinstance(result, ThinkingResult):
+                artifact_id = job.record_outcome(
+                    name,
+                    result.thinking_status,
+                    result.scope,
+                    result.evidence,
+                    result.next_actions,
+                    result.artifact,
+                )
+                if artifact_id:
+                    result = ThinkingResult(
+                        f"{result}\nArtifact reference: {artifact_id}",
+                        status=result.thinking_status,
+                        evidence=result.evidence,
+                        scope=result.scope,
+                        next_actions=result.next_actions,
+                        artifact=result.artifact,
+                    )
+                if result.thinking_status == "needs_input":
+                    if any(item.get("status") == "evidence" for item in job.evidence):
+                        stop_for_preliminary_report = True
+                        result = str(result)
+                    else:
+                        needs_input = "Reactive question: " + str(result).removeprefix(
+                            "Reactive question:"
+                        ).strip()
+                elif result.thinking_status in {"failed", "unavailable"}:
+                    result = str(result)
+            step = intents.classify_step(result)
+            if step.kind is intents.StepKind.REACTIVE:
+                # A capability rejected malformed or incomplete input before
+                # producing evidence. Let a corrected action use its budget.
+                capability_calls[name] -= 1
+            if step.artifact is not None and job.artifact is None:
+                job.artifact = step.artifact
+            if step.kind is intents.StepKind.WEB_SEARCH:
+                summary = self._summarise_search_result(step.text, cancelled)
+                if summary and summary.strip():
+                    result = summary
+                else:
+                    logger.warning("Deep-think job %s received an empty web summary", job.id)
+            logger.info(
+                "Deep-think job %s received %d characters from %s", job.id, len(result), name
+            )
+            findings = _append_thinking_observation(findings, f"tool:{name}", result)
+            if name == "evaluate_itinerary" and "not feasible" in result.lower():
+                findings = _append_thinking_observation(
+                    findings,
+                    "worker",
+                    "This rejects one evaluated itinerary only. Inspect untested retrieved combinations or take a materially different available search before making a broader feasibility conclusion.",
+                )
+            job.state = findings
+            if stop_for_preliminary_report:
+                findings = _append_thinking_observation(
+                    findings,
+                    "worker",
+                    "Further input would refine the result, but sufficient evidence exists for a preliminary scoped report now.",
+                )
+                job.state = findings
+                return False
+            return True
+
+        for _ in range(MAX_THINKING_WORKER_CALLS):
+            if cancelled():
+                return "", findings
+            self.thinking_jobs.update_stage(job, "Analysing findings")
+            prompt = get_thinking_worker_prompt(
+                job.snapshot.task,
+                list(job.snapshot.conversation),
+                notes=job.snapshot.notes,
+                job_state=findings,
+                capabilities="\n".join(descriptions),
+                capability_playbooks="\n\n".join(playbook.render() for playbook in playbooks),
+            )
+
+            def generate(worker_prompt=prompt) -> str:
+                return generate_slm(
+                    self.slm_model,
+                    user_prompt=worker_prompt,
+                    grammar=self.grammar,
+                    # One tool-selection step must yield promptly when a
+                    # foreground turn arrives; the report synthesis below is
+                    # deliberately allowed a larger budget.
+                    max_new_tokens=DEEP_THINK_STEP_MAX_TOKENS,
+                    temperature=0.4,
+                    cancel_check=cancelled,
+                    # Qwen's reasoning channel and llama.cpp's JSON grammar do
+                    # not compose: reasoning tokens can consume the completion
+                    # while leaving `content` empty. Deliberation comes from the
+                    # bounded tool/reasoning loop, so keep structured output on
+                    # the normal channel.
+                    thinking_mode=False,
+                    read_timeout=DEEP_THINK_READ_TIMEOUT_S,
+                    generation_timeout=DEEP_THINK_GENERATION_TIMEOUT_S,
+                    recover_on_failure=False,
+                )
+
+            response = (
+                generate() if self.thinking_server_slots == 2 else self._with_turn_lock(generate)
+            )
+            if cancelled():
+                return "", findings
+            response = (response or "").strip()
+            if not response:
+                logger.warning(
+                    "Deep-think job %s returned an empty worker response; synthesising collected findings",
+                    job.id,
+                )
+                findings = _append_thinking_observation(
+                    findings,
+                    "worker",
+                    "Worker stopped without a next action; synthesise only the evidence collected so far.",
+                )
+                job.state = findings
+                break
+            try:
+                emission = intents.parse_agent_emission(response)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Deep-think job %s produced an invalid worker emission; synthesising collected findings",
+                    job.id,
+                )
+                findings = _append_thinking_observation(
+                    findings,
+                    "worker",
+                    "Worker returned an invalid planning response; select the next capability or reply sufficient findings collected.",
+                )
+                job.state = findings
+                continue
+            reply = emission.get("reply")
+            if isinstance(reply, str) and reply.strip():
+                reply = reply.strip()
+                if reply.startswith("Reactive question:"):
+                    return (
+                        reply,
+                        findings,
+                    )
+                findings = _append_thinking_observation(findings, "worker", reply)
+                break
+            plan = emission.get("plan")
+            if isinstance(plan, str) and plan.strip():
+                logger.debug("Deep-think job %s plan: %s", job.id, plan.strip())
+            actions = emission.get("actions") or []
+            if not actions and isinstance(plan, str) and plan.strip():
+                fallback_name = next(
+                    (
+                        playbook.fallback_capability
+                        for playbook in playbooks
+                        if playbook.fallback_capability in capabilities
+                    ),
+                    None,
+                )
+                if fallback_name is not None:
+                    action_key = _thinking_action_key(fallback_name, [job.snapshot.task])
+                    if action_key not in attempted_actions:
+                        attempted_actions.add(action_key)
+                        findings = _append_thinking_observation(
+                            findings,
+                            "worker",
+                            f"Worker supplied a plan without an action; using {fallback_name}.",
+                        )
+                        run_capability(fallback_name, [job.snapshot.task])
+                        if needs_input:
+                            return needs_input, findings
+                        continue
+            if len(actions) != 1 or not isinstance(actions[0], dict):
+                findings = _append_thinking_observation(
+                    findings,
+                    "worker",
+                    "Worker did not select exactly one next capability; synthesise current findings.",
+                )
+                break
+            action = actions[0]
+            name = tool_registry.canonical_name(action.get("intent", ""))
+            capability = capabilities.get(name or "")
+            if capability is None:
+                findings = _append_thinking_observation(
+                    findings,
+                    "worker",
+                    "Blocked unavailable capability: " + str(action.get("intent")),
+                )
+                job.state = findings
+                break
+            args, kwargs = intents.coerce_args(action.get("args"))
+            if kwargs:
+                findings = _append_thinking_observation(
+                    findings, "worker", f"Unsupported keyword arguments for {name}"
+                )
+                job.state = findings
+                break
+            action_key = _thinking_action_key(name, args)
+            if action_key in attempted_actions:
+                findings = _append_thinking_observation(
+                    findings,
+                    "worker",
+                    f"Duplicate capability request for {name}; synthesise the evidence collected so far.",
+                )
+                job.state = findings
+                break
+            attempted_actions.add(action_key)
+            if not run_capability(name, args):
+                break
+            if needs_input:
+                return needs_input, findings
+        if not findings.strip():
+            return "I couldn't retrieve enough source material to complete this report.", findings
+
+        self.thinking_jobs.update_stage(job, "Synthesising report")
+        report_prompt = get_thinking_report_prompt(
+            job.snapshot.task,
+            findings if not job.evidence else "",
+            json.dumps(job.evidence, ensure_ascii=True, sort_keys=True),
+        )
+
+        def synthesise() -> str:
+            return generate_slm(
+                self.slm_model,
+                user_prompt="Produce the final report now.",
+                system_prompt=report_prompt,
+                max_new_tokens=8192,
+                temperature=0.4,
+                cancel_check=cancelled,
+                thinking_mode=True,
+                read_timeout=DEEP_THINK_READ_TIMEOUT_S,
+                generation_timeout=DEEP_THINK_GENERATION_TIMEOUT_S,
+                recover_on_failure=False,
+            )
+
+        report = synthesise() if self.thinking_server_slots == 2 else self._with_turn_lock(synthesise)
+        if cancelled():
+            return "", findings
+        report = (report or "").strip()
+        if report:
+            logger.info("Deep-think job %s produced a %d-character report", job.id, len(report))
+            return report, findings
+        return fallback_report(), findings
+
+    def _on_thinking_job_status(self, job: BackgroundJob) -> None:
+        """Publish job transitions for dashboard and Home Assistant SSE clients."""
+        if job.status == "NEEDS_INPUT":
+            question = job.summary.removeprefix("Reactive question:").strip()
+            if job.snapshot.origin_satellite_id:
+                self._pending_thinking_tasks[job.snapshot.origin_satellite_id] = job.snapshot.task
+            self._history.append(
+                {"role": "tool", "name": "deep_think", "content": job.summary}
+            )
+            self._trim_history()
+            self._dispatch_event(
+                {
+                    "role": "thinking",
+                    "ts": time.time(),
+                    "job_id": job.id,
+                    "status": job.status,
+                    "summary": question[:500],
+                    "error": "",
+                    "note_id": "",
+                    "task": job.snapshot.task,
+                    "stage": job.stage,
+                }
+            )
+            if job.snapshot.origin_source == "conversation" and question:
+                self._emit_turn_event(
+                    "assistant",
+                    question,
+                    "proactive",
+                    satellite_id=job.snapshot.origin_satellite_id,
+                )
+                satellite_id = job.snapshot.origin_satellite_id
+                if satellite_id and satellite_id != "dashboard-text":
+                    threading.Thread(
+                        target=self.speak_proactive,
+                        args=(question,),
+                        kwargs={
+                            "emit_event": False,
+                            "satellite_id": satellite_id,
+                            "follow_up": True,
+                        },
+                        daemon=True,
+                        name=f"thinking-input-{job.id[:8]}",
+                    ).start()
+            return
+        if job.status == "READY" and not job.note_id:
+            job.note_id = self._save_thinking_report(job)
+        if job.status == "READY":
+            if job.snapshot.origin_satellite_id:
+                self._pending_thinking_tasks.pop(job.snapshot.origin_satellite_id, None)
+            report_summary = self._report_summary(job.summary)
+            self._history.append(
+                {
+                    "role": "tool",
+                    "name": "deep_think",
+                    "content": (
+                        f"Completed deep-think report for: {job.snapshot.task}\n"
+                        f"Summary: {report_summary}\n"
+                        f"Report note: {job.note_id or 'unavailable'}"
+                    ),
+                }
+            )
+            self._trim_history()
+        self._dispatch_event(
+            {
+                "role": "thinking",
+                "ts": time.time(),
+                "job_id": job.id,
+                "status": job.status,
+                "summary": job.summary[:500],
+                "error": job.error,
+                "note_id": job.note_id,
+                "task": job.snapshot.task,
+                "stage": job.stage,
+            }
+        )
+        artifact = (
+            {
+                **job.artifact,
+                "type": "flight_plan",
+                "note_id": job.note_id,
+                "report_url": f"/reports/{job.note_id}" if job.note_id else "",
+                "prices_can_change": True,
+            }
+            if job.status == "READY" and job.artifact is not None and job.artifact.get("type") == "flight_search"
+            else {
+                **job.artifact,
+                "note_id": job.note_id,
+                "report_url": f"/reports/{job.note_id}" if job.note_id else "",
+            }
+            if job.status == "READY" and job.artifact is not None
+            else {
+                "type": "generated_report",
+                "title": job.snapshot.task[:160] or "Research report",
+                "created_at": job.created_at,
+                "summary": job.summary[:600],
+                "report_url": f"/reports/{job.note_id}",
+            }
+            if job.status == "READY" and job.note_id
+            else None
+        )
+        if job.status == "READY" and job.snapshot.origin_source == "conversation":
+            if job.snapshot.origin_satellite_id:
+                self._completed_thinking_reports[job.snapshot.origin_satellite_id] = (
+                    {
+                        "note_id": job.note_id,
+                        "task": job.snapshot.task,
+                        "summary_delivered": False,
+                    }
+                )
+            self._emit_turn_event(
+                "assistant",
+                "I've finished looking into that. Would you like a short summary?",
+                "proactive",
+                satellite_id=job.snapshot.origin_satellite_id,
+                artifact=artifact,
+            )
+            satellite_id = job.snapshot.origin_satellite_id
+            if satellite_id and satellite_id != "dashboard-text":
+                threading.Thread(
+                    target=self.speak_proactive,
+                    args=("I've finished looking into that. Would you like a short summary?",),
+                    kwargs={
+                        "emit_event": False,
+                        "satellite_id": satellite_id,
+                        "follow_up": True,
+                    },
+                    daemon=True,
+                    name=f"thinking-complete-{job.id[:8]}",
+                ).start()
+        elif artifact is not None:
+            self._emit_turn_event(
+                "assistant",
+                (
+                    "I found a recommended flight option and saved the full comparison."
+                    if artifact["type"] == "flight_plan"
+                    else "I've completed the research report and saved the full version."
+                ),
+                "proactive",
+                artifact=artifact,
+            )
+
+    def _save_thinking_report(self, job: BackgroundJob) -> str:
+        """Append a completed worker result to a durable, retrievable Markdown report."""
+        note_id = f"fulloch-reports/{local_now().strftime('%Y-%m-%d')}-{job.id[:8]}"
+        path = notes_root.get_notes_root() / f"{note_id}.md"
+        timestamp = local_now().strftime("%Y-%m-%d %H:%M")
+        findings = job.summary or "No report was produced."
+        if not re.search(r"(?im)^## Summary\s*$", findings):
+            first_sentence = split_sentences(findings)
+            answer = first_sentence[0] if first_sentence else "No reliable conclusion was produced."
+            findings = (
+                "## Summary\n\n"
+                f"{answer} Scope: this preliminary report is limited to the retrieved evidence. "
+                "Caveat: details may remain incomplete.\n\n"
+                + findings
+            )
+        report = (
+            f"# Deep Think Report\n\n"
+            f"**Completed:** {timestamp}\n\n"
+            f"**Objective:** {job.snapshot.task}\n\n"
+            f"## Findings\n\n{findings}\n"
+        )
+        evidence_path = path.with_suffix(".evidence.json")
+        evidence = {
+            "task": job.snapshot.task,
+            "evidence": job.evidence,
+            "artifacts": job.artifacts,
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(report, encoding="utf-8")
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8"
+            )
+            notes._after_write(path)
+            logger.info("Saved deep-think report %s to %s", job.id, path)
+            return note_id
+        except Exception:
+            logger.exception("Failed to persist thinking report %s", job.id)
+            return ""
+
+    def _with_turn_lock(self, action: Callable[[], str]) -> str:
+        with self._turn_lock:
+            return action()
+
+    def _background_job_admitted(self) -> bool:
+        """One-slot jobs run only when no foreground turn or speech is live."""
+        if self.thinking_server_slots == 2:
+            return True
+        if self._turn_arbiter.owner is not None:
+            return False
+        return not any(
+            s.turn_active or s.active_session is not None for s in self.satellites.values()
+        )
+
+    def _yield_background_for_foreground(self) -> None:
+        if self.thinking_jobs is not None:
+            self.thinking_jobs.pause_active()
+            self.thinking_jobs.wake()
+
     def _emit_satellite_state(self, satellite_id: str, state: str, **extra) -> None:
         """Publish an authoritative lifecycle transition for a native satellite."""
         event = {
@@ -1556,11 +2378,13 @@ class Assistant:
     def _emit_satellite_stand_down_after_tts(self, sat: SatelliteSession) -> None:
         """Close a short server-generated response after its final PCM drains."""
         if sat.protocol_turn_id is not None:
-            self._dispatch_event({
-                "type": "assistant.stand_down_after_tts",
-                "satellite_id": sat.id,
-                "turn_id": sat.protocol_turn_id,
-            })
+            self._dispatch_event(
+                {
+                    "type": "assistant.stand_down_after_tts",
+                    "satellite_id": sat.id,
+                    "turn_id": sat.protocol_turn_id,
+                }
+            )
 
     def _begin_satellite_turn(self, sat: SatelliteSession) -> None:
         """Establish a new native-satellite turn when its wakeword is accepted."""
@@ -1605,12 +2429,16 @@ class Assistant:
         self._begin_satellite_turn(sat)
         self._set_pending_satellite_wake(sat)
 
-    def _on_asr_work_dropped(self, satellite_id: str, kind: str, candidate: bool, reason: str) -> None:
+    def _on_asr_work_dropped(
+        self, satellite_id: str, kind: str, candidate: bool, reason: str
+    ) -> None:
         """Close optimistic native wake feedback when its ASR work is discarded."""
         sat = self.satellites.get(satellite_id)
         if sat is None or not candidate or not sat.protocol_wake_pending:
             return
-        logger.info("Standing down pending wake after %s ASR work was %s (%s)", kind, reason, satellite_id)
+        logger.info(
+            "Standing down pending wake after %s ASR work was %s (%s)", kind, reason, satellite_id
+        )
         self._reject_pending_satellite_wake(sat)
 
     def _begin_satellite_follow_up_turn(self, sat: SatelliteSession) -> None:
@@ -1771,7 +2599,9 @@ class Assistant:
                 raise ConversationModeUnavailable("Conversation mode is active on another device.")
             voice_sessions = [sid for sid in self.satellites if sid != "dashboard-text"]
             if len(voice_sessions) >= self.max_voice_satellites:
-                raise ConversationModeUnavailable("The maximum number of voice satellites is connected.")
+                raise ConversationModeUnavailable(
+                    "The maximum number of voice satellites is connected."
+                )
             self.satellites[satellite_id] = session
         requested_mode = (
             self.conversation_mode_default if conversation_mode is None else conversation_mode
@@ -1807,6 +2637,10 @@ class Assistant:
         satellite's queue/sink/recorder thread is untouched.
         """
         self.set_satellite_conversation_mode(satellite_id, False)
+        # A reconnect receives a new server session ID. Discard any utterances
+        # queued by the retired recorder so the shared ASR worker cannot process
+        # stale audio after its replacement is already active.
+        self.audio_capture.flush(satellite_id)
         session = self.satellites.pop(satellite_id, None)
         if session is not None:
             # Cancel the active turn before losing its session/sink. The recorder
@@ -1833,7 +2667,10 @@ class Assistant:
                     session.chunk_q.put_nowait(None)
                 except queue.Empty:
                     pass
-            if session.recorder_thread is not None and session.recorder_thread is not threading.current_thread():
+            if (
+                session.recorder_thread is not None
+                and session.recorder_thread is not threading.current_thread()
+            ):
                 session.recorder_thread.join(timeout=1.0)
         # A mid-turn disconnect must release the arbiter like a stop would —
         # otherwise a satellite that vanished mid-reply would wedge every
@@ -2249,6 +3086,7 @@ class Assistant:
             busy = random.choice(BUSY_PHRASES)
             self._emit_turn_event("assistant", busy, "text", satellite_id="dashboard-text")
             return busy
+        self._yield_background_for_foreground()
         # Per-turn cancel handle so the dashboard Stop button can abort the SLM
         # stream mid-turn (request_stop signals `active_session`).
         session = TtsSession()
@@ -2522,6 +3360,7 @@ class Assistant:
         Serialised under `_turn_lock` so local model turns and history remain ordered
         and dashboard text turns share this method with voice turns.
         """
+        self._yield_background_for_foreground()
         with self._turn_lock:
             return AgentLoop(
                 self,
@@ -2945,6 +3784,13 @@ class Assistant:
         `for sid in self.satellites: self.request_stop(sid)`.
         """
         target = satellite_id if satellite_id is not None else self._turn_arbiter.owner
+        active_job = self.active_thinking_task()
+        if (
+            active_job is not None
+            and active_job.get("origin_source") == "conversation"
+            and (target is None or active_job.get("origin_satellite_id") == target)
+        ):
+            self.cancel_thinking_task(active_job["id"])
         if target is None:
             # Proactive speech (dashboard replay, alarms) does not own an
             # agent turn, but still exposes its TtsSession on its output satellite.
@@ -3347,7 +4193,9 @@ class Assistant:
                     self.audio_capture.mark_wakeword_wav(
                         self._asr_kws_wav_path.get("path"), accepted=False
                     )
-                    logger.debug("Dropping expired wake verification result (%s)", turn_satellite_id)
+                    logger.debug(
+                        "Dropping expired wake verification result (%s)", turn_satellite_id
+                    )
                     continue
 
                 provisional = self._asr_provisional.get("flag", False)
@@ -3359,7 +4207,9 @@ class Assistant:
                     "asr_complete",
                     satellite_id=turn_satellite_id,
                     seconds=getattr(self.asr_pipe, "last_transcribe_seconds", None),
-                    audio_seconds=round(float(audio.size) / 16000, 3) if isinstance(audio, np.ndarray) else None,
+                    audio_seconds=round(float(audio.size) / 16000, 3)
+                    if isinstance(audio, np.ndarray)
+                    else None,
                     kws_candidate=kws_candidate,
                     provisional=provisional,
                     has_text=bool(text),
@@ -3789,6 +4639,7 @@ class Assistant:
         alarm: bool = False,
         emit_event: bool = True,
         satellite_id: Optional[str] = None,
+        follow_up: bool = False,
     ) -> None:
         """Speak `text` through the cloned voice without a user turn.
 
@@ -3802,6 +4653,8 @@ class Assistant:
         `alarm=True` (timer completions) plays the pre-rendered alert tone
         immediately before the spoken text. `satellite_id` targets one connected
         voice satellite; an explicit target never falls back to another device.
+        `follow_up` is only for proactive questions that expect an immediate
+        spoken response, such as a completed deep-think report prompt.
         """
         if not self.models_ready.wait(timeout=30):
             logger.warning("speak_proactive: models not ready")
@@ -3814,7 +4667,9 @@ class Assistant:
             time.sleep(0.05)
         with self._turn_lock:
             if satellite_id is None:
-                proactive_sat = self.satellites.get(self._last_connected_satellite_id)
+                proactive_sats = [
+                    sat for sat in self.satellites.values() if sat.tts_sink is not None
+                ]
             else:
                 proactive_sat = self.satellites.get(satellite_id)
                 if proactive_sat is None or proactive_sat.tts_sink is None:
@@ -3822,43 +4677,67 @@ class Assistant:
                         "speak_proactive: target satellite %s is no longer connected", satellite_id
                     )
                     return
+                proactive_sats = [proactive_sat]
             for s in self.satellites.values():
                 s.transcribing = False
-            # Proactive speech isn't a reply to any particular satellite's
-            # utterance, so there's no originating sid to resolve against —
-            # falls back to whichever satellite connected most recently (see
-            # `_last_connected_satellite_id`'s docstring for the known
-            # multi-satellite limitation this implies).
-            self._turn_local.sink = _safe_sink(proactive_sat.tts_sink) if proactive_sat is not None else None
-            self._turn_local.tts_active_event = (
-                proactive_sat.tts_active if proactive_sat is not None else None
-            )
+            if len(proactive_sats) == 1:
+                self._turn_local.sink = _safe_sink(proactive_sats[0].tts_sink)
+                self._turn_local.tts_active_event = proactive_sats[0].tts_active
+            elif proactive_sats:
+                self._turn_local.sink = _BroadcastSink(
+                    [_safe_sink(sat.tts_sink) for sat in proactive_sats]
+                )
+                self._turn_local.tts_active_event = _BroadcastEvent(
+                    [sat.tts_active for sat in proactive_sats]
+                )
+            else:
+                self._turn_local.sink = None
+                self._turn_local.tts_active_event = None
             session = TtsSession()
-            if proactive_sat is not None:
-                proactive_sat.active_session = session
+            playback_end = None
+            for sat in proactive_sats:
+                sat.active_session = session
+            proactive_lifecycle_started = False
             try:
                 cleaned = clean_for_tts(text)
                 if not cleaned:
                     return
-                alarm_seconds = self._play_alarm_tone(session) if alarm else 0.0
+                if proactive_sats:
+                    # Proactive speech is not a conversational reply: establish
+                    # a short lifecycle turn which explicitly returns to idle
+                    # after its final PCM frame instead of opening follow-up.
+                    for sat in proactive_sats:
+                        sat.protocol_state_generation += 1
+                        if sat.protocol_follow_up_timer is not None:
+                            sat.protocol_follow_up_timer.cancel()
+                            sat.protocol_follow_up_timer = None
+                        self.audio_capture.clear_follow_up(sat)
+                        sat.protocol_turn_id = uuid.uuid4().hex
+                        self._emit_satellite_state(sat.id, "thinking", turn_id=sat.protocol_turn_id)
+                    proactive_lifecycle_started = True
+                if alarm:
+                    self._play_alarm_tone(session)
                 if emit_event:
                     self._emit_turn_event(
                         "assistant",
                         cleaned,
                         "proactive",
-                        satellite_id=proactive_sat.id if proactive_sat is not None else None,
+                        satellite_id=satellite_id,
                     )
                 playback_end = self.speak_stream(cleaned, self.voice_clone_prompt, session=session)
-                playback_end += alarm_seconds
             finally:
-                if proactive_sat is not None:
-                    proactive_sat.active_session = None
+                for sat in proactive_sats:
+                    sat.active_session = None
+                    if proactive_lifecycle_started:
+                        if follow_up:
+                            self._mark_turn_end(sat.id, playback_end)
+                        else:
+                            self._emit_satellite_stand_down_after_tts(sat)
+                            sat.protocol_turn_id = None
                 for s in self.satellites.values():
                     s.transcribing = True
                 self._turn_local.sink = None
                 self._turn_local.tts_active_event = None
-            if proactive_sat is not None:
-                self._mark_turn_end(proactive_sat.id, playback_end)
 
     def run(self):
         """Start the transcriber thread and block until Ctrl+C.

@@ -52,6 +52,16 @@
     <span id="busy-banner-text">Busy — talking to another room</span>
   </div>
 
+  <section id="thinking-job-card" class="thinking-job-card" aria-live="polite" hidden>
+    <div class="thinking-orbit" aria-hidden="true"><i></i><i></i><i></i></div>
+    <div class="thinking-job-copy">
+      <span class="thinking-job-kicker">DEEP THINK</span>
+      <strong id="thinking-job-task"></strong>
+      <span id="thinking-job-stage"></span>
+    </div>
+    <button id="thinking-job-cancel" type="button" title="Cancel deep-think task">Cancel</button>
+  </section>
+
   <nav class="tabs" role="tablist">
     <button class="tab active" data-tab="chat" role="tab" aria-selected="true">Chat</button>
     <button class="tab" data-tab="facts" role="tab" aria-selected="false">Facts</button>
@@ -89,6 +99,11 @@
     </section>
 
     <section id="obsidian" class="view" hidden>
+      <aside id="obsidian-plugin-info" class="obs-plugin-info" aria-label="About the Obsidian plugin">
+        <span>The folder link handles notes. The optional plugin adds live active-note and selection context, editor actions, and note opening. In Docker, automatic note opening needs matching host and container paths.</span>
+        <button id="obsidian-plugin-info-dismiss" type="button" aria-label="Dismiss plugin information" title="Dismiss">×</button>
+      </aside>
+      <div id="obs-path-warning" class="obs-path-warning" role="alert" hidden></div>
       <div class="obs-panel">
         <div class="obs-status-row">
           <span class="obs-pill" id="obs-pill">—</span>

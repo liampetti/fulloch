@@ -100,8 +100,8 @@ general:
 #   # custom wakeword model you have downloaded.
 #   wakeword:
 #     backend: openwakeword
-#     model: "data/models/wakeword/hey_atticus_v0.3.onnx"
-#     threshold: 0.7            # Increase threshold to reduce false activations
+#     model: "data/models/wakeword/hey_atticus_v0.5.onnx"
+#     threshold: 0.6            # Increase threshold to reduce false activations
 #     smoothing_frames: 1       # Add frames to reduce false activations
 #     cooldown_ms: 1500         # How long to wait between successive wakeword activations
 #
@@ -112,6 +112,32 @@ general:
 #     model: ""                 # Optional; blank uses a single-model server's default.
 #     connect_timeout: 0.4
 #     read_timeout: 60
+
+# === Deliberate Thinking ====================================================
+# Always available for substantial research, planning, and comparisons. Slot
+# capacity and the local model KV cache are allocated when llama-server starts,
+# so this setting requires a restart. One slot runs
+# queued work whenever Fulloch is otherwise idle; two slots allow it to run
+# alongside foreground conversation.
+thinking:
+  server_slots: 1                 # 1 = idle jobs; 2 = foreground + background
+
+# === MCP Servers ============================================================
+# Each server must explicitly allowlist tools the thinking worker may use.
+# `credential_key` names a secret in data/credentials.json, never a YAML value.
+# mcp:
+#   servers:
+#     paper_search:
+#       transport: streamable_http
+#       url: "https://example.invalid/mcp"
+#       tools: [search]
+#       credential_key: paper_search_api_key
+
+# Research automatically prefers Semantic Scholar, then falls back to arXiv
+# and OpenAlex. semantic_scholar_api_key and wolfram_app_id are optional
+# credentials; Wolfram is exposed only when its key is present.
+# Travel planning is always available when serpapi_api_key is present. It uses
+# fixed, bounded Google Flights/Hotels searches in AUD and never books.
 
 # === Multi-satellite (/ws/satellite-v2) =====================================
 # Tokens accepted from non-browser /ws/satellite-v2 clients (any one in the
@@ -163,3 +189,4 @@ general:
 # === Search (SearXNG) ======================================================
 search:
   searxng_url: "http://localhost:8080/search"
+  # News briefings use general.timezone to include global, regional, and local sources.

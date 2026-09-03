@@ -26,8 +26,10 @@ word2number>=1.1
 simpleeval>=1.0
 pint>=0.24
 python-dateutil>=2.9
+Babel==2.17.0                 # CLDR territory, currency, and timezone metadata (utils/locale.py)
 ruamel.yaml>=0.18           # config_store round-trip (test_config_store, /setup/schema)
 openai>=1.40                # remote LLM client (test_llm_openai; importorskip'd if absent)
 huggingface_hub==0.36.2      # download manager (server/downloader.py, unstubbed in tests)
 cryptography==46.0.3          # self-signed dashboard HTTPS cert (core/tls_certs.py)
 spotipy==2.25.1                # direct Spotify Web API (tools/spotify.py, test_spotify.py)
+airportsdata==20260803         # IATA airport timezone metadata (tools/travel.py, test_travel.py)

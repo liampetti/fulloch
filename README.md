@@ -14,17 +14,15 @@ Fulloch is your privacy-focused local voice assistant running on your own PC or 
 
 ## Features
 
-- **Obsidian notes** - read, write, append, and search your vault by voice; capture a conversation as a note without leaving what you're doing
-- **Semantic search** - *"what did I write about the car service?"* finds the right note by meaning, not just keywords
-- **Web search** - ask a question, get a spoken summary pulled live from a self-hosted search engine, optionally saved to your vault
-- **Conversational** - holds context across a turn; follow-ups like *"and tomorrow?"* just work
-- **Memory** - facts persist across restarts and build up over time
-- **Smart-home control** - control any of your smart home devices using Home Assistant, integrate Fulloch into Home Assistant to trigger voice notifications and track your conversational history
-- **Music search & play** - *"play the Beatles"*, *"play jazz in the kitchen"*, *"play music everywhere"* - smart search on Spotify directly and hand playback off to Home Assistant
-- **Calendar reminders** - creates events on a dedicated HA calendar and speaks them at the right time
-- **Barge-in** - interrupt mid-sentence with the wakeword
-- **Voice options** - the GPU stack clones from reference audio; CPU defaults to Pocket TTS one-shot cloning, with minimal built-in Kokoro voices available as an alternative
-- **Quiet delivery** - ask it to whisper or speak quietly; every TTS backend lowers output volume to 30% by default
+- **Private, local by default** - speech, language processing, notes, facts, and conversation history stay on your machine; web search, Spotify, and remote language models are explicit opt-ins
+- **Natural voice conversations** - use the browser dashboard or connected satellites; Fulloch keeps conversational context, supports follow-up turns, and lets you barge in with the wakeword
+- **Your voice, your way** - GPU and CPU stacks support voice cloning; ask it to whisper or speak quietly for per-turn reduced-volume delivery
+- **Obsidian notes and memory** - read, write, append, and semantically search your vault by voice; remembered facts persist across restarts
+- **Smart-home control** - control Home Assistant lights, locks, covers, climate, media, calendars, todos, weather, and more in natural language
+- **Music and reminders** - find music with Spotify and play it through Home Assistant; create calendar reminders that Fulloch announces at the right time
+- **Live answers** - get concise, source-aware summaries from self-hosted SearXNG web search, with the option to save results to your vault
+- **Deliberate research and planning** - queue deeper background investigations for comparisons, academic literature, and multi-stop travel plans; research prefers Semantic Scholar and falls back to arXiv and OpenAlex, while travel searches use an optional SerpApi key
+- **Home Assistant automation** - use the HACS integration for status, mic control, proactive speech, chat, and scheduled deliberate-thinking tasks
 
 > **Higgs TTS 3:** The optional Higgs GPU backend is available only under Boson AI's Research and Non-Commercial License, not Fulloch's MIT license. It requires explicit consent for every voice reference. See [Model Sources and Licenses](MODELS.md#higgs-tts-3-license).
 
@@ -94,7 +92,7 @@ Just add your vault's directory as a volume when launching Docker container `-v 
 
 The Obsidian wizard's "Auto-detect" scans the container filesystem for a vault, so it'll find `/vault` (or wherever you mounted it) without further config.
 
-The included Obsidian plugin adds live assistance for the active document. Install it from the dashboard's Obsidian tab; see the [Obsidian setup details](TECHNICAL_DETAILS.md#obsidian-integration).
+The plugin is optional: the folder link alone supports reading, writing, appending, and searching notes. Install the separate plugin for live active-note and selection context, editor actions, and automatic note navigation; Docker installations with different host and container paths cannot yet navigate back to a written note automatically. See the [Obsidian setup details](TECHNICAL_DETAILS.md#obsidian-integration).
 
 ## Home Assistant Integration
 
@@ -109,6 +107,7 @@ A HACS-installable integration for status sensors, mic control, proactive speech
 | `sensor.fulloch_status` | `idle` / `thinking` / `speaking` |
 | `sensor.fulloch_last_utterance` | Last thing the user said |
 | `sensor.fulloch_last_response` | Last thing Fulloch said (`full_text` attribute has the full string) |
+| `sensor.fulloch_thinking_task` | Active deliberate-thinking task and status |
 | `switch.fulloch_mic` | Mute / unmute the microphone |
 | `text.fulloch_speak` | Submit text → Fulloch speaks it |
 | `text.fulloch_chat` | Submit a query → full agent loop |
@@ -118,6 +117,9 @@ A HACS-installable integration for status sensors, mic control, proactive speech
 | `fulloch.speak` | `text` | Speak a message |
 | `fulloch.chat` | `text` | Run a full agent query and speak the result |
 | `fulloch.mic` | `enabled` | Turn the mic on or off |
+| `fulloch.run_thinking_task` | `task` | Queue a deeper background investigation |
+| `fulloch.cancel_thinking_task` | `job_id` | Cancel a queued or active investigation |
+| `fulloch.get_thinking_task_status` | `job_id` | Retrieve an investigation's current status |
 
 | Event | When |
 | -- | -- |

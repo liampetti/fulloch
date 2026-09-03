@@ -1,7 +1,6 @@
 """Tools package.
 
-Loads each tool module conditionally based on the keys present in
-data/config.yml — commenting out an integration's config block disables it.
+Loads integrations conditionally from config, plus built-in local capabilities.
 """
 
 import importlib
@@ -20,7 +19,7 @@ _OPTIONAL_TOOLS = {
 }
 
 # Tools that are always loaded — no config dependency.
-_ALWAYS_LOAD = ["time_tools", "thinking", "notes", "calculator", "satellite_messages"]
+_ALWAYS_LOAD = ["time_tools", "thinking", "notes", "calculator", "satellite_messages", "research", "travel"]
 
 
 def _load(module_name: str) -> None:

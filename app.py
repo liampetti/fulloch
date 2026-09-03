@@ -396,7 +396,14 @@ def main():
     if not wakeword:
         logger.error("No wakeword configured; cannot start. Re-run setup.")
         return
-    assistant = Assistant(wakeword=wakeword, models=models, lifecycle=lifecycle, **options)
+    thinking = _read_config().get("thinking") or {}
+    assistant = Assistant(
+        wakeword=wakeword,
+        models=models,
+        thinking=thinking,
+        lifecycle=lifecycle,
+        **options,
+    )
     context.set_assistant(assistant)
     assistant.run()
 

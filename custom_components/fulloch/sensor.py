@@ -19,6 +19,7 @@ async def async_setup_entry(
             FullochStatusSensor(coordinator, entry),
             FullochLastUtteranceSensor(coordinator, entry),
             FullochLastResponseSensor(coordinator, entry),
+            FullochThinkingTaskSensor(coordinator, entry),
         ]
     )
 
@@ -90,3 +91,21 @@ class FullochLastResponseSensor(_FullochSensorBase):
     @property
     def extra_state_attributes(self) -> dict:
         return {"full_text": (self.coordinator.data or {}).get("last_response", "")}
+
+
+class FullochThinkingTaskSensor(_FullochSensorBase):
+    _attr_name = "Fulloch Thinking Task"
+    _attr_icon = "mdi:thought-bubble"
+
+    @property
+    def unique_id(self) -> str:
+        return f"{self._entry.entry_id}_thinking_task"
+
+    @property
+    def native_value(self) -> str:
+        job = (self.coordinator.data or {}).get("thinking_job") or {}
+        return job.get("status", "idle")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return (self.coordinator.data or {}).get("thinking_job") or {}

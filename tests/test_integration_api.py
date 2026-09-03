@@ -11,6 +11,7 @@ from server.lifecycle import READY, AppContext, Lifecycle
 def _context() -> AppContext:
     assistant = MagicMock()
     assistant.get_state.return_value = "idle"
+    assistant.active_thinking_task.return_value = None
     assistant.audio_capture.mic_globally_enabled = True
     return AppContext(lifecycle=Lifecycle(phase=READY), assistant=assistant)
 
@@ -23,7 +24,16 @@ def _client(monkeypatch):
 def test_integration_api_exposes_only_hacs_routes(monkeypatch):
     client = _client(monkeypatch)
     paths = {route.path for route in client.app.routes}
-    assert paths == {"/status", "/speak", "/chat", "/mic", "/stream"}
+    assert paths == {
+        "/status",
+        "/speak",
+        "/chat",
+        "/mic",
+        "/thinking/run",
+        "/thinking/{job_id}",
+        "/thinking/{job_id}/cancel",
+        "/stream",
+    }
     assert client.get("/static/index.js").status_code == 401
 
 

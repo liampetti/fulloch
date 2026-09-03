@@ -77,11 +77,11 @@ def test_custom_llm_uses_its_filename_in_loading_status():
     assert a.Assistant._loading_display_name(cfg) == "Custom local model (Qwen3.6-35B-A3B-UD-IQ4_NL.gguf)"
 
 
-def test_both_slm_calls_guard_context_exhaustion():
+def test_foreground_agent_call_guards_context_exhaustion():
     a = _import_assistant_module()
     src = inspect.getsource(a.AgentLoop._run)
-    # Agent call + thinking call must each be wrapped.
-    assert src.count("except ContextExhaustedError") == 2
+    # Deliberate work is now a background worker, not a second foreground call.
+    assert src.count("except ContextExhaustedError") == 1
     assert "_context_exhausted_reply()" in src
 
 

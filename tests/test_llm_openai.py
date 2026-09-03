@@ -103,6 +103,18 @@ def test_local_generation_deadline_restarts_the_server():
     assert restarted and "deadline" in restarted[0]
 
 
+def test_generation_deadline_can_preserve_a_shared_local_server():
+    c, _ = _make_client(lambda k: iter([_chunk("too late")]))
+    c._generation_timeout = 0
+    restarted = []
+    c._fulloch_restart_local_server = restarted.append
+
+    with pytest.raises(RemoteUnreachable, match="generation exceeded"):
+        c.generate(user_prompt="hi", recover_on_failure=False)
+
+    assert restarted == []
+
+
 def test_local_stream_failure_restarts_the_server():
     def broken_stream(_):
         def stream():

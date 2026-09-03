@@ -21,6 +21,23 @@ def test_mtp_server_command_enables_native_speculation(monkeypatch):
     assert command[command.index("--host") + 1] == "127.0.0.1"
     assert command[command.index("--no-mmproj")] == "--no-mmproj"
     assert command[command.index("--parallel") + 1] == "1"
+    assert command[command.index("--ctx-size") + 1] == "12288"
+
+
+def test_two_slot_server_command_doubles_total_context(monkeypatch):
+    monkeypatch.setattr(slm, "_local_server_binary", lambda: "/opt/llama-cpp/llama-server")
+
+    command = slm._local_server_command("model.gguf", 12288, 4, 512, server_slots=2)
+
+    assert command[command.index("--parallel") + 1] == "2"
+    assert command[command.index("--ctx-size") + 1] == "24576"
+
+
+def test_server_command_rejects_unknown_slot_count(monkeypatch):
+    monkeypatch.setattr(slm, "_local_server_binary", lambda: "/opt/llama-cpp/llama-server")
+
+    with pytest.raises(ValueError, match="server_slots"):
+        slm._local_server_command("model.gguf", 12288, 4, 512, server_slots=3)
 
 
 def test_mtp_server_command_can_disable_flash_attention(monkeypatch):

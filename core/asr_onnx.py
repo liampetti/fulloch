@@ -13,6 +13,7 @@ from .asr import (
     AsrInput,
     stream_generator,  # noqa: F401  (generic queue drainer, re-exported)
 )
+from .inference_safety import InferenceWatchdog
 
 # Keep `from .asr import stream_generator` source-visible for the CPU import guard.
 
@@ -328,12 +329,13 @@ class QwenOnnxASRPipelineWrapper:
         else:  # torch tensor / list
             arr = buf.cpu().numpy() if hasattr(buf, "cpu") else np.asarray(buf)
         t0 = time.monotonic()
-        text = self.pipeline.transcribe(
-            arr,
-            context=context,
-            language=self.language,
-            max_new_tokens=max_new_tokens,
-        )
+        with InferenceWatchdog("Qwen3 ASR ONNX transcription"):
+            text = self.pipeline.transcribe(
+                arr,
+                context=context,
+                language=self.language,
+                max_new_tokens=max_new_tokens,
+            )
         self.last_transcribe_seconds = time.monotonic() - t0
         return text
 

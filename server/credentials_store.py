@@ -47,6 +47,9 @@ _ENV_MAP: dict[str, str] = {
     "spotify_client_secret": "SPOTIFY_CLIENT_SECRET",
     "spotify_refresh_token": "SPOTIFY_REFRESH_TOKEN",
     "hf_token": "HF_TOKEN",
+    "semantic_scholar_api_key": "SEMANTIC_SCHOLAR_API_KEY",
+    "wolfram_app_id": "WOLFRAM_APP_ID",
+    "serpapi_api_key": "SERPAPI_API_KEY",
 }
 
 

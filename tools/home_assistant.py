@@ -11,6 +11,7 @@ import difflib
 import functools
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -26,9 +27,45 @@ from core.satellite_context import current_satellite_id, get_current_assistant
 from core.url_utils import normalize_url
 
 from ._config import config
+from .thinking_playbooks import thinking_playbook
+from .tool_registry import ArtifactText
 from .tool_registry import tool as _register_tool
 
 logger = logging.getLogger(__name__)
+
+thinking_playbook(
+    name="home context",
+    triggers=(r"\b(home|house|light|lights|thermostat|weather|calendar|todo|energy|security|device|sensor)\b",),
+    capabilities=(
+        "get_entity_state",
+        "get_home_overview",
+        "get_energy_overview",
+        "get_security_overview",
+        "get_weather_forecast",
+        "find_calendar_event",
+        "whats_on",
+        "get_todo_items",
+        "get_entity_history",
+        "list_entities_in_area",
+    ),
+    solve_path=(
+        "Retrieve the relevant Home Assistant state or records before describing the home.",
+        "Use a narrower follow-up lookup only when the first result leaves a material ambiguity.",
+        "Report observed state separately from recommendations or inference.",
+    ),
+    completion_rule="Home-status claims are supported by a retrieved Home Assistant observation.",
+)
+
+thinking_playbook(
+    name="conversation history",
+    triggers=(r"\b(previous|earlier|conversation|chat history|what did (?:i|we) say)\b",),
+    capabilities=("get_conversation_history",),
+    solve_path=(
+        "Retrieve the relevant conversation history before recalling prior wording or decisions.",
+        "Quote or summarize only the retrieved entries relevant to the request.",
+    ),
+    completion_rule="Claims about prior conversation are supported by retrieved history.",
+)
 
 
 def tool(*dargs, **dkwargs):
@@ -1336,6 +1373,281 @@ def _format_entity_state(entity_id: str, state: dict) -> str:
     return ", ".join(details)
 
 
+def _entity_status_artifact(entity_id: str, state: dict) -> dict:
+    """Build the compact, dashboard-only companion to a state observation."""
+    attrs = state.get("attributes", {})
+    details = []
+    brightness = attrs.get("brightness")
+    if isinstance(brightness, (int, float)):
+        details.append({"label": "Brightness", "value": f"{round(brightness / 255 * 100)}%"})
+    rgb = attrs.get("rgb_color")
+    if (
+        isinstance(rgb, (list, tuple))
+        and len(rgb) == 3
+        and all(isinstance(value, (int, float)) and 0 <= value <= 255 for value in rgb)
+    ):
+        details.append({"label": "Colour", "value": "#%02x%02x%02x" % tuple(round(value) for value in rgb)})
+    for attribute, label, suffix in (
+        ("temperature", "Target", "°"),
+        ("current_temperature", "Current", "°"),
+        ("humidity", "Humidity", "%"),
+        ("current_position", "Open", "%"),
+        ("current_valve_position", "Open", "%"),
+        ("battery_level", "Battery", "%"),
+        ("hvac_action", "Activity", ""),
+    ):
+        value = attrs.get(attribute)
+        if value is not None:
+            details.append({"label": label, "value": f"{value}{suffix}"})
+    return {
+        "type": "entity_status",
+        "title": str(attrs.get("friendly_name") or entity_id),
+        "domain": _domain_of(entity_id),
+        "state": str(state.get("state", "unknown")),
+        "details": details[:8],
+    }
+
+
+def _media_artifact(entity_id: str, state: dict) -> dict:
+    """Build media-player data for the dashboard without exposing HA URLs."""
+    attrs = state.get("attributes", {})
+    volume = attrs.get("volume_level")
+    try:
+        volume = round(float(volume) * 100)
+    except (TypeError, ValueError):
+        volume = None
+    return {
+        "type": "media",
+        "title": str(attrs.get("media_title") or attrs.get("friendly_name") or entity_id),
+        "artist": str(attrs.get("media_artist") or attrs.get("app_name") or ""),
+        "player": str(attrs.get("friendly_name") or entity_id),
+        "state": str(state.get("state", "unknown")),
+        "volume": max(0, min(100, volume)) if volume is not None else None,
+        "artwork_url": f"/media-artwork/{entity_id}",
+    }
+
+
+def _overview_group(label: str, kind: str, entities: list[str]) -> dict | None:
+    if not entities:
+        return None
+    return {"label": label, "kind": kind, "count": len(entities), "entities": entities[:8]}
+
+
+@tool(
+    name="get_home_overview",
+    description=(
+        "Get a live overview of the home: lights on, open doors/windows/covers, "
+        "unlocked locks, and active devices."
+    ),
+    aliases=["home_overview", "home_status", "house_status", "overview"],
+)
+def get_home_overview() -> str:
+    """Summarise voice-enabled live Home Assistant states by safety-relevant group."""
+    if not HA_TOKEN:
+        return "Home Assistant isn't set up."
+    try:
+        response = requests.get(f"{HA_URL}/api/states", headers=_get_headers(), timeout=TIMEOUT)
+        response.raise_for_status()
+        states = response.json()
+    except Exception as exc:
+        logger.warning("HA home overview failed: %s", exc)
+        return "I couldn't reach Home Assistant."
+    if not isinstance(states, list):
+        return "I couldn't read Home Assistant's current states."
+
+    groups = {"lights": [], "openings": [], "locks": [], "active": []}
+    inactive = {"off", "idle", "standby", "unavailable", "unknown"}
+    for item in states:
+        entity_id = item.get("entity_id") or ""
+        if entity_id in _DENIED_ENTITIES:
+            continue
+        domain = _domain_of(entity_id)
+        state = str(item.get("state") or "").lower()
+        attrs = item.get("attributes") or {}
+        name = str(attrs.get("friendly_name") or _friendly_for(entity_id))
+        if domain == "light" and state == "on":
+            groups["lights"].append(name)
+        elif domain == "lock" and state == "unlocked":
+            groups["locks"].append(name)
+        elif domain == "cover" and state in {"open", "opening"}:
+            groups["openings"].append(name)
+        elif (
+            domain == "binary_sensor"
+            and attrs.get("device_class") in {"door", "window", "opening"}
+            and state == "on"
+        ):
+            groups["openings"].append(name)
+        elif domain in {"switch", "fan", "vacuum", "media_player"} and state not in inactive:
+            groups["active"].append(name)
+
+    artifact_groups = [
+        group
+        for group in (
+            _overview_group("Lights on", "lights", groups["lights"]),
+            _overview_group("Open", "openings", groups["openings"]),
+            _overview_group("Unlocked", "locks", groups["locks"]),
+            _overview_group("Active", "active", groups["active"]),
+        )
+        if group is not None
+    ]
+    if not artifact_groups:
+        return ArtifactText("Everything looks settled at home.", {"type": "home_overview", "groups": []})
+    spoken = ", ".join(f"{group['count']} {group['label'].lower()}" for group in artifact_groups)
+    return ArtifactText(f"Home overview: {spoken}.", {"type": "home_overview", "groups": artifact_groups})
+
+
+def _energy_sensor_kind(entity_id: str, attrs: dict) -> str | None:
+    """Classify common HA power/energy sensors without relying on one vendor."""
+    device_class = str(attrs.get("device_class") or "").lower()
+    name = f"{entity_id} {attrs.get('friendly_name', '')}".lower()
+    if device_class == "battery" and any(token in name for token in ("solar", "battery", "powerwall", "storage")):
+        return "battery"
+    if device_class not in {"power", "energy"}:
+        return None
+    if any(token in name for token in ("solar", "pv", "photovoltaic", "production", "generation")):
+        return "solar"
+    return "consumption"
+
+
+def _energy_history(entity_id: str) -> list[dict]:
+    """Fetch a small 24-hour numeric series for the primary consumption sensor."""
+    end = _local_tz.now()
+    start = end - _dt.timedelta(days=1)
+    try:
+        response = requests.get(
+            f"{HA_URL}/api/history/period/{start.isoformat()}",
+            headers=_get_headers(),
+            params={"end_time": end.isoformat(), "filter_entity_id": entity_id, "minimal_response": "true", "no_attributes": "true"},
+            timeout=TIMEOUT,
+        )
+        response.raise_for_status()
+        records = (response.json() or [[]])[0]
+    except Exception as exc:
+        logger.warning("HA energy history failed for %s: %s", entity_id, exc)
+        return []
+    points = []
+    for record in records:
+        try:
+            value = float(record.get("state"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        timestamp = record.get("last_changed") or record.get("last_updated")
+        if isinstance(timestamp, str) and timestamp:
+            points.append({"time": timestamp, "value": round(value, 2)})
+    if len(points) > 36:
+        stride = (len(points) - 1) / 35
+        points = [points[round(index * stride)] for index in range(36)]
+    return points
+
+
+@tool(
+    name="get_energy_overview",
+    description="Get current Home Assistant energy readings for consumption, solar production, and home battery, with recent consumption history when available.",
+    aliases=["energy", "energy_overview", "solar_status", "power_usage"],
+)
+def get_energy_overview() -> str:
+    """Read standard HA energy sensors and return only readings that exist."""
+    if not HA_TOKEN:
+        return "Home Assistant isn't set up."
+    try:
+        response = requests.get(f"{HA_URL}/api/states", headers=_get_headers(), timeout=TIMEOUT)
+        response.raise_for_status()
+        states = response.json()
+    except Exception as exc:
+        logger.warning("HA energy overview failed: %s", exc)
+        return "I couldn't reach Home Assistant."
+    metrics = {}
+    for item in states if isinstance(states, list) else []:
+        entity_id = item.get("entity_id") or ""
+        attrs = item.get("attributes") or {}
+        kind = _energy_sensor_kind(entity_id, attrs)
+        if kind is None or kind in metrics:
+            continue
+        try:
+            value = float(item.get("state"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        metrics[kind] = {
+            "kind": kind,
+            "label": str(attrs.get("friendly_name") or _friendly_for(entity_id)),
+            "value": round(value, 2),
+            "unit": str(attrs.get("unit_of_measurement") or ""),
+            "entity_id": entity_id,
+        }
+    if not metrics:
+        return "I couldn't find any Home Assistant energy sensors."
+    consumption = metrics.get("consumption")
+    history = _energy_history(consumption["entity_id"]) if consumption else []
+    artifact_metrics = [{key: value for key, value in metric.items() if key != "entity_id"} for metric in metrics.values()]
+    bits = [f"{metric['label']} is {metric['value']:g} {metric['unit']}".strip() for metric in metrics.values()]
+    return ArtifactText(
+        "Energy overview: " + ", ".join(bits) + ".",
+        {"type": "energy", "metrics": artifact_metrics, "history": history, "history_unit": consumption["unit"] if consumption else ""},
+    )
+
+
+@tool(
+    name="get_security_overview",
+    description="Get a constrained Home Assistant security summary of unlocked locks, open doors/windows, and camera availability. Read-only: never exposes camera feeds.",
+    aliases=["security", "security_overview", "home_security"],
+)
+def get_security_overview() -> str:
+    """Read safety-relevant state only, keeping camera details deliberately minimal."""
+    if not HA_TOKEN:
+        return "Home Assistant isn't set up."
+    try:
+        response = requests.get(f"{HA_URL}/api/states", headers=_get_headers(), timeout=TIMEOUT)
+        response.raise_for_status()
+        states = response.json()
+    except Exception as exc:
+        logger.warning("HA security overview failed: %s", exc)
+        return "I couldn't reach Home Assistant."
+    findings = {"openings": [], "locks": [], "cameras": [], "camera_issues": []}
+    for item in states if isinstance(states, list) else []:
+        entity_id = item.get("entity_id") or ""
+        if entity_id in _DENIED_ENTITIES:
+            continue
+        attrs = item.get("attributes") or {}
+        domain = _domain_of(entity_id)
+        state = str(item.get("state") or "").lower()
+        name = str(attrs.get("friendly_name") or _friendly_for(entity_id))
+        if domain == "lock" and state == "unlocked":
+            findings["locks"].append(name)
+        elif domain == "cover" and attrs.get("device_class") in {"door", "garage"} and state in {"open", "opening"}:
+            findings["openings"].append(name)
+        elif domain == "binary_sensor" and attrs.get("device_class") in {"door", "window", "opening"} and state == "on":
+            findings["openings"].append(name)
+        elif domain == "camera":
+            (findings["camera_issues"] if state in {"unavailable", "unknown"} else findings["cameras"]).append(name)
+    groups = [
+        group
+        for group in (
+            _overview_group("Open entries", "openings", findings["openings"]),
+            _overview_group("Unlocked", "locks", findings["locks"]),
+            _overview_group("Cameras online", "cameras", findings["cameras"]),
+            _overview_group("Cameras unavailable", "camera_issues", findings["camera_issues"]),
+        )
+        if group is not None
+    ]
+    attention = bool(findings["openings"] or findings["locks"] or findings["camera_issues"])
+    artifact = {"type": "security", "status": "attention" if attention else "secure", "groups": groups}
+    if not attention:
+        camera_text = f" {len(findings['cameras'])} cameras online." if findings["cameras"] else ""
+        return ArtifactText("Security check: no open entries or unlocked locks." + camera_text, artifact)
+    bits = []
+    if findings["openings"]:
+        bits.append(f"{len(findings['openings'])} open entries")
+    if findings["locks"]:
+        bits.append(f"{len(findings['locks'])} unlocked locks")
+    if findings["camera_issues"]:
+        bits.append(f"{len(findings['camera_issues'])} cameras unavailable")
+    return ArtifactText("Security attention: " + ", ".join(bits) + ".", artifact)
+
+
 @tool(
     name="get_entity_state",
     description="Get the current state of a Home Assistant entity (on/off, sensor reading, etc.)",
@@ -1360,7 +1672,12 @@ def get_entity_state(entity: str) -> str:
             f"{_friendly_for(entity_id)!r}. Try a different name or be more specific."
         )
 
-    return _format_entity_state(entity_id, state)
+    artifact = (
+        _media_artifact(entity_id, state)
+        if _domain_of(entity_id) == "media_player"
+        else _entity_status_artifact(entity_id, state)
+    )
+    return ArtifactText(_format_entity_state(entity_id, state), artifact)
 
 
 def _area_entities(area_id: str, domain: Optional[str] = None) -> list[str]:
@@ -1484,6 +1801,7 @@ def get_entities_in_area_state(
         return "The state filter must be 'on' or 'off'."
 
     details = []
+    artifacts = []
     for entity_id in entity_ids:
         state = _get_state(entity_id)
         if state is None:
@@ -1491,13 +1809,19 @@ def get_entities_in_area_state(
         if state_filter and state.get("state") != state_filter:
             continue
         details.append(_format_entity_state(entity_id, state))
+        if len(artifacts) < 12:
+            artifacts.append(_entity_status_artifact(entity_id, state))
 
     if not details and state_filter:
         scoped = f"{domain}s" if domain else "entities"
         return f"No {scoped} are {state_filter} in {area_name}."
     if not details:
         return f"I couldn't read any entity states in {area_name}."
-    return "; ".join(details)
+    text = "; ".join(details)
+    return ArtifactText(
+        text,
+        {"type": "entity_status", "title": area_name, "entities": artifacts},
+    )
 
 
 @tool(
@@ -1862,13 +2186,40 @@ def _normalise_ha_event(event: dict) -> dict:
     }
 
 
+def _calendar_artifact(events: list[dict], title: str) -> dict | None:
+    """Turn normalised HA events into a bounded, dashboard-only agenda."""
+    if not events:
+        return None
+    now = _local_tz.now()
+    entries = []
+    for event in events[:12]:
+        try:
+            start = _normalise_ha_timestamp(event["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if event.get("all_day"):
+            when = "All day"
+        elif start.date() == now.date():
+            when = start.strftime("%-I:%M %p")
+        else:
+            when = start.strftime("%a %-d, %-I:%M %p")
+        entries.append(
+            {
+                "title": str(event.get("summary") or "Untitled event"),
+                "when": when,
+                "all_day": bool(event.get("all_day")),
+            }
+        )
+    return {"type": "calendar", "title": title.replace("_", " ").title(), "events": entries} if entries else None
+
+
 def _read_calendars() -> list[str]:
-    """Calendars whats_on reads from.
+    """Calendars the calendar read tools query.
 
     The autodetected primary calendar PLUS the configured reminder calendar
     Fulloch writes to (`create_calendar_event`). Without the reminder
     calendar here, events Fulloch creates are invisible to its own
-    `whats_on` whenever the write target differs from the autodetected read
+    either lookup tool whenever the write target differs from the autodetected read
     target (e.g. config `calendar: "Fulloch"` vs an auto-picked
     `calendar.primary`). Deduped, order-preserving.
     """
@@ -1909,49 +2260,56 @@ def _ha_get_events(day: str) -> str:
     # Multi-event days benefit from agent summarisation/filtering; route
     # through the replan loop. The "no events" case stays as a direct
     # spoken result.
-    if len(events) >= 2:
-        return f"Reactive question: {summary}"
-    return summary
+    text = f"Reactive question: {summary}" if len(events) >= 2 else summary
+    return ArtifactText(text, _calendar_artifact(events, day))
 
 
 @tool(
     name="whats_on",
     description=(
-        "Get calendar events. Without event_name: everything in a fixed window — "
-        "pass 'today' (default), 'tomorrow', 'this_week', or a specific date as "
-        "'YYYY-MM-DD'. With event_name: search for a specific named event across "
-        "a wide date range (default 30 days both before and after today, widen "
-        "with limit), forward or backward — use this whenever the user names an "
-        "event and asks if/when it's coming up or was on, e.g. 'any concerts "
-        "coming up?', 'when's the dentist?'."
+        "List every calendar event in a fixed window: pass 'today' (default), "
+        "'tomorrow', 'this_week', or a specific date as 'YYYY-MM-DD'. For a "
+        "specific named event, use find_calendar_event instead."
     ),
     aliases=[
         "calendar",
         "events",
         "schedule",
-        "find_event",
-        "search_calendar",
-        "when_was",
-        "when_is_it_on",
     ],
 )
-def whats_on(day: str = "today", event_name: Optional[str] = None, limit: str = "30d") -> str:
-    """Calendar events — a fixed-window listing, or a named-event search.
+def whats_on(day: str = "today") -> str:
+    """List every calendar event in a fixed day or week window.
 
     Args:
         day: "today" (default), "tomorrow", "this_week", or an ISO date
-            "YYYY-MM-DD" for a single day. Ignored when event_name is set.
-        event_name: If set, search for this event by name instead of listing a
-            fixed window, e.g. "dentist", "school play".
-        limit: How far to search either side of today when event_name is set,
-            e.g. "30d", "2w", "6m". Default "30d".
+            "YYYY-MM-DD" for a single day.
     """
-    if event_name:
-        return _ha_get_events_name(event_name, limit)
     return _ha_get_events(day)
 
 
-def _parse_lookback_days(limit: str, default: int = 30) -> int:
+@tool(
+    name="find_calendar_event",
+    description=(
+        "Find a named calendar event. Pass event_name first. Optionally pass "
+        "day as 'today', 'tomorrow', 'this_week', or 'YYYY-MM-DD' to search "
+        "only that window; omit day to search one year before and after today."
+    ),
+    aliases=["find_event", "search_calendar", "when_was", "when_is_it_on"],
+)
+def find_calendar_event(event_name: str, day: Optional[str] = None, limit: str = "1y") -> str:
+    """Find one named event in an explicit window or the broad default range.
+
+    Args:
+        event_name: The event title or natural-language description to match.
+        day: Optional fixed window: "today", "tomorrow", "this_week", or an
+            ISO date. Omit it when the user gave no time scope.
+        limit: Broad-search range either side of today, e.g. "30d", "2w", or
+            "6m". Ignored when day is set. Default "1y".
+    """
+    return _ha_get_events_name(event_name, day=day, limit=limit)
+
+
+def _parse_lookback_days(limit: str, default: int = 365) -> int:
     """Parse a compact duration like '30d' / '2w' / '6m' / '1y' into days.
 
     Bare numbers are treated as days. Falls back to `default` for anything
@@ -1987,31 +2345,62 @@ def _relative_day_phrase(start_dt: _dt.datetime, now: _dt.datetime) -> str:
     return start_dt.strftime("%A, %B %-d")
 
 
-def _speak_matched_events(matches: list[dict], now: _dt.datetime) -> str:
-    spoken = []
+def _calendar_match_observation(matches: list[dict]) -> str:
+    """Return named-event matches with absolute dates for the next agent step.
+
+    A named event is often only an intermediate fact, such as when the user
+    asks how long until a trip.  Keep the timestamp lossless so the agent can
+    choose a follow-up action rather than infer a date from relative wording.
+    """
+    details = []
     for event in matches:
-        start_dt = _normalise_ha_timestamp(event["start"])
-        day = _relative_day_phrase(start_dt, now)
+        start = _normalise_ha_timestamp(event["start"])
         summary = event.get("summary") or "an event"
         if event.get("all_day"):
-            spoken.append(f"{summary} is all day {day}.")
+            details.append(f"{summary}: start date {start.date().isoformat()} (all day)")
         else:
-            time_str = start_dt.strftime("%-I:%M %p")
-            spoken.append(f"{summary} is at {time_str} {day}.")
-    return " ".join(spoken)
+            details.append(f"{summary}: starts {start.isoformat()}")
+    return "Reactive question: Calendar search found: " + "; ".join(details) + "."
 
 
-def _ha_get_events_name(event_description: str, limit: str = "30d") -> str:
+_CALENDAR_MATCH_STOPWORDS = frozenset(
+    {"a", "an", "and", "at", "for", "from", "in", "is", "my", "of", "on", "our", "the", "to", "with"}
+)
+_CALENDAR_MATCH_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _normalise_calendar_match_text(value: object) -> str:
+    """Lowercase and remove punctuation so calendar-title matching is stable."""
+    return " ".join(_CALENDAR_MATCH_TOKEN_RE.findall(str(value or "").lower()))
+
+
+def _calendar_match_tokens(value: object) -> frozenset[str]:
+    """Return meaningful, order-independent tokens for conservative matching."""
+    return frozenset(
+        token
+        for token in _CALENDAR_MATCH_TOKEN_RE.findall(str(value or "").lower())
+        if token not in _CALENDAR_MATCH_STOPWORDS
+    )
+
+
+def _ha_get_events_name(
+    event_description: str, *, day: Optional[str] = None, limit: str = "1y"
+) -> str:
     """Search calendars for events whose summary matches `event_description`,
-    within `limit` days either side of now (both past and future)."""
+    in `day`'s fixed window, or within `limit` days either side of now."""
     calendars = _read_calendars()
     if not calendars:
         return "No calendar is configured in Home Assistant."
 
-    days = _parse_lookback_days(limit)
-    now = _local_tz.now()
-    start_iso = (now - _dt.timedelta(days=days)).isoformat()
-    end_iso = (now + _dt.timedelta(days=days)).isoformat()
+    if day:
+        start_iso, end_iso = _calendar_window(day)
+        range_description = day.replace("_", " ")
+    else:
+        days = _parse_lookback_days(limit)
+        now = _local_tz.now()
+        start_iso = (now - _dt.timedelta(days=days)).isoformat()
+        end_iso = (now + _dt.timedelta(days=days)).isoformat()
+        range_description = f"{days} days before or after today"
 
     response = _call_service_with_response(
         "calendar",
@@ -2030,24 +2419,39 @@ def _ha_get_events_name(event_description: str, limit: str = "30d") -> str:
         raw_events.extend((response.get(cal) or {}).get("events") or [])
     events = [_normalise_ha_event(e) for e in raw_events]
 
-    query = event_description.lower().strip()
-    matches = [e for e in events if query in (e.get("summary") or "").lower()]
+    query = _normalise_calendar_match_text(event_description)
+    matches = [
+        event
+        for event in events
+        if query and query in _normalise_calendar_match_text(event.get("summary"))
+    ]
     if not matches:
-        names = [e.get("summary") or "" for e in events]
-        close = difflib.get_close_matches(event_description, names, n=5, cutoff=0.5)
-        matches = [e for e in events if (e.get("summary") or "") in close]
+        query_tokens = _calendar_match_tokens(event_description)
+        # A one-word query is too broad for token matching; exact-substring
+        # matching above already covers the reliable single-word cases.
+        if len(query_tokens) >= 2:
+            matches = [
+                event
+                for event in events
+                if query_tokens.issubset(_calendar_match_tokens(event.get("summary")))
+            ]
+    if not matches:
+        names = [_normalise_calendar_match_text(event.get("summary")) for event in events]
+        close = set(difflib.get_close_matches(query, names, n=5, cutoff=0.5))
+        matches = [
+            event
+            for event in events
+            if _normalise_calendar_match_text(event.get("summary")) in close
+        ]
 
     if not matches:
-        return (
-            f"I couldn't find any events matching '{event_description}' in the "
-            f"{days} days before or after today."
-        )
+        return f"I couldn't find any events matching '{event_description}' in {range_description}."
 
     matches.sort(key=lambda e: _normalise_ha_timestamp(e["start"]))
-    summary = _speak_matched_events(matches, now)
-    if len(matches) >= 2:
-        return f"Reactive question: {summary}"
-    return summary
+    return ArtifactText(
+        _calendar_match_observation(matches),
+        _calendar_artifact(matches, "Calendar match"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2087,7 +2491,8 @@ def get_upcoming_events(window_seconds: int = 90) -> list[dict]:
     for e in raw:
         summary = e.get("summary", "")
         start = e.get("start", "")
-        if not summary:
+        # Date-only starts are all-day events, not time-specific reminders.
+        if not summary or "T" not in start:
             continue
         # Filter out events that have already started — HA returns currently-active
         # events (started but not ended) which we don't want to re-fire as reminders.
@@ -2396,8 +2801,10 @@ def get_todo_items() -> str:
     if not names:
         return "Your list is empty."
     if len(names) == 1:
-        return f"You have one item: {names[0]}."
-    return f"You have {len(names)} items: {', '.join(names[:-1])}, and {names[-1]}."
+        text = f"You have one item: {names[0]}."
+    else:
+        text = f"You have {len(names)} items: {', '.join(names[:-1])}, and {names[-1]}."
+    return ArtifactText(text, {"type": "todos", "items": names[:20]})
 
 
 def _fetch_pending_todo_items() -> Optional[list]:
@@ -2506,6 +2913,58 @@ def _format_day(label: str, day: dict, unit: str) -> str:
     if precip is not None:
         bits.append(f"{int(precip)} percent chance of rain")
     return " ".join(bits)
+
+
+def _weather_artifact(
+    entity_id: str,
+    current_cond: str,
+    current_temp,
+    unit: str,
+    forecast: list,
+    start: _dt.date,
+    days: int,
+    today: _dt.date,
+) -> dict:
+    """Build a compact, dashboard-safe forecast payload from HA data."""
+    entries = []
+    for day in forecast:
+        try:
+            day_date = _normalise_ha_timestamp(day.get("datetime") or "").date()
+        except (TypeError, ValueError):
+            continue
+        if day_date < start or len(entries) >= days:
+            continue
+        label = (
+            "Today"
+            if day_date == today
+            else "Tomorrow"
+            if day_date == today + _dt.timedelta(days=1)
+            else day_date.strftime("%A")
+        )
+        entry = {
+            "date": day_date.isoformat(),
+            "label": label,
+            "condition": _humanize_condition(day.get("condition")),
+        }
+        for source, target in (
+            ("templow", "low"),
+            ("temperature", "high"),
+            ("precipitation_probability", "precipitation_probability"),
+        ):
+            value = day.get(source)
+            if isinstance(value, (int, float)):
+                entry[target] = round(value)
+        entries.append(entry)
+    current = {"condition": current_cond}
+    if isinstance(current_temp, (int, float)):
+        current["temperature"] = round(current_temp)
+    return {
+        "type": "weather",
+        "title": _friendly_for(entity_id).replace("forecast", "").strip() or "Weather",
+        "unit": unit,
+        "current": current,
+        "forecast": entries,
+    }
 
 
 def _weather_history_summary(entity_id: str, start: _dt.date, days: int, unit: str) -> str:
@@ -2673,7 +3132,13 @@ def get_weather_forecast(
         parts.append(_format_day(label, day, unit))
         count += 1
 
-    return ". ".join(parts) + "."
+    text = ". ".join(parts) + "."
+    return ArtifactText(
+        text,
+        _weather_artifact(
+            entity_id, current_cond, current_temp, unit, forecast, start, days, today
+        ),
+    )
 
 
 def _parse_history_start(start: str):
@@ -2737,6 +3202,101 @@ def _fetch_history_states(entity_id: str, start_dt, end_dt) -> list:
     if not history or not history[0]:
         return []
     return history[0]
+
+
+def _temperature_history_artifact(entity_id: str, friendly: str, states: list, current: object) -> dict | None:
+    """Return bounded chart data only for temperature-capable HA entities."""
+    attrs = current.get("attributes", {}) if isinstance(current, dict) else {}
+    raw_unit = str(attrs.get("temperature_unit") or attrs.get("unit_of_measurement") or "")
+    is_temperature = (
+        "C" in raw_unit.upper()
+        or "F" in raw_unit.upper()
+        or attrs.get("device_class") == "temperature"
+        or _domain_of(entity_id) in {"climate", "weather"}
+    )
+    if not is_temperature:
+        return None
+
+    points = []
+    for item in states:
+        try:
+            value = float(item.get("state"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        timestamp = item.get("last_changed") or item.get("last_updated")
+        if isinstance(timestamp, str) and timestamp:
+            points.append({"time": timestamp, "value": round(value, 2)})
+    if not points:
+        return None
+    low = min(point["value"] for point in points)
+    high = max(point["value"] for point in points)
+
+    # Preserve the full time span while keeping the stream payload small.
+    if len(points) > 40:
+        stride = (len(points) - 1) / 39
+        points = [points[round(index * stride)] for index in range(40)]
+
+    def _number(value: object) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return round(parsed, 2) if math.isfinite(parsed) else None
+
+    current_value = _number(attrs.get("current_temperature"))
+    if current_value is None:
+        current_value = _number(current.get("state") if isinstance(current, dict) else None)
+    return {
+        "type": "temperature_history",
+        "title": friendly,
+        "unit": "°F" if "F" in raw_unit.upper() else "°C",
+        "current": current_value if current_value is not None else points[-1]["value"],
+        "target": _number(attrs.get("temperature")),
+        "min": low,
+        "max": high,
+        "points": points,
+    }
+
+
+def _light_history_artifact(friendly: str, states: list, current: object) -> dict | None:
+    """Build a small on/off and brightness timeline from light history records."""
+    points = []
+    for item in states:
+        timestamp = item.get("last_changed") or item.get("last_updated")
+        if not isinstance(timestamp, str) or not timestamp:
+            continue
+        brightness = item.get("attributes", {}).get("brightness")
+        try:
+            brightness = round(float(brightness) / 255 * 100) if brightness is not None else None
+        except (TypeError, ValueError):
+            brightness = None
+        points.append(
+            {
+                "time": timestamp,
+                "on": item.get("state") == "on",
+                "brightness": brightness if brightness is None else max(0, min(100, brightness)),
+            }
+        )
+    if not points:
+        return None
+    if len(points) > 40:
+        stride = (len(points) - 1) / 39
+        points = [points[round(index * stride)] for index in range(40)]
+    current_attrs = current.get("attributes", {}) if isinstance(current, dict) else {}
+    current_brightness = current_attrs.get("brightness")
+    try:
+        current_brightness = round(float(current_brightness) / 255 * 100)
+    except (TypeError, ValueError):
+        current_brightness = None
+    return {
+        "type": "light_history",
+        "title": friendly,
+        "state": str(current.get("state", "unknown")) if isinstance(current, dict) else "unknown",
+        "brightness": current_brightness,
+        "points": points,
+    }
 
 
 @tool(
@@ -2828,15 +3388,17 @@ def get_entity_history(
         end_dt = now
 
     try:
+        params = {
+            "end_time": end_dt.isoformat(),
+            "filter_entity_id": entity_id,
+            "minimal_response": "true",
+        }
+        if _domain_of(entity_id) != "light":
+            params["no_attributes"] = "true"
         response = requests.get(
             f"{HA_URL}/api/history/period/{start_dt.isoformat()}",
             headers=_get_headers(),
-            params={
-                "end_time": end_dt.isoformat(),
-                "filter_entity_id": entity_id,
-                "minimal_response": "true",
-                "no_attributes": "true",
-            },
+            params=params,
             timeout=TIMEOUT,
         )
         response.raise_for_status()
@@ -2854,6 +3416,7 @@ def get_entity_history(
         return f"No recorded state changes for {_friendly_for(entity_id)} {window}."
 
     states = history[0]
+    artifact_states = states
     friendly = _friendly_for(entity_id)
     today = _local_tz.today()
     yesterday = today - _dt.timedelta(days=1)
@@ -2886,7 +3449,12 @@ def get_entity_history(
     if truncated:
         lines.append(f"showing the last {MAX_RESULTS} changes only")
 
-    return ". ".join(lines) + "."
+    text = ". ".join(lines) + "."
+    current = _get_state(entity_id)
+    artifact = _temperature_history_artifact(entity_id, friendly, artifact_states, current)
+    if artifact is None and _domain_of(entity_id) == "light":
+        artifact = _light_history_artifact(friendly, artifact_states, current)
+    return ArtifactText(text, artifact)
 
 
 @tool(

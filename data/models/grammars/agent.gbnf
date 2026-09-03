@@ -12,7 +12,7 @@
 
 root ::= actions-obj | reply-obj
 
-actions-obj ::= "{" ws "\"actions\"" ws ":" ws actions-array ("," ws "\"delivery\"" ws ":" ws string)? "}" ws
+actions-obj ::= "{" ws "\"actions\"" ws ":" ws actions-array ("," ws "\"plan\"" ws ":" ws string)? ("," ws "\"delivery\"" ws ":" ws string)? "}" ws
 
 reply-obj ::= "{" ws "\"reply\"" ws ":" ws string "}" ws
 

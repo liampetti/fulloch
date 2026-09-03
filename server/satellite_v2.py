@@ -49,6 +49,7 @@ class _RecoverySession:
     protocol_events: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=128))
     lifecycle_turn_id: Optional[str] = None
     turn_id: Optional[str] = None
+    sequence_turn_id: Optional[str] = None
     next_seq: int = 0
     source_sample_rate: int = 0
     sent_audio_seconds: float = 0.0
@@ -256,7 +257,7 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                             chunk_q.put_nowait(samples.astype(np.float32) / 32768.0)
                             uplink_frames_received += 1
                             if uplink_frames_received <= 5 or uplink_frames_received % 250 == 0:
-                                logger.info(
+                                logger.debug(
                                     "Satellite %s received uplink frame %d: %d bytes, %d channels",
                                     satellite_id, uplink_frames_received, len(raw), uplink_channels,
                                 )
@@ -393,7 +394,14 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                 try:
                     if isinstance(kind, str) and kind == "start":
                         session.turn_id = session.lifecycle_turn_id or uuid.uuid4().hex
-                        session.next_seq, session.replay = 0, deque(maxlen=SATELLITE_V2_REPLAY_FRAMES)
+                        # An LLM turn can contain a cached acknowledgement and
+                        # its final answer as separate TTS streams sharing one
+                        # lifecycle turn ID. Keep their PCM sequence continuous
+                        # so native clients do not discard the final answer as a
+                        # replay of the acknowledgement.
+                        if session.sequence_turn_id != session.turn_id:
+                            session.sequence_turn_id = session.turn_id
+                            session.next_seq, session.replay = 0, deque(maxlen=SATELLITE_V2_REPLAY_FRAMES)
                         session.source_sample_rate, session.sent_audio_seconds, session.pace_origin = item[1], 0.0, None
                         await ws.send_json({"type": "assistant.state", "state": "speaking", "turn_id": session.turn_id})
                     elif isinstance(kind, str) and kind == "cancel" and session.turn_id is not None:

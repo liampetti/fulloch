@@ -157,6 +157,60 @@ def test_weather_forecast_includes_todays_low_and_high(monkeypatch):
     assert "Today cloudy 12 to 18 degrees Celsius" in result
 
 
+def test_weather_forecast_attaches_dashboard_artifact(monkeypatch):
+    """The text response remains usable while the dashboard gets typed data."""
+    import tools.home_assistant as ha
+
+    monkeypatch.setattr(ha, "HA_TOKEN", "token")
+    monkeypatch.setattr(ha, "_DEFAULT_WEATHER_ENTITY", "weather.home")
+    monkeypatch.setattr(ha._local_tz, "today", lambda: datetime.date(2026, 8, 13))
+    monkeypatch.setattr(ha._local_tz, "get_tz", lambda: datetime.timezone.utc)
+    monkeypatch.setattr(
+        ha,
+        "_get_state",
+        lambda _entity: {
+            "state": "partlycloudy",
+            "attributes": {"temperature": 14, "temperature_unit": "°C"},
+        },
+    )
+    response = MagicMock()
+    response.json.return_value = {
+        "service_response": {
+            "weather.home": {
+                "forecast": [
+                    {
+                        "datetime": "2026-08-13T00:00:00+00:00",
+                        "condition": "rainy",
+                        "templow": 11,
+                        "temperature": 17,
+                        "precipitation_probability": 75,
+                    }
+                ]
+            }
+        }
+    }
+    monkeypatch.setattr(ha.requests, "post", lambda *args, **kwargs: response)
+
+    result = ha.get_weather_forecast(days=1)
+
+    assert result.artifact == {
+        "type": "weather",
+        "title": "home",
+        "unit": "degrees Celsius",
+        "current": {"condition": "partly cloudy", "temperature": 14},
+        "forecast": [
+            {
+                "date": "2026-08-13",
+                "label": "Today",
+                "condition": "rainy",
+                "low": 11,
+                "high": 17,
+                "precipitation_probability": 75,
+            }
+        ],
+    }
+
+
 def test_calendar_window_today_is_midnight_to_midnight():
     from tools.home_assistant import _calendar_window
 
@@ -197,6 +251,24 @@ def test_calendar_window_unrecognised_string_defaults_to_today():
     assert end == "2026-06-19T00:00:00"
 
 
+def test_whats_on_lists_only_tomorrows_window():
+    import tools.home_assistant as ha
+
+    now = datetime.datetime(2026, 8, 26, 14, 30, tzinfo=datetime.timezone.utc)
+    response = {"calendar.primary": {"events": []}}
+    with (
+        patch.object(ha, "CALENDAR_ENTITY", "calendar.primary"),
+        patch.object(ha, "_reminder_calendar_entity", return_value=None),
+        patch.object(ha, "_call_service_with_response", return_value=response) as call,
+        patch.object(ha._local_tz, "now", return_value=now),
+    ):
+        ha.whats_on("tomorrow")
+
+    request = call.call_args.args[2]
+    assert request["start_date_time"] == "2026-08-27T00:00:00+00:00"
+    assert request["end_date_time"] == "2026-08-28T00:00:00+00:00"
+
+
 def test_whats_on_reads_both_primary_and_reminder_calendars():
     """Events Fulloch writes to its reminder calendar must surface in whats_on
     even when the autodetected read calendar differs (#2 regression)."""
@@ -226,6 +298,14 @@ def test_whats_on_reads_both_primary_and_reminder_calendars():
     # The reminder-calendar event is present in the spoken summary.
     assert "Australia vs Paraguay" in out
     assert "Standup" in out
+    assert out.artifact == {
+        "type": "calendar",
+        "title": "2026-06-26",
+        "events": [
+            {"title": "Standup", "when": "Fri 26, 9:00 AM", "all_day": False},
+            {"title": "Australia vs Paraguay", "when": "Fri 26, 12:00 PM", "all_day": False},
+        ],
+    }
 
 
 def test_whats_on_dedupes_when_read_and_reminder_calendars_match():
@@ -249,7 +329,7 @@ def test_parse_lookback_days_units():
     assert _parse_lookback_days("6m") == 180
     assert _parse_lookback_days("1y") == 365
     assert _parse_lookback_days("10") == 10  # bare number -> days
-    assert _parse_lookback_days("garbage") == 30  # falls back to default
+    assert _parse_lookback_days("garbage") == 365  # falls back to default
 
 
 def test_relative_day_phrase():
@@ -284,10 +364,128 @@ def test_when_is_it_on_matches_by_substring():
         patch.object(ha, "_reminder_calendar_entity", return_value=None),
         patch.object(ha, "_call_service_with_response", return_value=response),
     ):
-        out = ha._ha_get_events_name("dentist", "30d")
+        out = ha._ha_get_events_name("dentist", limit="30d")
 
+    assert out.startswith("Reactive question:")
     assert "Dentist appointment" in out
+    assert "2026-05-20" in out
     assert "Standup" not in out
+
+
+def test_when_is_it_on_fuzzy_matches_event_word_variants():
+    """Natural query wording need not exactly match the calendar title."""
+    import tools.home_assistant as ha
+
+    response = {
+        "calendar.primary": {
+            "events": [
+                {"start": "2026-10-03T18:25:00", "summary": "Flight to Perth, VA 567"},
+            ]
+        }
+    }
+    with (
+        patch.object(ha, "CALENDAR_ENTITY", "calendar.primary"),
+        patch.object(ha, "_reminder_calendar_entity", return_value=None),
+        patch.object(ha, "_call_service_with_response", return_value=response),
+    ):
+        out = ha._ha_get_events_name("fly to perth")
+
+    assert out.startswith("Reactive question:")
+    assert "Flight to Perth, VA 567" in out
+    assert "2026-10-03" in out
+
+
+def test_when_is_it_on_matches_meaningful_tokens_regardless_of_order():
+    import tools.home_assistant as ha
+
+    response = {
+        "calendar.primary": {
+            "events": [
+                {"start": "2026-10-03T18:25:00", "summary": "Flight to Perth, VA 567"},
+            ]
+        }
+    }
+    with (
+        patch.object(ha, "CALENDAR_ENTITY", "calendar.primary"),
+        patch.object(ha, "_reminder_calendar_entity", return_value=None),
+        patch.object(ha, "_call_service_with_response", return_value=response),
+        patch.object(ha.difflib, "get_close_matches") as fuzzy,
+    ):
+        out = ha._ha_get_events_name("Perth flight")
+
+    assert "Flight to Perth, VA 567" in out
+    fuzzy.assert_not_called()
+
+
+def test_when_is_it_on_token_matching_requires_all_query_tokens():
+    import tools.home_assistant as ha
+
+    response = {
+        "calendar.primary": {
+            "events": [
+                {"start": "2026-10-03T18:25:00", "summary": "Flight to Darwin"},
+            ]
+        }
+    }
+    with (
+        patch.object(ha, "CALENDAR_ENTITY", "calendar.primary"),
+        patch.object(ha, "_reminder_calendar_entity", return_value=None),
+        patch.object(ha, "_call_service_with_response", return_value=response),
+        patch.object(ha.difflib, "get_close_matches", return_value=[]),
+    ):
+        out = ha._ha_get_events_name("Perth flight")
+
+    assert "couldn't find" in out
+
+
+def test_find_calendar_event_limits_named_search_to_today():
+    import tools.home_assistant as ha
+
+    now = datetime.datetime(2026, 8, 26, 14, 30, tzinfo=datetime.timezone.utc)
+    response = {
+        "calendar.primary": {
+            "events": [
+                {"start": "2026-08-26T18:25:00+00:00", "summary": "Doctor appointment"},
+            ]
+        }
+    }
+    with (
+        patch.object(ha, "CALENDAR_ENTITY", "calendar.primary"),
+        patch.object(ha, "_reminder_calendar_entity", return_value=None),
+        patch.object(ha, "_call_service_with_response", return_value=response) as call,
+        patch.object(ha._local_tz, "now", return_value=now),
+    ):
+        out = ha.find_calendar_event("appointment", "today")
+
+    request = call.call_args.args[2]
+    assert request["start_date_time"] == "2026-08-26T00:00:00+00:00"
+    assert request["end_date_time"] == "2026-08-27T00:00:00+00:00"
+    assert "Doctor appointment" in out
+
+
+def test_find_calendar_event_limits_named_search_to_this_week():
+    import tools.home_assistant as ha
+
+    now = datetime.datetime(2026, 8, 26, 14, 30, tzinfo=datetime.timezone.utc)
+    response = {
+        "calendar.primary": {
+            "events": [
+                {"start": "2026-08-28T16:00:00+00:00", "summary": "Dance class"},
+            ]
+        }
+    }
+    with (
+        patch.object(ha, "CALENDAR_ENTITY", "calendar.primary"),
+        patch.object(ha, "_reminder_calendar_entity", return_value=None),
+        patch.object(ha, "_call_service_with_response", return_value=response) as call,
+        patch.object(ha._local_tz, "now", return_value=now),
+    ):
+        out = ha.find_calendar_event("dance class", "this_week")
+
+    request = call.call_args.args[2]
+    assert request["start_date_time"] == "2026-08-26T00:00:00+00:00"
+    assert request["end_date_time"] == "2026-09-02T00:00:00+00:00"
+    assert "Dance class" in out
 
 
 def test_when_is_it_on_no_match_is_spoken_directly():
@@ -299,7 +497,7 @@ def test_when_is_it_on_no_match_is_spoken_directly():
         patch.object(ha, "_reminder_calendar_entity", return_value=None),
         patch.object(ha, "_call_service_with_response", return_value=response),
     ):
-        out = ha._ha_get_events_name("dentist", "30d")
+        out = ha._ha_get_events_name("dentist", limit="30d")
 
     assert "couldn't find" in out
     assert not out.startswith("Reactive question:")
@@ -312,7 +510,7 @@ def test_when_is_it_on_no_calendar_configured():
         patch.object(ha, "CALENDAR_ENTITY", None),
         patch.object(ha, "_reminder_calendar_entity", return_value=None),
     ):
-        out = ha._ha_get_events_name("dentist", "30d")
+        out = ha._ha_get_events_name("dentist", limit="30d")
 
     assert out == "No calendar is configured in Home Assistant."
 
@@ -334,6 +532,21 @@ def test_calendar_normalises_all_day_event():
     assert norm == {"start": "2026-05-26", "summary": "Public holiday", "all_day": True}
 
 
+def test_upcoming_events_excludes_all_day_events():
+    import tools.home_assistant as ha
+
+    response = {
+        "calendar.fulloch": {
+            "events": [{"start": "2026-05-26", "end": "2026-05-27", "summary": "Public holiday"}]
+        }
+    }
+    with (
+        patch.object(ha, "_reminder_calendar_entity", return_value="calendar.fulloch"),
+        patch.object(ha, "_call_service_with_response", return_value=response),
+    ):
+        assert ha.get_upcoming_events() == []
+
+
 def test_named_calendar_event_normalises_timezone_before_relative_date():
     import tools.home_assistant as ha
 
@@ -352,7 +565,25 @@ def test_named_calendar_event_normalises_timezone_before_relative_date():
     ):
         out = ha._ha_get_events_name("dentist")
 
-    assert out == "Dentist is at 12:00 AM tomorrow."
+    assert out == "Reactive question: Calendar search found: Dentist: starts 2026-05-25T00:00:00+00:00."
+
+
+def test_named_calendar_search_defaults_to_one_year_each_side():
+    import tools.home_assistant as ha
+
+    response = {"calendar.primary": {"events": []}}
+    now = datetime.datetime(2026, 8, 25, 12, tzinfo=datetime.timezone.utc)
+    with (
+        patch.object(ha, "CALENDAR_ENTITY", "calendar.primary"),
+        patch.object(ha, "_reminder_calendar_entity", return_value=None),
+        patch.object(ha, "_call_service_with_response", return_value=response) as call,
+        patch.object(ha._local_tz, "now", return_value=now),
+    ):
+        ha.find_calendar_event("Perth flight")
+
+    request = call.call_args.args[2]
+    assert request["start_date_time"] == "2025-08-25T12:00:00+00:00"
+    assert request["end_date_time"] == "2027-08-25T12:00:00+00:00"
 
 
 def test_calendar_events_sort_by_normalised_timestamp():
@@ -606,6 +837,146 @@ def test_get_entity_state_reports_humidity_battery_and_position():
     assert "battery: 20%" in result
     assert "position: 60% open" in result
     assert "hvac action: heating" in result
+    assert result.artifact == {
+        "type": "entity_status",
+        "title": "Upstairs Sensor",
+        "domain": "sensor",
+        "state": "on",
+        "details": [
+            {"label": "Humidity", "value": "45%"},
+            {"label": "Open", "value": "60%"},
+            {"label": "Battery", "value": "20%"},
+            {"label": "Activity", "value": "heating"},
+        ],
+    }
+
+
+def test_get_media_player_state_attaches_media_artifact():
+    import tools.home_assistant as ha
+
+    state = {
+        "state": "playing",
+        "attributes": {
+            "friendly_name": "Kitchen Speaker",
+            "media_title": "Teardrop",
+            "media_artist": "Massive Attack",
+            "volume_level": 0.42,
+        },
+    }
+    with (
+        patch("tools.home_assistant._resolve_entity", return_value="media_player.kitchen"),
+        patch("tools.home_assistant._get_state", return_value=state),
+    ):
+        result = ha.get_entity_state("kitchen speaker")
+
+    assert "Kitchen Speaker is playing" in result
+    assert result.artifact == {
+        "type": "media",
+        "title": "Teardrop",
+        "artist": "Massive Attack",
+        "player": "Kitchen Speaker",
+        "state": "playing",
+        "volume": 42,
+        "artwork_url": "/media-artwork/media_player.kitchen",
+    }
+
+
+def test_home_overview_groups_live_voice_enabled_states(monkeypatch):
+    import tools.home_assistant as ha
+
+    states = [
+        {"entity_id": "light.kitchen", "state": "on", "attributes": {"friendly_name": "Kitchen"}},
+        {"entity_id": "binary_sensor.window", "state": "on", "attributes": {"friendly_name": "Study Window", "device_class": "window"}},
+        {"entity_id": "lock.front_door", "state": "unlocked", "attributes": {"friendly_name": "Front Door"}},
+        {"entity_id": "media_player.office", "state": "playing", "attributes": {"friendly_name": "Office Speaker"}},
+        {"entity_id": "light.private", "state": "on", "attributes": {"friendly_name": "Private"}},
+    ]
+    response = MagicMock()
+    response.json.return_value = states
+    monkeypatch.setattr(ha, "HA_TOKEN", "token")
+    monkeypatch.setattr(ha, "_loaded", True)
+    monkeypatch.setattr(ha, "_DENIED_ENTITIES", frozenset({"light.private"}))
+    monkeypatch.setattr(ha.requests, "get", lambda *args, **kwargs: response)
+
+    result = ha.get_home_overview()
+
+    assert result == "Home overview: 1 lights on, 1 open, 1 unlocked, 1 active."
+    assert result.artifact == {
+        "type": "home_overview",
+        "groups": [
+            {"label": "Lights on", "kind": "lights", "count": 1, "entities": ["Kitchen"]},
+            {"label": "Open", "kind": "openings", "count": 1, "entities": ["Study Window"]},
+            {"label": "Unlocked", "kind": "locks", "count": 1, "entities": ["Front Door"]},
+            {"label": "Active", "kind": "active", "count": 1, "entities": ["Office Speaker"]},
+        ],
+    }
+
+
+def test_energy_overview_attaches_current_readings_and_history(monkeypatch):
+    import tools.home_assistant as ha
+
+    states = [
+        {"entity_id": "sensor.grid_power", "state": "850", "attributes": {"friendly_name": "Grid power", "device_class": "power", "unit_of_measurement": "W"}},
+        {"entity_id": "sensor.solar_power", "state": "1200", "attributes": {"friendly_name": "Solar", "device_class": "power", "unit_of_measurement": "W"}},
+        {"entity_id": "sensor.powerwall_battery", "state": "76", "attributes": {"friendly_name": "Home battery", "device_class": "battery", "unit_of_measurement": "%"}},
+    ]
+    snapshot = MagicMock()
+    snapshot.json.return_value = states
+    history = MagicMock()
+    history.json.return_value = [[
+        {"state": "800", "last_changed": "2026-08-31T10:00:00+00:00"},
+        {"state": "850", "last_changed": "2026-08-31T11:00:00+00:00"},
+    ]]
+    monkeypatch.setattr(ha, "HA_TOKEN", "token")
+    monkeypatch.setattr(ha, "_loaded", True)
+    monkeypatch.setattr(ha.requests, "get", lambda url, **kwargs: history if "/history/" in url else snapshot)
+
+    result = ha.get_energy_overview()
+
+    assert result == "Energy overview: Grid power is 850 W, Solar is 1200 W, Home battery is 76 %."
+    assert result.artifact == {
+        "type": "energy",
+        "metrics": [
+            {"kind": "consumption", "label": "Grid power", "value": 850.0, "unit": "W"},
+            {"kind": "solar", "label": "Solar", "value": 1200.0, "unit": "W"},
+            {"kind": "battery", "label": "Home battery", "value": 76.0, "unit": "%"},
+        ],
+        "history": [
+            {"time": "2026-08-31T10:00:00+00:00", "value": 800.0},
+            {"time": "2026-08-31T11:00:00+00:00", "value": 850.0},
+        ],
+        "history_unit": "W",
+    }
+
+
+def test_security_overview_reports_only_constrained_entity_summaries(monkeypatch):
+    import tools.home_assistant as ha
+
+    states = [
+        {"entity_id": "lock.front_door", "state": "unlocked", "attributes": {"friendly_name": "Front Door"}},
+        {"entity_id": "binary_sensor.window", "state": "on", "attributes": {"friendly_name": "Study Window", "device_class": "window"}},
+        {"entity_id": "camera.driveway", "state": "idle", "attributes": {"friendly_name": "Driveway"}},
+        {"entity_id": "camera.backyard", "state": "unavailable", "attributes": {"friendly_name": "Backyard"}},
+    ]
+    response = MagicMock()
+    response.json.return_value = states
+    monkeypatch.setattr(ha, "HA_TOKEN", "token")
+    monkeypatch.setattr(ha, "_loaded", True)
+    monkeypatch.setattr(ha.requests, "get", lambda *args, **kwargs: response)
+
+    result = ha.get_security_overview()
+
+    assert result == "Security attention: 1 open entries, 1 unlocked locks, 1 cameras unavailable."
+    assert result.artifact == {
+        "type": "security",
+        "status": "attention",
+        "groups": [
+            {"label": "Open entries", "kind": "openings", "count": 1, "entities": ["Study Window"]},
+            {"label": "Unlocked", "kind": "locks", "count": 1, "entities": ["Front Door"]},
+            {"label": "Cameras online", "kind": "cameras", "count": 1, "entities": ["Driveway"]},
+            {"label": "Cameras unavailable", "kind": "camera_issues", "count": 1, "entities": ["Backyard"]},
+        ],
+    }
 
 
 def test_complete_todo_item_matches_by_substring():
@@ -633,6 +1004,23 @@ def test_complete_todo_item_matches_by_substring():
     assert payload["item"] == "Buy milk"
     assert payload["status"] == "completed"
     assert "Buy milk" in result
+
+
+def test_get_todo_items_attaches_checklist_artifact(monkeypatch):
+    import tools.home_assistant as ha
+
+    monkeypatch.setattr(ha, "TODO_ENTITY", "todo.shopping")
+    monkeypatch.setattr(ha, "_loaded", True)
+    monkeypatch.setattr(
+        ha,
+        "_fetch_pending_todo_items",
+        lambda: [{"summary": "Milk"}, {"summary": "Call the plumber"}],
+    )
+
+    result = ha.get_todo_items()
+
+    assert result == "You have 2 items: Milk, and Call the plumber."
+    assert result.artifact == {"type": "todos", "items": ["Milk", "Call the plumber"]}
 
 
 def test_complete_todo_item_no_match_is_spoken_directly():
@@ -903,6 +1291,68 @@ def test_entity_history_returns_full_change_list_for_the_agent():
     assert ": on" in result and ": off" in result
 
 
+def test_temperature_history_attaches_chart_artifact():
+    import contextlib
+
+    import tools.home_assistant as ha
+
+    states = [
+        {"state": "18.5", "last_changed": "2026-06-24T19:30:00+00:00"},
+        {"state": "20", "last_changed": "2026-06-24T23:00:00+00:00"},
+    ]
+    current = {
+        "state": "20.5",
+        "attributes": {"temperature_unit": "°C", "current_temperature": 20.5, "temperature": 21},
+    }
+    with contextlib.ExitStack() as stack:
+        for cm in _patch_history(ha, states):
+            stack.enter_context(cm)
+        stack.enter_context(patch("tools.home_assistant._get_state", return_value=current))
+        result = ha.get_entity_history("dining room temperature")
+
+    assert result.artifact == {
+        "type": "temperature_history",
+        "title": "Dining Room Lights",
+        "unit": "°C",
+        "current": 20.5,
+        "target": 21.0,
+        "min": 18.5,
+        "max": 20.0,
+        "points": [
+            {"time": "2026-06-24T19:30:00+00:00", "value": 18.5},
+            {"time": "2026-06-24T23:00:00+00:00", "value": 20.0},
+        ],
+    }
+
+
+def test_light_history_attaches_state_and_brightness_artifact():
+    import contextlib
+
+    import tools.home_assistant as ha
+
+    states = [
+        {"state": "on", "last_changed": "2026-06-24T19:30:00+00:00", "attributes": {"brightness": 64}},
+        {"state": "off", "last_changed": "2026-06-24T23:00:00+00:00", "attributes": {}},
+    ]
+    current = {"state": "off", "attributes": {"brightness": 128}}
+    with contextlib.ExitStack() as stack:
+        for cm in _patch_history(ha, states):
+            stack.enter_context(cm)
+        stack.enter_context(patch("tools.home_assistant._get_state", return_value=current))
+        result = ha.get_entity_history("dining room lights")
+
+    assert result.artifact == {
+        "type": "light_history",
+        "title": "Dining Room Lights",
+        "state": "off",
+        "brightness": 50,
+        "points": [
+            {"time": "2026-06-24T19:30:00+00:00", "on": True, "brightness": 25},
+            {"time": "2026-06-24T23:00:00+00:00", "on": False, "brightness": None},
+        ],
+    }
+
+
 def test_entity_history_uses_ha_local_date_for_relative_labels():
     import contextlib
 
@@ -1071,6 +1521,19 @@ def test_get_entities_in_area_state_filters_to_requested_state(monkeypatch):
         result = ha.get_entities_in_area_state("office", "light", "on")
 
     assert result == "Office Main is on, brightness: 50%"
+    assert result.artifact == {
+        "type": "entity_status",
+        "title": "Office",
+        "entities": [
+            {
+                "type": "entity_status",
+                "title": "Office Main",
+                "domain": "light",
+                "state": "on",
+                "details": [{"label": "Brightness", "value": "50%"}],
+            }
+        ],
+    }
 
 
 # --- Spotify Connect fallback for transport controls (pause/resume/skip/previous) ---

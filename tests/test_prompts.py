@@ -92,7 +92,9 @@ class TestAgentPromptShape:
         prompt = prompts.get_agent_system_prompt()
         assert "Never claim you cannot whisper" in prompt
 
-    def test_prompt_keeps_recent_weather_forecasts_when_weather_tool_is_available(self, notes_dir, monkeypatch):
+    def test_prompt_keeps_recent_weather_forecasts_when_weather_tool_is_available(
+        self, notes_dir, monkeypatch
+    ):
         monkeypatch.setattr(
             prompts.tool_registry,
             "canonical_name",
@@ -136,7 +138,9 @@ class TestAgentPromptShape:
         assert "replace_selected_obsidian_text" in prompt
 
     def test_examples_use_current_dates_and_hide_unavailable_tools(self, notes_dir, monkeypatch):
-        monkeypatch.setattr(prompts._local_time, "today", lambda: datetime(2026, 7, 17, tzinfo=timezone.utc).date())
+        monkeypatch.setattr(
+            prompts._local_time, "today", lambda: datetime(2026, 7, 17, tzinfo=timezone.utc).date()
+        )
         monkeypatch.setattr(
             prompts.tool_registry,
             "canonical_name",
@@ -149,6 +153,39 @@ class TestAgentPromptShape:
         assert "{{YESTERDAY}}" not in examples
         assert '"calculate"' in examples
         assert '"get_weather_forecast"' not in examples
+
+    def test_prompt_teaches_calendar_lookup_before_dependent_date_maths(
+        self, notes_dir, monkeypatch
+    ):
+        monkeypatch.setattr(
+            prompts.tool_registry,
+            "canonical_name",
+            lambda name: name if name in {"whats_on", "find_calendar_event"} else None,
+        )
+
+        prompt = prompts.get_agent_system_prompt()
+
+        assert "check the calendar before web search" in prompt
+        assert "do not bundle dependent steps" in prompt
+
+    def test_prompt_keeps_replans_focused_on_the_original_request(self, notes_dir):
+        prompt = prompts.get_agent_system_prompt()
+
+        assert "not a new user question" in prompt
+        assert "Keep answering the original request" in prompt
+        assert "Never use `delivery` for a query or calculation" in prompt
+
+    def test_calendar_examples_use_the_explicit_named_event_tool(self, notes_dir, monkeypatch):
+        monkeypatch.setattr(
+            prompts.tool_registry,
+            "canonical_name",
+            lambda name: name if name in {"find_calendar_event", "days_between"} else None,
+        )
+
+        examples = prompts._intent_examples()
+
+        assert '"find_calendar_event"' in examples
+        assert '"whats_on"' not in examples
 
     def test_capability_summary_only_names_available_tool_categories(self, notes_dir, monkeypatch):
         monkeypatch.setattr(
@@ -194,8 +231,13 @@ class TestGreetingPrompt:
         # No agent grammar instructions in the greeting prompt.
         assert '"actions"' not in prompt
 
-    def test_greeting_and_thinking_keep_personality(self, notes_dir):
+    def test_greeting_keeps_personality(self, notes_dir):
         greeting = prompts.get_greeting_system_prompt(personality="wry")
-        thinking = prompts.get_thinking_system_prompt(personality="wry")
         assert "dry observational humor" in greeting
-        assert "dry observational humor" in thinking
+
+
+def test_thinking_report_prompt_requires_a_complete_report():
+    prompt = prompts.get_thinking_report_prompt("Research AI", "source finding")
+    assert "600-1,000 words" in prompt
+    assert "focused question concisely" in prompt
+    assert "Finish every sentence" in prompt

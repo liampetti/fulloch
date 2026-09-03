@@ -6,6 +6,7 @@ resolved a turn. Host stubs mirror the pattern in test_llm_openai.py's
 touches before returning, not a full Assistant.
 """
 
+import inspect
 import sys
 import time
 import types
@@ -13,7 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.agent_loop import _llm_unavailable_label  # noqa: E402
+from core.agent_loop import (  # noqa: E402
+    _llm_unavailable_label,
+    _take_startup_greeting_response_follow_up,
+)
 from core.slm import RemoteUnreachable  # noqa: E402
 from core.turn_stats import TurnStats  # noqa: E402
 from utils.intents import StepKind, StepResult  # noqa: E402
@@ -35,6 +39,66 @@ def _host(**overrides):
 
 def test_local_llm_failure_label_names_llama_server():
     assert _llm_unavailable_label(_host(llm_backend="local")) == "Local llama-server unavailable"
+
+
+def test_startup_greeting_response_is_available_only_to_an_immediate_explicit_follow_up():
+    host = _host(_startup_greeting_response="Storms can make frogs rain from the sky.")
+
+    assert _take_startup_greeting_response_follow_up(host, "Could you tell me more about that topic?") == (
+        "Storms can make frogs rain from the sky."
+    )
+    assert host._startup_greeting_response is None
+
+
+def test_startup_greeting_response_is_discarded_from_history_for_unrelated_first_turn(monkeypatch):
+    import core.agent_loop as al
+
+    monkeypatch.setattr(al, "catchAll", lambda _prompt: {"reply": "The kitchen lights are on."})
+    history = []
+    host = _host(
+        _history_for=lambda _session: history,
+        _record_spoken=lambda _text: None,
+        _startup_greeting_response="Storms can make frogs rain from the sky.",
+    )
+
+    assert al.AgentLoop(host, source="text").run("Turn on the kitchen lights.") == "The kitchen lights are on."
+    assert history == [
+        {"role": "user", "content": "Turn on the kitchen lights."},
+        {"role": "assistant", "content": '{"reply": "The kitchen lights are on."}'},
+    ]
+    assert host._startup_greeting_response is None
+
+
+def test_startup_greeting_response_enters_history_for_explicit_first_follow_up(monkeypatch):
+    import core.agent_loop as al
+
+    monkeypatch.setattr(al, "catchAll", lambda prompt: None)
+    captured = {}
+
+    def generate(**kwargs):
+        captured.update(kwargs)
+        return '{"reply": "A weather explanation."}'
+
+    history = []
+    host = _host(
+        grammar=object(),
+        wakeword_name="Fulloch",
+        tts_session=None,
+        replan_stall_cache=[],
+        play_chunks=lambda *args, **kwargs: None,
+        _note_llm_remote_status=lambda *args: None,
+        _generate_with_context_recovery=generate,
+        _record_spoken=lambda _text: None,
+        _history_for=lambda _session: history,
+        _startup_greeting_response="Storms can make frogs rain from the sky.",
+    )
+
+    assert al.AgentLoop(host, source="text").run("Tell me more about that.") == "A weather explanation."
+    assert captured["history"] == [
+        {"role": "assistant", "content": "Storms can make frogs rain from the sky."},
+        {"role": "user", "content": "Tell me more about that."},
+    ]
+    assert host._startup_greeting_response is None
 
 
 def test_route_is_regex_when_catchall_reply_resolves_without_slm(monkeypatch):
@@ -67,6 +131,13 @@ def test_route_is_no_llm_when_llm_disabled(monkeypatch):
     out = loop.run("tell me a joke")
     assert out == "NO_AI"
     assert stats.route == "no_llm"
+
+
+def test_pending_thinking_clarification_is_left_for_the_agent_to_route():
+    import core.agent_loop as al
+
+    source = inspect.getsource(al.AgentLoop._run)
+    assert "resume_pending_thinking_task" not in source
 
 
 def test_topicless_web_search_reuses_prior_question(monkeypatch):
@@ -160,6 +231,50 @@ def test_replan_ack_finishes_before_the_final_reply_returns(monkeypatch):
 
     assert al.AgentLoop(host, source="voice").run("look it up") == "The final answer."
     assert ack_finished == [True]
+
+
+def test_replan_can_use_a_calendar_date_in_a_follow_up_calculation(monkeypatch):
+    """An intermediate lookup observation must allow a dependent tool action."""
+    import core.agent_loop as al
+
+    monkeypatch.setattr(al, "catchAll", lambda prompt: None)
+    actions = []
+    emissions = iter(
+        [
+            '{"actions": [{"intent": "find_calendar_event", "args": ["Perth flight"]}]}',
+            '{"actions": [{"intent": "days_between", "args": ["2026-08-25", "2026-10-03"]}]}',
+        ]
+    )
+
+    def handle_action(action):
+        actions.append(action)
+        if action["intent"] == "find_calendar_event":
+            return "Reactive question: Calendar search found: Perth flight: start date 2026-10-03 (all day)."
+        return "There are 39 days between those two dates."
+
+    history = []
+    host = _host(
+        grammar=object(),
+        wakeword_name="Fulloch",
+        tts_session=None,
+        replan_stall_cache=[],
+        _play_random_ack=lambda *args, **kwargs: None,
+        play_chunks=lambda *args, **kwargs: None,
+        _note_llm_remote_status=lambda *args: None,
+        _generate_with_context_recovery=lambda **kwargs: next(emissions),
+        _record_spoken=lambda _text: None,
+        _history_for=lambda _session: history,
+    )
+    monkeypatch.setattr(al.intents, "is_registered_tool", lambda _intent: True)
+    monkeypatch.setattr(al.intents, "handle_action", handle_action)
+
+    out = al.AgentLoop(host, source="text").run("how many days until we fly to Perth?")
+
+    assert out == "There are 39 days between those two dates."
+    assert actions == [
+        {"intent": "find_calendar_event", "args": ["Perth flight"]},
+        {"intent": "days_between", "args": ["2026-08-25", "2026-10-03"]},
+    ]
 
 
 def test_route_stays_none_without_a_stats_object():
@@ -287,6 +402,14 @@ def test_delivery_is_not_spoken_for_lock_actions():
     assert al._can_speak_delivery(_host(personality="wry"), [{"intent": "turn_on", "args": ["lamp"]}])
 
 
+def test_delivery_is_not_spoken_for_read_actions():
+    import core.agent_loop as al
+
+    assert not al._can_speak_delivery(
+        _host(personality="wry"), [{"intent": "days_between", "args": ["today", "2026-10-03"]}]
+    )
+
+
 def test_delivery_replaces_raw_tool_results_after_success(monkeypatch):
     import core.agent_loop as al
 
@@ -313,4 +436,26 @@ def test_delivery_replaces_raw_tool_results_after_success(monkeypatch):
     out = al.AgentLoop(host, session=None, source="text").run("turn on lights and play music")
 
     assert out == "The lights are on and music is playing."
+    assert spoken == [out]
+
+
+def test_read_action_delivery_cannot_hide_the_tool_result(monkeypatch):
+    import core.agent_loop as al
+
+    monkeypatch.setattr(
+        al,
+        "catchAll",
+        lambda _prompt: {
+            "actions": [{"intent": "days_between", "args": ["2026-08-26", "2026-10-03"]}],
+            "delivery": "Calculating the days until departure.",
+        },
+    )
+    monkeypatch.setattr(al.intents, "is_registered_tool", lambda name: name == "days_between")
+    monkeypatch.setattr(al.intents, "handle_action", lambda _action: "There are 38 days between those two dates.")
+    spoken = []
+    host = _host(personality="wry", _record_spoken=spoken.append)
+
+    out = al.AgentLoop(host, session=None, source="text").run("how many days until departure")
+
+    assert out == "There are 38 days between those two dates."
     assert spoken == [out]

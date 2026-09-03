@@ -693,9 +693,7 @@ def _obsidian_edit_enabled() -> bool:
 
 
 # Each rule: (extractor, intent_dict_builder). The builder receives the
-# extractor's return value (string or True). Order matters — summarize_thinking
-# is listed before deep_think so "summarise what you've been thinking" doesn't
-# slip into the deep_think 'think about' family.
+# extractor's return value (string or True).
 _INTENT_RULES = [
     # Smart-home control first — these skip the SLM entirely (HA resolves the
     # entity; a miss replans into the agent), so let them win the common case.
@@ -738,7 +736,6 @@ _INTENT_RULES = [
     (extract_resume, lambda _: {"intent": "resume", "args": []}),
     (extract_timer, lambda v: {"intent": "start_countdown", "args": [v]}),
     (list_timers, lambda _: {"intent": "get_timer_status", "args": []}),
-    (extract_summarize_thinking, lambda _: {"intent": "summarize_thinking", "args": []}),
     (extract_deep_think, lambda v: {"intent": "deep_think", "args": [v]}),
 ]
 

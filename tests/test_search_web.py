@@ -174,6 +174,7 @@ def test_external_information_no_results_signals_clearly(monkeypatch):
     monkeypatch.setattr(search_web, "searxng_search", lambda q, num_results=3: [])
     out = search_web.external_information("trending models")
     assert out.startswith("User question: trending models")
+    assert out.thinking_status == "rejected"
     assert "no usable results" in out
     assert "do not save this as a note" in out
 
@@ -193,6 +194,12 @@ def test_external_information_includes_snippets(monkeypatch):
     assert "A web search has retrieved" in out
     assert "real body text" in out
     assert "From http://x" in out
+    assert out.thinking_status == "evidence"
+    assert out.artifact == {
+        "type": "web_research",
+        "query": "q",
+        "sources": [{"url": "http://x", "host": "x", "evidence": "real body text"}],
+    }
 
 
 class TestStripSummariseDirective:
@@ -220,7 +227,7 @@ class TestStripSummariseDirective:
 def test_search_query_strips_summarise_but_keeps_user_question(monkeypatch):
     seen = {}
 
-    def fake_search(q, num_results=3):
+    def fake_search(q, **kwargs):
         seen["q"] = q
         return []
 
@@ -230,3 +237,49 @@ def test_search_query_strips_summarise_but_keeps_user_question(monkeypatch):
     assert seen["q"] == "today's news"
     # ...but the summariser still sees the user's full intent.
     assert out.startswith("User question: summarize today's news")
+
+
+def test_news_search_uses_news_category_and_day_range(monkeypatch):
+    calls = []
+
+    def fake_search(query, **kwargs):
+        calls.append((query, kwargs))
+        return []
+
+    monkeypatch.setattr(search_web, "searxng_search", fake_search)
+    search_web.external_information("latest news")
+
+    assert calls == [
+        (
+            "latest news",
+            {
+                "num_results": search_web.NEWS_RESULTS_PER_SCOPE,
+                "category": "news",
+                "time_range": "day",
+            },
+        )
+    ]
+
+
+def test_news_search_includes_timezone_derived_local_and_regional_queries(monkeypatch):
+    calls = []
+
+    def fake_search(query, **kwargs):
+        calls.append(query)
+        return []
+
+    monkeypatch.setattr(search_web, "searxng_search", fake_search)
+    monkeypatch.setitem(
+        search_web.config,
+        "general",
+        {
+            "timezone": "Australia/Sydney",
+        },
+    )
+    search_web.external_information("today's news")
+
+    assert calls == [
+        "today's news",
+        "today's news Australia",
+        "today's news Sydney Australia",
+    ]

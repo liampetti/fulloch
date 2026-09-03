@@ -31,10 +31,25 @@ from dateutil.relativedelta import (
 )
 
 import utils.local_time as _local_time
+from utils.locale import household_locale
 
+from .thinking_playbooks import thinking_playbook
 from .tool_registry import tool
 
 logger = logging.getLogger(__name__)
+
+thinking_playbook(
+    name="calculation",
+    triggers=(r"\b(calculate|convert|percentage|how many|how much|difference between)\b",),
+    capabilities=("calculate", "convert_units", "days_between"),
+    solve_path=(
+        "Retrieve any external or ambiguous inputs before calculating.",
+        "Use the narrowest calculation capability that exactly matches the requested operation.",
+        "Report the computed result with the inputs used.",
+    ),
+    completion_rule="Every numeric conclusion is computed from supplied or retrieved values.",
+    prohibited_shortcuts=("Do not use arithmetic to infer facts that require another capability.",),
+)
 
 
 # Scale words make big results speakable: "1.23 million" beats a 7-digit run.
@@ -168,12 +183,21 @@ def _normalize_expr(text: str) -> str:
     description=(
         "Evaluate a maths expression and speak the result. Handles sums, "
         "percentages, powers and roots; supports + - * / ** %, parentheses "
-        "and functions like sqrt, abs, round, log, sin, cos."
+        "and functions like sqrt, abs, round, log, sin, cos. Also resolves "
+        "relative calendar dates and ranges such as next week, next month, "
+        "next year, or in three days."
     ),
     aliases=["calc", "math", "evaluate_expression"],
 )
 def calculate(expression: str) -> str:
     """Safely evaluate an arithmetic expression string."""
+    if calendar := _calendar_reference(expression):
+        start, end = calendar
+        if start == end:
+            return f"Calendar date: {start.isoformat()}."
+        return f"Calendar range: {start.isoformat()} through {end.isoformat()}."
+    if offset := _iso_date_offset(expression):
+        return f"Calendar date: {offset.isoformat()}."
     expr = _normalize_expr(expression)
     if not expr:
         return (
@@ -234,6 +258,104 @@ def _parse_date(value: str) -> date:
         return today - timedelta(days=1)
     base = datetime(today.year, today.month, today.day)
     return _dateparser.parse(value.strip(), default=base).date()
+
+
+def has_relative_calendar_reference(value: str) -> bool:
+    """Whether text contains a calendar phrase that needs deterministic maths."""
+    return bool(
+        re.search(
+            r"\b(?:today|tomorrow|yesterday|(?:this|next|last)\s+"
+            r"(?:week|month|year|weekend|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+            r"in\s+\d+\s+(?:day|week|month|year)s?)\b",
+            value or "",
+            re.I,
+        )
+    )
+
+
+def _calendar_reference(value: str) -> tuple[date, date] | None:
+    """Resolve common relative dates to one date or an inclusive date range."""
+    text = (value or "").lower()
+    today = _local_time.today()
+    if match := re.search(
+        r"\b(this|next|last)\s+"
+        r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        text,
+    ):
+        modifier, weekday = match.groups()
+        target = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday").index(
+            weekday
+        )
+        days = (target - today.weekday()) % 7
+        if modifier == "next" and days == 0:
+            days = 7
+        elif modifier == "last":
+            days -= 7 if days == 0 else 7
+        result = today + timedelta(days=days)
+        return result, result
+    if re.search(r"\bnext week\b", text):
+        start = today + timedelta(days=7 - today.weekday())
+        return start, start + timedelta(days=6)
+    if re.search(r"\blast week\b", text):
+        start = today - timedelta(days=today.weekday() + 7)
+        return start, start + timedelta(days=6)
+    if re.search(r"\bthis week\b", text):
+        start = today - timedelta(days=today.weekday())
+        return start, start + timedelta(days=6)
+    if re.search(r"\bnext month\b", text):
+        start = today.replace(day=1) + relativedelta(months=1)
+        return start, start + relativedelta(months=1, days=-1)
+    if re.search(r"\blast month\b", text):
+        start = today.replace(day=1) - relativedelta(months=1)
+        return start, start + relativedelta(months=1, days=-1)
+    if re.search(r"\bthis month\b", text):
+        start = today.replace(day=1)
+        return start, start + relativedelta(months=1, days=-1)
+    if re.search(r"\bnext year\b", text):
+        start = today.replace(year=today.year + 1, month=1, day=1)
+        return start, start.replace(year=start.year + 1) - timedelta(days=1)
+    if re.search(r"\blast year\b", text):
+        start = today.replace(year=today.year - 1, month=1, day=1)
+        return start, start.replace(year=start.year + 1) - timedelta(days=1)
+    if re.search(r"\bthis year\b", text):
+        start = today.replace(month=1, day=1)
+        return start, start.replace(year=start.year + 1) - timedelta(days=1)
+    if re.search(r"\bnext weekend\b", text):
+        start = today + timedelta(days=(5 - today.weekday()) % 7 or 7)
+        return start, start + timedelta(days=1)
+    if re.search(r"\bthis weekend\b", text):
+        start = today + timedelta(days=(5 - today.weekday()) % 7)
+        return start, start + timedelta(days=1)
+    if match := re.search(r"\bin\s+(\d+)\s+(day|week|month|year)s?\b", text):
+        count, unit = int(match.group(1)), match.group(2)
+        result = today + relativedelta(**{unit + "s": count})
+        return result, result
+    if "tomorrow" in text:
+        return today + timedelta(days=1), today + timedelta(days=1)
+    if "yesterday" in text:
+        return today - timedelta(days=1), today - timedelta(days=1)
+    if "today" in text:
+        return today, today
+    return None
+
+
+def _iso_date_offset(value: str) -> date | None:
+    """Resolve ISO date offsets emitted by planning workers without arithmetic eval."""
+    match = re.fullmatch(
+        r"\s*(\d{4}-\d{2}-\d{2})\s*([+-])\s*(\d+)\s*(hour|day|week|month|year)s?\s*",
+        value or "",
+        re.I,
+    )
+    if match is None:
+        return None
+    value, operator, amount, unit = match.groups()
+    try:
+        start = date.fromisoformat(value)
+    except ValueError:
+        return None
+    delta = relativedelta(**{unit.lower() + "s": int(amount)})
+    result = start + delta if operator == "+" else start - delta
+    return result.date() if isinstance(result, datetime) else result
 
 
 def _friendly_date(d: date) -> str:
@@ -304,9 +426,9 @@ def date_of(weekday: str, which: str = "next") -> str:
 
 _UREG = pint.UnitRegistry()
 
-# Imperial (UK) measures are the default for ambiguous volume words, matching
-# the British spelling used elsewhere; pint's bare `gallon`/`pint`/`quart` are
-# US. Saying "US gallon" routes to pint's US default instead (see _pint_unit).
+# Pint's bare gallon/pint/quart are US measures. Map ambiguous volume words to
+# the household's timezone-derived convention; explicit US/American wording
+# still always selects Pint's native US units.
 _UK_VOLUME = {
     "gallon": "imperial_gallon",
     "gallons": "imperial_gallon",
@@ -323,9 +445,8 @@ _UK_VOLUME = {
 def _pint_unit(u: str) -> str:
     """Map a spoken unit name to one pint understands.
 
-    Strips the word 'degrees', honours an explicit 'US'/'American' prefix
-    (pint's bare names are already US), and defaults ambiguous imperial
-    volume words to their UK definitions.
+    Strips the word 'degrees', honours an explicit 'US'/'American' prefix,
+    and uses the household locale for ambiguous volume words.
     """
     s = (u or "").strip().lower()
     s = re.sub(r"\bdegrees?\b", "", s).strip()
@@ -333,7 +454,9 @@ def _pint_unit(u: str) -> str:
     if m:
         return m.group(1).strip()
     key = s.replace(" ", "").replace("-", "")
-    return _UK_VOLUME.get(key, s)
+    if household_locale().volume_system == "imperial":
+        return _UK_VOLUME.get(key, s)
+    return s
 
 
 @tool(
@@ -341,11 +464,12 @@ def _pint_unit(u: str) -> str:
     description=(
         "Convert a value between units of length, mass, volume, temperature "
         "or speed (miles, km, kg, lb, litres, gallons, celsius, fahrenheit, "
-        "mph). Gallons/pints default to imperial; say 'US gallon' for US."
+        "mph). When to_unit is omitted, use the household's timezone-derived "
+        "distance, temperature, or speed unit."
     ),
     aliases=["unit_conversion", "convert"],
 )
-def convert_units(value: float, from_unit: str, to_unit: str) -> str:
+def convert_units(value: float, from_unit: str, to_unit: str | None = None) -> str:
     """Convert `value` from one unit to another within the same dimension."""
     try:
         v = float(value)
@@ -353,9 +477,21 @@ def convert_units(value: float, from_unit: str, to_unit: str) -> str:
         return "Reactive question: The amount to convert wasn't a number. Ask the user to clarify."
 
     frm = _pint_unit(from_unit)
-    to = _pint_unit(to_unit)
     try:
-        result = _UREG.Quantity(v, frm).to(to)
+        source = _UREG.Quantity(v, frm)
+        display_to = to_unit
+        if not isinstance(display_to, str) or not display_to.strip():
+            locale = household_locale()
+            if source.check("[length]"):
+                display_to = locale.distance_unit
+            elif source.check("[temperature]"):
+                display_to = locale.temperature_unit
+            elif source.check("[length] / [time]"):
+                display_to = f"{locale.distance_unit} / hour"
+            else:
+                return "Reactive question: Say which unit you'd like that converted to."
+        to = _pint_unit(display_to)
+        result = source.to(to)
     except pint.DimensionalityError:
         return (
             f"Reactive question: {from_unit!r} and {to_unit!r} measure different "
@@ -367,4 +503,4 @@ def convert_units(value: float, from_unit: str, to_unit: str) -> str:
             f"Reactive question: Couldn't convert {from_unit!r} to {to_unit!r} — "
             f"one of the units wasn't recognised. Ask the user to rephrase."
         )
-    return f"{_fmt_number(v)} {from_unit} is {_fmt_number(result.magnitude)} {to_unit}."
+    return f"{_fmt_number(v)} {from_unit} is {_fmt_number(result.magnitude)} {display_to}."

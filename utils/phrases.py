@@ -1,9 +1,7 @@
 """Short, hand-authored speech used outside LLM replies."""
 
-# Brief conversational receipts for normal agent work. These are deliberately
-# neutral: they should not narrate internal work the way a progress update does.
-STALL_PHRASES = ["Okay.", "Yep.", "Aha."]
-ACK_PHRASES = ["Okay.", "Yep.", "Aha."]
+# Brief conversational receipts for normal agent work. These are deliberately short
+ACK_PHRASES = ["Okay.", "Got it.", "Aha.", "Hmm.", "Huh.", "OK.", "Let's see."]
 
 # These operations need no special wording; they reuse the acknowledgement
 # clips rather than expanding the startup phrase inventory.
@@ -41,14 +39,30 @@ STARTUP_CACHE_SPECS = (
 
 REMINDER_PREFIX_PHRASES = ["Just a reminder -", "Heads up -"]
 
-# A compact, varied startup rotation.
+# A compact, varied startup rotation. These topics are used to warm-up the LLM on start-up.
 GREETING_TOPICS = [
-    "animal camouflage",
-    "deep-sea life",
-    "forgotten ancient technologies",
-    "the origins of everyday idioms",
-    "counterintuitive mathematical paradoxes",
-    "accidental scientific discoveries",
-    "obscure musical instruments",
-    "psychological illusions",
+    "the secret lives of urban wildlife",
+    "strange weather phenomena",
+    "ancient engineering marvels",
+    "the science of everyday smells",
+    "how maps changed the world",
+    "surprising ways plants communicate",
+    "lost languages and undeciphered scripts",
+    "the oddest experiments in food history",
+    "how modern weather satellites see storms forming",
+    "the surprising physics behind roller coasters",
+    "recent breakthroughs in protein design",
+    "the engineering challenge of reusable rockets",
+    "how large language models learn patterns in text",
+    "how AI systems learn to recognise images",
+    "the challenge of making AI reasoning more reliable",
+    "how robots use AI to navigate unfamiliar spaces",
+    "the early pioneers of artificial intelligence",
+    "the rise and fall of expert systems",
+    "how the Turing test shaped AI research",
+    "the quest for practical quantum computers",
+    "the hidden mathematics of music",
+    "how cities are adapting to rising heat",
+    "the deep history written in ice cores",
+    "why some materials remember their shape",
 ]

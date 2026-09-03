@@ -1,14 +1,3 @@
-# Stage 0: Build the Obsidian plugin bundle + downloadable zip from source, so
-# the dashboard always serves what's in obsidian-plugin/main.ts rather than a
-# stale hand-built artifact.
-FROM node:20-slim AS obsidian-plugin-builder
-WORKDIR /plugin
-RUN apt-get update && apt-get install -y zip && rm -rf /var/lib/apt/lists/*
-COPY obsidian-plugin/package.json obsidian-plugin/package-lock.json ./
-RUN npm ci
-COPY obsidian-plugin/main.ts obsidian-plugin/manifest.json obsidian-plugin/esbuild.config.mjs obsidian-plugin/tsconfig.json ./
-RUN npm run build && zip fulloch.zip manifest.json main.js
-
 # Stage 1: Build compiled CUDA extensions
 FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel AS builder
 
@@ -149,13 +138,10 @@ COPY --chown=appuser:appuser third_party/openwakeword-models/NOTICE.md /app/THIR
 # the timer alert tone. Downloadable model weights stay out of the image.
 COPY --chown=appuser:appuser data/config.example.yml /app/seed/config.example.yml
 COPY --chown=appuser:appuser data/models/grammars/agent.gbnf /app/seed/grammars/agent.gbnf
-COPY --chown=appuser:appuser data/models/wakeword/hey_atticus_v0.3.onnx /app/seed/wakeword/hey_atticus_v0.3.onnx
+COPY --chown=appuser:appuser data/models/wakeword/hey_atticus_v0.5.onnx /app/seed/wakeword/hey_atticus_v0.5.onnx
 COPY --chown=appuser:appuser data/wav/ /app/seed/wav/
 COPY --chown=appuser:appuser data/voices/ /app/seed/voices/
-
-# Obsidian plugin zip, built from source in the obsidian-plugin-builder stage
-# above — served by GET /api/obsidian/plugin.zip (server/dashboard.py).
-COPY --from=obsidian-plugin-builder --chown=appuser:appuser /plugin/fulloch.zip /app/obsidian-plugin/fulloch.zip
+COPY --chown=appuser:appuser data/fulloch-obsidian-plugin.zip /app/seed/fulloch-obsidian-plugin.zip
 
 # Entrypoint chowns the data dir to appuser on every boot — needed because
 # Docker-named volumes start root-owned, and a fresh volume would otherwise

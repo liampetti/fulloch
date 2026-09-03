@@ -10,6 +10,7 @@ import torch
 # Generic queue drainer — backend-agnostic, re-exported so the assistant can
 # pull it from whichever ASR module the registry selected.
 from .asr import stream_generator  # noqa: F401
+from .inference_safety import InferenceWatchdog
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +45,11 @@ class MoonshineASRPipelineWrapper:
 
     def _transcribe(self, arr: np.ndarray, generate_kwargs: dict) -> str:
         _t0 = time.monotonic()
-        result = self.pipe(
-            {"raw": arr, "sampling_rate": SAMPLE_RATE},
-            generate_kwargs=generate_kwargs or None,
-        )
+        with InferenceWatchdog("Moonshine ASR transcription"):
+            result = self.pipe(
+                {"raw": arr, "sampling_rate": SAMPLE_RATE},
+                generate_kwargs=generate_kwargs or None,
+            )
         self.last_transcribe_seconds = time.monotonic() - _t0
         if isinstance(result, list):
             result = result[0] if result else {}

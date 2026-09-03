@@ -85,6 +85,24 @@ def test_vault_metadata_records_editor_path_without_redirecting_notes(ctx, tmp_p
     assert ctx.obsidian_vault_state["vault_path"] == str(vault.resolve())
 
 
+def test_vault_metadata_marks_differing_plugin_and_server_paths(ctx, tmp_path, monkeypatch):
+    container_vault = tmp_path / "container-vault"
+    container_vault.mkdir()
+    (container_vault / ".obsidian").mkdir()
+    monkeypatch.setattr(
+        "tools.notes_root.translate_vault_path", lambda _path: container_vault
+    )
+    client = _client_for(ctx)
+
+    with _connect(client, ctx.obsidian_token) as ws:
+        ws.send_text(json.dumps({"type": "vault_metadata", "vault_path": "/host/vault", "files": []}))
+        import time
+        time.sleep(0.1)
+
+    assert ctx.obsidian_vault_state["plugin_vault_path"] == "/host/vault"
+    assert ctx.obsidian_vault_state["path_navigation_mismatch"] is True
+
+
 def test_context_message_routes_to_assistant(ctx):
     client = _client_for(ctx)
     with _connect(client, ctx.obsidian_token) as ws:

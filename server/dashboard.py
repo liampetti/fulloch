@@ -22,6 +22,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+import requests
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import (
@@ -101,6 +102,7 @@ _LOGO_PATH = _SERVER_DIR.parent / "fulloch.png"
 # language model runs off-device over a remote OpenAI-compatible endpoint.
 _PARLOCH_PATH = _SERVER_DIR.parent / "parloch.png"
 _VOICES_DIR = _SERVER_DIR.parent / "data" / "voices"
+_OBSIDIAN_PLUGIN_ZIP = _SERVER_DIR.parent / "data" / "fulloch-obsidian-plugin.zip"
 
 HISTORY_LIMIT = 200
 
@@ -432,6 +434,10 @@ class ModelsRequest(BaseModel):
     models: Optional[dict] = None
 
 
+class ThinkingTaskRequest(BaseModel):
+    task: str
+
+
 class VoiceRequest(BaseModel):
     instruct: str
     phrase: Optional[str] = None
@@ -699,6 +705,19 @@ def create_app(
         with history_lock:
             return JSONResponse(list(history_log))
 
+    @app.get("/reports/{note_id:path}")
+    def get_report(note_id: str) -> Response:
+        """Serve a generated report only from the dedicated reports note directory."""
+        if not _re.fullmatch(r"fulloch-reports/\d{4}-\d{2}-\d{2}-[0-9a-f]{8}", note_id):
+            raise HTTPException(status_code=404, detail="report not found")
+        from tools.notes_root import get_notes_root
+
+        root = get_notes_root().resolve()
+        path = (root / f"{note_id}.md").resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            raise HTTPException(status_code=404, detail="report not found")
+        return Response(path.read_text(encoding="utf-8"), media_type="text/markdown")
+
     @app.post("/reset")
     def reset_chat() -> dict:
         nonlocal startup_greeting_seeded
@@ -841,6 +860,7 @@ def create_app(
                     )
                     else {}
                 ),
+                "thinking_job": context.assistant.active_thinking_task(),
             }
         )
         return JSONResponse(payload)
@@ -874,6 +894,32 @@ def create_app(
         _require_ready()
         context.assistant.audio_capture.mic_globally_enabled = req.enabled
         return {"ok": True, "mic_enabled": req.enabled}
+
+    @app.post("/thinking/run")
+    def run_thinking_task(req: ThinkingTaskRequest) -> dict:
+        _require_ready()
+        try:
+            return context.assistant.run_thinking_task(req.task)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/thinking/{job_id}")
+    def thinking_task_status(job_id: str) -> dict:
+        _require_ready()
+        status = context.assistant.thinking_task_status(job_id)
+        if status is None:
+            raise HTTPException(status_code=404, detail="thinking job not found")
+        return status
+
+    @app.post("/thinking/{job_id}/cancel")
+    def cancel_thinking_task(job_id: str) -> dict:
+        _require_ready()
+        if not context.assistant.cancel_thinking_task(job_id):
+            raise HTTPException(status_code=404, detail="thinking job not found or already finished")
+        status = context.assistant.thinking_task_status(job_id)
+        return {"ok": True, "job": status}
 
     @app.post("/stop")
     def stop_turn(req: StopRequest = StopRequest()) -> dict:  # noqa: B008
@@ -940,6 +986,30 @@ def create_app(
         _require_ready()
         answer = context.assistant.handle_text_turn(req.text)
         return {"answer": answer}
+
+    @app.get("/media-artwork/{entity_id}")
+    def media_artwork(entity_id: str) -> Response:
+        """Proxy a player's current artwork through the authenticated dashboard."""
+        _require_ready()
+        if not _re.fullmatch(r"media_player\.[A-Za-z0-9_]+", entity_id):
+            raise HTTPException(status_code=404, detail="media player not found")
+        import tools.home_assistant as ha
+
+        if not ha.HA_TOKEN or entity_id in ha._DENIED_ENTITIES:
+            raise HTTPException(status_code=404, detail="media player not found")
+        try:
+            response = requests.get(
+                f"{ha.HA_URL}/api/media_player_proxy/{entity_id}",
+                headers=ha._get_headers(),
+                timeout=ha.TIMEOUT,
+            )
+            response.raise_for_status()
+        except requests.RequestException:
+            raise HTTPException(status_code=404, detail="artwork unavailable") from None
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        if not content_type.startswith("image/") or len(response.content) > 5_000_000:
+            raise HTTPException(status_code=404, detail="artwork unavailable")
+        return Response(content=response.content, media_type=content_type, headers={"Cache-Control": "no-cache"})
 
     @app.get("/facts")
     def facts_list() -> JSONResponse:
@@ -1706,6 +1776,12 @@ def create_app(
                         context.obsidian_vault_state["connected"] = True
                         context.obsidian_vault_state["vault_path"] = str(resolved)
                         context.obsidian_vault_state["vault_resolved_path"] = str(resolved)
+                        context.obsidian_vault_state["plugin_vault_path"] = str(raw_path)
+                        # The server can translate host paths to its mounted vault,
+                        # but open_file has no reverse translation back to Obsidian.
+                        context.obsidian_vault_state["path_navigation_mismatch"] = (
+                            str(raw_path) != str(resolved)
+                        )
                         context.obsidian_vault_state["last_connected_at"] = time.time()
                         context.obsidian_vault_state["last_error"] = None
                         logger.info(
@@ -1863,18 +1939,13 @@ def create_app(
 
     @app.get("/api/obsidian/plugin.zip")
     def obsidian_plugin_zip() -> FileResponse:
-        """Serve the pre-built plugin zip from obsidian-plugin/fulloch.zip.
-
-        The zip is committed in the repo so a fresh install has it available
-        immediately, no release download required.
-        """
-        zip_path = _SERVER_DIR.parent / "obsidian-plugin" / "fulloch.zip"
-        if not zip_path.is_file():
-            raise HTTPException(status_code=404, detail="plugin zip not built yet")
+        """Serve the transitional, separately built Obsidian plugin archive."""
+        if not _OBSIDIAN_PLUGIN_ZIP.is_file():
+            raise HTTPException(status_code=404, detail="plugin archive unavailable")
         return FileResponse(
-            str(zip_path),
+            str(_OBSIDIAN_PLUGIN_ZIP),
             media_type="application/zip",
-            filename="fulloch.zip",
+            filename="fulloch-obsidian-plugin.zip",
         )
 
     return app
@@ -2114,7 +2185,12 @@ async def _pipe_to_backend(
     except Exception:
         return
 
-    async def _pump(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
+    peer = client_writer.get_extra_info("peername")
+    first_close: tuple[str, str] | None = None
+
+    async def _pump(src: asyncio.StreamReader, dst: asyncio.StreamWriter, direction: str) -> None:
+        nonlocal first_close
+        close_reason = "EOF"
         try:
             while True:
                 data = await src.read(65536)
@@ -2122,11 +2198,15 @@ async def _pipe_to_backend(
                     break
                 dst.write(data)
                 await dst.drain()
-        except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
-            pass
-        except Exception:
-            pass
+        except asyncio.CancelledError:
+            raise
+        except (ConnectionResetError, BrokenPipeError) as error:
+            close_reason = type(error).__name__
+        except Exception as error:  # noqa: BLE001 -- retain connection-level failure provenance
+            close_reason = f"{type(error).__name__}: {error}"
         finally:
+            if first_close is None:
+                first_close = (direction, close_reason)
             try:
                 dst.close()
             except Exception:
@@ -2134,10 +2214,16 @@ async def _pipe_to_backend(
 
     try:
         await asyncio.gather(
-            _pump(client_reader, backend_writer),
-            _pump(backend_reader, client_writer),
+            _pump(client_reader, backend_writer, "client"),
+            _pump(backend_reader, client_writer, "backend"),
         )
     finally:
+        if first_close is not None:
+            # Docker probes /ready over loopback every ten seconds. Their normal
+            # response close is not actionable, even when application logging is DEBUG.
+            if peer is None or peer[0] not in ("127.0.0.1", "::1"):
+                logger.info("TLS dispatcher relay closed by %s (%s, peer=%s)",
+                            first_close[0], first_close[1], peer)
         for w in (client_writer, backend_writer):
             try:
                 w.close()

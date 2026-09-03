@@ -7,7 +7,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tools.tool_registry import ToolRegistry, ToolSchema, UnknownToolError  # noqa: E402
+from tools.tool_registry import (  # noqa: E402
+    ThinkingResult,
+    ToolRegistry,
+    ToolSchema,
+    UnknownToolError,
+    thinking_result_error,
+)
 
 
 class TestRegistration:
@@ -34,6 +40,15 @@ class TestRegistration:
         assert mock_tool_registry.get_tool("greet") is not None
         assert mock_tool_registry.get_tool("hello") is not None
         assert mock_tool_registry.get_tool("hi_there") is not None
+
+    def test_registers_deep_think_only_tool(self, mock_tool_registry):
+        def investigate():
+            return "evidence"
+
+        mock_tool_registry.register_tool(investigate, name="investigate", deep_think_only=True)
+
+        assert mock_tool_registry.is_deep_think_only("investigate") is True
+        assert mock_tool_registry.is_deep_think_only("unknown") is False
 
     def test_name_collision_is_skipped_with_warning(self, mock_tool_registry, caplog):
         def first():
@@ -121,6 +136,32 @@ class TestExecution:
         mock_tool_registry.register_tool(boom, name="boom")
         with pytest.raises(RuntimeError):
             mock_tool_registry.execute_tool("boom")
+
+
+class TestThinkingResult:
+    def test_typed_outcome_accepts_the_standard_evidence_envelope(self):
+        result = ThinkingResult(
+            "Found one source.",
+            evidence={"source": "example"},
+            scope="One retrieved source.",
+            next_actions=("search_again",),
+            artifact={"type": "source"},
+        )
+
+        assert thinking_result_error(result) is None
+
+    @pytest.mark.parametrize(
+        ("kwargs", "error"),
+        [
+            ({"status": "exhausted", "scope": "One search."}, "unknown status"),
+            ({"scope": ""}, "scope must be a non-empty string"),
+            ({"scope": "One search.", "evidence": []}, "evidence must be a mapping"),
+            ({"scope": "One search.", "next_actions": ["search"]}, "next_actions must be a tuple"),
+            ({"scope": "One search.", "artifact": "source"}, "artifact must be a mapping"),
+        ],
+    )
+    def test_typed_outcome_rejects_invalid_contract_fields(self, kwargs, error):
+        assert error in thinking_result_error(ThinkingResult("Result", **kwargs))
 
 
 class TestDescribeTools:

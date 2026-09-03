@@ -232,6 +232,11 @@ def _utterance_mono(chunks: deque) -> np.ndarray:
     return buf[:, channel]
 
 
+def _utterance_pcm(chunks: deque) -> np.ndarray:
+    """Materialize an utterance without discarding its satellite channels."""
+    return np.concatenate(list(chunks), axis=0)
+
+
 def rms_to_dbfs(rms: float) -> float:
     """Convert a linear RMS (0..1 for float32 PCM) to dBFS.
 
@@ -493,7 +498,7 @@ class AudioCapture:
                 self.wakeword_detected_callback(session.id)
 
     def _save_wakeword_wav(self, satellite_id: str, pcm: np.ndarray, score: float) -> Optional[str]:
-        """Persist a short candidate clip for wake-word tuning when enabled."""
+        """Persist a candidate clip, retaining every satellite channel for diagnostics."""
         if not self.save_wakeword_wavs or not pcm.size:
             return None
         try:
@@ -502,9 +507,10 @@ class AudioCapture:
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
             path = self.wakeword_wav_dir / f"{timestamp}_{safe_id}_{score:.3f}_pending.wav"
             samples = np.clip(pcm, -1.0, 1.0)
+            channels = 1 if samples.ndim == 1 else samples.shape[1]
             data = (samples * 32767).astype("<i2", copy=False).tobytes()
             with wave.open(str(path), "wb") as wav:
-                wav.setnchannels(1)
+                wav.setnchannels(channels)
                 wav.setsampwidth(2)
                 wav.setframerate(self.sample_rate)
                 wav.writeframes(data)
@@ -541,7 +547,9 @@ class AudioCapture:
         if session.kws_candidate and self.asr_work_dropped_callback is not None:
             self.asr_work_dropped_callback(session.id, "wake_candidate", True, reason)
 
-    def _enqueue(self, session, buf, onset, loudness_db, provisional, endpoint_t, wake_probe=False):
+    def _enqueue(
+        self, session, buf, onset, loudness_db, provisional, endpoint_t, wake_probe=False, diagnostic_pcm=None
+    ):
         gated = self._wakeword_gate_active(session)
         if gated and not session.kws_candidate:
             return
@@ -556,7 +564,9 @@ class AudioCapture:
             # but tuning needs the complete endpointed utterance. A provisional
             # ASR snapshot is not authoritative, so only persist the final one.
             if not provisional:
-                wav_path = self._save_wakeword_wav(session.id, endpoint_buf, session.kws_score)
+                wav_path = self._save_wakeword_wav(
+                    session.id, diagnostic_pcm if diagnostic_pcm is not None else endpoint_buf, session.kws_score
+                )
             queued = self._put_utterance(
                 (buf, onset, loudness_db, provisional, session.id, endpoint_t, wake_probe, True, wav_path,
                  session.protocol_state_generation),
@@ -809,9 +819,13 @@ class AudioCapture:
                 if not session.server_vad:
                     if chunk is FLUSH:
                         if sat_buf and self.mic_globally_enabled and session.transcribing and not session.user_muted:
-                            buf = _utterance_mono(sat_buf)
+                            diagnostic_pcm = _utterance_pcm(sat_buf)
+                            buf = _utterance_mono([diagnostic_pcm])
                             onset = speech_onset_t if speech_onset_t is not None else time.monotonic()
-                            self._enqueue(session, buf, onset, rms_to_dbfs(_buf_rms(buf)), False, time.monotonic())
+                            self._enqueue(
+                                session, buf, onset, rms_to_dbfs(_buf_rms(buf)), False, time.monotonic(),
+                                diagnostic_pcm=diagnostic_pcm,
+                            )
                         sat_buf.clear()
                         speech_onset_t = None
                         continue
@@ -878,7 +892,8 @@ class AudioCapture:
                         and time.monotonic() - session.early_wake_probe_started_at
                         >= self.early_wake_probe_seconds
                     ):
-                        buf = _utterance_mono(sat_buf)
+                        diagnostic_pcm = _utterance_pcm(sat_buf)
+                        buf = _utterance_mono([diagnostic_pcm])
                         onset = endpointer.speech_onset or time.monotonic()
                         rms = endpointer.voiced_rms
                         if rms is None:
@@ -902,6 +917,10 @@ class AudioCapture:
                         endpointer.soft_endpointed
                         and not endpointer.endpointed
                         and endpointer.speech_started
+                        # An early probe already covers this in-progress speech
+                        # segment. Keep the hard endpoint for verification, but
+                        # do not queue another provisional ASR request.
+                        and not session.early_wake_probe_emitted
                     ):
                         if not session.soft_probe_emitted:
                             # A wake phrase is commonly shorter than the normal
@@ -972,7 +991,10 @@ class AudioCapture:
                         if self._follow_up_open(session)
                         else self.min_utterance_samples
                     )
-                    buf = _utterance_mono(sat_buf)
+                    # Keep the interleaved/multichannel capture for optional
+                    # wakeword diagnostics while ASR receives its best channel.
+                    diagnostic_pcm = _utterance_pcm(sat_buf)
+                    buf = _utterance_mono([diagnostic_pcm])
                     if buf.size >= min_required and endpointer.speech_started:
                         onset = endpointer.speech_onset or time.monotonic()
                         # Tag with the voiced-window loudness; fall back to
@@ -982,7 +1004,9 @@ class AudioCapture:
                         if rms is None:
                             rms = _buf_rms(buf)
                         loudness_db = rms_to_dbfs(rms)
-                        self._enqueue(session, buf, onset, loudness_db, False, time.monotonic())
+                        self._enqueue(
+                            session, buf, onset, loudness_db, False, time.monotonic(), diagnostic_pcm=diagnostic_pcm
+                        )
                         secs = buf.size / self.sample_rate
                         logger.debug("VAD endpoint: enqueued %.2fs for transcription (%s)", secs, session.id)
                     sat_buf.clear()
@@ -1019,14 +1043,16 @@ class AudioCapture:
                 if not (hit_silence or hit_max):
                     continue
 
-                buf = _utterance_mono(sat_buf)
+                diagnostic_pcm = _utterance_pcm(sat_buf)
+                buf = _utterance_mono([diagnostic_pcm])
                 if buf.size >= min_s and (
                     self._vad_model is None
                     or _contains_speech(buf, self._vad_model, self._vad_get_timestamps, self.sample_rate)
                 ):
                     onset = speech_onset_t if speech_onset_t is not None else time.monotonic()
                     self._enqueue(
-                        session, buf, onset, rms_to_dbfs(_buf_rms(buf)), tts_active and hit_max, time.monotonic()
+                        session, buf, onset, rms_to_dbfs(_buf_rms(buf)), tts_active and hit_max, time.monotonic(),
+                        diagnostic_pcm=diagnostic_pcm,
                     )
                     logger.debug("Satellite: enqueued %.2fs for transcription", buf.size / self.sample_rate)
 

@@ -65,7 +65,7 @@ DEFAULT_GENERATION_TIMEOUT = 90.0  # seconds — bounds a server that continues 
 # (or agent JSON) never needs more than ~1k tokens; deep_think (thinking_mode)
 # gets a roomier, still-bounded budget since the user explicitly asked for depth.
 REMOTE_REPLY_MAX_TOKENS = 1024
-REMOTE_THINK_MAX_TOKENS = 4096
+REMOTE_THINK_MAX_TOKENS = 8192
 
 
 def _is_context_error(exc: Exception) -> bool:
@@ -183,6 +183,9 @@ class OpenAIClient:
         history: Optional[list] = None,
         thinking_mode: bool = False,
         stats=None,
+        read_timeout: float | None = None,
+        generation_timeout: float | None = None,
+        recover_on_failure: bool = True,
     ) -> str:
         from openai import APIConnectionError, APITimeoutError, BadRequestError
 
@@ -197,7 +200,8 @@ class OpenAIClient:
         max_new_tokens = min(max_new_tokens, ceiling)
 
         t_call = time.monotonic()
-        deadline = t_call + self._generation_timeout
+        request_generation_timeout = generation_timeout or self._generation_timeout
+        deadline = t_call + request_generation_timeout
         ttft = None
         out_tokens = 0
         full_text = ""
@@ -230,11 +234,16 @@ class OpenAIClient:
                     kwargs["extra_body"]["grammar"] = gbnf
                 else:
                     kwargs["response_format"] = {"type": "json_object"}
-            stream = self._client.chat.completions.create(**kwargs)
+            client = self._client
+            if read_timeout is not None:
+                client = client.with_options(
+                    timeout=httpx.Timeout(read_timeout, connect=self._connect_timeout)
+                )
+            stream = client.chat.completions.create(**kwargs)
             for chunk in stream:
                 if time.monotonic() >= deadline:
                     raise TimeoutError(
-                        f"LLM generation exceeded the {self._generation_timeout:.0f}s deadline"
+                        f"LLM generation exceeded the {request_generation_timeout:.0f}s deadline"
                     )
                 if cancel_check is not None and cancel_check():
                     logger.info("Remote LLM generation cancelled")
@@ -251,7 +260,7 @@ class OpenAIClient:
                     out_tokens += 1
                     full_text += content
         except (APIConnectionError, APITimeoutError) as e:
-            local_restarted = self._recover_local_server(f"{type(e).__name__}: {e}")
+            local_restarted = recover_on_failure and self._recover_local_server(f"{type(e).__name__}: {e}")
             if local_restarted:
                 raise RemoteUnreachable(f"Local llama-server failed and was restarted: {type(e).__name__}: {e}") from e
             # No usable response → degrade. (A read timeout *after* partial
@@ -259,7 +268,7 @@ class OpenAIClient:
             if not full_text:
                 raise RemoteUnreachable(f"{type(e).__name__}: {e}") from e
         except TimeoutError as e:
-            if self._recover_local_server(str(e)):
+            if recover_on_failure and self._recover_local_server(str(e)):
                 raise RemoteUnreachable(f"Local llama-server timed out and was restarted: {e}") from e
             raise RemoteUnreachable(str(e)) from e
         except BadRequestError as e:
@@ -279,7 +288,7 @@ class OpenAIClient:
             if _is_context_error(e):
                 raise ContextExhaustedError(str(e)) from e
             logger.warning("Remote LLM stream failed mid-response: %s: %s", type(e).__name__, e)
-            if self._recover_local_server(f"{type(e).__name__}: {e}"):
+            if recover_on_failure and self._recover_local_server(f"{type(e).__name__}: {e}"):
                 raise RemoteUnreachable(f"Local llama-server failed and was restarted: {type(e).__name__}: {e}") from e
             if not full_text:
                 raise RemoteUnreachable(f"{type(e).__name__}: {e}") from e

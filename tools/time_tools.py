@@ -9,7 +9,7 @@ from word2number import w2n
 
 import utils.local_time as _local_time
 
-from .tool_registry import tool
+from .tool_registry import ArtifactText, tool
 
 MAX_ACTIVE_TIMERS = 32
 MAX_TIMER_SECONDS = 7 * 24 * 60 * 60
@@ -27,6 +27,51 @@ _speak_proactive = None
 def set_speak_callback(fn) -> None:
     global _speak_proactive
     _speak_proactive = fn
+
+
+def _parse_duration(duration_str: str) -> int:
+    """Parse a timer duration; shared by create and extend operations."""
+    duration_str = duration_str.lower()
+    number_str = ""
+    unit = ""
+    for word in duration_str.split():
+        try:
+            number_str = str(w2n.word_to_num(word))
+        except ValueError:
+            unit += word + " "
+    if not number_str:
+        numbers = re.findall(r"\d+", duration_str)
+        if not numbers:
+            raise ValueError("No valid duration value found")
+        number_str = numbers[0]
+    value = int(number_str)
+    if "hour" in unit:
+        return value * 3600
+    if "minute" in unit:
+        return value * 60
+    if "second" in unit or not unit.strip():
+        return value
+    raise ValueError(f"Unknown duration unit: {unit.strip()!r}")
+
+
+def _timer_artifact() -> dict:
+    """Return the bounded, UI-only timer state without changing spoken text."""
+    now = time.time()
+    with _timers_lock:
+        timers = list(active_timers.items())
+    entries = []
+    for timer_id, timer in timers[:MAX_ACTIVE_TIMERS]:
+        ends_at = timer.start_time + timer.interval
+        entries.append(
+            {
+                "id": timer_id,
+                "label": str(getattr(timer, "reminder", None) or "Timer")[:120],
+                "ends_at": round(ends_at),
+                "duration": round(timer.interval),
+                "remaining": max(0, round(ends_at - now)),
+            }
+        )
+    return {"type": "timers", "timers": entries}
 
 
 # Word forms used by `get_current_time` below. The output emits dates and
@@ -166,36 +211,6 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
         message:  Optional reminder text spoken after the beeps fire.
     """
 
-    def parse_duration(duration_str: str) -> int:
-        duration_str = duration_str.lower()
-
-        number_str = ""
-        unit = ""
-        for word in duration_str.split():
-            try:
-                val = w2n.word_to_num(word)
-                number_str = str(val)
-            except ValueError:
-                unit += word + " "
-
-        if not number_str:
-            numbers = re.findall(r"\d+", duration_str)
-            if not numbers:
-                raise ValueError("No valid duration value found")
-            number_str = numbers[0]
-
-        value = int(number_str)
-
-        if "hour" in unit:
-            return value * 3600
-        elif "minute" in unit:
-            return value * 60
-        elif "second" in unit or not unit.strip():
-            # Bare number (no unit) → seconds.
-            return value
-        else:
-            raise ValueError(f"Unknown duration unit: {unit.strip()!r}")
-
     def on_timer_complete(timer_id: str, reminder: Optional[str]):
         with _timers_lock:
             active_timers.pop(timer_id, None)
@@ -209,7 +224,7 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
                 logging.getLogger(__name__).warning(f"Timer speak failed: {e}")
 
     try:
-        seconds = parse_duration(duration)
+        seconds = _parse_duration(duration)
         if seconds > MAX_TIMER_SECONDS:
             return "Error: Timers can be at most 7 days."
         with _timers_lock:
@@ -219,17 +234,19 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
             timer = threading.Timer(seconds, on_timer_complete, args=[timer_id, message])
             timer.daemon = True
             timer.start_time = time.time()
+            timer.reminder = message
             active_timers[timer_id] = timer
             timer.start()
 
         if seconds >= 3600:
             hours = seconds // 3600
-            return f"Timer started for {hours} {'hour' if hours == 1 else 'hours'}"
+            text = f"Timer started for {hours} {'hour' if hours == 1 else 'hours'}"
         elif seconds >= 60:
             minutes = seconds // 60
-            return f"Timer started for {minutes} {'minute' if minutes == 1 else 'minutes'}"
+            text = f"Timer started for {minutes} {'minute' if minutes == 1 else 'minutes'}"
         else:
-            return f"Timer started for {seconds} {'second' if seconds == 1 else 'seconds'}"
+            text = f"Timer started for {seconds} {'second' if seconds == 1 else 'seconds'}"
+        return ArtifactText(text, _timer_artifact())
 
     except ValueError as e:
         return f"Error: {str(e)}"
@@ -252,8 +269,34 @@ def cancel_timer(timer_id: str) -> str:
         timer = active_timers.pop(timer_id, None)
     if timer is not None:
         timer.cancel()
-        return f"Timer {timer_id} cancelled"
+        return ArtifactText(f"Timer {timer_id} cancelled", _timer_artifact())
     return f"Timer {timer_id} not found"
+
+
+@tool(
+    name="extend_timer",
+    description="Extend one active timer by a relative duration, such as '1 minute'",
+    aliases=["add_time_to_timer", "timer_extend"],
+)
+def extend_timer(timer_id: str, duration: str) -> str:
+    """Extend one active countdown while retaining its reminder and identity."""
+    try:
+        seconds = _parse_duration(duration)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    with _timers_lock:
+        timer = active_timers.get(timer_id)
+        if timer is None:
+            return f"Timer {timer_id} not found"
+        remaining = max(0, timer.interval - (time.time() - timer.start_time))
+        timer.cancel()
+        extended = threading.Timer(remaining + seconds, timer.function, args=timer.args)
+        extended.daemon = True
+        extended.start_time = time.time()
+        extended.reminder = getattr(timer, "reminder", None)
+        active_timers[timer_id] = extended
+        extended.start()
+    return ArtifactText(f"Timer {timer_id} extended by {duration}", _timer_artifact())
 
 
 @tool(
@@ -299,7 +342,7 @@ def get_timer_status(timer_id: Optional[str] = None) -> str:
         timer = timers[timer_id]
         remaining = max(0, timer.interval - (time.time() - timer.start_time))
         time_str = format_time_remaining(remaining)
-        return f"Timer {timer_id} has {time_str} remaining"
+        return ArtifactText(f"Timer {timer_id} has {time_str} remaining", _timer_artifact())
 
     # Show status of all timers
     statuses = []
@@ -308,4 +351,4 @@ def get_timer_status(timer_id: Optional[str] = None) -> str:
         time_str = format_time_remaining(remaining)
         statuses.append(f"{tid}: {time_str}")
 
-    return "Timer status:\n" + "\n".join(statuses)
+    return ArtifactText("Timer status:\n" + "\n".join(statuses), _timer_artifact())

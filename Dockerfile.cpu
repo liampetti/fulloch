@@ -66,7 +66,7 @@ COPY --chown=appuser:appuser third_party/openwakeword-models/NOTICE.md /app/THIR
 # First-run seeds (copied into the empty ./data volume by core/bootstrap.py).
 COPY --chown=appuser:appuser data/config.example.yml /app/seed/config.example.yml
 COPY --chown=appuser:appuser data/models/grammars/agent.gbnf /app/seed/grammars/agent.gbnf
-COPY --chown=appuser:appuser data/models/wakeword/hey_atticus_v0.3.onnx /app/seed/wakeword/hey_atticus_v0.3.onnx
+COPY --chown=appuser:appuser data/models/wakeword/hey_atticus_v0.5.onnx /app/seed/wakeword/hey_atticus_v0.5.onnx
 COPY --chown=appuser:appuser data/wav/ /app/seed/wav/
 COPY --chown=appuser:appuser data/voices/ /app/seed/voices/
 COPY --chown=appuser:appuser data/fulloch-obsidian-plugin.zip /app/seed/fulloch-obsidian-plugin.zip

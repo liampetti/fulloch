@@ -92,6 +92,9 @@ VAD_SOFT_ENDPOINT_SILENCE_MS = 100
 # without waiting for a pause. It is wakeword-only: it can update a native
 # satellite's lifecycle but never dispatches the partial command.
 EARLY_WAKE_PROBE_MS = 600
+# Acoustic wake matches are verified from this short trailing capture while the
+# recorder continues collecting the authoritative endpointed command.
+KWS_EARLY_VERIFICATION_MS = 1250
 # While VAD has not yet detected any speech, discard the buffer once it grows
 # past this so a noisy room doesn't accumulate seconds of pre-speech audio
 # (which would both inflate onset latency and hand ASR a long noise clip).
@@ -122,14 +125,15 @@ class AsrWorkQueue:
         self.maxsize = maxsize
         self._candidates: deque[AsrWorkItem] = deque()
         self._ordinary: deque[AsrWorkItem] = deque()
-        self._candidate_satellites: set[str] = set()
+        self._candidate_keys: set[tuple[str, str]] = set()
         self._closed = False
         self._condition = threading.Condition()
 
     def offer(self, item: AsrWorkItem) -> tuple[bool, list[AsrWorkItem]]:
         """Admit work without blocking, evicting only older ordinary work for a candidate."""
         with self._condition:
-            if self._closed or (item.candidate and item.satellite_id in self._candidate_satellites):
+            key = (item.satellite_id, item.kind)
+            if self._closed or (item.candidate and key in self._candidate_keys):
                 return False, []
             evicted: list[AsrWorkItem] = []
             if self.qsize() >= self.maxsize:
@@ -138,7 +142,7 @@ class AsrWorkQueue:
                 evicted.append(self._ordinary.popleft())
             if item.candidate:
                 self._candidates.append(item)
-                self._candidate_satellites.add(item.satellite_id)
+                self._candidate_keys.add(key)
             else:
                 self._ordinary.append(item)
             self._condition.notify()
@@ -150,7 +154,7 @@ class AsrWorkQueue:
                 self._condition.wait()
             if self._candidates:
                 item = self._candidates.popleft()
-                self._candidate_satellites.remove(item.satellite_id)
+                self._candidate_keys.remove((item.satellite_id, item.kind))
                 return item.payload
             if self._ordinary:
                 return self._ordinary.popleft().payload
@@ -160,7 +164,7 @@ class AsrWorkQueue:
         with self._condition:
             if self._candidates:
                 item = self._candidates.popleft()
-                self._candidate_satellites.remove(item.satellite_id)
+                self._candidate_keys.remove((item.satellite_id, item.kind))
                 return item.payload
             if self._ordinary:
                 return self._ordinary.popleft().payload
@@ -177,7 +181,7 @@ class AsrWorkQueue:
                     if satellite_id is None or item.satellite_id == satellite_id:
                         discarded.append(item)
                         if item.candidate:
-                            self._candidate_satellites.discard(item.satellite_id)
+                            self._candidate_keys.discard((item.satellite_id, item.kind))
                     else:
                         retained.append(item)
                 items.extend(retained)
@@ -458,15 +462,23 @@ class AudioCapture:
 
     def _feed_wakeword_gate(
         self, session: SatelliteSession, chunk: np.ndarray, *, append_pre_roll: bool = True
-    ) -> None:
+    ) -> bool:
+        """Feed the idle gate and report whether this chunk activated it."""
         if not self._wakeword_gate_active(session):
-            return
+            return False
         if append_pre_roll:
             session.kws_pre_roll.append(chunk)
+            # Preserve the established one-second command pre-roll separately
+            # from the longer feedback-only verification snapshot.
             max_chunks = max(1, int(self.sample_rate / max(1, chunk.size)))
             del session.kws_pre_roll[:-max_chunks]
+            session.kws_verification_pre_roll.append(chunk)
+            verification_max_chunks = max(1, math.ceil(
+                self.sample_rate * KWS_EARLY_VERIFICATION_MS / 1000 / max(1, chunk.size)
+            ))
+            del session.kws_verification_pre_roll[:-verification_max_chunks]
         if session.kws_candidate:
-            return
+            return False
         # Do not run the acoustic classifier over idle room sound. Apart from
         # avoiding false wake candidates, this prevents each false candidate
         # from forcing an expensive Qwen ASR verification pass. Once VAD sees
@@ -474,7 +486,7 @@ class AudioCapture:
         # is still available to openWakeWord.
         endpointer = session.vad_endpointer
         if endpointer is not None and not endpointer.speech_started:
-            return
+            return False
         pcm = chunk
         if endpointer is not None and not session.kws_speech_active:
             pcm = np.concatenate(session.kws_pre_roll)
@@ -485,7 +497,7 @@ class AudioCapture:
             logger.warning("Wakeword gate failed; falling back to ASR-only: %s", exc)
             self.wakeword_backend = None
             self.wakeword_metrics["backend_errors"] += 1
-            return
+            return False
         if result.matched:
             session.kws_candidate = True
             session.kws_score = result.score
@@ -496,6 +508,31 @@ class AudioCapture:
             telemetry_event("wakeword_candidate", satellite_id=session.id, score=round(result.score, 3))
             if self.wakeword_detected_callback is not None:
                 self.wakeword_detected_callback(session.id)
+            # This is feedback-only verification. The regular endpointed
+            # candidate below still owns command dispatch and final acceptance.
+            verification_pcm = np.concatenate(session.kws_verification_pre_roll)[
+                -int(self.sample_rate * KWS_EARLY_VERIFICATION_MS / 1000) :
+            ]
+            self._put_utterance(
+                (
+                    verification_pcm,
+                    time.monotonic() - verification_pcm.size / self.sample_rate,
+                    rms_to_dbfs(_buf_rms(verification_pcm)),
+                    False,
+                    session.id,
+                    time.monotonic(),
+                    False,
+                    True,
+                    None,
+                    session.protocol_state_generation,
+                    True,
+                ),
+                satellite_id=session.id,
+                kind="wake_verification",
+                candidate=True,
+            )
+            return True
+        return False
 
     def _save_wakeword_wav(self, satellite_id: str, pcm: np.ndarray, score: float) -> Optional[str]:
         """Persist a candidate clip, retaining every satellite channel for diagnostics."""
@@ -539,6 +576,7 @@ class AudioCapture:
         session.kws_wav_path = None
         session.kws_speech_active = False
         session.kws_pre_roll.clear()
+        session.kws_verification_pre_roll.clear()
         if classifier_ran and self.wakeword_backend is not None:
             self.wakeword_backend.reset(session.id)
 
@@ -811,10 +849,11 @@ class AudioCapture:
                 if chunk is None:
                     break
 
+                wakeword_matched = False
                 if chunk is not FLUSH and self.mic_globally_enabled and session.transcribing and not session.user_muted:
                     # Keep a short pre-roll while idle. The VAD path below
                     # decides whether this same frame may be classified.
-                    self._feed_wakeword_gate(session, _endpoint_mono(chunk))
+                    wakeword_matched = self._feed_wakeword_gate(session, _endpoint_mono(chunk))
 
                 if not session.server_vad:
                     if chunk is FLUSH:
@@ -865,7 +904,22 @@ class AudioCapture:
                 # survives for the transcriber's duplicate-endpoint guard.
                 if endpointer is not None and (not tts_active or endpointer.speech_started):
                     endpointer.process(_endpoint_mono(sat_buf[-1]))
-                    self._feed_wakeword_gate(session, _endpoint_mono(chunk), append_pre_roll=False)
+                    wakeword_matched = (
+                        self._feed_wakeword_gate(session, _endpoint_mono(chunk), append_pre_roll=False)
+                        or wakeword_matched
+                    )
+                    if wakeword_matched:
+                        # The gate may match after room conversation has already
+                        # kept VAD open for many seconds. Start the command at the
+                        # short wake pre-roll instead of handing that conversation
+                        # to ASR, then rebuild VAD state over the retained audio.
+                        sat_buf = deque(session.kws_pre_roll)
+                        endpointer.reset()
+                        for pre_roll_chunk in sat_buf:
+                            endpointer.process(_endpoint_mono(pre_roll_chunk))
+                        session.soft_probe_emitted = False
+                        session.early_wake_probe_started_at = time.monotonic()
+                        session.early_wake_probe_emitted = False
                     buffer_samples = sum(len(c) for c in sat_buf)
 
                     # Discard accumulating noise before any speech is detected
@@ -1020,6 +1074,12 @@ class AudioCapture:
                 # its TTS is currently playing (barge-in always uses the RMS
                 # floor — a stricter, faster-reacting mechanism than the
                 # hard-endpoint VAD silence window).
+                if wakeword_matched:
+                    # Keep the same wake pre-roll boundary even without the VAD
+                    # state that the branch above rebuilds.
+                    sat_buf = deque(session.kws_pre_roll)
+                    silence_counter = 0
+                    speech_onset_t = time.monotonic() - sum(len(c) for c in sat_buf) / self.sample_rate
                 threshold = self._barge_in_rms if tts_active else self.silence_threshold
 
                 if is_silent(_endpoint_mono(sat_buf[-1]), threshold):

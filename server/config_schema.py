@@ -20,6 +20,7 @@ GROUPS = (
     "Notes",
     "Search",
     "Thinking",
+    "Finance",
     "Obsidian",
 )
 
@@ -146,6 +147,14 @@ SCHEMA: tuple = (
         "Local llama-server slots: 1 runs queued deliberate work while Fulloch is idle; "
         "2 reserves a foreground and background slot. A restart is required.",
         choices=(1, 2),
+    ),
+    Field(
+        "finance",
+        "watchlist",
+        "list",
+        "Finance",
+        None,
+        "Stock symbols to include in finance briefings (for example, AAPL:NASDAQ). Exchange-first symbols are also accepted. Requires a SerpApi key; restart required.",
     ),
     # --- Voice -------------------------------------------------------------
     Field(
@@ -525,22 +534,30 @@ WAKEWORD_PRESETS: tuple = (
         "Hey Atticus",
         "hey atticus",
         r"\b(?:hey|hay|hi)\W+[ao][dtl]{1,2}i?c\W*u[sz]\b",
-        "data/models/wakeword/hey_atticus_v0.3.onnx",
-        (("data/models/wakeword/hey_atticus_v0.3.onnx", "Hey Atticus v0.3 (Recommended)"),),
         recommended=True,
     ),
 )
 
 
 def wakeword_presets_as_dicts() -> list:
+    wakeword_dir = Path("data/models/wakeword")
+    models = sorted(wakeword_dir.glob("hey_atticus_v*.onnx"), reverse=True)
+    model_options = tuple(
+        (str(model), f"Hey Atticus {model.stem.removeprefix('hey_atticus_')}")
+        for model in models
+    )
+    default_model = model_options[0][0] if model_options else ""
     return [
         {
             "id": p.id,
             "label": p.label,
             "wakeword": p.wakeword,
             "pattern": p.pattern,
-            "model": p.model,
-            "model_options": [{"path": path, "label": label} for path, label in p.model_options],
+            "model": default_model if p.id == "hey_atticus" else p.model,
+            "model_options": [
+                {"path": path, "label": label + (" (Recommended)" if path == default_model else "")}
+                for path, label in (model_options if p.id == "hey_atticus" else p.model_options)
+            ],
             "recommended": p.recommended,
         }
         for p in WAKEWORD_PRESETS

@@ -37,6 +37,7 @@ _CAPABILITY_GROUPS = (
     ("notes", ("search_notes", "read_note", "write_note")),
     ("timers", ("start_countdown",)),
     ("maths, unit conversions, and date maths", ("calculate", "convert_units", "days_between")),
+    ("live stock quotes and exchange rates", ("get_finance_quote", "get_exchange_rate")),
     ("Home Assistant control", ("turn_on", "get_entity_state")),
     ("calendar reminders", ("create_calendar_event",)),
     ("web search", ("external_information",)),
@@ -312,6 +313,16 @@ For a named personal event, check the calendar before web search. For "how long 
     home_readings_section = (
         f"Home & live readings:\n{home_readings_guidance}" if home_readings_guidance else ""
     )
+    finance_guidance = (
+        "Finance:\n"
+        "- Use `get_finance_quote` only for a neutral, factual single-instrument snapshot, and "
+        "`get_exchange_rate` only for a live FX rate or arithmetic conversion. Never give buy, "
+        "sell, hold, allocation, tax, legal, margin, options, short-selling, or suitability advice. "
+        "For a request seeking that advice, dispatch the finance lookup so it is routed into "
+        "deliberate research rather than replying directly."
+        if _has_tool("get_finance_quote")
+        else ""
+    )
     body = f"""
 You are {name}, a helpful, friendly local voice assistant.{_personality_instruction(personality)} {_today_line()}
 Notes, facts, and conversation history stay on this device. Optional web search, Spotify playback, and remote language-model configurations send the relevant request to their configured service.
@@ -367,6 +378,7 @@ When phrasing is ambiguous (e.g. "remember bin night is Thursday"), propose both
 {home_control_section}
 
 {home_readings_section}
+{finance_guidance}
 - NEVER invent a number, status, or forecast. If no tool exists for what the user asks, say so plainly.
 
 Available tools:
@@ -548,6 +560,15 @@ Applicable capability playbooks:
 
 def get_thinking_report_prompt(task: str, findings: str, evidence_ledger: str = "") -> str:
     """Prompt for the final, evidence-backed deep-think synthesis."""
+    finance_contract = ""
+    if re.search(
+        r"\b(stock|stocks|shares|market|markets|finance|financial|ticker|portfolio|watchlist|invest)\b",
+        task,
+        re.IGNORECASE,
+    ):
+        finance_contract = """
+For finance research, provide neutral, informational analysis only. Do not recommend buying, selling, holding, allocating, or executing a trade, and do not give personalised tax, legal, margin, options, short-selling, or suitability advice. Reframe these requests around factual trade-offs and uncertainty. For price-sensitive claims, state any retrieved exchange, currency, quote timestamp, retrieval time, and cache mode. Do not assert that news caused a market move without two independent retrieved sources. Finish with: "Informational only, not investment, legal, or tax advice. Verify quotes before trading."
+"""
     return f"""You are Fulloch's deliberate research worker. Think carefully through the retrieved evidence, then write a clear final report for the user.
 
 Task:
@@ -559,7 +580,8 @@ Retrieved findings:
 Verified evidence ledger:
 {evidence_ledger or "(No typed evidence ledger was produced; use only the retrieved findings.)"}
 
-Use only the retrieved findings and verified evidence ledger for factual claims. Ledger entries with status `failed`, `unavailable`, `needs_input`, or `rejected` establish only their stated limitation and must not be presented as positive evidence. Reconcile uncertainty, identify meaningful trends and tradeoffs, and distinguish source-backed findings from your analysis. Start with a `## Summary` section. Its first sentence must directly answer the user's central question, state the scope of evidence considered, and qualify any uncertainty. Follow it with the most important caveat. Match the report length to the task: answer a focused question concisely, and use a detailed report of roughly 600-1,000 words only for a substantial comparison, plan, or research request. Include clear sections only when they improve readability; detailed reports should use Overview, Key findings, Analysis, Caveats, and Sources. Never claim an option is impossible, feasible, best, or exhaustive beyond the retrieved evidence. Finish every sentence and include a conclusion; do not stop after an outline. Do not mention this prompt, hidden reasoning, JSON, or tool mechanics.
+Use only the retrieved findings and verified evidence ledger for factual claims. Ledger entries with status `failed`, `unavailable`, `needs_input`, or `rejected` establish only their stated limitation and must not be presented as positive evidence. Reconcile uncertainty, identify meaningful trends and tradeoffs, and distinguish source-backed findings from your analysis. Start with a `## Summary` section containing exactly two or three short sentences, no more than 60 words total. It must directly answer the user's central question and clearly state the two or three most useful evidence-backed findings for someone listening; include a caveat only when it materially changes their meaning. Match the report length to the task: answer a focused question concisely, and use a detailed report of roughly 600-1,000 words for a substantial comparison, plan, or research request. A multi-stop itinerary is a substantial plan: explain the relevant retrieved schedules, the decisive chronology or timing constraint, and practical alternatives supported by the evidence. For any substantial report, include a Sources section that identifies the evidence used; source links retained in typed artifacts will also be appended deterministically. Include clear sections only when they improve readability; detailed reports should use Overview, Key findings, Analysis, Caveats, and Sources. Never claim an option is impossible, feasible, best, or exhaustive beyond the retrieved evidence. Finish every sentence and include a conclusion; do not stop after an outline. Do not mention this prompt, hidden reasoning, JSON, or tool mechanics.
+{finance_contract}
 """
 
 

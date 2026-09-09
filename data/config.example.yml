@@ -96,11 +96,11 @@ general:
 #     flash_attn: false          # Experimental llama.cpp Flash Attention; enable only after stability testing.
 #   # Optional idle gate. Omit this block (or use backend: asr) for default
 #   # always-running ASR wakeword detection, which transcribes voice activity.
-#   # The bundled Hey Atticus model is below; use a compatible ONNX path for a
-#   # custom wakeword model you have downloaded.
+#   # Current model is v0.6 for the "Hey Atticus" wakeword, otherwise use
+#   # path for a custom wakeword model you have downloaded.
 #   wakeword:
 #     backend: openwakeword
-#     model: "data/models/wakeword/hey_atticus_v0.5.onnx"
+#     model: "data/models/wakeword/hey_atticus_v0.6.onnx"
 #     threshold: 0.6            # Increase threshold to reduce false activations
 #     smoothing_frames: 1       # Add frames to reduce false activations
 #     cooldown_ms: 1500         # How long to wait between successive wakeword activations
@@ -138,6 +138,12 @@ thinking:
 # credentials; Wolfram is exposed only when its key is present.
 # Travel planning is always available when serpapi_api_key is present. It uses
 # fixed, bounded Google Flights/Hotels searches in AUD and never books.
+# Finance research is available when serpapi_api_key is present. It uses
+# Google Finance data through SerpApi; data may be delayed and is not trading advice.
+# finance:
+#   watchlist:                     # Symbols with exchanges avoid ambiguity.
+#     - "AAPL:NASDAQ"
+#     - "TSLA:NASDAQ"
 
 # === Multi-satellite (/ws/satellite-v2) =====================================
 # Tokens accepted from non-browser /ws/satellite-v2 clients (any one in the

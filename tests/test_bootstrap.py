@@ -14,6 +14,7 @@ def _make_seed(tmp_path):
     (seed / "grammars" / "agent.gbnf").write_text('root ::= "x"')
     (seed / "wakeword").mkdir()
     (seed / "wakeword" / "hey_atticus_v0.3.onnx").write_bytes(b"wakeword model")
+    (seed / "wakeword" / "hey_atticus_v0.6.onnx").write_bytes(b"new wakeword model")
     (seed / "config.example.yml").write_text("general:\n  wakeword: hey atticus\n")
     return seed
 
@@ -33,7 +34,7 @@ def test_seeds_config_and_grammar_on_first_run(tmp_path):
     assert (data / "models" / "grammars" / "agent.gbnf").is_file()
 
 
-def test_seeds_default_wakeword_model_without_overwriting_a_replacement(tmp_path):
+def test_seeds_wakeword_models_without_overwriting_a_replacement(tmp_path):
     seed = _make_seed(tmp_path)
     data = tmp_path / "data"
 
@@ -41,6 +42,7 @@ def test_seeds_default_wakeword_model_without_overwriting_a_replacement(tmp_path
 
     wakeword = data / "models" / "wakeword" / "hey_atticus_v0.3.onnx"
     assert wakeword.read_bytes() == b"wakeword model"
+    assert (data / "models" / "wakeword" / "hey_atticus_v0.6.onnx").read_bytes() == b"new wakeword model"
 
     wakeword.write_bytes(b"user replacement")
     ensure_scaffolding(str(data), seed_dir=str(seed))

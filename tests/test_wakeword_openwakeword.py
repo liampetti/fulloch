@@ -51,7 +51,7 @@ def test_wakeword_activation_records_score():
     capture.set_wakeword_detected_callback(matched_ids.append)
     session = SatelliteSession("satellite")
 
-    capture._feed_wakeword_gate(session, np.zeros(1280, dtype=np.float32))
+    assert capture._feed_wakeword_gate(session, np.zeros(1280, dtype=np.float32)) is True
 
     assert session.kws_candidate is True
     assert capture.wakeword_metrics["candidates"] == 1
@@ -79,6 +79,7 @@ def test_wakeword_activation_optionally_saves_timestamped_wav(tmp_path):
     assert files[0].name.endswith("_kitchen_phone_0.873_pending.wav")
     assert files[0].read_bytes()[:4] == b"RIFF"
     assert files[0].stat().st_size == 32044
+    assert capture.audio_queue.get_nowait()[10] is True
     assert capture.audio_queue.get_nowait()[8] == str(files[0])
 
 
@@ -109,6 +110,33 @@ def test_wakeword_candidate_waits_for_final_endpoint_before_asr():
 
     assert capture.audio_queue.empty()
     assert session.kws_candidate is True
+
+
+def test_wakeword_activation_queues_a_1250ms_verification_snapshot():
+    class Backend:
+        def __init__(self):
+            self.calls = 0
+
+        def feed_pcm(self, _satellite_id, _pcm):
+            self.calls += 1
+            return WakewordResult(self.calls == 7, 0.873)
+
+        def reset(self, _satellite_id):
+            pass
+
+    capture = AudioCapture(use_vad=False)
+    capture.set_wakeword_backend(Backend())
+    session = SatelliteSession("satellite")
+    chunks = [np.full(3200, value, dtype=np.float32) for value in range(7)]
+
+    for chunk in chunks:
+        capture._feed_wakeword_gate(session, chunk)
+
+    queued = capture.audio_queue.get_nowait()
+    assert queued[0].size == 20000
+    assert np.array_equal(queued[0], np.concatenate(chunks)[-20000:])
+    assert queued[7] is True
+    assert queued[10] is True
 
 
 def test_wakeword_wav_is_labelled_after_asr_verification(tmp_path):

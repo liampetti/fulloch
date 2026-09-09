@@ -21,7 +21,7 @@ Fulloch is your privacy-focused local voice assistant running on your own PC or 
 - **Smart-home control** - control Home Assistant lights, locks, covers, climate, media, calendars, todos, weather, and more in natural language
 - **Music and reminders** - find music with Spotify and play it through Home Assistant; create calendar reminders that Fulloch announces at the right time
 - **Live answers** - get concise, source-aware summaries from self-hosted SearXNG web search, with the option to save results to your vault
-- **Deliberate research and planning** - queue deeper background investigations for comparisons, academic literature, and multi-stop travel plans; research prefers Semantic Scholar and falls back to arXiv and OpenAlex, while travel searches use an optional SerpApi key
+- **Deliberate research and planning** - queue deeper background investigations for comparisons, academic literature, travel, and finance; research prefers Semantic Scholar and falls back to arXiv and OpenAlex, while optional SerpApi-backed travel and finance tools provide bounded, read-only results
 - **Home Assistant automation** - use the HACS integration for status, mic control, proactive speech, chat, and scheduled deliberate-thinking tasks
 
 > **Higgs TTS 3:** The optional Higgs GPU backend is available only under Boson AI's Research and Non-Commercial License, not Fulloch's MIT license. It requires explicit consent for every voice reference. See [Model Sources and Licenses](MODELS.md#higgs-tts-3-license).

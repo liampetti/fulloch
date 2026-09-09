@@ -85,7 +85,7 @@ def test_tls_proxy_logs_which_side_closed_first(monkeypatch, caplog):
         return _Reader(), backend_writer
 
     monkeypatch.setattr(dashboard.asyncio, "open_connection", fake_open_connection)
-    with caplog.at_level(logging.INFO, logger="server.dashboard"):
+    with caplog.at_level(logging.DEBUG, logger="server.dashboard"):
         asyncio.run(dashboard._pipe_to_backend(_Reader(), client_writer, "127.0.0.1", 18765))
 
     assert "TLS dispatcher relay closed by client (EOF, peer=('192.168.4.99', 45678))" in caplog.text

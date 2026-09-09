@@ -15,6 +15,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import quote, urlparse
 
 import numpy as np
 
@@ -45,7 +46,7 @@ from .agent_loop import (
 )
 from .audio import AudioCapture
 from .backends import ASR, LLM, TTS, get_module, resolve_models
-from .background_jobs import BackgroundJob, BackgroundJobManager
+from .background_jobs import BackgroundJob, BackgroundJobManager, JobStatus
 from .higgs_controls import apply_delivery, extract_delivery_request
 from .satellite import SatelliteSession
 from .satellite_context import current_satellite_id as _current_satellite_id
@@ -61,6 +62,10 @@ logger = logging.getLogger(__name__)
 
 class ConversationModeUnavailable(RuntimeError):
     """Raised when an exclusive Conversation mode session cannot be opened."""
+
+
+class ReportSynthesisError(RuntimeError):
+    """Raised when a background investigation cannot produce a final report."""
 
 
 # Names accepted by general.log_level, for the settings-console hot-apply
@@ -152,8 +157,181 @@ def _describe_thinking_capability(name: str, schema) -> str:
 
 
 def _thinking_action_key(name: str, args: list) -> str:
-    """Identify equivalent worker actions independent of JSON object key order."""
-    return f"{name}:{json.dumps(args, sort_keys=True, separators=(',', ':'), default=str)}"
+    """Identify duplicate worker actions despite cosmetic string differences."""
+
+    def normalise(value):
+        if isinstance(value, str):
+            return " ".join(value.split()).casefold()
+        if isinstance(value, list):
+            return [normalise(item) for item in value]
+        if isinstance(value, dict):
+            return {key: normalise(item) for key, item in value.items()}
+        return value
+
+    return f"{name}:{json.dumps(normalise(args), sort_keys=True, separators=(',', ':'), default=str)}"
+
+
+def _fallback_thinking_report(task: str, evidence: list[dict], findings: str) -> str:
+    """Preserve collected evidence when the report model returns no visible text."""
+    source = json.dumps(evidence, ensure_ascii=True, indent=2, sort_keys=True, default=str)
+    if not evidence:
+        source = findings
+    source = source[:DEEP_THINK_TRANSCRIPT_MAX_CHARS].rstrip()
+    return (
+        "## Summary\n\n"
+        "The investigation collected the evidence below, but the final report model "
+        "returned no visible response. This is the retrieved material without additional synthesis.\n\n"
+        "## Task\n\n"
+        f"{task}\n\n"
+        "## Collected evidence\n\n"
+        f"{source or 'No usable evidence was retained.'}"
+    )
+
+
+def _travel_report_appendix(artifacts: dict[str, dict]) -> str:
+    """Render bounded flight evidence so reports retain the offers they discuss."""
+    offers_by_route: dict[tuple[str, str, str], list[dict]] = {}
+    sources: dict[tuple[str, str, str], str] = {}
+    currencies: dict[tuple[str, str, str], str] = {}
+
+    def add_offers(
+        route: object, departure_date: object, offers: object, retrieved_at: object = "", currency: object = ""
+    ) -> None:
+        if not isinstance(route, dict) or not isinstance(offers, list):
+            return
+        origin = str(route.get("origin") or "").upper()
+        destination = str(route.get("destination") or "").upper()
+        date = str(departure_date or "")
+        if not origin or not destination or not date:
+            return
+        key = (origin, destination, date)
+        bucket = offers_by_route.setdefault(key, [])
+        for offer in offers:
+            if isinstance(offer, dict) and offer not in bucket:
+                bucket.append(offer)
+        if retrieved_at:
+            sources[key] = str(retrieved_at)
+        if currency:
+            currencies[key] = str(currency)
+
+    for record in artifacts.values():
+        data = record.get("data") if isinstance(record, dict) else None
+        if not isinstance(data, dict):
+            continue
+        if data.get("type") == "travel_plan":
+            representative = data.get("representative")
+            departure_date = representative.get("departure_date") if isinstance(representative, dict) else ""
+            currency = representative.get("currency") if isinstance(representative, dict) else ""
+            for offers in data.get("leg_offers") or []:
+                if not isinstance(offers, list) or not offers:
+                    continue
+                first = offers[0] if isinstance(offers[0], dict) else {}
+                departure = first.get("departure") if isinstance(first.get("departure"), dict) else {}
+                arrival = first.get("arrival") if isinstance(first.get("arrival"), dict) else {}
+                add_offers(
+                    {"origin": departure.get("id"), "destination": arrival.get("id")},
+                    departure_date,
+                    offers,
+                    currency=currency,
+                )
+        elif data.get("type") == "flight_search":
+            add_offers(
+                data.get("route"), data.get("departure_date"), [data.get("offer")], data.get("retrieved_at"), data.get("currency")
+            )
+
+    if not offers_by_route:
+        return ""
+    sections = ["## Retrieved Flight Offers", "", "Bounded Google Flights results retrieved for this investigation. Fares and schedules can change."]
+    source_lines = []
+    for (origin, destination, date), offers in offers_by_route.items():
+        sections.extend(["", f"### {origin} to {destination} on {date}"])
+        for index, offer in enumerate(offers, 1):
+            departure = offer.get("departure") if isinstance(offer.get("departure"), dict) else {}
+            arrival = offer.get("arrival") if isinstance(offer.get("arrival"), dict) else {}
+            airlines = ", ".join(str(name) for name in offer.get("airlines") or []) or "Carrier unavailable"
+            stops = offer.get("stops")
+            stop_text = "nonstop" if stops == 0 else f"{stops} stop{'s' if stops != 1 else ''}" if isinstance(stops, int) else "stops unavailable"
+            duration = offer.get("duration_minutes")
+            duration_text = f", {duration // 60}h {duration % 60:02d}m" if isinstance(duration, int) else ""
+            price = offer.get("price")
+            price_text = f", {currencies.get((origin, destination, date), '')} {price}" if price is not None else ""
+            sections.append(
+                f"{index}. {airlines}: {departure.get('time', 'departure unavailable')} "
+                f"to {arrival.get('time', 'arrival unavailable')} ({stop_text}{duration_text}{price_text})."
+            )
+        query = quote(f"Flights from {origin} to {destination} on {date}")
+        retrieved = sources.get((origin, destination, date))
+        suffix = f" Retrieved {retrieved}." if retrieved else ""
+        source_lines.append(
+            f"- [Google Flights: {origin} to {destination} on {date}](https://www.google.com/travel/flights?q={query}) via SerpApi.{suffix}"
+        )
+    return "\n".join(sections + ["", "## Sources", ""] + source_lines)
+
+
+def _report_references(artifacts: dict[str, dict]) -> str:
+    """Render source URLs from typed artifacts rather than trusting synthesis to cite them."""
+    references: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(label: object, url: object) -> None:
+        if not isinstance(url, str) or not url.strip() or url in seen:
+            return
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return
+        seen.add(url)
+        references.append((str(label).strip() or parsed.netloc, url))
+
+    def add_quote(quote: object) -> None:
+        if not isinstance(quote, dict):
+            return
+        label = quote.get("name") or quote.get("symbol") or quote.get("requested_symbol") or "Google Finance"
+        add(f"Google Finance: {label}", quote.get("source_url"))
+        for item in quote.get("news") or []:
+            if isinstance(item, dict):
+                add(item.get("title") or item.get("publisher") or "Finance news", item.get("url"))
+
+    for record in artifacts.values():
+        data = record.get("data") if isinstance(record, dict) else None
+        if not isinstance(data, dict):
+            continue
+        kind = data.get("type")
+        if kind in {"paper_search", "paper_detail"}:
+            papers = data.get("papers") if kind == "paper_search" else [data.get("paper")]
+            for paper in papers or []:
+                if not isinstance(paper, dict):
+                    continue
+                title = paper.get("title") or "Paper"
+                add(f"{paper.get('source') or 'Paper'}: {title}", paper.get("url"))
+                doi = paper.get("doi")
+                if isinstance(doi, str) and doi.strip():
+                    add(f"DOI: {title}", f"https://doi.org/{doi.removeprefix('https://doi.org/')}")
+        elif kind == "web_research":
+            for source in data.get("sources") or []:
+                if isinstance(source, dict):
+                    add(source.get("host") or "Web result", source.get("url"))
+        elif kind == "finance_quote":
+            add_quote(data.get("quote"))
+        elif kind == "finance_exchange_rate":
+            rate = data.get("exchange_rate")
+            if isinstance(rate, dict):
+                add(f"Google Finance: {rate.get('pair') or 'exchange rate'}", rate.get("source_url"))
+        elif kind == "finance_watchlist":
+            for quote in data.get("quotes") or []:
+                add_quote(quote)
+        elif kind == "finance_market":
+            add("Google Finance: market overview", data.get("source_url"))
+            for market in data.get("markets") or []:
+                if isinstance(market, dict):
+                    add(f"Google Finance: {market.get('name') or 'market'}", market.get("source_url"))
+            for item in data.get("news") or []:
+                if isinstance(item, dict):
+                    add(item.get("title") or item.get("publisher") or "Finance news", item.get("url"))
+
+    if not references:
+        return ""
+    return "## References\n\n" + "\n".join(f"- [{label}]({url})" for label, url in references)
+
 
 # Short tokens that Qwen3-ASR (and Whisper) commonly hallucinate from
 # background noise when English is enforced. None of these can match a real
@@ -678,14 +856,16 @@ class Assistant:
             requested_slots = 1
         self.thinking_server_slots = min(max(requested_slots, 1), 2)
         if self.thinking_server_slots != requested_slots:
-            logger.warning("Invalid thinking.server_slots %r; using %d", requested_slots, self.thinking_server_slots)
-        self._models = resolve_models(models)
-        self.thinking_jobs = (
-            BackgroundJobManager(
-                self._run_background_thinking_job,
-                self._on_thinking_job_status,
-                self._background_job_admitted,
+            logger.warning(
+                "Invalid thinking.server_slots %r; using %d",
+                requested_slots,
+                self.thinking_server_slots,
             )
+        self._models = resolve_models(models)
+        self.thinking_jobs = BackgroundJobManager(
+            self._run_background_thinking_job,
+            self._on_thinking_job_status,
+            self._background_job_admitted,
         )
         self.llm_enabled = self._models[LLM]["backend"] != "none"
         # The resolved LLM backend name (e.g. "llama"/"openai"/"none"). The
@@ -819,6 +999,7 @@ class Assistant:
         # so recorder cleanup cannot lose it before ASR verifies the wakeword.
         self._asr_kws_wav_path: dict = {"path": None}
         self._asr_wake_generation: dict = {"value": None}
+        self._asr_kws_early_verification: dict = {"flag": False}
         self.wakeword_metrics = {"accepted": 0, "rejected": 0, "status": "asr"}
         # A2: the last completed turn's stats payload (`TurnStats.to_payload()`),
         # for `GET /status` to expose without the caller needing to scrape SSE
@@ -1736,7 +1917,9 @@ class Assistant:
             + " The full report is saved in Fulloch Reports. Would you like me to read the full report?"
         )
 
-    def _completed_thinking_report_entry(self, satellite_id: str | None) -> dict[str, object] | None:
+    def _completed_thinking_report_entry(
+        self, satellite_id: str | None
+    ) -> dict[str, object] | None:
         if satellite_id is None:
             return None
         pending = self._completed_thinking_reports.get(satellite_id)
@@ -1811,7 +1994,9 @@ class Assistant:
         if match:
             summary = " ".join(match.group(1).split())
             if summary:
-                return summary[:450].rstrip()
+                sentences = split_sentences(summary)
+                if sentences:
+                    return " ".join(sentences[:3])
         return Assistant._spoken_report_summary(report)
 
     @staticmethod
@@ -1849,14 +2034,6 @@ class Assistant:
         capability_calls: dict[str, int] = {}
         attempted_actions: set[str] = set()
         needs_input: str | None = None
-
-        def fallback_report() -> str:
-            if findings.strip():
-                return (
-                    "I gathered source material but couldn't complete a reliable final report. "
-                    "I have not drawn a conclusion from those incomplete results."
-                )
-            return "I couldn't retrieve enough source material to complete this report."
 
         def run_capability(name: str, args: list) -> bool:
             nonlocal findings, needs_input
@@ -1914,6 +2091,8 @@ class Assistant:
                 )
             finally:
                 reset_artifacts(artifact_token)
+            if cancelled():
+                return False
             if schema is not None and schema.thinking_outcome:
                 error = (
                     "The tool did not provide its required typed evidence envelope."
@@ -1927,6 +2106,7 @@ class Assistant:
                         scope="The tool result was rejected before it entered the evidence ledger.",
                     )
             if isinstance(result, ThinkingResult):
+                next_actions = result.next_actions
                 artifact_id = job.record_outcome(
                     name,
                     result.thinking_status,
@@ -1949,9 +2129,10 @@ class Assistant:
                         stop_for_preliminary_report = True
                         result = str(result)
                     else:
-                        needs_input = "Reactive question: " + str(result).removeprefix(
-                            "Reactive question:"
-                        ).strip()
+                        needs_input = (
+                            "Reactive question: "
+                            + str(result).removeprefix("Reactive question:").strip()
+                        )
                 elif result.thinking_status in {"failed", "unavailable"}:
                     result = str(result)
             step = intents.classify_step(result)
@@ -1971,6 +2152,12 @@ class Assistant:
                 "Deep-think job %s received %d characters from %s", job.id, len(result), name
             )
             findings = _append_thinking_observation(findings, f"tool:{name}", result)
+            if isinstance(result, ThinkingResult) and next_actions:
+                findings = _append_thinking_observation(
+                    findings,
+                    "worker",
+                    "Suggested distinct next capabilities: " + ", ".join(next_actions) + ".",
+                )
             if name == "evaluate_itinerary" and "not feasible" in result.lower():
                 findings = _append_thinking_observation(
                     findings,
@@ -2130,8 +2317,10 @@ class Assistant:
                 break
             if needs_input:
                 return needs_input, findings
+        if cancelled():
+            return "", findings
         if not findings.strip():
-            return "I couldn't retrieve enough source material to complete this report.", findings
+            raise ReportSynthesisError("No source material was retrieved for the report.")
 
         self.thinking_jobs.update_stage(job, "Synthesising report")
         report_prompt = get_thinking_report_prompt(
@@ -2154,14 +2343,20 @@ class Assistant:
                 recover_on_failure=False,
             )
 
-        report = synthesise() if self.thinking_server_slots == 2 else self._with_turn_lock(synthesise)
+        report = (
+            synthesise() if self.thinking_server_slots == 2 else self._with_turn_lock(synthesise)
+        )
         if cancelled():
             return "", findings
         report = (report or "").strip()
         if report:
             logger.info("Deep-think job %s produced a %d-character report", job.id, len(report))
             return report, findings
-        return fallback_report(), findings
+        logger.warning(
+            "Deep-think job %s returned an empty final report; preserving collected evidence",
+            job.id,
+        )
+        return _fallback_thinking_report(job.snapshot.task, job.evidence, findings), findings
 
     def _on_thinking_job_status(self, job: BackgroundJob) -> None:
         """Publish job transitions for dashboard and Home Assistant SSE clients."""
@@ -2169,9 +2364,7 @@ class Assistant:
             question = job.summary.removeprefix("Reactive question:").strip()
             if job.snapshot.origin_satellite_id:
                 self._pending_thinking_tasks[job.snapshot.origin_satellite_id] = job.snapshot.task
-            self._history.append(
-                {"role": "tool", "name": "deep_think", "content": job.summary}
-            )
+            self._history.append({"role": "tool", "name": "deep_think", "content": job.summary})
             self._trim_history()
             self._dispatch_event(
                 {
@@ -2207,6 +2400,41 @@ class Assistant:
                         name=f"thinking-input-{job.id[:8]}",
                     ).start()
             return
+        if job.status == JobStatus.FAILED:
+            if job.snapshot.origin_satellite_id:
+                self._pending_thinking_tasks.pop(job.snapshot.origin_satellite_id, None)
+            self._dispatch_event(
+                {
+                    "role": "thinking",
+                    "ts": time.time(),
+                    "job_id": job.id,
+                    "status": job.status,
+                    "summary": "",
+                    "error": job.error,
+                    "note_id": "",
+                    "task": job.snapshot.task,
+                    "stage": job.stage,
+                }
+            )
+            if job.snapshot.origin_source == "conversation":
+                message = "I couldn't complete that report."
+                self._emit_turn_event(
+                    "assistant", message, "proactive", satellite_id=job.snapshot.origin_satellite_id
+                )
+                satellite_id = job.snapshot.origin_satellite_id
+                if satellite_id and satellite_id != "dashboard-text":
+                    threading.Thread(
+                        target=self.speak_proactive,
+                        args=(message,),
+                        kwargs={
+                            "emit_event": False,
+                            "satellite_id": satellite_id,
+                            "follow_up": False,
+                        },
+                        daemon=True,
+                        name=f"thinking-failed-{job.id[:8]}",
+                    ).start()
+            return
         if job.status == "READY" and not job.note_id:
             job.note_id = self._save_thinking_report(job)
         if job.status == "READY":
@@ -2238,40 +2466,14 @@ class Assistant:
                 "stage": job.stage,
             }
         )
-        artifact = (
-            {
-                **job.artifact,
-                "type": "flight_plan",
-                "note_id": job.note_id,
-                "report_url": f"/reports/{job.note_id}" if job.note_id else "",
-                "prices_can_change": True,
-            }
-            if job.status == "READY" and job.artifact is not None and job.artifact.get("type") == "flight_search"
-            else {
-                **job.artifact,
-                "note_id": job.note_id,
-                "report_url": f"/reports/{job.note_id}" if job.note_id else "",
-            }
-            if job.status == "READY" and job.artifact is not None
-            else {
-                "type": "generated_report",
-                "title": job.snapshot.task[:160] or "Research report",
-                "created_at": job.created_at,
-                "summary": job.summary[:600],
-                "report_url": f"/reports/{job.note_id}",
-            }
-            if job.status == "READY" and job.note_id
-            else None
-        )
+        artifact = self._thinking_report_artifact(job)
         if job.status == "READY" and job.snapshot.origin_source == "conversation":
             if job.snapshot.origin_satellite_id:
-                self._completed_thinking_reports[job.snapshot.origin_satellite_id] = (
-                    {
-                        "note_id": job.note_id,
-                        "task": job.snapshot.task,
-                        "summary_delivered": False,
-                    }
-                )
+                self._completed_thinking_reports[job.snapshot.origin_satellite_id] = {
+                    "note_id": job.note_id,
+                    "task": job.snapshot.task,
+                    "summary_delivered": False,
+                }
             self._emit_turn_event(
                 "assistant",
                 "I've finished looking into that. Would you like a short summary?",
@@ -2295,14 +2497,61 @@ class Assistant:
         elif artifact is not None:
             self._emit_turn_event(
                 "assistant",
-                (
-                    "I found a recommended flight option and saved the full comparison."
-                    if artifact["type"] == "flight_plan"
-                    else "I've completed the research report and saved the full version."
-                ),
+                "I've completed the report and saved the full version.",
                 "proactive",
                 artifact=artifact,
             )
+
+    def _thinking_report_artifact(self, job: BackgroundJob) -> dict | None:
+        """Build a compact, domain-specific card for a completed thinking job."""
+        if job.status != JobStatus.READY:
+            return None
+        source = job.artifact if isinstance(job.artifact, dict) else None
+        finance_sources = [
+            item.get("data")
+            for item in job.artifacts.values()
+            if isinstance(item, dict) and isinstance(item.get("data"), dict)
+        ]
+        watchlist = next(
+            (item for item in finance_sources if item.get("type") == "finance_watchlist"), None
+        )
+        if watchlist is not None:
+            market = next(
+                (item for item in finance_sources if item.get("type") == "finance_market"), None
+            )
+            source = {
+                "type": "finance_summary",
+                "quotes": watchlist.get("quotes", []),
+                "markets": market.get("markets", []) if market else [],
+            }
+        source_type = source.get("type") if source else ""
+        report_url = f"/reports/{job.note_id}" if job.note_id else ""
+        domains = {
+            "paper_search": ("research_report", "Research Report"),
+            "paper_detail": ("research_report", "Research Report"),
+            "web_research": ("research_report", "Research Report"),
+            "flight_search": ("travel_report", "Travel Report"),
+            "travel_plan": ("travel_report", "Travel Report"),
+            "hotel_search": ("travel_report", "Travel Report"),
+            "finance_quote": ("finance_report", "Finance Report"),
+            "finance_exchange_rate": ("finance_report", "Finance Report"),
+            "finance_watchlist": ("finance_report", "Finance Report"),
+            "finance_market": ("finance_report", "Finance Report"),
+            "finance_summary": ("finance_report", "Finance Report"),
+        }
+        card_type, title = domains.get(
+            source_type, ("generated_report", job.snapshot.task[:160] or "Research Report")
+        )
+        artifact = {
+            "type": card_type,
+            "title": title,
+            "created_at": job.created_at,
+            "summary": job.summary[:600],
+            "report_url": report_url,
+        }
+        if source is not None:
+            artifact["data"] = source
+        return artifact if report_url or source is not None else None
 
     def _save_thinking_report(self, job: BackgroundJob) -> str:
         """Append a completed worker result to a durable, retrievable Markdown report."""
@@ -2316,8 +2565,7 @@ class Assistant:
             findings = (
                 "## Summary\n\n"
                 f"{answer} Scope: this preliminary report is limited to the retrieved evidence. "
-                "Caveat: details may remain incomplete.\n\n"
-                + findings
+                "Caveat: details may remain incomplete.\n\n" + findings
             )
         report = (
             f"# Deep Think Report\n\n"
@@ -2325,6 +2573,12 @@ class Assistant:
             f"**Objective:** {job.snapshot.task}\n\n"
             f"## Findings\n\n{findings}\n"
         )
+        appendix = _travel_report_appendix(job.artifacts)
+        if appendix:
+            report = report.rstrip() + "\n\n" + appendix + "\n"
+        references = _report_references(job.artifacts)
+        if references:
+            report = report.rstrip() + "\n\n" + references + "\n"
         evidence_path = path.with_suffix(".evidence.json")
         evidence = {
             "task": job.snapshot.task,
@@ -2386,15 +2640,21 @@ class Assistant:
                 }
             )
 
-    def _begin_satellite_turn(self, sat: SatelliteSession) -> None:
-        """Establish a new native-satellite turn when its wakeword is accepted."""
+    def _begin_satellite_turn(self, sat: SatelliteSession, *, tentative: bool = False) -> None:
+        """Establish a native-satellite turn, optionally awaiting KWS verification."""
         sat.protocol_state_generation += 1
         if sat.protocol_follow_up_timer is not None:
             sat.protocol_follow_up_timer.cancel()
             sat.protocol_follow_up_timer = None
         sat.protocol_turn_id = uuid.uuid4().hex
         self._emit_satellite_state(sat.id, "wake_detected", turn_id=sat.protocol_turn_id)
-        self._emit_satellite_state(sat.id, "listening", turn_id=sat.protocol_turn_id)
+        if not tentative:
+            self._emit_satellite_state(sat.id, "listening", turn_id=sat.protocol_turn_id)
+
+    def _confirm_pending_satellite_wake(self, sat: SatelliteSession) -> None:
+        """Make an acoustically detected wake persistent after ASR confirms it."""
+        if sat.protocol_wake_pending and sat.protocol_turn_id is not None:
+            self._emit_satellite_state(sat.id, "listening", turn_id=sat.protocol_turn_id)
 
     def _set_pending_satellite_wake(self, sat: SatelliteSession) -> None:
         """Bound optimistic wake feedback until its final ASR verification completes."""
@@ -2426,7 +2686,7 @@ class Assistant:
         sat = self.satellites.get(satellite_id)
         if sat is None or sat.protocol_turn_id is not None:
             return
-        self._begin_satellite_turn(sat)
+        self._begin_satellite_turn(sat, tentative=True)
         self._set_pending_satellite_wake(sat)
 
     def _on_asr_work_dropped(
@@ -2439,7 +2699,10 @@ class Assistant:
         logger.info(
             "Standing down pending wake after %s ASR work was %s (%s)", kind, reason, satellite_id
         )
-        self._reject_pending_satellite_wake(sat)
+        if kind == "wake_verification":
+            self._stand_down_tentative_satellite_wake(sat)
+        else:
+            self._reject_pending_satellite_wake(sat)
 
     def _begin_satellite_follow_up_turn(self, sat: SatelliteSession) -> None:
         """Replace an expiring follow-up window with the spoken continuation."""
@@ -2455,6 +2718,13 @@ class Assistant:
         if sat.protocol_wake_pending:
             self._clear_pending_satellite_wake(sat)
             self._satellite_idle(sat)
+
+    def _stand_down_tentative_satellite_wake(self, sat: SatelliteSession) -> None:
+        """Hide an early KWS ring without invalidating its final ASR result."""
+        if sat.protocol_wake_pending:
+            self._clear_pending_satellite_wake(sat)
+            sat.protocol_turn_id = None
+            self._emit_satellite_state(sat.id, "idle", turn_id=None)
 
     def _satellite_thinking(self, sat: SatelliteSession) -> None:
         """The recorder endpoint was accepted and processing is about to begin."""
@@ -4160,6 +4430,8 @@ class Assistant:
             stream_kwargs["kws_wav_path_sink"] = self._asr_kws_wav_path
         if "wake_generation_sink" in stream_params:
             stream_kwargs["wake_generation_sink"] = self._asr_wake_generation
+        if "kws_early_verification_sink" in stream_params:
+            stream_kwargs["kws_early_verification_sink"] = self._asr_kws_early_verification
         for result in self.asr_pipe(
             self.asr_stream_generator(*stream_args, **stream_kwargs),
             batch_size=1,
@@ -4201,6 +4473,7 @@ class Assistant:
                 provisional = self._asr_provisional.get("flag", False)
                 wake_probe = self._asr_wake_probe.get("flag", False)
                 kws_candidate = self._asr_kws_candidate.get("flag", False)
+                kws_early_verification = self._asr_kws_early_verification.get("flag", False)
                 kws_wav_path = self._asr_kws_wav_path.get("path")
                 audio = self._asr_audio.get("buf")
                 telemetry_event(
@@ -4219,7 +4492,10 @@ class Assistant:
                         self.wakeword_metrics["rejected"] += 1
                         self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=False)
                     if not provisional:
-                        self._reject_pending_satellite_wake(sat)
+                        if kws_early_verification:
+                            self._stand_down_tentative_satellite_wake(sat)
+                        else:
+                            self._reject_pending_satellite_wake(sat)
                     continue
 
                 if kws_candidate:
@@ -4230,11 +4506,17 @@ class Assistant:
                         self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=False)
                         logger.info("openWakeWord activation rejected by ASR: %r", text)
                         telemetry_event("wakeword_rejected", satellite_id=turn_satellite_id)
-                        self._reject_pending_satellite_wake(sat)
+                        if kws_early_verification:
+                            self._stand_down_tentative_satellite_wake(sat)
+                        else:
+                            self._reject_pending_satellite_wake(sat)
                         continue
                     self.wakeword_metrics["accepted"] += 1
                     self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=True)
                     telemetry_event("wakeword_accepted", satellite_id=turn_satellite_id)
+                    if kws_early_verification:
+                        self._confirm_pending_satellite_wake(sat)
+                        continue
 
                 if time.monotonic() < sat.drop_results_until:
                     logger.debug(f"Dropping post-cancel ASR result: {text}")
@@ -4326,7 +4608,12 @@ class Assistant:
                     sat.provisional_committed_at = 0.0
 
                 text_lower = text.lower()
-                wakeword_match = self._wakeword_re.search(text_lower)
+                wakeword_matches = list(self._wakeword_re.finditer(text_lower))
+                # Continuous room speech often contains several attempts while
+                # the user waits for feedback. The last wakeword prefixes the
+                # latest request; stripping the first leaves another wakeword
+                # in the prompt and defeats the anchored regex fast-path.
+                wakeword_match = wakeword_matches[-1] if wakeword_matches else None
                 wakeword_present = wakeword_match is not None
                 in_follow_up = False
                 just_barged_in = False

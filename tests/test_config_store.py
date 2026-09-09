@@ -8,7 +8,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from server import config_store as cs  # noqa: E402
-from server.config_schema import SCHEMA, WAKEWORD_PRESETS, field_for  # noqa: E402
+from server.config_schema import (  # noqa: E402
+    SCHEMA,
+    WAKEWORD_PRESETS,
+    field_for,
+    wakeword_presets_as_dicts,
+)
 
 
 def _write(tmp_path, text):
@@ -198,12 +203,20 @@ def test_write_models_validates_and_preserves_openwakeword_config(tmp_path):
         cs.write_models(models, path)
 
 
-def test_wakeword_presets_only_offer_bundled_atticus_model():
+def test_wakeword_presets_offer_all_bundled_atticus_models(tmp_path, monkeypatch):
+    wakeword_dir = tmp_path / "data" / "models" / "wakeword"
+    wakeword_dir.mkdir(parents=True)
+    (wakeword_dir / "hey_atticus_v0.3.onnx").touch()
+    (wakeword_dir / "hey_atticus_v0.6.onnx").touch()
+    monkeypatch.chdir(tmp_path)
+
     assert [preset.wakeword for preset in WAKEWORD_PRESETS] == ["hey atticus"]
-    assert WAKEWORD_PRESETS[0].model == "data/models/wakeword/hey_atticus_v0.3.onnx"
-    assert WAKEWORD_PRESETS[0].model_options == (
-        ("data/models/wakeword/hey_atticus_v0.3.onnx", "Hey Atticus v0.3 (Recommended)"),
-    )
+    preset = wakeword_presets_as_dicts()[0]
+    assert preset["model"] == "data/models/wakeword/hey_atticus_v0.6.onnx"
+    assert preset["model_options"] == [
+        {"path": "data/models/wakeword/hey_atticus_v0.6.onnx", "label": "Hey Atticus v0.6 (Recommended)"},
+        {"path": "data/models/wakeword/hey_atticus_v0.3.onnx", "label": "Hey Atticus v0.3"},
+    ]
 
 
 def test_set_llm_model_name_preserves_rest_of_block(tmp_path):

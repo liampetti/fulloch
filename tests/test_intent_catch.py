@@ -199,6 +199,12 @@ class TestExtractTimer:
         result = extract_timer("set timer for 2 hours")
         assert result == "2 hours"
 
+    def test_set_the_timer_to(self):
+        assert extract_timer("set the timer to six minutes") == "six minutes"
+
+    def test_set_timer_to(self):
+        assert extract_timer("set timer to six minutes") == "six minutes"
+
     def test_start_a_timer(self):
         result = extract_timer("start a timer thirty seconds please")
         assert result == "thirty seconds"

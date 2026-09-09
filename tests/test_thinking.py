@@ -238,6 +238,7 @@ def test_thinking_report_prompt_requires_a_direct_evidence_scoped_summary():
     prompt = get_thinking_report_prompt("Compare heating options", "Retrieved prices")
 
     assert "## Summary" in prompt
+    assert "exactly two or three short sentences" in prompt
     assert "central question" in prompt
     assert "beyond the retrieved evidence" in prompt
 
@@ -261,7 +262,14 @@ def test_typed_evidence_is_used_without_raw_worker_observations(monkeypatch):
         "job",
         JobSnapshot("Investigate"),
         state="[worker]\nprivate planning text",
-        evidence=[{"tool": "lookup", "status": "evidence", "scope": "One source.", "evidence": {"fact": "retrieved"}}],
+        evidence=[
+            {
+                "tool": "lookup",
+                "status": "evidence",
+                "scope": "One source.",
+                "evidence": {"fact": "retrieved"},
+            }
+        ],
     )
 
     assistant._run_background_thinking_job(job, lambda: False)
@@ -325,7 +333,7 @@ def test_deep_think_worker_stops_on_a_duplicate_action(monkeypatch):
     responses = iter(
         [
             '{"actions":[{"intent":"lookup","args":["same"]}]}',
-            '{"actions":[{"intent":"lookup","args":["same"]}]}',
+            '{"actions":[{"intent":"lookup","args":[" SAME "]}]}',
             "Evidence-based report.",
         ]
     )
@@ -345,6 +353,47 @@ def test_deep_think_worker_stops_on_a_duplicate_action(monkeypatch):
     assert "Duplicate capability request for lookup" in findings
     assert report == "Evidence-based report."
     assert stages[-1] == "Synthesising report"
+
+
+def test_deep_think_cancel_after_tool_result_skips_report_synthesis(monkeypatch):
+    from core.background_jobs import BackgroundJob, JobSnapshot
+    from tools.capabilities import ToolCapability
+
+    a = _import_assistant_module()
+    cancelled = False
+    calls = []
+
+    def invoke(_args, _kwargs):
+        nonlocal cancelled
+        cancelled = True
+        return "evidence"
+
+    capability = ToolCapability(
+        name="lookup",
+        invoke=invoke,
+        source="native",
+        timeout_seconds=1,
+        format_result=lambda result: result,
+        access_class="read",
+    )
+    monkeypatch.setattr(a, "native_capabilities", lambda: {"lookup": capability})
+    monkeypatch.setattr(a.tool_registry, "canonical_name", lambda name: name)
+    monkeypatch.setattr(
+        a,
+        "generate_slm",
+        lambda *_args, **_kwargs: calls.append("generate") or '{"actions":[{"intent":"lookup","args":[]}]}'
+    )
+    assistant = a.Assistant.__new__(a.Assistant)
+    assistant.slm_model = object()
+    assistant.grammar = "grammar"
+    assistant.thinking_server_slots = 2
+    assistant.thinking_jobs = type("Jobs", (), {"update_stage": lambda *_args: None})()
+    job = BackgroundJob("job", JobSnapshot("Investigate"))
+
+    report, _findings = assistant._run_background_thinking_job(job, lambda: cancelled)
+
+    assert report == ""
+    assert calls == ["generate"]
 
 
 def test_deep_think_invalid_worker_json_is_not_saved_as_a_report(monkeypatch):
@@ -422,6 +471,44 @@ def test_deep_think_empty_worker_response_still_synthesises_collected_evidence(m
     assert "source evidence" in findings
 
 
+def test_deep_think_empty_final_report_preserves_collected_evidence(monkeypatch):
+    from core.background_jobs import BackgroundJob, JobSnapshot
+    from tools.capabilities import ToolCapability
+    from tools.tool_registry import ThinkingResult, ToolSchema
+
+    a = _import_assistant_module()
+    capability = ToolCapability(
+        name="lookup",
+        invoke=lambda _args, _kwargs: ThinkingResult(
+            "Retrieved schedule.",
+            evidence={"departure": "Tokyo", "arrival": "Dubai"},
+            scope="One retrieved flight schedule.",
+        ),
+        source="native",
+        timeout_seconds=1,
+        format_result=lambda result: result,
+        access_class="read",
+    )
+    monkeypatch.setattr(a, "native_capabilities", lambda: {"lookup": capability})
+    monkeypatch.setattr(a.tool_registry, "canonical_name", lambda name: name)
+    monkeypatch.setitem(
+        a.tool_registry._schemas, "lookup", ToolSchema("lookup", "", [], thinking_outcome=True)
+    )
+    responses = iter(['{"actions":[{"intent":"lookup","args":[]}]}', '{"reply":"enough"}', ""])
+    monkeypatch.setattr(a, "generate_slm", lambda *_args, **_kwargs: next(responses))
+    assistant = a.Assistant.__new__(a.Assistant)
+    assistant.slm_model = object()
+    assistant.grammar = "grammar"
+    assistant.thinking_server_slots = 2
+    assistant.thinking_jobs = type("Jobs", (), {"update_stage": lambda *_args: None})()
+    job = BackgroundJob("job", JobSnapshot("Can this itinerary work?"))
+
+    report, _findings = assistant._run_background_thinking_job(job, lambda: False)
+
+    assert "## Collected evidence" in report
+    assert '"departure": "Tokyo"' in report
+
+
 def test_deep_think_rejects_invalid_typed_outcome_before_recording_evidence(monkeypatch):
     from core.background_jobs import BackgroundJob, JobSnapshot
     from tools.capabilities import ToolCapability
@@ -430,7 +517,9 @@ def test_deep_think_rejects_invalid_typed_outcome_before_recording_evidence(monk
     a = _import_assistant_module()
     capability = ToolCapability(
         name="lookup",
-        invoke=lambda _args, _kwargs: ThinkingResult("Bad result", status="exhausted", scope="Bad."),
+        invoke=lambda _args, _kwargs: ThinkingResult(
+            "Bad result", status="exhausted", scope="Bad."
+        ),
         source="native",
         timeout_seconds=1,
         format_result=lambda result: result,
@@ -443,7 +532,9 @@ def test_deep_think_rejects_invalid_typed_outcome_before_recording_evidence(monk
         "lookup",
         ToolSchema("lookup", "", [Param("refinement", False, "")], thinking_outcome=True),
     )
-    responses = iter(['{"actions":[{"intent":"lookup","args":[]}]}', '{"reply":"enough"}', "Report."])
+    responses = iter(
+        ['{"actions":[{"intent":"lookup","args":[]}]}', '{"reply":"enough"}', "Report."]
+    )
     monkeypatch.setattr(a, "generate_slm", lambda *_args, **_kwargs: next(responses))
     assistant = a.Assistant.__new__(a.Assistant)
     assistant.slm_model = object()
@@ -477,7 +568,9 @@ def test_deep_think_typed_needs_input_stops_without_synthesising(monkeypatch):
     )
     monkeypatch.setattr(a, "native_capabilities", lambda: {"lookup": capability})
     monkeypatch.setattr(a.tool_registry, "canonical_name", lambda name: name)
-    monkeypatch.setitem(a.tool_registry._schemas, "lookup", ToolSchema("lookup", "", [], thinking_outcome=True))
+    monkeypatch.setitem(
+        a.tool_registry._schemas, "lookup", ToolSchema("lookup", "", [], thinking_outcome=True)
+    )
     monkeypatch.setattr(
         a, "generate_slm", lambda *_args, **_kwargs: '{"actions":[{"intent":"lookup","args":[]}]}'
     )
@@ -502,8 +595,12 @@ def test_deep_think_synthesises_preliminary_report_when_input_follows_evidence(m
     a = _import_assistant_module()
     results = iter(
         [
-            ThinkingResult("Retrieved schedule.", evidence={"schedule": True}, scope="One schedule."),
-            ThinkingResult("Which exact time?", status="needs_input", scope="Event timing is missing."),
+            ThinkingResult(
+                "Retrieved schedule.", evidence={"schedule": True}, scope="One schedule."
+            ),
+            ThinkingResult(
+                "Which exact time?", status="needs_input", scope="Event timing is missing."
+            ),
         ]
     )
     capability = ToolCapability(
@@ -585,12 +682,45 @@ def test_deep_think_has_no_regex_profile_routing():
     assert not hasattr(a.Assistant, "_select_thinking_profile")
 
 
+def test_failed_thinking_job_does_not_offer_or_save_a_report():
+    from core.background_jobs import BackgroundJob, JobSnapshot, JobStatus
+
+    a = _import_assistant_module()
+    assistant = a.Assistant.__new__(a.Assistant)
+    assistant._history = []
+    assistant._completed_thinking_reports = {}
+    assistant._pending_thinking_tasks = {"dashboard-text": "Today's finance summary"}
+    assistant._trim_history = lambda: None
+    dispatched = []
+    emitted = []
+    assistant._dispatch_event = lambda event: dispatched.append(event)
+    assistant._emit_turn_event = lambda *args, **kwargs: emitted.append((args, kwargs))
+    job = BackgroundJob(
+        "12345678",
+        JobSnapshot(
+            "Today's finance summary", origin_source="conversation", origin_satellite_id="dashboard-text"
+        ),
+        status=JobStatus.FAILED,
+        error="ReportSynthesisError: The final report generation returned no content.",
+    )
+
+    assistant._on_thinking_job_status(job)
+
+    assert job.note_id == ""
+    assert assistant._completed_thinking_reports == {}
+    assert assistant._pending_thinking_tasks == {}
+    assert emitted == [
+        (("assistant", "I couldn't complete that report.", "proactive"), {"satellite_id": "dashboard-text"})
+    ]
+    assert dispatched[0]["status"] == JobStatus.FAILED
+
+
 def test_agentic_worker_logs_its_internal_plan_and_uses_long_synthesis():
     import inspect
 
     a = _import_assistant_module()
     source = inspect.getsource(a.Assistant._run_background_thinking_job)
-    assert "fallback_report()" in source
+    assert "ReportSynthesisError" in source
     assert "thinking_mode=False" in source
     assert 'logger.debug("Deep-think job %s plan: %s"' in source
     assert "get_thinking_report_prompt" in source
@@ -642,6 +772,19 @@ def test_foreground_deep_think_only_tools_are_routed_to_the_planning_worker(monk
     }
 
 
+def test_finance_advice_quote_is_routed_to_the_planning_worker(monkeypatch):
+    from core.agent_loop import _route_deep_think_only_tools
+
+    monkeypatch.setattr(
+        "core.agent_loop.tool_registry.is_available", lambda name: name == "deep_think"
+    )
+    emission = {"actions": [{"intent": "get_finance_quote", "args": ["TSLA:NASDAQ"]}]}
+
+    assert _route_deep_think_only_tools(emission, "Should I buy TSLA?") == {
+        "actions": [{"intent": "deep_think", "args": ["Should I buy TSLA?"]}]
+    }
+
+
 def test_affirmative_follow_up_consumes_the_completed_report():
     import inspect
 
@@ -655,7 +798,22 @@ def test_affirmative_follow_up_consumes_the_completed_report():
 def test_spoken_report_summary_is_short_and_sentence_complete():
     a = _import_assistant_module()
     report = "One finding is useful. Two finding is useful. Three finding is useful. Four finding is useful. Five finding is useful."
-    assert a.Assistant._spoken_report_summary(report) == "Four finding is useful. Five finding is useful."
+    assert (
+        a.Assistant._spoken_report_summary(report)
+        == "Four finding is useful. Five finding is useful."
+    )
+
+
+def test_report_summary_keeps_only_the_first_three_summary_sentences():
+    a = _import_assistant_module()
+    report = (
+        "## Summary\n\nFirst key finding. Second key finding. Third key finding. "
+        "Fourth finding should not be spoken.\n\n## Details\n\nMore detail."
+    )
+
+    assert a.Assistant._report_summary(report) == (
+        "First key finding. Second key finding. Third key finding."
+    )
 
 
 def test_completed_report_is_available_after_a_satellite_reconnect(monkeypatch):
@@ -703,9 +861,10 @@ def test_explicit_summary_request_consumes_the_completed_report():
     loop = AgentLoop.__new__(AgentLoop)
     loop.satellite_id = "satellite"
 
-    assert loop._run(
-        Host(), None, "voice", None, None, None, "Yes, give me a short summary."
-    ) == "Grounded report conclusion."
+    assert (
+        loop._run(Host(), None, "voice", None, None, None, "Yes, give me a short summary.")
+        == "Grounded report conclusion."
+    )
     assert consumed == ["satellite"]
 
 
@@ -722,15 +881,18 @@ def test_report_follow_up_uses_the_grounded_report_reader_for_non_travel_questio
     loop = AgentLoop.__new__(AgentLoop)
     loop.satellite_id = "satellite"
 
-    assert loop._run(
-        Host(),
-        None,
-        "voice",
-        None,
-        None,
-        None,
-        "What did the report say about installation costs?",
-    ) == "The report lists installation costs of $4,000."
+    assert (
+        loop._run(
+            Host(),
+            None,
+            "voice",
+            None,
+            None,
+            None,
+            "What did the report say about installation costs?",
+        )
+        == "The report lists installation costs of $4,000."
+    )
 
 
 def test_report_follow_up_uses_the_grounded_report_reader_for_feasibility_question():
@@ -743,16 +905,21 @@ def test_report_follow_up_uses_the_grounded_report_reader_for_feasibility_questi
     loop = AgentLoop.__new__(AgentLoop)
     loop.satellite_id = "satellite"
 
-    assert loop._run(
-        Host(), None, "voice", None, None, None, "Does it say that the route is feasible?"
-    ) == "The report found no feasible option among the retrieved itineraries."
+    assert (
+        loop._run(
+            Host(), None, "voice", None, None, None, "Does it say that the route is feasible?"
+        )
+        == "The report found no feasible option among the retrieved itineraries."
+    )
 
 
 def test_report_question_reads_the_saved_report_without_conversation_history(tmp_path, monkeypatch):
     a = _import_assistant_module()
     report_path = tmp_path / "fulloch-reports" / "2026-08-27-12345678.md"
     report_path.parent.mkdir()
-    report_path.write_text("# Deep Think Report\n\nThe installation cost is $4,000.", encoding="utf-8")
+    report_path.write_text(
+        "# Deep Think Report\n\nThe installation cost is $4,000.", encoding="utf-8"
+    )
     report_path.with_suffix(".evidence.json").write_text(
         '{"artifacts": {"artifact-001": {"data": {"price": 4000}}}}', encoding="utf-8"
     )
@@ -808,6 +975,78 @@ def test_completed_report_persists_typed_evidence_and_artifacts(tmp_path, monkey
     assert evidence["artifacts"]["artifact-001"]["data"]["price"] == 4000
 
 
+def test_completed_travel_report_appends_retrieved_offers_and_source_link(tmp_path, monkeypatch):
+    from core.background_jobs import BackgroundJob, JobSnapshot
+
+    a = _import_assistant_module()
+    monkeypatch.setattr(a.notes_root, "get_notes_root", lambda: tmp_path)
+    monkeypatch.setattr(a.notes, "_after_write", lambda _path: None)
+    assistant = a.Assistant.__new__(a.Assistant)
+    job = BackgroundJob(
+        "12345678",
+        JobSnapshot("Plan a trip"),
+        summary="## Summary\n\nNo compatible itinerary was found.",
+        artifacts={
+            "artifact-001": {
+                "data": {
+                    "type": "travel_plan",
+                    "representative": {"departure_date": "2026-09-23", "currency": "AUD"},
+                    "leg_offers": [[{
+                        "airlines": ["Emirates"],
+                        "departure": {"id": "HND", "time": "2026-09-23 00:05"},
+                        "arrival": {"id": "DXB", "time": "2026-09-23 05:40"},
+                        "duration_minutes": 635,
+                        "stops": 0,
+                        "price": 1601,
+                    }]],
+                }
+            }
+        },
+    )
+
+    note_id = assistant._save_thinking_report(job)
+    report = (tmp_path / f"{note_id}.md").read_text(encoding="utf-8")
+
+    assert "## Retrieved Flight Offers" in report
+    assert "Emirates: 2026-09-23 00:05 to 2026-09-23 05:40" in report
+    assert "AUD 1601" in report
+    assert "[Google Flights: HND to DXB on 2026-09-23]" in report
+
+
+def test_completed_research_report_appends_artifact_references(tmp_path, monkeypatch):
+    from core.background_jobs import BackgroundJob, JobSnapshot
+
+    a = _import_assistant_module()
+    monkeypatch.setattr(a.notes_root, "get_notes_root", lambda: tmp_path)
+    monkeypatch.setattr(a.notes, "_after_write", lambda _path: None)
+    assistant = a.Assistant.__new__(a.Assistant)
+    job = BackgroundJob(
+        "12345678",
+        JobSnapshot("Find papers"),
+        summary="## Summary\n\nOne relevant paper was found.",
+        artifacts={
+            "artifact-001": {
+                "data": {
+                    "type": "paper_search",
+                    "papers": [{
+                        "title": "Example Paper",
+                        "source": "arXiv",
+                        "url": "https://arxiv.org/abs/1234.5678",
+                        "doi": "10.1000/example",
+                    }],
+                }
+            }
+        },
+    )
+
+    note_id = assistant._save_thinking_report(job)
+    report = (tmp_path / f"{note_id}.md").read_text(encoding="utf-8")
+
+    assert "## References" in report
+    assert "[arXiv: Example Paper](https://arxiv.org/abs/1234.5678)" in report
+    assert "[DOI: Example Paper](https://doi.org/10.1000/example)" in report
+
+
 def test_completed_report_adds_a_scoped_summary_when_worker_omits_one(tmp_path, monkeypatch):
     from core.background_jobs import BackgroundJob, JobSnapshot
 
@@ -815,7 +1054,9 @@ def test_completed_report_adds_a_scoped_summary_when_worker_omits_one(tmp_path, 
     monkeypatch.setattr(a.notes_root, "get_notes_root", lambda: tmp_path)
     monkeypatch.setattr(a.notes, "_after_write", lambda _path: None)
     assistant = a.Assistant.__new__(a.Assistant)
-    job = BackgroundJob("12345678", JobSnapshot("Compare options"), summary="Option A has the lower price.")
+    job = BackgroundJob(
+        "12345678", JobSnapshot("Compare options"), summary="Option A has the lower price."
+    )
 
     note_id = assistant._save_thinking_report(job)
     report = (tmp_path / f"{note_id}.md").read_text(encoding="utf-8")
@@ -839,7 +1080,9 @@ def test_completed_report_history_keeps_summary_and_durable_filename():
     assistant.satellites = {"dashboard-text": object()}
     job = BackgroundJob(
         "12345678",
-        JobSnapshot("Compare heat pumps", origin_source="conversation", origin_satellite_id="dashboard-text"),
+        JobSnapshot(
+            "Compare heat pumps", origin_source="conversation", origin_satellite_id="dashboard-text"
+        ),
         status=JobStatus.READY,
         note_id="fulloch-reports/2026-08-27-12345678",
         summary=(
@@ -864,7 +1107,7 @@ def test_reports_use_a_user_facing_vault_directory():
     assert 'f"fulloch-reports/' in source
 
 
-def test_completed_flight_job_emits_its_flight_plan_card():
+def test_completed_flight_job_emits_a_travel_report_card():
     from core.background_jobs import BackgroundJob, JobSnapshot, JobStatus
 
     a = _import_assistant_module()
@@ -893,24 +1136,28 @@ def test_completed_flight_job_emits_its_flight_plan_card():
         (
             (
                 "assistant",
-                "I found a recommended flight option and saved the full comparison.",
+                "I've completed the report and saved the full version.",
                 "proactive",
             ),
             {
                 "artifact": {
-                    "type": "flight_plan",
-                    "route": {"origin": "SYD", "destination": "NRT"},
-                    "offer": {},
-                    "note_id": "fulloch-reports/2026-08-27-12345678",
+                    "type": "travel_report",
+                    "title": "Travel Report",
+                    "created_at": job.created_at,
+                    "summary": "",
                     "report_url": "/reports/fulloch-reports/2026-08-27-12345678",
-                    "prices_can_change": True,
+                    "data": {
+                        "type": "flight_search",
+                        "route": {"origin": "SYD", "destination": "NRT"},
+                        "offer": {},
+                    },
                 }
             },
         )
     ]
 
 
-def test_completed_research_job_emits_generated_report_card():
+def test_completed_general_job_emits_generated_report_card():
     from core.background_jobs import BackgroundJob, JobSnapshot, JobStatus
 
     a = _import_assistant_module()
@@ -934,7 +1181,11 @@ def test_completed_research_job_emits_generated_report_card():
 
     assert emitted == [
         (
-            ("assistant", "I've completed the research report and saved the full version.", "proactive"),
+            (
+                "assistant",
+                "I've completed the report and saved the full version.",
+                "proactive",
+            ),
             {
                 "artifact": {
                     "type": "generated_report",
@@ -946,6 +1197,134 @@ def test_completed_research_job_emits_generated_report_card():
             },
         )
     ]
+
+
+def test_completed_paper_job_emits_a_research_report_card():
+    from core.background_jobs import BackgroundJob, JobSnapshot, JobStatus
+
+    a = _import_assistant_module()
+    assistant = a.Assistant.__new__(a.Assistant)
+    assistant._history = []
+    assistant._completed_thinking_reports = {}
+    assistant._trim_history = lambda: None
+    assistant._dispatch_event = lambda _event: None
+    emitted = []
+    assistant._emit_turn_event = lambda *args, **kwargs: emitted.append((args, kwargs))
+    job = BackgroundJob(
+        "12345678",
+        JobSnapshot("Find papers", origin_source="integration"),
+        status=JobStatus.READY,
+        note_id="fulloch-reports/2026-08-27-12345678",
+        created_at=1_788_000_000,
+        summary="A relevant paper was found.",
+        artifact={
+            "type": "paper_search",
+            "papers": [{"title": "A Paper", "year": 2026, "source": "arXiv"}],
+        },
+    )
+
+    assistant._on_thinking_job_status(job)
+
+    assert emitted[0][1]["artifact"] == {
+        "type": "research_report",
+        "title": "Research Report",
+        "created_at": 1_788_000_000,
+        "summary": "A relevant paper was found.",
+        "report_url": "/reports/fulloch-reports/2026-08-27-12345678",
+        "data": {
+            "type": "paper_search",
+            "papers": [{"title": "A Paper", "year": 2026, "source": "arXiv"}],
+        },
+    }
+
+
+def test_completed_finance_job_emits_a_finance_report_card():
+    from core.background_jobs import BackgroundJob, JobSnapshot, JobStatus
+
+    a = _import_assistant_module()
+    assistant = a.Assistant.__new__(a.Assistant)
+    assistant._history = []
+    assistant._completed_thinking_reports = {}
+    assistant._trim_history = lambda: None
+    assistant._dispatch_event = lambda _event: None
+    emitted = []
+    assistant._emit_turn_event = lambda *args, **kwargs: emitted.append((args, kwargs))
+    job = BackgroundJob(
+        "12345678",
+        JobSnapshot("Analyse Tesla", origin_source="integration"),
+        status=JobStatus.READY,
+        note_id="fulloch-reports/2026-08-27-12345678",
+        created_at=1_788_000_000,
+        summary="Tesla moved higher.",
+        artifact={
+            "type": "finance_quote",
+            "quote": {"name": "Tesla", "price": "250", "points": []},
+        },
+    )
+
+    assistant._on_thinking_job_status(job)
+
+    assert emitted[0][1]["artifact"] == {
+        "type": "finance_report",
+        "title": "Finance Report",
+        "created_at": 1_788_000_000,
+        "summary": "Tesla moved higher.",
+        "report_url": "/reports/fulloch-reports/2026-08-27-12345678",
+        "data": {"type": "finance_quote", "quote": {"name": "Tesla", "price": "250", "points": []}},
+    }
+
+
+def test_finance_report_card_combines_watchlist_charts_with_market_context():
+    from core.background_jobs import BackgroundJob, JobSnapshot, JobStatus
+
+    a = _import_assistant_module()
+    assistant = a.Assistant.__new__(a.Assistant)
+    job = BackgroundJob(
+        "12345678",
+        JobSnapshot("Today's finance summary"),
+        status=JobStatus.READY,
+        note_id="fulloch-reports/2026-08-27-12345678",
+        artifact={"type": "finance_market", "markets": [{"name": "S&P 500"}]},
+        artifacts={
+            "artifact-001": {
+                "data": {"type": "finance_market", "markets": [{"name": "S&P 500"}]}
+            },
+            "artifact-002": {
+                "data": {
+                    "type": "finance_watchlist",
+                    "quotes": [{"name": "Example Corp", "points": [{"value": 20.0}]}],
+                }
+            },
+        },
+    )
+
+    artifact = assistant._thinking_report_artifact(job)
+
+    assert artifact["type"] == "finance_report"
+    assert artifact["data"] == {
+        "type": "finance_summary",
+        "quotes": [{"name": "Example Corp", "points": [{"value": 20.0}]}],
+        "markets": [{"name": "S&P 500"}],
+    }
+
+
+def test_completed_exchange_job_emits_a_finance_report_card():
+    from core.background_jobs import BackgroundJob, JobSnapshot, JobStatus
+
+    a = _import_assistant_module()
+    assistant = a.Assistant.__new__(a.Assistant)
+    job = BackgroundJob(
+        "12345678",
+        JobSnapshot("Convert USD to AUD"),
+        status=JobStatus.READY,
+        note_id="fulloch-reports/2026-08-27-12345678",
+        artifact={"type": "finance_exchange_rate", "exchange_rate": {"rate": 1.5}},
+    )
+
+    artifact = assistant._thinking_report_artifact(job)
+
+    assert artifact["type"] == "finance_report"
+    assert artifact["data"]["type"] == "finance_exchange_rate"
 
 
 def _import_assistant_module():

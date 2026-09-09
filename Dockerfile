@@ -134,11 +134,11 @@ COPY --chown=appuser:appuser third_party/openwakeword-models/NOTICE.md /app/THIR
 
 # First-run seeds (copied into the empty ./data volume by core/bootstrap.py):
 # the config template the wizard fills in, the app's own GBNF grammar (which
-# the wizard's downloader can't fetch), the default wakeword classifier, and
+# the wizard's downloader can't fetch), bundled wakeword classifiers, and
 # the timer alert tone. Downloadable model weights stay out of the image.
 COPY --chown=appuser:appuser data/config.example.yml /app/seed/config.example.yml
 COPY --chown=appuser:appuser data/models/grammars/agent.gbnf /app/seed/grammars/agent.gbnf
-COPY --chown=appuser:appuser data/models/wakeword/hey_atticus_v0.5.onnx /app/seed/wakeword/hey_atticus_v0.5.onnx
+COPY --chown=appuser:appuser data/models/wakeword/ /app/seed/wakeword/
 COPY --chown=appuser:appuser data/wav/ /app/seed/wav/
 COPY --chown=appuser:appuser data/voices/ /app/seed/voices/
 COPY --chown=appuser:appuser data/fulloch-obsidian-plugin.zip /app/seed/fulloch-obsidian-plugin.zip

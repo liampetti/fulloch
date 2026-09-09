@@ -19,7 +19,14 @@ def assistant():
         return instance
 
 
-def _run_transcripts(assistant, transcripts, before_final=None, wake_probe_indexes=()):
+def _run_transcripts(
+    assistant,
+    transcripts,
+    before_final=None,
+    wake_probe_indexes=(),
+    kws_candidate_indexes=(),
+    early_verification_indexes=(),
+):
     items = iter(transcripts)
 
     def stream_generator(
@@ -31,6 +38,8 @@ def _run_transcripts(assistant, transcripts, before_final=None, wake_probe_index
         satellite_id_sink,
         endpoint_wait_sink,
         wake_probe_sink,
+        kws_candidate_sink=None,
+        kws_early_verification_sink=None,
     ):
         for index, _text in enumerate(transcripts):
             onset_sink["t"] = 10.0
@@ -40,6 +49,10 @@ def _run_transcripts(assistant, transcripts, before_final=None, wake_probe_index
             satellite_id_sink["id"] = "sat-a"
             endpoint_wait_sink["s"] = 0.0
             wake_probe_sink["flag"] = index in wake_probe_indexes
+            if kws_candidate_sink is not None:
+                kws_candidate_sink["flag"] = index in kws_candidate_indexes
+            if kws_early_verification_sink is not None:
+                kws_early_verification_sink["flag"] = index in early_verification_indexes
             yield object()
 
     def asr_pipe(stream, **_kwargs):
@@ -77,6 +90,13 @@ def test_soft_wake_is_emitted_before_final_transcript(assistant):
     assert assistant._start_turn.call_args.args[0] == "tell me a story"
 
 
+def test_repeated_wakewords_route_the_latest_command(assistant):
+    _run_transcripts(assistant, ["atticus, atticus, dim upstairs lights"])
+
+    assistant._start_turn.assert_called_once()
+    assert assistant._start_turn.call_args.args[0] == "dim upstairs lights"
+
+
 def test_rejected_soft_wake_returns_satellite_to_idle(assistant):
     events = []
     assistant.register_turn_listener(events.append)
@@ -95,13 +115,32 @@ def test_model_wake_is_emitted_before_asr_and_can_be_rejected(assistant):
 
     assistant._on_wakeword_model_match("sat-a")
 
-    assert [event["state"] for event in events] == ["wake_detected", "listening"]
+    assert [event["state"] for event in events] == ["wake_detected"]
     assert assistant.satellites["sat-a"].protocol_wake_pending is True
 
     assistant._reject_pending_satellite_wake(assistant.satellites["sat-a"])
 
-    assert [event["state"] for event in events] == ["wake_detected", "listening", "idle"]
+    assert [event["state"] for event in events] == ["wake_detected", "idle"]
     assert assistant.satellites["sat-a"].protocol_turn_id is None
+
+
+def test_final_candidate_dispatches_after_early_verification_rejects(assistant):
+    events = []
+    assistant.register_turn_listener(events.append)
+    assistant._on_wakeword_model_match("sat-a")
+    generation = assistant.satellites["sat-a"].protocol_state_generation
+
+    _run_transcripts(
+        assistant,
+        ["television noise", "atticus set a timer for six minutes"],
+        kws_candidate_indexes={0, 1},
+        early_verification_indexes={0},
+    )
+
+    assert [event["state"] for event in events] == ["wake_detected", "idle", "wake_detected", "listening"]
+    assert assistant.satellites["sat-a"].protocol_state_generation == generation + 1
+    assistant._start_turn.assert_called_once()
+    assert assistant._start_turn.call_args.args[0] == "set a timer for six minutes"
 
 
 def test_bare_hard_wake_starts_lifecycle_before_follow_up(assistant):
@@ -166,7 +205,7 @@ def test_dropping_ordinary_work_keeps_a_pending_wake(assistant):
     assistant._on_wakeword_model_match("sat-a")
     assistant._on_asr_work_dropped("sat-a", "final", False, "evicted")
 
-    assert [event["state"] for event in events] == ["wake_detected", "listening"]
+    assert [event["state"] for event in events] == ["wake_detected"]
     assert sat.protocol_wake_pending is True
     assert sat.protocol_turn_id is not None
 
@@ -179,6 +218,6 @@ def test_dropping_wake_candidate_stands_down_pending_wake(assistant):
     assistant._on_wakeword_model_match("sat-a")
     assistant._on_asr_work_dropped("sat-a", "wake_candidate", True, "full")
 
-    assert [event["state"] for event in events] == ["wake_detected", "listening", "idle"]
+    assert [event["state"] for event in events] == ["wake_detected", "idle"]
     assert sat.protocol_wake_pending is False
     assert sat.protocol_turn_id is None

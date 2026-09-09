@@ -2222,8 +2222,8 @@ async def _pipe_to_backend(
             # Docker probes /ready over loopback every ten seconds. Their normal
             # response close is not actionable, even when application logging is DEBUG.
             if peer is None or peer[0] not in ("127.0.0.1", "::1"):
-                logger.info("TLS dispatcher relay closed by %s (%s, peer=%s)",
-                            first_close[0], first_close[1], peer)
+                logger.debug("TLS dispatcher relay closed by %s (%s, peer=%s)",
+                             first_close[0], first_close[1], peer)
         for w in (client_writer, backend_writer):
             try:
                 w.close()

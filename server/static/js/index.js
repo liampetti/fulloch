@@ -970,6 +970,180 @@
     return card;
   };
 
+  const validReportUrl = value => typeof value === 'string' && /^\/reports\/fulloch-reports\/\d{4}-\d{2}-\d{2}-[0-9a-f]{8}$/.test(value);
+  const appendReportLink = (card, url) => {
+    if (!validReportUrl(url)) return;
+    const link = document.createElement('a');
+    link.className = 'report-card-link';
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'Open full report';
+    card.append(link);
+  };
+  const appendSourceLink = (card, url) => {
+    let source;
+    try { source = new URL(url); } catch { return; }
+    if (!['http:', 'https:'].includes(source.protocol)) return;
+    const link = document.createElement('a');
+    link.className = 'report-card-source';
+    link.href = source.href;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = 'Market source';
+    card.append(link);
+  };
+  const appendSparkline = (card, points) => {
+    const values = Array.isArray(points) ? points.filter(point => Number.isFinite(point?.value)).slice(0, 48) : [];
+    if (values.length < 2) return;
+    const low = Math.min(...values.map(point => point.value));
+    const high = Math.max(...values.map(point => point.value));
+    const range = high - low || 1;
+    const chart = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    chart.classList.add('finance-sparkline');
+    chart.setAttribute('viewBox', '0 0 300 62');
+    chart.setAttribute('role', 'img');
+    chart.setAttribute('aria-label', `Price range ${low} to ${high}`);
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    line.setAttribute('points', values.map((point, index) => {
+      const x = index / (values.length - 1) * 288 + 6;
+      const y = 54 - (point.value - low) / range * 46;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' '));
+    chart.append(line);
+    card.append(chart);
+  };
+  const appendFinanceQuote = (card, quote, chart = true) => {
+    if (!quote || typeof quote.name !== 'string' || typeof quote.price !== 'string') return;
+    const quoteLine = document.createElement('div');
+    quoteLine.className = 'finance-quote-line';
+    const identity = document.createElement('span');
+    identity.textContent = [quote.name, quote.symbol].filter(value => typeof value === 'string' && value).join(' · ');
+    const price = document.createElement('strong');
+    price.textContent = [quote.price, quote.currency, quote.change, quote.change_percent].filter(value => typeof value === 'string' && value).join(' ');
+    quoteLine.append(identity, price);
+    card.append(quoteLine);
+    if (chart) appendSparkline(card, quote.points);
+    const freshness = document.createElement('small');
+    freshness.textContent = [quote.exchange, quote.quoted_at && `Quoted ${quote.quoted_at}`, quote.retrieved_at && `Retrieved ${quote.retrieved_at}`, quote.cache_mode].filter(Boolean).join(' · ');
+    if (freshness.textContent) card.append(freshness);
+    appendSourceLink(card, quote.source_url);
+  };
+  const renderCurrencyConversionCard = (data) => {
+    const rate = data?.exchange_rate;
+    if (data?.type !== 'finance_exchange_rate' || !rate || typeof rate.base_currency !== 'string' || typeof rate.quote_currency !== 'string' || !Number.isFinite(rate.rate)) return null;
+    const card = document.createElement('section');
+    card.className = 'artifact finance-card currency-conversion-card';
+    card.innerHTML = '<div class="finance-card-heading"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h11m0 0-3-3m3 3-3 3M17 17H6m0 0 3 3m-3-3 3-3"/></svg><strong>Currency Conversion</strong></div>';
+    const rateLine = document.createElement('div');
+    rateLine.className = 'finance-rate';
+    rateLine.textContent = `1 ${rate.base_currency} = ${rate.rate} ${rate.quote_currency}`;
+    card.append(rateLine);
+    if (Number.isFinite(rate.amount) && Number.isFinite(rate.converted_amount)) {
+      const conversion = document.createElement('p');
+      conversion.textContent = `${rate.amount} ${rate.base_currency} = approximately ${rate.converted_amount} ${rate.quote_currency}`;
+      card.append(conversion);
+    }
+    const freshness = document.createElement('small');
+    freshness.textContent = [rate.quoted_at && `Quoted ${rate.quoted_at}`, rate.retrieved_at && `Retrieved ${rate.retrieved_at}`, rate.cache_mode].filter(Boolean).join(' · ');
+    if (freshness.textContent) card.append(freshness);
+    appendSourceLink(card, rate.source_url);
+    return card;
+  };
+  const renderStockQuoteCard = (data) => {
+    if (data?.type !== 'finance_quote' || !data.quote) return null;
+    const card = document.createElement('section');
+    card.className = 'artifact finance-card stock-quote-card';
+    card.innerHTML = '<div class="finance-card-heading"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17 9 12l3 3 7-8M14 7h5v5"/></svg><strong>Stock Quote</strong></div>';
+    appendFinanceQuote(card, data.quote);
+    return card;
+  };
+  const renderDomainReportCard = (data, type, icon) => {
+    if (!data || data.type !== type || typeof data.title !== 'string' || typeof data.summary !== 'string' || !Number.isFinite(data.created_at)) return null;
+    const card = document.createElement('section');
+    card.className = `artifact domain-report-card ${type}`;
+    const heading = document.createElement('div');
+    heading.className = 'domain-report-heading';
+    heading.innerHTML = icon;
+    const title = document.createElement('strong');
+    title.textContent = data.title;
+    heading.append(title);
+    card.append(heading);
+    const summary = document.createElement('p');
+    summary.textContent = data.summary;
+    card.append(summary);
+    const source = data.data;
+    if (type === 'finance_report') {
+       if (source?.type === 'finance_quote') appendFinanceQuote(card, source.quote);
+       if (source?.type === 'finance_summary' && Array.isArray(source.quotes)) {
+         for (const quote of source.quotes.slice(0, 4)) appendFinanceQuote(card, quote);
+       }
+      if (source?.type === 'finance_exchange_rate') {
+        const rate = source.exchange_rate;
+        if (rate && typeof rate.base_currency === 'string' && typeof rate.quote_currency === 'string' && Number.isFinite(rate.rate)) {
+          const item = document.createElement('div');
+          item.className = 'domain-report-row';
+          item.textContent = `1 ${rate.base_currency} = ${rate.rate} ${rate.quote_currency}${Number.isFinite(rate.amount) && Number.isFinite(rate.converted_amount) ? ` · ${rate.amount} = ${rate.converted_amount}` : ''}`;
+          card.append(item);
+          const freshness = document.createElement('small');
+          freshness.textContent = [rate.quoted_at && `Quoted ${rate.quoted_at}`, rate.retrieved_at && `Retrieved ${rate.retrieved_at}`, rate.cache_mode].filter(Boolean).join(' · ');
+          if (freshness.textContent) card.append(freshness);
+          appendSourceLink(card, rate.source_url);
+        }
+      }
+       const rows = source?.type === 'finance_watchlist'
+         ? source.quotes
+         : source?.type === 'finance_market'
+           ? source.markets
+           : source?.type === 'finance_summary' ? source.markets : [];
+      if (Array.isArray(rows)) for (const row of rows.slice(0, 4)) {
+        if (typeof row?.name !== 'string') continue;
+        const item = document.createElement('div');
+        item.className = 'domain-report-row';
+        item.textContent = [row.name, row.price, row.currency, row.change, row.change_percent].filter(value => typeof value === 'string' && value).join(' · ');
+        card.append(item);
+      }
+       const retrievedAt = source?.type === 'finance_watchlist'
+         ? source.quotes?.[0]?.retrieved_at
+         : source?.type === 'finance_market' ? source.retrieved_at : source?.quotes?.[0]?.retrieved_at;
+      if (typeof retrievedAt === 'string') {
+        const freshness = document.createElement('small');
+        freshness.textContent = `Retrieved ${retrievedAt}`;
+        card.append(freshness);
+      }
+    } else if (type === 'research_report') {
+      const papers = source?.type === 'paper_search' ? source.papers : source?.type === 'paper_detail' ? [source.paper] : [];
+      if (Array.isArray(papers)) for (const paper of papers.slice(0, 3)) {
+        if (typeof paper?.title !== 'string') continue;
+        const item = document.createElement('div');
+        item.className = 'domain-report-row';
+        item.textContent = [paper.title, paper.year && String(paper.year), paper.source].filter(Boolean).join(' · ');
+        card.append(item);
+      }
+      if (source?.type === 'web_research' && Array.isArray(source.sources)) {
+        const item = document.createElement('div');
+        item.className = 'domain-report-row';
+        item.textContent = `${source.sources.slice(0, 3).filter(source => typeof source?.url === 'string').length} web sources retrieved`;
+        card.append(item);
+      }
+    } else if (type === 'travel_report') {
+      const route = source?.route;
+      if (route?.origin || route?.destination) {
+        const item = document.createElement('div');
+        item.className = 'domain-report-row';
+        item.textContent = `${route.origin || '?'} to ${route.destination || '?'}`;
+        card.append(item);
+      } else if (Array.isArray(source?.legs)) {
+        const item = document.createElement('div');
+        item.className = 'domain-report-row';
+        item.textContent = `${source.legs.length} itinerary leg${source.legs.length === 1 ? '' : 's'} retrieved`;
+        card.append(item);
+      }
+    }
+    appendReportLink(card, data.report_url);
+    return card;
+  };
+
   const flightDuration = (minutes) => Number.isFinite(minutes)
     ? `${Math.floor(minutes / 60)}h ${minutes % 60}m`
     : 'Duration unavailable';
@@ -1028,6 +1202,11 @@
     if (artifact?.type === 'notes_search') return renderNotesSearchCard(artifact);
     if (artifact?.type === 'todos') return renderTodosCard(artifact);
     if (artifact?.type === 'web_research') return renderWebResearchCard(artifact);
+    if (artifact?.type === 'finance_exchange_rate') return renderCurrencyConversionCard(artifact);
+    if (artifact?.type === 'finance_quote') return renderStockQuoteCard(artifact);
+    if (artifact?.type === 'research_report') return renderDomainReportCard(artifact, 'research_report', '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12a2 2 0 0 1 2 2v14l-4-2-4 2-4-2-2 1Z"/><path d="M8 9h8m-8 4h6"/></svg>');
+    if (artifact?.type === 'travel_report') return renderDomainReportCard(artifact, 'travel_report', '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13.5h6l3.5 6 1.5-.5-1.5-5.5H20a1.5 1.5 0 0 0 0-3h-7.5L14 5l-1.5-.5L9 10.5H3z"/></svg>');
+    if (artifact?.type === 'finance_report') return renderDomainReportCard(artifact, 'finance_report', '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17 9 12l3 3 7-8M14 7h5v5"/></svg>');
     if (artifact?.type === 'generated_report') return renderGeneratedReportCard(artifact);
     if (artifact?.type === 'flight_plan') return renderFlightPlanCard(artifact);
     return null;
@@ -1061,9 +1240,8 @@
   // Finalise any in-flight typewriter immediately (show the full text).
   const finishTyping = () => { if (finishActive) finishActive(); };
 
-  // Reveal `text` into `bubble` progressively to mimic a live stream, paced to
-  // roughly track speech (~165 wpm). Used only for live turns, never history
-  // replay. A new message finalises any in-flight animation via finishTyping().
+  // Reveal voice responses progressively to roughly track speech (~165 wpm).
+  // Text-chat responses are already complete and render immediately.
   const typeInto = (bubble, text) => {
     finishTyping();
     const words = text.trim().split(/\s+/).length || 1;
@@ -1206,7 +1384,7 @@
     const text = ev.role === 'assistant'
       ? naturalize(ev.content).replace(/<\|[^|>]+\|>/g, '').replace(/\s{2,}/g, ' ').trim()
       : ev.content;
-    const animate = ev.role === 'assistant' && live && !!text;
+    const animate = ev.role === 'assistant' && ev.source === 'voice' && live && !!text;
     bubble.textContent = animate ? '' : text;
 
     const meta = document.createElement('div');

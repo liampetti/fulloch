@@ -1303,6 +1303,23 @@ nav.tabs {
 .generated-report-card a { display: inline-block; margin-top: 10px; color: var(--primary); font-size: .76rem; font-weight: 650; text-decoration: none; }
 .generated-report-card a:hover { text-decoration: underline; }
 
+.finance-card, .domain-report-card { padding: 13px; }
+.finance-card-heading, .domain-report-heading { display: flex; align-items: center; gap: 7px; font-family: var(--font-display); }
+.finance-card-heading svg, .domain-report-heading svg { width: 22px; height: 22px; flex: none; fill: none; stroke: var(--primary); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.finance-card-heading strong, .domain-report-heading strong { overflow: hidden; font-size: .88rem; text-overflow: ellipsis; white-space: nowrap; }
+.finance-rate { margin: 10px 0 4px; color: var(--primary); font-family: var(--font-display); font-size: 1.05rem; }
+.finance-card p, .domain-report-card p { display: -webkit-box; margin: 6px 0; overflow: hidden; color: var(--text-muted); font-size: .75rem; line-height: 1.42; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
+.finance-card small, .domain-report-card small { display: block; margin-top: 7px; color: var(--text-muted); font-size: .67rem; }
+.finance-quote-line { display: flex; justify-content: space-between; gap: 10px; margin-top: 10px; }
+.finance-quote-line span { min-width: 0; overflow: hidden; color: var(--text-muted); font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
+.finance-quote-line strong { color: var(--primary); font-family: var(--font-display); font-size: .84rem; text-align: right; }
+.finance-sparkline { display: block; width: 100%; height: 70px; margin: 8px 0 2px; overflow: visible; }
+.finance-sparkline polyline { fill: none; stroke: var(--primary); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.domain-report-row { padding: 7px 0; border-top: 1px solid var(--border); color: var(--text-muted); font-size: .73rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.report-card-link, .report-card-source { display: inline-block; margin-top: 9px; color: var(--primary); font-size: .76rem; font-weight: 650; text-decoration: none; }
+.report-card-source { margin-left: 12px; font-weight: 500; }
+.report-card-link:hover, .report-card-source:hover { text-decoration: underline; }
+
 .flight-plan-card { padding: 14px; }
 .flight-plan-kicker, .flight-plan-meta { display: flex; justify-content: space-between; gap: 8px; color: var(--text-muted); font-size: 0.7rem; }
 .flight-plan-kicker span:first-child { color: var(--primary); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }

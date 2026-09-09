@@ -109,7 +109,9 @@ def load_asr_model(model_name: Optional[str] = None, language: Optional[str] = N
         model_name,
         device_map=DEVICE,
         dtype=DTYPE,
-        attn_implementation="flash_attention_2",
+        # Use PyTorch SDPA so ASR remains compatible with the installed torch
+        # build when a matching FlashAttention extension is unavailable.
+        attn_implementation="sdpa",
     )
     if language:
         logger.info(f"ASR language locked to: {language!r}")
@@ -129,12 +131,13 @@ def stream_generator(
     kws_candidate_sink: Optional[dict] = None,
     kws_wav_path_sink: Optional[dict] = None,
     wake_generation_sink: Optional[dict] = None,
+    kws_early_verification_sink: Optional[dict] = None,
 ) -> Generator:
     """Yield audio buffers from a queue until a None sentinel.
 
     Queue items are
     `(buf, speech_onset_monotonic, loudness_dbfs[, provisional[, satellite_id[,
-    endpoint_monotonic[, wake_probe[, kws_candidate[, kws_wav_path]]]]]])` tuples (everything past `buf`/`onset`
+    endpoint_monotonic[, wake_probe[, kws_candidate[, kws_wav_path[, wake_generation[, kws_early_verification]]]]]]]])` tuples (everything past `buf`/`onset`
     is optional
     for backward compatibility). When `onset_sink` / `loudness_sink` /
     `provisional_sink` / `audio_sink` / `satellite_id_sink` / `endpoint_wait_sink`
@@ -163,6 +166,7 @@ def stream_generator(
         kws_candidate = item[7] if len(item) > 7 else False
         kws_wav_path = item[8] if len(item) > 8 else None
         wake_generation = item[9] if len(item) > 9 else None
+        kws_early_verification = item[10] if len(item) > 10 else False
         if onset_sink is not None:
             onset_sink["t"] = onset_t
         if loudness_sink is not None:
@@ -183,4 +187,6 @@ def stream_generator(
             kws_wav_path_sink["path"] = kws_wav_path
         if wake_generation_sink is not None:
             wake_generation_sink["value"] = wake_generation
+        if kws_early_verification_sink is not None:
+            kws_early_verification_sink["flag"] = kws_early_verification
         yield AsrInput(buf, verification_context) if kws_candidate else buf

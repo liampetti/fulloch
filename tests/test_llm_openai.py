@@ -91,6 +91,23 @@ def test_cancel_check_aborts_before_content():
     assert c.generate(user_prompt="hi", cancel_check=lambda: True) == ""
 
 
+def test_cancelled_stream_is_closed_immediately():
+    class Stream:
+        closed = False
+
+        def __iter__(self):
+            return iter([_chunk("a")])
+
+        def close(self):
+            self.closed = True
+
+    stream = Stream()
+    c, _ = _make_client(lambda _kwargs: stream)
+
+    assert c.generate(user_prompt="hi", cancel_check=lambda: True) == ""
+    assert stream.closed is True
+
+
 def test_local_generation_deadline_restarts_the_server():
     c, _ = _make_client(lambda k: iter([_chunk("too late")]))
     c._generation_timeout = 0

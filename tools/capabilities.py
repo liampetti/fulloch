@@ -57,6 +57,10 @@ _NATIVE_ACCESS: dict[str, AccessClass] = {
     "deep_think": "propose",
     "assess_itinerary": "read",
     "plan_travel": "read",
+    "get_finance_quote": "read",
+    "get_exchange_rate": "read",
+    "get_watchlist_brief": "read",
+    "get_market_brief": "read",
 }
 
 def native_access_class(name: str) -> AccessClass:

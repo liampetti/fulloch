@@ -206,6 +206,7 @@ class OpenAIClient:
         out_tokens = 0
         full_text = ""
         usage = None
+        stream = None
         try:
             kwargs = {
                 "model": self.model,
@@ -240,25 +241,30 @@ class OpenAIClient:
                     timeout=httpx.Timeout(read_timeout, connect=self._connect_timeout)
                 )
             stream = client.chat.completions.create(**kwargs)
-            for chunk in stream:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"LLM generation exceeded the {request_generation_timeout:.0f}s deadline"
-                    )
-                if cancel_check is not None and cancel_check():
-                    logger.info("Remote LLM generation cancelled")
-                    break
-                if getattr(chunk, "usage", None):
-                    usage = chunk.usage
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-                content = getattr(delta, "content", None)
-                if content:
-                    if ttft is None:
-                        ttft = time.monotonic() - t_call
-                    out_tokens += 1
-                    full_text += content
+            try:
+                for chunk in stream:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"LLM generation exceeded the {request_generation_timeout:.0f}s deadline"
+                        )
+                    if cancel_check is not None and cancel_check():
+                        logger.info("Remote LLM generation cancelled")
+                        break
+                    if getattr(chunk, "usage", None):
+                        usage = chunk.usage
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+                    content = getattr(delta, "content", None)
+                    if content:
+                        if ttft is None:
+                            ttft = time.monotonic() - t_call
+                        out_tokens += 1
+                        full_text += content
+            finally:
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    close()
         except (APIConnectionError, APITimeoutError) as e:
             local_restarted = recover_on_failure and self._recover_local_server(f"{type(e).__name__}: {e}")
             if local_restarted:

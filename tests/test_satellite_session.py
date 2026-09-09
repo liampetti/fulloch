@@ -18,6 +18,7 @@ import pytest
 
 from core.audio import AudioCapture
 from core.satellite import SatelliteSession
+from core.wakeword import WakewordResult
 
 
 def _make_assistant(**kwargs):
@@ -604,6 +605,54 @@ class TestVadEndpointing:
         assert buf.shape == (4000,)
         assert np.allclose(buf, 0.5)
         assert np.allclose(endpointer.processed[0], 0.5)
+
+    def test_wakeword_match_discards_pre_wake_room_audio(self):
+        class Endpointer:
+            def __init__(self):
+                self.speech_started = False
+                self.soft_endpointed = False
+                self.endpointed = False
+                self.last_speech_samples = 0
+                self.speech_onset = None
+                self.voiced_rms = None
+
+            def process(self, samples) -> None:
+                self.speech_started = True
+                self.last_speech_samples = len(samples)
+                self.endpointed = samples[0] == 9.0
+
+            def reset(self) -> None:
+                self.speech_started = False
+                self.soft_endpointed = False
+                self.endpointed = False
+                self.last_speech_samples = 0
+
+        class WakewordBackend:
+            def feed_pcm(self, _satellite_id, samples):
+                return WakewordResult(samples[0] == 7.0, 0.9)
+
+            def reset(self, _satellite_id) -> None:
+                pass
+
+        ac = AudioCapture(use_vad=False, min_utterance_ms=100, max_utterance_ms=10000)
+        ac._use_vad_enabled = True
+        ac.vad_min_speech_samples = 100
+        ac._build_endpointer = Endpointer
+        ac.set_wakeword_backend(WakewordBackend())
+        session = SatelliteSession(id="sat-a", chunk_q=queue.Queue())
+        for value in range(1, 10):
+            session.chunk_q.put(np.full(3200, value, dtype=np.float32))
+        session.chunk_q.put(None)
+
+        ac.satellite_recorder_thread(session)
+
+        verification, *_ = ac.audio_queue.get_nowait()
+        buf, *_ = ac.audio_queue.get_nowait()
+        assert verification.size == 20000
+        # The one-second pre-roll keeps chunks 3-7; chunks 1-2 precede the
+        # wakeword and must never reach ASR with the command.
+        assert buf[0] == 3.0
+        assert buf[-1] == 9.0
 
     def test_hard_endpoint_keeps_its_vad_onset_when_tts_starts_after_soft_probe(self):
         ac = AudioCapture(use_vad=False, min_utterance_ms=100, max_utterance_ms=10000)

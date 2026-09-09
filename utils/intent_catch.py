@@ -67,7 +67,7 @@ _WEATHER_FORECAST_RE = re.compile(
 # can't hijack the turn.
 _TIMER_RE = re.compile(
     r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*"
-    r"(?:start|set)\s+(?:a\s+)?(?:timer|time)\s+(?:for\s+)?(.+?)(?:\s+please)?$",
+    r"(?:start|set)\s+(?:(?:a|the)\s+)?(?:timer|time)\s+(?:(?:for|to)\s+)?(.+?)(?:\s+please)?$",
     re.IGNORECASE,
 )
 _SATELLITE_MESSAGE_RE = re.compile(

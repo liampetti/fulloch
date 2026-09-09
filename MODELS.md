@@ -11,11 +11,11 @@ Fulloch downloads model assets during setup. The selected backend determines whi
 
 ## Wakeword
 
-- Hey Atticus v0.3: repository-provided custom openWakeWord ONNX classifier at
-  `data/models/wakeword/hey_atticus_v0.3.onnx`. Docker images seed it into the
-  persistent data volume on first run, so the default wizard preset works without
-  a model download. Fulloch uses it only as an optional candidate gate and
-  verifies each candidate with ASR. The openWakeWord runtime is
+- Hey Atticus: repository-provided custom openWakeWord ONNX classifiers named
+  `data/models/wakeword/hey_atticus_v*.onnx`. Docker images seed every bundled
+  version into the persistent data volume on first run, so configuration can
+  select a model filename without a model download. Fulloch uses it only as an
+  optional candidate gate and verifies each candidate with ASR. The openWakeWord runtime is
   [Apache-2.0](https://github.com/dscripka/openWakeWord/blob/main/LICENSE).
 - Feature extractors: Fulloch images and this repository include the unmodified
   `embedding_model` and `melspectrogram` ONNX/TFLite files from

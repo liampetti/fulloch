@@ -95,6 +95,7 @@ class SatelliteSession:
     # Idle openWakeWord gate state. Recorder-thread owned and reset on disconnect
     # or when an endpoint completes.
     kws_pre_roll: list = field(default_factory=list)
+    kws_verification_pre_roll: list = field(default_factory=list)
     kws_candidate: bool = False
     kws_score: float = 0.0
     kws_detected_at: float = 0.0

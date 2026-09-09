@@ -71,14 +71,15 @@ def ensure_scaffolding(data_dir: str = "./data", seed_dir: str = None) -> None:
         shutil.copy2(seed_grammar, grammar)
         logger.info("Seeded agent grammar into %s", grammar)
 
-    # The default wakeword preset points to this repository-owned classifier.
-    # It is an app asset rather than a setup download, so seed it like the
-    # grammar and never overwrite a user-supplied replacement.
-    wakeword_model = data / "models" / "wakeword" / "hey_atticus_v0.3.onnx"
-    seed_wakeword_model = seed / "wakeword" / "hey_atticus_v0.3.onnx"
-    if not wakeword_model.is_file() and seed_wakeword_model.is_file():
-        shutil.copy2(seed_wakeword_model, wakeword_model)
-        logger.info("Seeded default wakeword model into %s", wakeword_model)
+    # Bundle every versioned Hey Atticus classifier. They are app assets rather
+    # than setup downloads, and existing user files must never be overwritten.
+    seed_wakewords = seed / "wakeword"
+    if seed_wakewords.is_dir():
+        for src in seed_wakewords.glob("hey_atticus_v*.onnx"):
+            dst = data / "models" / "wakeword" / src.name
+            if not dst.is_file():
+                shutil.copy2(src, dst)
+                logger.info("Seeded wakeword model into %s", dst)
 
     # Timer alert tone (core/assistant.py: ALARM_WAV_PATH) — same reasoning
     # as the grammar above: it's an app asset, not something the wizard

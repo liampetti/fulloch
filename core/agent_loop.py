@@ -121,14 +121,30 @@ def _llm_unavailable_label(host) -> str:
     )
 
 
+_FINANCE_ADVICE_RE = re.compile(
+    r"\b(buy|sell|hold|invest(?:ment)?|allocat(?:e|ion)|margin|options?|short(?:ing)?|tax|legal)\b",
+    re.IGNORECASE,
+)
+
+
 def _route_deep_think_only_tools(emission: dict, user_prompt: str) -> dict:
-    """Keep multi-step research and planning calls in the deliberate worker."""
+    """Keep multi-step research, planning, and finance advice in deliberate work."""
     actions = emission.get("actions")
+    finance_advice = _FINANCE_ADVICE_RE.search(user_prompt) and any(
+        isinstance(action, dict)
+        and tool_registry.canonical_name(str(action.get("intent") or ""))
+        in {"get_finance_quote", "get_exchange_rate", "get_watchlist_brief", "get_market_brief"}
+        for action in actions or []
+    )
     if (
         not isinstance(actions, list)
-        or not any(
-            isinstance(action, dict) and native_requires_deep_think(str(action.get("intent") or ""))
-            for action in actions
+        or not (
+            finance_advice
+            or any(
+                isinstance(action, dict)
+                and native_requires_deep_think(str(action.get("intent") or ""))
+                for action in actions
+            )
         )
         or not tool_registry.is_available("deep_think")
     ):
@@ -327,7 +343,9 @@ class AgentLoop:
             )(self.satellite_id)
             if completed_report:
                 return completed_report
-        if not isinstance(catchAll(user_prompt), dict) and _is_completed_report_follow_up(user_prompt):
+        if not isinstance(catchAll(user_prompt), dict) and _is_completed_report_follow_up(
+            user_prompt
+        ):
             report_answer = getattr(host, "answer_completed_thinking_report", lambda *_args: None)(
                 self.satellite_id, user_prompt, cancel_check, stats
             )

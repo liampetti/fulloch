@@ -18,7 +18,7 @@ class TtsSession:
     active: bool = False
 
     def stop(self) -> None:
-        """Signal active TTS playback to abort. Idempotent; no-op when idle."""
+        """Signal cancellation, including before playback starts. Idempotent."""
         self.stop_event.set()
 
     @property

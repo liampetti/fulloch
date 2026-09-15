@@ -8,11 +8,8 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
-# Force tools.home_assistant's first-ever import to happen now, bound to the
-# real on-disk config, before any test below monkeypatches tools._config.config
-# (see tests/test_dashboard_entities.py for why this matters).
-import tools.home_assistant  # noqa: F401
 from server.dashboard import create_app
+from tools import ha_client as ha
 
 
 def _stub_assistant():
@@ -40,10 +37,9 @@ def test_areas_list(monkeypatch):
 
     monkeypatch.setattr(cfg, "config", {"home_assistant": {}})
 
-    import tools.home_assistant as ha
-
     sample = [{"id": "kitchen", "name": "Kitchen"}, {"id": "office", "name": "Office"}]
-    monkeypatch.setattr(ha, "list_areas", lambda: sample)
+    monkeypatch.setattr(ha, "_loaded", True)
+    monkeypatch.setattr(ha, "_AREA_MAP", {"kitchen": "Kitchen", "office": "Office"})
 
     client = TestClient(create_app(_stub_assistant()))
     r = client.get("/ha/areas")

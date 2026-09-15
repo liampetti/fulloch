@@ -1,7 +1,7 @@
 """Short, hand-authored speech used outside LLM replies."""
 
 # Brief conversational receipts for normal agent work. These are deliberately short
-ACK_PHRASES = ["Okay.", "Got it.", "Aha.", "Hmm.", "Huh.", "OK.", "Let's see."]
+ACK_PHRASES = ["Okay.", "Got it.", "Hmm.", "OK.", "Let's see.", "Aah.", "Er."]
 
 # These operations need no special wording; they reuse the acknowledgement
 # clips rather than expanding the startup phrase inventory.

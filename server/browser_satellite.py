@@ -75,8 +75,6 @@ def register_browser_satellite_route(
             "conversation_mode": in_conversation_mode,
             "half_duplex": context.assistant.barge_in != "wakeword" and not in_conversation_mode,
         })
-        context.assistant.replay_greeting(satellite_id)
-
         async def receive() -> None:
             try:
                 while True:

@@ -1,8 +1,7 @@
 """Tests for the markdown notes tool module.
 
-The notes module reads its base directory from config at import time, so the
-fixture monkeypatches `notes.NOTES_DIR` (and `notes.DAILY_SUBDIR`) onto a
-fresh tmp_path per test rather than re-importing the module.
+The fixture redirects the shared notes root to a fresh temporary directory and
+stubs index work. Transport tests patch the owning Obsidian transport module.
 """
 
 import queue
@@ -13,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tools import notes, notes_root  # noqa: E402
+from tools import notes, notes_obsidian, notes_root  # noqa: E402
 
 
 class _StubHit:
@@ -63,7 +62,7 @@ def notes_dir(tmp_path, monkeypatch):
 
 def test_insert_at_obsidian_cursor_queues_explicit_text(monkeypatch):
     commands = queue.Queue()
-    monkeypatch.setattr(notes, "_obsidian_cmd_q", commands)
+    monkeypatch.setattr(notes_obsidian, "_command_queue", commands)
     monkeypatch.setitem(notes.config, "obsidian", {"allow_edit_delete": True})
 
     assert notes.insert_at_obsidian_cursor("## Liam's daily tasks") == (
@@ -95,7 +94,7 @@ def test_notes_index_is_persisted_in_project_data_not_beside_vault(tmp_path, mon
 
 
 def test_rename_active_obsidian_note_requires_a_connected_plugin(monkeypatch):
-    monkeypatch.setattr(notes, "_obsidian_cmd_q", None)
+    monkeypatch.setattr(notes_obsidian, "_command_queue", None)
     monkeypatch.setitem(notes.config, "obsidian", {"allow_edit_delete": True})
 
     assert notes.rename_active_obsidian_note("Liam's daily tasks") == (
@@ -105,7 +104,7 @@ def test_rename_active_obsidian_note_requires_a_connected_plugin(monkeypatch):
 
 def test_replace_selected_obsidian_text_queues_replacement(monkeypatch):
     commands = queue.Queue()
-    monkeypatch.setattr(notes, "_obsidian_cmd_q", commands)
+    monkeypatch.setattr(notes_obsidian, "_command_queue", commands)
     monkeypatch.setitem(notes.config, "obsidian", {"allow_edit_delete": True})
 
     assert notes.replace_selected_obsidian_text("Liam's notes") == (
@@ -115,7 +114,7 @@ def test_replace_selected_obsidian_text_queues_replacement(monkeypatch):
 
 
 def test_replace_selected_obsidian_text_is_disabled_by_default(monkeypatch):
-    monkeypatch.setattr(notes, "_obsidian_cmd_q", queue.Queue())
+    monkeypatch.setattr(notes_obsidian, "_command_queue", queue.Queue())
     monkeypatch.setitem(notes.config, "obsidian", {"allow_edit_delete": False})
 
     assert notes.replace_selected_obsidian_text("Liam's notes") == (
@@ -462,7 +461,9 @@ class TestRecallFacts:
         assert "# Long-term facts" not in block
 
     def test_skips_blank_lines(self, notes_dir):
-        (notes_dir / "fulloch_facts.md").write_text("# Long-term facts\n\n\n- [2026-05-20] fact one\n\n\n")
+        (notes_dir / "fulloch_facts.md").write_text(
+            "# Long-term facts\n\n\n- [2026-05-20] fact one\n\n\n"
+        )
         block = notes.recall_facts()
         assert "fact one" in block
         # No empty lines between the block header and the bullet

@@ -1,14 +1,15 @@
 """Backend registry and no-LLM gate.
 
 `core.backends` is the single source of truth mapping `(domain, backend)` to
-a loader + metadata. These tests lock in the default resolution (the v2.1.9
-Qwen stack when `models:` is absent), error behaviour, and the regex-only
+a loader + metadata. These tests cover the default Qwen stack when `models:`
+is absent, error behaviour, and the regex-only
 bypass `AgentLoop` takes when `llm.backend: none`.
 """
 
-import inspect
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -63,24 +64,31 @@ def test_backends_are_implemented():
     assert b.get_spec("llm", "none").implemented is True
     assert b.get_spec("llm", "openai").implemented is True
     assert b.get_spec("asr", "qwen").implemented is True
+    assert b.get_spec("asr", "parakeet").implemented is True
+    assert b.get_spec("asr", "orukeet").implemented is True
     assert b.get_spec("asr", "moonshine").implemented is True
     assert b.get_spec("tts", "kokoro-onnx").implemented is True
     assert b.get_spec("tts", "pocket-tts-onnx").implemented is True
     assert b.get_spec("tts", "pocket-tts-gguf").implemented is True
     assert b.get_spec("tts", "pocket-tts-pytorch").implemented is True
+    assert b.get_spec("tts", "audio8").implemented is True
     assert b.get_loader("llm", "openai")  # resolves to load_openai
 
 
 def test_gpu_only_flags():
     assert b.get_spec("asr", "qwen").gpu_only is True
+    assert b.get_spec("asr", "parakeet").gpu_only is True
+    assert b.get_spec("asr", "orukeet").gpu_only is True
     assert b.get_spec("tts", "qwen").gpu_only is True
     assert b.get_spec("llm", "llama").gpu_only is True
     assert b.get_spec("llm", "gemma").gpu_only is True
+    assert b.get_spec("llm", "ornith").gpu_only is True
     assert b.get_spec("asr", "moonshine").gpu_only is False
     assert b.get_spec("tts", "kokoro-onnx").gpu_only is False
     assert b.get_spec("tts", "pocket-tts-onnx").gpu_only is False
     assert b.get_spec("tts", "pocket-tts-gguf").gpu_only is True
     assert b.get_spec("tts", "pocket-tts-pytorch").gpu_only is True
+    assert b.get_spec("tts", "audio8").gpu_only is True
     assert b.get_spec("llm", "openai").gpu_only is False
     assert b.get_spec("asr", "qwen-gguf").gpu_only is True
     assert b.get_spec("tts", "qwen-gguf").gpu_only is True
@@ -130,6 +138,27 @@ def test_pocket_pytorch_backend_metadata_and_cpu_gating():
     assert b.is_offerable(pocket, "cpu") is False
 
 
+def test_orukeet_backend_metadata_and_cpu_gating():
+    orukeet = b.get_spec("asr", "orukeet")
+    assert orukeet.loader == "core.asr_orukeet:load_asr_model"
+    assert orukeet.hf_snapshots[0] == (
+        "oruk/orukeet",
+        ("orukeet-v0.1.0.nemo",),
+        "555136b50265a132d4cea0d35560c26fc4f657ab",
+    )
+    assert b.is_offerable(orukeet, "gpu") is True
+    assert b.is_offerable(orukeet, "cpu") is False
+
+
+def test_audio8_backend_metadata_and_cpu_gating():
+    audio8 = b.get_spec("tts", "audio8")
+    assert audio8.loader == "core.tts_audio8:load_tts"
+    assert audio8.hf_snapshots[0][0] == "Edge0/Audio8-TTS-Preview-0.6b"
+    assert audio8.extra["revision"] == audio8.hf_snapshots[0][2]
+    assert b.is_offerable(audio8, "gpu") is True
+    assert b.is_offerable(audio8, "cpu") is False
+
+
 def test_small_gguf_backend_metadata():
     asr = b.get_spec("asr", "qwen-gguf-small")
     tts = b.get_spec("tts", "qwen-gguf-small")
@@ -157,9 +186,23 @@ def test_gemma_resolves_with_registry_defaults():
     assert r["llm"]["opts"]["mtp"] is False
 
 
+def test_ornith_backend_metadata_and_public_resolution():
+    ornith = b.get_spec("llm", "ornith")
+    assert ornith.loader == "core.slm:load_slm"
+    assert ornith.hf_repo == "ornith-ai/Ornith-1.5-9B-GGUF"
+    assert ornith.hf_file == "Ornith-1.5-9B-Q4_K_M.gguf"
+    assert ornith.extra == {"mtp": False}
+
+    resolved = b.resolve_models({"llm": {"backend": "local", "local_model": "ornith"}})["llm"]
+    assert resolved["backend"] == "ornith"
+    assert resolved["model"].endswith(ornith.hf_file)
+    assert resolved["opts"]["mtp"] is False
+
+
 def test_public_local_llm_modes_resolve_to_their_internal_servers():
     qwen = b.resolve_models({"llm": {"backend": "local", "local_model": "qwen"}})["llm"]
     gemma = b.resolve_models({"llm": {"backend": "local", "local_model": "gemma"}})["llm"]
+    ornith = b.resolve_models({"llm": {"backend": "local", "local_model": "ornith"}})["llm"]
     external = b.resolve_models({"llm": {"backend": "external", "base_url": "http://llm/v1"}})[
         "llm"
     ]
@@ -168,8 +211,32 @@ def test_public_local_llm_modes_resolve_to_their_internal_servers():
     assert qwen["opts"]["mtp"] is False
     assert qwen["opts"]["flash_attn"] is False
     assert gemma["backend"] == "gemma"
+    assert ornith["backend"] == "ornith"
     assert external["backend"] == "openai"
     assert external["opts"]["base_url"] == "http://llm/v1"
+
+
+def test_model_docs_and_settings_cover_the_registry():
+    root = Path(__file__).parent.parent
+    example = (root / "data/config.example.yml").read_text()
+    settings = (root / "server/static/js/setup-settings.js").read_text()
+
+    # ASR/TTS selects are registry-driven, so every offerable backend returned
+    # by /settings is selectable without a second hard-coded menu.
+    assert "optsFor('asr'" in settings
+    assert "optsFor('tts'" in settings
+    for domain in (b.ASR, b.TTS):
+        for spec in b.list_backends(domain):
+            assert spec.backend in example
+
+    # Local LLMs have public config aliases rather than their internal server
+    # backend names; keep the explicit selector and config docs in sync.
+    for local_model in ("qwen", "gemma", "ornith", "custom"):
+        assert f"local_model: {local_model}" in example
+        assert f'<option value="{local_model}"' in settings
+    assert "backend: local             # local | external | none" in example
+    assert '<option value="external"' in settings
+    assert '<option value="none"' in settings
 
 
 def test_local_llm_experimental_options_are_explicit_overrides():
@@ -210,6 +277,8 @@ def test_list_backends_covers_each_domain():
 
 def test_asr_and_tts_options_have_stable_user_facing_order():
     assert [spec.backend for spec in b.list_backends(b.ASR)] == [
+        "parakeet",
+        "orukeet",
         "qwen-gguf",
         "qwen-gguf-small",
         "qwen-onnx",
@@ -224,6 +293,7 @@ def test_asr_and_tts_options_have_stable_user_facing_order():
         "qwen-gguf",
         "qwen-gguf-small",
         "pocket-tts-pytorch",
+        "audio8",
         "pocket-tts-gguf",
         "qwen",
         "qwen-small",
@@ -236,36 +306,42 @@ def test_asr_and_tts_options_have_stable_user_facing_order():
 # --- no-LLM bypass in the agent loop ---------------------------------------
 
 
-def _import_agent_loop():
-    """Import core.agent_loop.
+@pytest.mark.parametrize(
+    "result,expected",
+    [
+        ("Lights on.", "Lights on."),
+        (
+            "Reactive question: Couldn't find that room. Ask the user which room.",
+            "Couldn't find that room.",
+        ),
+        ("User question: raw search data", "Basic commands only."),
+        (None, "Basic commands only."),
+    ],
+)
+def test_regex_only_dispatch_never_calls_model(monkeypatch, result, expected):
+    import core.agent_loop as al
 
-    It's self-contained (imports only utils/tools/leaf-core), and its leaf
-    deps are importable on the dev box / conftest-stubbed in CI, so no module
-    stubbing is needed here — stubbing core.slm would pollute sys.modules for
-    other test files that need the real generate_slm/load_slm.
-    """
-    import core.agent_loop as agent_loop  # noqa: E402
+    action = {"intent": "example_tool", "args": ["kitchen"]}
+    monkeypatch.setattr(al, "catchAll", lambda prompt: {"actions": [action]})
+    dispatch = Mock(return_value=result)
+    monkeypatch.setattr(al.intents, "handle_action", dispatch)
+    history = []
+    host = SimpleNamespace(
+        llm_enabled=False,
+        _history_for=lambda satellite: history,
+        _compact_completed_turns=Mock(),
+        _trim_history=Mock(),
+        _emit_agent_event=Mock(),
+        _record_spoken=Mock(),
+        _speak_no_ai_fallback=Mock(return_value="Basic commands only."),
+        _generate_with_context_recovery=Mock(),
+    )
 
-    return agent_loop
-
-
-def test_run_bypasses_slm_when_llm_disabled():
-    al = _import_agent_loop()
-    src = inspect.getsource(al.AgentLoop._run)
-    # The bypass is taken before the SLM agent loop body.
-    assert "if not host.llm_enabled:" in src
-    bypass_pos = src.index("host.llm_enabled")
-    loop_pos = src.index("for iteration in range")
-    assert bypass_pos < loop_pos, "no-LLM bypass must precede the SLM loop"
-
-
-def test_run_without_llm_never_calls_slm():
-    al = _import_agent_loop()
-    src = inspect.getsource(al.AgentLoop._run_without_llm)
-    # The regex-only path must not invoke any SLM generation.
-    assert "_generate_with_context_recovery" not in src
-    assert "generate_slm" not in src
-    # A non-recoverable step (web search / deep_think / unresolved entity)
-    # falls back rather than replanning.
-    assert "should_replan" in src
-    assert "_speak_no_ai_fallback" in src
+    assert al.AgentLoop(host, source="text").run("A command") == expected
+    dispatch.assert_called_once_with(action)
+    host._generate_with_context_recovery.assert_not_called()
+    assert history[-1] == {
+        "role": "tool",
+        "name": "example_tool",
+        "content": result if result is not None else "<error>",
+    }

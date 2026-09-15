@@ -1,29 +1,12 @@
-"""The unified agent loop.
+"""Per-turn intent matching, model calls, tool dispatch, and reply selection.
 
-Extracted from `core.assistant.Assistant._handle_wakeword` so the most
-bug-prone region of the turn lives behind a small, clearly-scoped interface.
-
-`AgentLoop` runs one user turn: it drives the regex fast-path, the
-grammar-constrained SLM agent calls, in-order action dispatch, the inline
-web-search summariser, the deep-think / summarise-thinking sentinel branches,
-and the terminal "speak joined outputs" step. It holds a reference to the
-owning `Assistant` (`self.host`) for the shared services a turn needs —
-history, stall-phrase caches, the SLM handle, event emission, TTS playback,
-and the out-of-band summarisers — and keeps the per-turn context (session,
-source, stats, on_slm_start hook) as its own fields.
-
-The module is intentionally self-contained: it imports only from `utils`,
-`tools`, and the leaf `core` modules (`slm`, `text_utils`, `thinking_watchdog`),
-none of which import `core.assistant`, so there's no import cycle. `assistant`
-imports `AgentLoop` to run turns and re-imports `_PROMPT_STRIP_CHARS` (still used
-by its wakeword stripping); `NOTE_SEARCH_INTENTS` / `_normalise_search_query`
-now live here and are referenced directly.
+The owning Assistant supplies history, model access, playback, and event sinks.
+This module does not import Assistant, keeping the dependency one-way.
 """
 
 import json
 import logging
 import random
-import re
 import threading
 import time
 from typing import Optional
@@ -33,13 +16,17 @@ from tools.capabilities import native_access_class, native_requires_deep_think
 from tools.tool_registry import tool_registry
 from utils import intents
 from utils.intent_catch import catchAll, is_contextual_web_search_request
-from utils.intents import MAX_AGENT_CALLS_PER_TURN, StepKind, StepResult
+from utils.intents import MAX_AGENT_CALLS_PER_TURN, StepKind
 from utils.phrases import ACK_PHRASES
 from utils.prompts import (
     assemble_foreground_history,
     get_agent_system_prompt,
 )
 
+from .agent_emission import normalize_emission, parse_model_emission, should_style_satellite_message
+from .agent_follow_up import route_report_follow_up, startup_greeting_follow_up
+from .agent_search import PROMPT_STRIP_CHARS as _PROMPT_STRIP_CHARS  # noqa: F401 — Assistant export
+from .agent_search import TurnSearch, last_user_question, normalise_search_query
 from .satellite_context import current_satellite_id as _current_satellite_id
 from .slm import ContextExhaustedError, RemoteUnreachable
 from .telemetry import event as telemetry_event
@@ -50,40 +37,6 @@ logger = logging.getLogger(__name__)
 # Tool intents that count as "context retrieval" for the stats panel. The
 # chunk count is surfaced by the semantic paths via notes.last_retrieval.
 NOTE_SEARCH_INTENTS = frozenset({"search_notes", "search_notes_semantic", "read_note"})
-
-# Leading/trailing punctuation peeled off a user prompt / search query. Includes
-# "!"/"?" so ASR's "Hey Atticus! Stop." yields the bare "stop" without trailing
-# punctuation confusing intent matching.
-_PROMPT_STRIP_CHARS = " ,.!?;:"
-
-_REPORT_FOLLOW_UP_RE = re.compile(
-    r"\b(?:report|summary|findings|conclusion|recommendation|what did (?:it|the report) say|"
-    r"does (?:it|the report) (?:say|show)|is (?:it|that) (?:feasible|possible|worth it|safe)|"
-    r"(?:check|read|explain|clarify) (?:that|it|again)|more (?:detail|details))\b",
-    re.I,
-)
-_REPORT_BYPASS_RE = re.compile(
-    r"\b(?:new question|something else|search again|look up|research again|use other sources)\b",
-    re.I,
-)
-_STARTUP_GREETING_FOLLOW_UP_RE = re.compile(
-    r"\s*(?:(?:can|could|would)\s+you\s+)?(?:"
-    r"(?:tell|give|share)\s+me\s+(?:more|more\s+(?:information|details))\s+(?:about|on)\s+|"
-    r"(?:explain|expand|elaborate)\s+(?:(?:more\s+)?(?:about|on)\s+)?)"
-    r"(?:(?:that|it)(?:\s+(?:topic|fact))?|the\s+(?:topic|fact))"
-    r"\s*(?:please)?[.!?]*\s*\Z",
-    re.I,
-)
-
-# The calling satellite's id for the duration of the current `AgentLoop.run`
-# call (None outside a turn, or for a turn with no satellite — e.g. a fresh
-# text turn's "dashboard-text" pseudo-id still sets this). This is the one
-# hook tools need to read "which satellite/room is this turn for" without
-# every `@tool` signature growing a satellite_id parameter — only the HA
-# per-satellite area default (#14) reads it so far. Lives in
-# `core/satellite_context.py`, not here, so a tool module can import it
-# without pulling in this module's much heavier dependency chain (`core.slm`
-# alone imports `torch`).
 
 
 def _personality(host) -> Optional[str]:
@@ -96,22 +49,6 @@ def _personality(host) -> Optional[str]:
     return getattr(host, "personality", None)
 
 
-def _is_completed_report_follow_up(user_prompt: str) -> bool:
-    """Recognise natural questions about a retained completed investigation."""
-    return bool(
-        _REPORT_FOLLOW_UP_RE.search(user_prompt) and not _REPORT_BYPASS_RE.search(user_prompt)
-    )
-
-
-def _take_startup_greeting_response_follow_up(host, user_prompt: str) -> str | None:
-    """Consume the greeting only on the first, explicit referential turn."""
-    response = getattr(host, "_startup_greeting_response", None)
-    if not response:
-        return None
-    host._startup_greeting_response = None
-    return response if _STARTUP_GREETING_FOLLOW_UP_RE.fullmatch(user_prompt) else None
-
-
 def _llm_unavailable_label(host) -> str:
     """Name the configured backend rather than its shared transport contract."""
     return (
@@ -121,154 +58,11 @@ def _llm_unavailable_label(host) -> str:
     )
 
 
-_FINANCE_ADVICE_RE = re.compile(
-    r"\b(buy|sell|hold|invest(?:ment)?|allocat(?:e|ion)|margin|options?|short(?:ing)?|tax|legal)\b",
-    re.IGNORECASE,
-)
-
-
-def _route_deep_think_only_tools(emission: dict, user_prompt: str) -> dict:
-    """Keep multi-step research, planning, and finance advice in deliberate work."""
-    actions = emission.get("actions")
-    finance_advice = _FINANCE_ADVICE_RE.search(user_prompt) and any(
-        isinstance(action, dict)
-        and tool_registry.canonical_name(str(action.get("intent") or ""))
-        in {"get_finance_quote", "get_exchange_rate", "get_watchlist_brief", "get_market_brief"}
-        for action in actions or []
-    )
-    if (
-        not isinstance(actions, list)
-        or not (
-            finance_advice
-            or any(
-                isinstance(action, dict)
-                and native_requires_deep_think(str(action.get("intent") or ""))
-                for action in actions
-            )
-        )
-        or not tool_registry.is_available("deep_think")
-    ):
-        return emission
-    return {"actions": [{"intent": "deep_think", "args": [user_prompt]}]}
-
-
-def _should_style_satellite_message(host, emission: Optional[dict]) -> bool:
-    """Let non-balanced LLM personalities phrase outbound announcements."""
-    if not getattr(host, "llm_enabled", False) or _personality(host) in (None, "balanced"):
-        return False
-    actions = emission.get("actions") if isinstance(emission, dict) else None
-    return (
-        isinstance(actions, list)
-        and len(actions) == 1
-        and actions[0].get("intent") == "send_satellite_message"
-    )
-
-
-_ANNOUNCEMENT_SUFFIXES = {
-    "playful": "The plates are ready for their moment.",
-    "calm": "Come through when you're ready.",
-    "wry": "The kitchen's patience has been noted.",
-}
-_LITERAL_ANNOUNCEMENT_RE = re.compile(
-    r"\b(?:verbatim|exact(?:ly)?|quote|alarm|emergency|evacuat|fire|smoke|carbon monoxide|"
-    r"medic(?:al|ine|ation)|ambulance|call 000|call 911)\b",
-    re.IGNORECASE,
-)
-_SENSITIVE_DELIVERY_INTENTS = frozenset({"ha_lock", "ha_unlock"})
-
-
-def _satellite_message_args(emission: Optional[dict]) -> Optional[list]:
-    actions = emission.get("actions") if isinstance(emission, dict) else None
-    if not isinstance(actions, list) or len(actions) != 1:
-        return None
-    action = actions[0]
-    if not isinstance(action, dict):
-        return None
-    args = action.get("args")
-    if (
-        action.get("intent") != "send_satellite_message"
-        or not isinstance(args, list)
-        or len(args) < 2
-    ):
-        return None
-    return args
-
-
-def _apply_announcement_fallback(
-    host, user_prompt: str, raw_emission: Optional[dict], emission: dict
-) -> None:
-    """Guarantee a built-in personality changes non-verbatim outbound copy."""
-    suffix = _ANNOUNCEMENT_SUFFIXES.get(_personality(host))
-    raw_args = _satellite_message_args(raw_emission)
-    action_args = _satellite_message_args(emission)
-    if (
-        not suffix
-        or not raw_args
-        or not action_args
-        or _LITERAL_ANNOUNCEMENT_RE.search(user_prompt)
-    ):
-        return
-    raw_text, proposed = raw_args[1], action_args[1]
-    if not isinstance(raw_text, str) or not isinstance(proposed, str):
-        return
-    if _normalise_search_query([raw_text]) == _normalise_search_query([proposed]):
-        action_args[1] = f"{proposed.rstrip('. ')}. {suffix}"
-
-
-def _can_speak_delivery(host, actions: object) -> bool:
-    if _personality(host) in (None, "balanced") or not isinstance(actions, list):
-        return False
-    return all(
-        not isinstance(action, dict)
-        or (
-            action.get("intent") not in _SENSITIVE_DELIVERY_INTENTS
-            and native_access_class(action.get("intent", "")) == "execute"
-        )
-        for action in actions
-    )
-
-
 def _play_music_search_ack(host, session) -> None:
     """Cover Spotify's remote search and playback-dispatch latency."""
     cache = getattr(host, "music_search_stall_cache", None)
     if cache:
         host._play_random_ack(session or getattr(host, "tts_session", None), cache=cache)
-
-
-def _normalise_search_query(args) -> Optional[str]:
-    """Stable cache key for a web-search action's query.
-
-    Lowercases, collapses whitespace, and strips surrounding punctuation so
-    trivial variants of the same query dedupe. A no-arg call (the search tool
-    falls back to its default query) maps to a fixed sentinel so repeated
-    default-news lookups also dedupe. Returns None for a non-string first arg.
-
-    Shape-robust: a grammar-less remote model may emit `args` as a kwargs object
-    (`{"query": "x"}`) or a bare string rather than the list the grammar forces,
-    so indexing `args[0]` blindly would raise `KeyError(0)` on a dict.
-    """
-    if isinstance(args, dict):
-        q = next(iter(args.values()), None)  # kwargs-style: first value
-    elif isinstance(args, (list, tuple)):
-        q = args[0] if args else None  # positional: first arg
-    elif isinstance(args, str):
-        q = args
-    else:
-        q = None
-    if q is None:
-        return "__default__"
-    if not isinstance(q, str):
-        return None
-    q = re.sub(r"\s+", " ", q).strip().lower().strip(_PROMPT_STRIP_CHARS)
-    return q or "__default__"
-
-
-def _last_user_question(history: list) -> Optional[str]:
-    """Most recent non-empty user message, for a topic-less search follow-up."""
-    for message in reversed(history):
-        if message.get("role") == "user" and (content := message.get("content", "").strip()):
-            return content
-    return None
 
 
 class AgentLoop:
@@ -296,11 +90,7 @@ class AgentLoop:
         self.stats = stats
         self.on_slm_start = on_slm_start
         self.cancel_check = (lambda: session.cancelled) if session is not None else None
-        # satellite_id/satellite identify the calling satellite (or
-        # "dashboard-text" for a typed turn); cheap to pass since AgentLoop is
-        # constructed fresh per turn anyway. Read by `run` to set
-        # `_current_satellite_id` for the duration of the call — the only
-        # hook tools need to read the calling satellite (#14).
+        # run() exposes this satellite to tools through core.satellite_context.
         self.satellite_id = satellite_id
         self.satellite = satellite
 
@@ -325,59 +115,36 @@ class AgentLoop:
         self, host, session, source, stats, on_slm_start, cancel_check, user_prompt: str
     ) -> str:
         logger.info(f"Handling turn: {user_prompt}")
-        startup_greeting = _take_startup_greeting_response_follow_up(host, user_prompt)
-
-        is_affirmation = re.fullmatch(
-            r"\s*(?:yes|yeah|yep|go ahead|please do)\s*[.!]?\s*", user_prompt, re.I
+        greeting_response = getattr(host, "_startup_greeting_response", None)
+        if greeting_response:
+            host._startup_greeting_response = None
+        startup_greeting = startup_greeting_follow_up(greeting_response, user_prompt)
+        report_route = route_report_follow_up(
+            user_prompt, satellite_id=self.satellite_id, cancel_check=cancel_check, stats=stats,
+            consume_report=getattr(host, "consume_completed_thinking_report", None),
+            answer_report=getattr(host, "answer_completed_thinking_report", None),
+            active_task=getattr(host, "active_thinking_task", None), catch_intent=catchAll,
         )
-        is_completed_report_request = re.fullmatch(
-            r"\s*(?:(?:yes|yeah|yep|go ahead|please do)[,!]?\s*)?"
-            r"(?:(?:give|read|tell)\s+me\s+)?(?:(?:a|the)\s+)?"
-            r"(?:(?:short|full)\s+)?(?:summary|report)(?:\s+please)?[.!]?\s*",
-            user_prompt,
-            re.I,
-        )
-        if is_affirmation or is_completed_report_request:
-            completed_report = getattr(
-                host, "consume_completed_thinking_report", lambda _sid: None
-            )(self.satellite_id)
-            if completed_report:
-                return completed_report
-        if not isinstance(catchAll(user_prompt), dict) and _is_completed_report_follow_up(
-            user_prompt
-        ):
-            report_answer = getattr(host, "answer_completed_thinking_report", lambda *_args: None)(
-                self.satellite_id, user_prompt, cancel_check, stats
-            )
-            if report_answer:
-                return report_answer
-        active_job = getattr(host, "active_thinking_task", lambda: None)()
-        if (
-            active_job is not None
-            and active_job.get("status") in {"QUEUED", "RUNNING", "PAUSED"}
-            and (is_affirmation or is_completed_report_request)
-        ):
-            return "I'm still working on that. I'll let you know as soon as the report is ready."
-        # Every tool result / planning emission in history now belongs to an
-        # already-finished turn, so drop them: the conversation is carried by
-        # the user messages and Fulloch's recorded replies, and anything a
-        # follow-up needs (notes, web findings) is re-fetched rather than
-        # recalled from a stale tool dump. Keeps history lean so long
-        # conversations don't blow N_CONTEXT.
+        if report_route.reply:
+            return report_route.reply
+        caught = report_route.caught
+        # Compact finished turns while retaining short tool traces for follow-ups.
         host._compact_completed_turns()
 
         history = host._history_for(self.satellite)
-        prior_question = _last_user_question(history)
+        prior_question = last_user_question(history)
         if startup_greeting:
             history.append({"role": "assistant", "content": startup_greeting})
         history.append({"role": "user", "content": user_prompt})
         host._trim_history()
 
         # Regex fast-path: if it matches, use it as the first agent emission.
-        caught = catchAll(user_prompt)
         regex_emission = caught if isinstance(caught, dict) else None
         first_emission = regex_emission
-        if _should_style_satellite_message(host, regex_emission):
+        if should_style_satellite_message(
+            regex_emission, llm_enabled=getattr(host, "llm_enabled", False),
+            personality=_personality(host),
+        ):
             # Other fast commands stay deterministic. A named outbound message
             # is delivery copy, so let a non-balanced personality phrase it.
             first_emission = None
@@ -392,8 +159,7 @@ class AgentLoop:
             logger.debug("Contextual web-search follow-up uses prior question: %r", prior_question)
         if first_emission is not None:
             logger.debug(f"Regex caught: {first_emission}")
-            # A2 route stat: overwritten to "agent" below if an SLM call ever
-            # actually runs this turn (e.g. a replan after the regex catch).
+            # A later SLM call changes the route to "agent".
             if stats is not None:
                 stats.route = "regex"
 
@@ -420,17 +186,8 @@ class AgentLoop:
         # browser TTS controls are not stream-id scoped, so a late ack `end`
         # would otherwise deactivate the final reply and discard its PCM.
         replan_ack_thread: Optional[threading.Thread] = None
-        # Holds the most recent web-search summary produced this turn.
-        # Persists across replan iterations so a follow-up action (e.g. a
-        # note save the agent composes after seeing the findings) doesn't
-        # bury the result — see the terminal "speak joined outputs" step.
-        web_summary_text: Optional[str] = None
-        # Per-turn web-search cache {normalised_query: summary}. A web search
-        # always hands control back to the agent; if the agent re-issues the
-        # *same* query, reusing the summary avoids a second SearXNG round-trip
-        # + summarise. A genuinely different follow-up query is a cache miss
-        # and still searches, so chained "drill into a result" research works.
-        search_cache: dict = {}
+        # Fresh even when callers reuse this AgentLoop instance for another run.
+        search = TurnSearch()
         # Set true once a note-write tool actually dispatches this turn, so a
         # confabulated "I saved this to your notes" can be scrubbed from the
         # spoken reply when no write happened (see strip_unfounded_save_claim).
@@ -564,87 +321,25 @@ class AgentLoop:
                     return ""
 
                 try:
-                    # Tolerant parse: strips reasoning artefacts (<think> blocks,
-                    # stray </think>, repeated objects) a grammar-less remote LLM
-                    # can wrap around the JSON, and takes the first balanced object.
-                    emission = intents.parse_agent_emission(emission_text)
-                except Exception as e:
-                    # A grammar-less remote model often answers in plain prose
-                    # instead of the JSON envelope (response_format is only a hint;
-                    # some servers ignore it, and even the one repair retry can come
-                    # back as prose). That prose is almost always a valid spoken
-                    # reply, so don't drop the turn — treat it as `{"reply": ...}`
-                    # and fall through to the reply branch (which also prefers a
-                    # grounded web summary after a search). Only genuinely empty
-                    # output, or a malformed JSON *fragment* (starts with { or [ —
-                    # speaking that would read brace-junk aloud), gives up.
-                    prose = (emission_text or "").strip()
-                    if not prose or prose[:1] in ("{", "["):
-                        logger.error(f"Failed to parse agent emission: {emission_text!r} ({e})")
-                        return random.choice(
-                            [
-                                "Sorry, can you repeat that",
-                                "I don't understand",
-                            ]
-                        )
-                    logger.warning(f"Agent emission was prose, not JSON; treating as a reply ({e})")
-                    emission = {"reply": prose}
-                # Cap actions to 3 — GBNF enforces this for local llama; do
-                # it structurally here so the remote path (no grammar) can't
-                # emit a 20-room scan. Applies before history, plan event, and
-                # dispatch all see the emission, so they stay consistent.
-                if isinstance(emission.get("actions"), list) and len(emission["actions"]) > 3:
-                    logger.warning(
-                        "Agent emitted %d actions; capping to 3",
-                        len(emission["actions"]),
+                    emission = parse_model_emission(
+                        emission_text, parse=intents.parse_agent_emission,
                     )
-                    emission = {**emission, "actions": emission["actions"][:3]}
+                except ValueError:
+                    return random.choice(["Sorry, can you repeat that", "I don't understand"])
                 # Canonicalise what goes into history so reasoning junk doesn't
                 # pollute the context the model sees on the next call.
                 emission_text = json.dumps(emission)
 
-            # A grammar-less model sometimes bundles its spoken answer as a
-            # `reply` pseudo-action *inside* `actions` (e.g. [append_to_today(...),
-            # reply("Done")]) instead of using the {"reply": ...} envelope. Split
-            # it out: the real tools still dispatch, the text becomes the spoken
-            # reply, and the hallucinated-tool guard doesn't block the whole turn
-            # on the non-tool `reply`.
-            if emission is not regex_emission:
-                _apply_announcement_fallback(host, user_prompt, regex_emission, emission)
-            emission = _route_deep_think_only_tools(emission, user_prompt)
-            delivery = emission.get("delivery")
-            if not isinstance(delivery, str) or not _can_speak_delivery(
-                host, emission.get("actions")
-            ):
-                delivery = None
-            elif not (delivery := delivery.strip()):
-                delivery = None
-            bundled_reply = None
-            _acts = emission.get("actions")
-            if isinstance(_acts, list):
-                kept = []
-                for a in _acts:
-                    _intent = a.get("intent") if isinstance(a, dict) else None
-                    if (
-                        isinstance(_intent, str)
-                        and _intent.lower() in intents.REPLY_PSEUDO_INTENTS
-                        and not intents.is_registered_tool(_intent)
-                    ):
-                        text = intents.coerce_reply_text(a.get("args"))
-                        if text:
-                            bundled_reply = text
-                    else:
-                        kept.append(a)
-                if len(kept) != len(_acts):  # a pseudo-reply was split out
-                    # Only a pseudo-reply (no real tools) → it's just a reply.
-                    emission = (
-                        {"actions": kept, **({"delivery": delivery} if delivery else {})}
-                        if kept
-                        else {"reply": bundled_reply or ""}
-                    )
-                    if not kept:
-                        bundled_reply = None
-                    emission_text = json.dumps(emission)
+            normalized = normalize_emission(
+                emission, emission_text, regex_emission=regex_emission,
+                user_prompt=user_prompt, personality=_personality(host), registry=tool_registry,
+                intent_services=intents, requires_deep_think=native_requires_deep_think,
+                access_class=native_access_class,
+            )
+            emission = normalized.emission
+            emission_text = normalized.history_text
+            delivery = normalized.delivery
+            bundled_reply = normalized.bundled_reply
 
             host._history_for(self.satellite).append(
                 {"role": "assistant", "content": emission_text}
@@ -666,18 +361,9 @@ class AgentLoop:
             # Reply branch — agent's final spoken answer.
             if "reply" in emission:
                 reply = (emission.get("reply") or "").strip()
-                # Grounding guard: if a web search ran this turn, the inline
-                # summariser already built a grounded answer from the actual
-                # SearXNG snippets (`web_summary_text`). A replan `reply` here is
-                # the model re-answering from a compressed summary in history —
-                # a fabrication opening a weak model takes (Gemma invented news
-                # items — inflation figures, sports results — in testing). Speak
-                # the grounded summary instead, and reconcile the just-appended
-                # history entry to it so the fabricated reply doesn't linger for
-                # the next turn. (A search followed by a real follow-up action
-                # goes through the actions branch + terminal path, not here.)
-                if web_summary_text and web_summary_text.strip():
-                    grounded = web_summary_text.strip()
+                # Prefer the source-grounded summary over a replan's answer;
+                # keep history consistent with what the user hears.
+                if grounded := search.grounded_reply():
                     host._history_for(self.satellite)[-1] = {
                         "role": "assistant",
                         "content": json.dumps({"reply": grounded}),
@@ -725,7 +411,7 @@ class AgentLoop:
             # Dispatch each action in order. Stop on the first replan trigger.
             result_strs: list = []
             replan = False
-            for _action_idx, action in enumerate(actions[:3]):
+            for action in actions[:3]:
                 if session is not None and session.cancelled:
                     return ""
                 intent_name = action.get("intent", "?")
@@ -743,18 +429,16 @@ class AgentLoop:
                 # ran this turn, reuse the cached summary instead of paying
                 # for another SearXNG round-trip + summarise.
                 search_query = None
-                cached_summary = None
+                cached_step = None
                 if intents.is_web_search(intent_name):
-                    search_query = _normalise_search_query(action.get("args") or [])
-                    if search_query is not None:
-                        cached_summary = search_cache.get(search_query)
+                    search_query = normalise_search_query(action.get("args") or [])
+                    cached_step = search.cached(search_query)
 
                 web_summarised = False
-                if cached_summary is not None:
+                if cached_step is not None:
                     logger.debug("Reusing cached web summary for repeated query")
-                    step = StepResult(StepKind.NORMAL, cached_summary, in_output=True)
+                    step = cached_step
                     web_summarised = True
-                    web_summary_text = cached_summary
                 else:
                     # A web search blocks on a SearXNG round-trip that can run
                     # many seconds (engine timeouts / rate-limits). Play the
@@ -812,19 +496,16 @@ class AgentLoop:
                         # bounded search-specific progress rather than piling
                         # generic "Aha" acknowledgements onto the response.
                         try:
-                            with ThinkingWatchdog(
-                                host.web_search_stall_cache,
-                                host.play_chunks,
-                                session or host.tts_session,
+                            summary = search.summarise(
+                                step.text, summariser=host._summarise_search_result,
+                                watchdog=ThinkingWatchdog, clips=host.web_search_stall_cache,
+                                play_chunks=host.play_chunks, session=session or host.tts_session,
                                 sink=getattr(host._turn_local, "sink", None),
                                 tts_active_event=getattr(
                                     host._turn_local, "tts_active_event", None
                                 ),
-                                max_stalls=2,
-                            ):
-                                summary = host._summarise_search_result(
-                                    step.text, cancel_check, stats=stats
-                                )
+                                cancel_check=cancel_check, stats=stats,
+                            )
                         except RemoteUnreachable as e:
                             logger.warning(
                                 "%s mid-turn; regex-only: %s", _llm_unavailable_label(host), e
@@ -839,13 +520,8 @@ class AgentLoop:
                             return ""
                         # Replace the raw payload with the summary; the loop
                         # still forces a replan via web_summarised below.
-                        step = StepResult(
-                            StepKind.NORMAL, summary, in_output=True, artifact=step.artifact
-                        )
+                        step = search.accept(search_query, summary, step)
                         web_summarised = True
-                        web_summary_text = summary
-                        if search_query is not None:
-                            search_cache[search_query] = summary
 
                 host._history_for(self.satellite).append(
                     {
@@ -908,20 +584,11 @@ class AgentLoop:
             # out above), the tools have now run, so speak that reply (e.g.
             # "Done, saved to your notes") rather than raw joined tool outputs —
             # unless a web search ran, where the grounded summary wins (below).
-            if bundled_reply and not web_summary_text:
+            if bundled_reply and not search.latest:
                 spoken = intents.strip_unfounded_save_claim(bundled_reply, note_written)
                 host._record_spoken(spoken)
                 return spoken
-            parts = [s.strip() for s in result_strs if s and s.strip()]
-            # If the turn researched something and the agent then took a
-            # follow-up action (e.g. saving a note), the web summary lives
-            # in history but not in this iteration's result_strs. Surface it
-            # first so the user hears the findings, not just "saved a note".
-            if web_summary_text:
-                summary = web_summary_text.strip().rstrip(".")
-                already = any(p.rstrip(".") == summary for p in parts)
-                if summary and not already:
-                    parts.insert(0, summary)
+            parts = search.output_parts(result_strs)
             # `delivery` is the one concise, post-success confirmation. Do not
             # append it after raw tool results, which would restate the same
             # completed actions to the user.
@@ -936,11 +603,9 @@ class AgentLoop:
         logger.warning(f"Hit MAX_AGENT_CALLS_PER_TURN={MAX_AGENT_CALLS_PER_TURN}")
         # If we researched something, speak the findings instead of a flat
         # apology — the lookup succeeded even though the agent never settled.
-        if web_summary_text:
-            spoken = web_summary_text.strip()
-            if spoken:
-                host._record_spoken(spoken)
-                return spoken
+        if spoken := search.grounded_reply():
+            host._record_spoken(spoken)
+            return spoken
         return "Sorry, I couldn't finish that."
 
     def _remote_llm_unavailable_fallback(self, host) -> str:

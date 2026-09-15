@@ -13,38 +13,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Skip the HA alias-fetch retry loop at module import time. The retry budget
-# is for cold-start in compose where HA takes a few seconds to be ready —
-# in tests we either don't have HA at all or have it mocked, so burning
-# 30s of retries on each test session is wasted. Must set this BEFORE any
-# test module imports tools.home_assistant (conftest is loaded first).
+# Disable HA startup retries before test modules import the integration.
 os.environ.setdefault("FULLOCH_HA_ALIAS_RETRIES", "0")
 
-# Point every config reader that loads once at import time (tools._config,
-# tools.notes_root) at the checked-in data/config.example.yml instead of the
-# real, gitignored data/config.yml. Without this, whatever a developer
-# happens to have configured locally (a real `home_assistant:`/`spotify:`
-# block) silently changes which code paths the suite exercises —
-# nondeterministic across machines and unreproducible in CI, which never has
-# the real file at all. Must be set BEFORE any test module imports
-# tools._config or tools.notes_root (conftest is loaded first).
-#
-# server.credentials_store.DEFAULT_PATH is deliberately NOT overridden this
-# way: it's a plain relative path re-resolved on every read/write (not baked
-# in at import time), and tests that need it sandboxed already do so with
-# `monkeypatch.chdir()` + an explicit `path=` — the same mechanism this repo
-# uses for server.config_store's config.yml default. A global override here
-# would break that chdir-based isolation instead of adding any (see the
-# credentials.example.json values in data/credentials.example.json for what
-# a fresh/blank credentials file looks like, if a new test wants to seed one).
+# Import-time config readers use the checked-in example for reproducibility.
+# Runtime config/credential writes are sandboxed by each test's path or chdir.
 _REPO_ROOT = Path(__file__).parent.parent
 os.environ.setdefault("FULLOCH_CONFIG_PATH", str(_REPO_ROOT / "data" / "config.example.yml"))
 
-# Same reasoning for server.auth's persisted dashboard sessions: point at a
-# scratch file instead of the real data/dashboard_sessions.json so tests that
-# construct an AppContext (which loads sessions at init) don't read/write
-# real login state. Must be set BEFORE any test module imports server.auth or
-# server.lifecycle.
+# Isolate persisted login sessions before AppContext is imported.
 os.environ.setdefault(
     "FULLOCH_SESSIONS_PATH",
     str(Path(tempfile.gettempdir()) / "fulloch_test_dashboard_sessions.json"),
@@ -56,9 +33,7 @@ os.environ.setdefault(
 # real fetch — deterministic even if a dev has HA_TOKEN in credentials.json.
 os.environ.pop("HA_TOKEN", None)
 
-# Add project root to path
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(_REPO_ROOT))
 
 # --- Heavy-dependency stubs (CI without the GPU stack) ---------------------
 # The full Qwen3 pipeline (torch / qwen_asr / qwen_tts / sounddevice

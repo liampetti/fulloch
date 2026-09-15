@@ -15,46 +15,53 @@ import time
 import uuid
 from pathlib import Path
 from typing import Callable, Optional
-from urllib.parse import quote, urlparse
 
 import numpy as np
 
-from tools import notes, notes_root
+from tools import notes
 from tools.capabilities import native_capabilities
-from tools.thinking_context import reset_artifacts, set_artifacts
-from tools.thinking_playbooks import matching_playbooks
-from tools.tool_registry import ThinkingResult, thinking_result_error, tool_registry
-from utils import intents
+from tools.tool_registry import tool_registry
 from utils.completeness import should_commit_provisional
 from utils.intent_catch import catchAll
-from utils.local_time import now as local_now
 from utils.prompts import (
     CACHE_PRIMING_USER_PROMPT,
     get_agent_system_prompt,
     get_greeting_system_prompt,
     get_greeting_user_prompt,
-    get_partial_thinking_summary_prompt,
-    get_thinking_report_answer_prompt,
-    get_thinking_report_prompt,
-    get_thinking_worker_prompt,
     get_web_summary_system_prompt,
 )
 
+from . import thinking_reports, turn_history
 from .agent_loop import (
     _PROMPT_STRIP_CHARS,
     AgentLoop,
 )
 from .audio import AudioCapture
 from .backends import ASR, LLM, TTS, get_module, resolve_models
-from .background_jobs import BackgroundJob, BackgroundJobManager, JobStatus
+from .background_jobs import BackgroundJob, BackgroundJobManager
 from .higgs_controls import apply_delivery, extract_delivery_request
 from .satellite import SatelliteSession
 from .satellite_context import current_satellite_id as _current_satellite_id
-from .slm import ContextExhaustedError, RemoteUnreachable, generate_slm, load_slm
+from .slm import RemoteUnreachable, generate_slm, load_slm
 from .telemetry import event as telemetry_event
 from .text_utils import clean_for_tts, split_sentences, spoken_for_tts
+from .thinking_worker import ThinkingWorker
 from .tts_session import TtsSession, parse_barge_time
+from .tts_sinks import BroadcastEvent as _BroadcastEvent
+from .tts_sinks import BroadcastSink as _BroadcastSink
+from .tts_sinks import GainSink as _GainSink
+from .tts_sinks import NonBlockingSink as _NonBlockingSink
+from .tts_sinks import safe_sink as _safe_sink
 from .turn_arbiter import TurnArbiter
+from .turn_history import (
+    CHAT_SESSION_TIMEOUT_S,
+    COMPACTED_TOOL_TRACE_MAX_CHARS,
+    CONTEXT_TRIM_KEEP_MIN,
+    HISTORY_MAX_MESSAGES,
+)
+from .turn_history import (
+    CONTEXT_EXHAUSTED_REPLY as CONTEXT_EXHAUSTED_REPLY,
+)
 from .turn_stats import TurnStats, set_model_labels
 
 logger = logging.getLogger(__name__)
@@ -62,10 +69,6 @@ logger = logging.getLogger(__name__)
 
 class ConversationModeUnavailable(RuntimeError):
     """Raised when an exclusive Conversation mode session cannot be opened."""
-
-
-class ReportSynthesisError(RuntimeError):
-    """Raised when a background investigation cannot produce a final report."""
 
 
 # Names accepted by general.log_level, for the settings-console hot-apply
@@ -81,256 +84,35 @@ _LOG_LEVELS = {
 # reminder (see Assistant._play_alarm_tone). Regenerate with dev/gen_sound.py.
 ALARM_WAV_PATH = "./data/wav/alarm.wav"
 
-# Background deliberate work needs room to investigate, revise its plan from
-# tool observations, and still produce a final synthesis.
-MAX_THINKING_WORKER_CALLS = 12
-MAX_THINKING_CAPABILITY_CALLS = 3
-# Background investigations can wait through a busy remote model queue without
-# applying those longer waits to foreground conversation turns.
-DEEP_THINK_READ_TIMEOUT_S = 600.0
-DEEP_THINK_GENERATION_TIMEOUT_S = 900.0
-# Planning actions can include structured multi-leg evidence. Leave room for
-# larger models to finish those JSON arguments before the bounded worker loop
-# advances to its next step.
-DEEP_THINK_STEP_MAX_TOKENS = 1024
-DEEP_THINK_TRANSCRIPT_MAX_CHARS = 12_000
-DEEP_THINK_OBSERVATION_MAX_CHARS = 3_000
-
-_THINKING_OBSERVATION_RE = re.compile(r"\n\n(?=\[[^\]\n]+\]\n)")
-
 # Strips every non-word character. The self-echo check uses this so ASR's
 # "1254" / "am" still match the assistant's spoken "12 54" / "a m" — the
 # get_time tool spells digits out with spaces and ASR re-concatenates them.
 _NON_WORD_RE = re.compile(r"\W+")
 
-
-def _thinking_excerpt(text: str, limit: int) -> str:
-    """Keep an observation useful without letting one result crowd out the rest."""
-    if len(text) <= limit:
-        return text
-    marker = "\n...[compacted]...\n"
-    remaining = limit - len(marker)
-    if remaining <= 0:
-        return text[:limit]
-    head = remaining * 2 // 3
-    return text[:head].rstrip() + marker + text[-(remaining - head) :].lstrip()
-
-
-def _compact_thinking_transcript(transcript: str) -> str:
-    """Bound ReAct observations while retaining every prior tool's context."""
-    transcript = transcript.strip()
-    if len(transcript) <= DEEP_THINK_TRANSCRIPT_MAX_CHARS:
-        return transcript
-    entries = _THINKING_OBSERVATION_RE.split(transcript)
-    if len(entries) == 1:
-        return _thinking_excerpt(transcript, DEEP_THINK_TRANSCRIPT_MAX_CHARS)
-    labels = [entry.split("\n", 1)[0] for entry in entries]
-    overhead = sum(len(label) + 2 for label in labels) + 2 * (len(entries) - 1)
-    per_entry = max(160, (DEEP_THINK_TRANSCRIPT_MAX_CHARS - overhead) // len(entries))
-    compacted = []
-    for label, entry in zip(labels, entries, strict=True):
-        body = entry[len(label) :].lstrip("\n")
-        compacted.append(f"{label}\n{_thinking_excerpt(body, per_entry)}")
-    return "\n\n".join(compacted)[:DEEP_THINK_TRANSCRIPT_MAX_CHARS]
-
-
-def _append_thinking_observation(transcript: str, label: str, observation: str) -> str:
-    """Append one bounded observation in a format safe to resume after a pause."""
-    observation = _thinking_excerpt(observation.strip(), DEEP_THINK_OBSERVATION_MAX_CHARS)
-    entry = f"[{label}]\n{observation}"
-    combined = f"{transcript.strip()}\n\n{entry}" if transcript.strip() else entry
-    return _compact_thinking_transcript(combined)
-
-
-def _describe_thinking_capability(name: str, schema) -> str:
-    """Render the callable shape a small ReAct worker needs, without prompt bloat."""
-    args = []
-    for param in schema.params:
-        if param.required:
-            args.append(param.name)
-        else:
-            args.append(f"{param.name}={param.default!r}")
-    description = " ".join(schema.description.split())
-    if len(description) > 240:
-        description = description[:237].rstrip() + "..."
-    return f"- {name}({', '.join(args)}): {description}"
-
-
-def _thinking_action_key(name: str, args: list) -> str:
-    """Identify duplicate worker actions despite cosmetic string differences."""
-
-    def normalise(value):
-        if isinstance(value, str):
-            return " ".join(value.split()).casefold()
-        if isinstance(value, list):
-            return [normalise(item) for item in value]
-        if isinstance(value, dict):
-            return {key: normalise(item) for key, item in value.items()}
-        return value
-
-    return f"{name}:{json.dumps(normalise(args), sort_keys=True, separators=(',', ':'), default=str)}"
-
-
-def _fallback_thinking_report(task: str, evidence: list[dict], findings: str) -> str:
-    """Preserve collected evidence when the report model returns no visible text."""
-    source = json.dumps(evidence, ensure_ascii=True, indent=2, sort_keys=True, default=str)
-    if not evidence:
-        source = findings
-    source = source[:DEEP_THINK_TRANSCRIPT_MAX_CHARS].rstrip()
-    return (
-        "## Summary\n\n"
-        "The investigation collected the evidence below, but the final report model "
-        "returned no visible response. This is the retrieved material without additional synthesis.\n\n"
-        "## Task\n\n"
-        f"{task}\n\n"
-        "## Collected evidence\n\n"
-        f"{source or 'No usable evidence was retained.'}"
-    )
-
-
-def _travel_report_appendix(artifacts: dict[str, dict]) -> str:
-    """Render bounded flight evidence so reports retain the offers they discuss."""
-    offers_by_route: dict[tuple[str, str, str], list[dict]] = {}
-    sources: dict[tuple[str, str, str], str] = {}
-    currencies: dict[tuple[str, str, str], str] = {}
-
-    def add_offers(
-        route: object, departure_date: object, offers: object, retrieved_at: object = "", currency: object = ""
-    ) -> None:
-        if not isinstance(route, dict) or not isinstance(offers, list):
-            return
-        origin = str(route.get("origin") or "").upper()
-        destination = str(route.get("destination") or "").upper()
-        date = str(departure_date or "")
-        if not origin or not destination or not date:
-            return
-        key = (origin, destination, date)
-        bucket = offers_by_route.setdefault(key, [])
-        for offer in offers:
-            if isinstance(offer, dict) and offer not in bucket:
-                bucket.append(offer)
-        if retrieved_at:
-            sources[key] = str(retrieved_at)
-        if currency:
-            currencies[key] = str(currency)
-
-    for record in artifacts.values():
-        data = record.get("data") if isinstance(record, dict) else None
-        if not isinstance(data, dict):
-            continue
-        if data.get("type") == "travel_plan":
-            representative = data.get("representative")
-            departure_date = representative.get("departure_date") if isinstance(representative, dict) else ""
-            currency = representative.get("currency") if isinstance(representative, dict) else ""
-            for offers in data.get("leg_offers") or []:
-                if not isinstance(offers, list) or not offers:
-                    continue
-                first = offers[0] if isinstance(offers[0], dict) else {}
-                departure = first.get("departure") if isinstance(first.get("departure"), dict) else {}
-                arrival = first.get("arrival") if isinstance(first.get("arrival"), dict) else {}
-                add_offers(
-                    {"origin": departure.get("id"), "destination": arrival.get("id")},
-                    departure_date,
-                    offers,
-                    currency=currency,
-                )
-        elif data.get("type") == "flight_search":
-            add_offers(
-                data.get("route"), data.get("departure_date"), [data.get("offer")], data.get("retrieved_at"), data.get("currency")
-            )
-
-    if not offers_by_route:
-        return ""
-    sections = ["## Retrieved Flight Offers", "", "Bounded Google Flights results retrieved for this investigation. Fares and schedules can change."]
-    source_lines = []
-    for (origin, destination, date), offers in offers_by_route.items():
-        sections.extend(["", f"### {origin} to {destination} on {date}"])
-        for index, offer in enumerate(offers, 1):
-            departure = offer.get("departure") if isinstance(offer.get("departure"), dict) else {}
-            arrival = offer.get("arrival") if isinstance(offer.get("arrival"), dict) else {}
-            airlines = ", ".join(str(name) for name in offer.get("airlines") or []) or "Carrier unavailable"
-            stops = offer.get("stops")
-            stop_text = "nonstop" if stops == 0 else f"{stops} stop{'s' if stops != 1 else ''}" if isinstance(stops, int) else "stops unavailable"
-            duration = offer.get("duration_minutes")
-            duration_text = f", {duration // 60}h {duration % 60:02d}m" if isinstance(duration, int) else ""
-            price = offer.get("price")
-            price_text = f", {currencies.get((origin, destination, date), '')} {price}" if price is not None else ""
-            sections.append(
-                f"{index}. {airlines}: {departure.get('time', 'departure unavailable')} "
-                f"to {arrival.get('time', 'arrival unavailable')} ({stop_text}{duration_text}{price_text})."
-            )
-        query = quote(f"Flights from {origin} to {destination} on {date}")
-        retrieved = sources.get((origin, destination, date))
-        suffix = f" Retrieved {retrieved}." if retrieved else ""
-        source_lines.append(
-            f"- [Google Flights: {origin} to {destination} on {date}](https://www.google.com/travel/flights?q={query}) via SerpApi.{suffix}"
-        )
-    return "\n".join(sections + ["", "## Sources", ""] + source_lines)
-
-
-def _report_references(artifacts: dict[str, dict]) -> str:
-    """Render source URLs from typed artifacts rather than trusting synthesis to cite them."""
-    references: list[tuple[str, str]] = []
-    seen: set[str] = set()
-
-    def add(label: object, url: object) -> None:
-        if not isinstance(url, str) or not url.strip() or url in seen:
-            return
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            return
-        seen.add(url)
-        references.append((str(label).strip() or parsed.netloc, url))
-
-    def add_quote(quote: object) -> None:
-        if not isinstance(quote, dict):
-            return
-        label = quote.get("name") or quote.get("symbol") or quote.get("requested_symbol") or "Google Finance"
-        add(f"Google Finance: {label}", quote.get("source_url"))
-        for item in quote.get("news") or []:
-            if isinstance(item, dict):
-                add(item.get("title") or item.get("publisher") or "Finance news", item.get("url"))
-
-    for record in artifacts.values():
-        data = record.get("data") if isinstance(record, dict) else None
-        if not isinstance(data, dict):
-            continue
-        kind = data.get("type")
-        if kind in {"paper_search", "paper_detail"}:
-            papers = data.get("papers") if kind == "paper_search" else [data.get("paper")]
-            for paper in papers or []:
-                if not isinstance(paper, dict):
-                    continue
-                title = paper.get("title") or "Paper"
-                add(f"{paper.get('source') or 'Paper'}: {title}", paper.get("url"))
-                doi = paper.get("doi")
-                if isinstance(doi, str) and doi.strip():
-                    add(f"DOI: {title}", f"https://doi.org/{doi.removeprefix('https://doi.org/')}")
-        elif kind == "web_research":
-            for source in data.get("sources") or []:
-                if isinstance(source, dict):
-                    add(source.get("host") or "Web result", source.get("url"))
-        elif kind == "finance_quote":
-            add_quote(data.get("quote"))
-        elif kind == "finance_exchange_rate":
-            rate = data.get("exchange_rate")
-            if isinstance(rate, dict):
-                add(f"Google Finance: {rate.get('pair') or 'exchange rate'}", rate.get("source_url"))
-        elif kind == "finance_watchlist":
-            for quote in data.get("quotes") or []:
-                add_quote(quote)
-        elif kind == "finance_market":
-            add("Google Finance: market overview", data.get("source_url"))
-            for market in data.get("markets") or []:
-                if isinstance(market, dict):
-                    add(f"Google Finance: {market.get('name') or 'market'}", market.get("source_url"))
-            for item in data.get("news") or []:
-                if isinstance(item, dict):
-                    add(item.get("title") or item.get("publisher") or "Finance news", item.get("url"))
-
-    if not references:
-        return ""
-    return "## References\n\n" + "\n".join(f"- [{label}]({url})" for label, url in references)
+# Parakeet commonly prefixes an echo of TTS with a short acknowledgement
+# ("Okay, the lights are off"). These do not identify a user request, so the
+# self-echo matcher ignores them before comparing the substantive transcript.
+_SELF_ECHO_PREFIX_TOKENS = frozenset(
+    {
+        "okay",
+        "ok",
+        "yeah",
+        "yep",
+        "yup",
+        "sure",
+        "alright",
+        "all",
+        "right",
+        "well",
+        "so",
+        "uh",
+        "um",
+        "hmm",
+        "hm",
+        "mm",
+        "mhm",
+    }
+)
 
 
 # Short tokens that Qwen3-ASR (and Whisper) commonly hallucinate from
@@ -372,6 +154,11 @@ _ASR_NOISE_TOKENS: frozenset[str] = frozenset(
         "technical terms",
     }
 )
+
+# Conversation mode may use a brief acknowledgement as a real reply, but only
+# after the assistant's audio ended. The same words that began during playback
+# remain ASR/AEC residue and stay in the global noise filter above.
+_CONVERSATION_ACK_TOKENS = frozenset({"yeah", "yep", "yup", "okay", "ok", "sure"})
 
 # Bare stop commands that interrupt an active turn without any wakeword.
 # Kept separate from _barge_re so the idle wakeword detector stays strict.
@@ -466,42 +253,14 @@ from utils.phrases import (  # noqa: E402
     TOOL_UNAVAILABLE_PHRASES,
 )
 
-# TTL on the partial-thinking capture. Past this, a 'summarise your
-# thoughts' request returns a graceful 'no recent thoughts' message
-# rather than dredging up a stale reasoning trace.
-THINKING_PARTIAL_TTL_S = 60.0
-
-# Token cap for the free-text *spoken* summaries (web-search result + cancelled
-# thinking). Both prompts ask for a few sentences, but they run WITHOUT the agent
-# GBNF grammar, so on a remote endpoint nothing bounds length — Qwen3.5 was seen
+# Token cap for free-text web-search summaries. These prompts ask for a few
+# sentences, but they run without the agent GBNF grammar, so on a remote endpoint
+# nothing bounds length — Qwen3.5 was seen
 # generating 3000+ tokens (~45s) "summarising" web snippets. A spoken answer of a
 # few sentences is well under this; truncating free text past it is harmless
 # (unlike the JSON agent call, where a cap could break parsing). The local path
 # was unaffected only because its grammar stops generation almost immediately.
 SUMMARY_MAX_NEW_TOKENS = 256
-
-# Unified conversation memory cap. Holds user / assistant (raw agent JSON) /
-# tool entries so the agent sees the full turn trace on each replan. Sized
-# generously — agent prompt cache stays warm; user / agent / tool messages
-# average ~80 tokens each, so 50 entries ≈ 4k tokens of history.
-HISTORY_MAX_MESSAGES = 50
-# Floor for context-overflow recovery: keep at least this many of the most
-# recent history entries (≈ the in-flight turn plus a little) when shedding old
-# history to fit the context window. Only if even this won't fit do we fall back
-# to clearing entirely.
-CONTEXT_TRIM_KEEP_MIN = 4
-# Silence timeout — past this gap with no new turn, history is cleared so a
-# stale "you said earlier..." context can't bleed into a fresh conversation.
-CHAT_SESSION_TIMEOUT_S = 1800.0
-# Cap on a compacted tool-result entry's length (chars). Raw tool payloads
-# (a web summary, a note dump, a state list) can be many KB; once a turn is
-# complete, only a short trace survives compaction — see
-# _compact_completed_turns.
-COMPACTED_TOOL_TRACE_MAX_CHARS = 160
-
-# Spoken only when the current request cannot fit an otherwise empty context.
-# Normal overflow sheds old history, then clears it and retries silently.
-CONTEXT_EXHAUSTED_REPLY = "I've lost some conversation context. Could you ask that again?"
 
 # Time window after a barge-in cancel during which incoming ASR results
 # are discarded. ASR inference is ~200ms on this GPU, so 500ms reliably
@@ -539,101 +298,8 @@ _MODEL_LOAD_ESTIMATES = {
     (TTS, "qwen-gguf"): "usually 5-15 seconds",
     (TTS, "pocket-tts-gguf"): "usually 5-15 seconds",
     (TTS, "pocket-tts-pytorch"): "usually 5-15 seconds",
+    (TTS, "audio8"): "usually 10-25 seconds",
 }
-
-
-class _GainSink:
-    """Apply a per-turn gain without changing the shared TTS sink protocol."""
-
-    def __init__(self, sink, gain: float):
-        self._sink = sink
-        self._gain = gain
-
-    def put(self, item, *args, **kwargs) -> None:
-        if isinstance(item, tuple) and item and isinstance(item[0], np.ndarray):
-            item = (item[0] * self._gain, *item[1:])
-        self._sink.put(item, *args, **kwargs)
-
-    def __getattr__(self, name):
-        return getattr(self._sink, name)
-
-
-class _NonBlockingSink:
-    """Apply transport backpressure without delaying cancellation controls.
-
-    TTS PCM must remain contiguous: dropping frames when a transport queue fills
-    causes audible garbling and truncates fast backends such as Pocket TTS.
-    Producers therefore wait for audio space. Start, cancel, and stop still
-    replace queued audio immediately so a new or cancelled turn is responsive.
-    """
-
-    def __init__(self, sink: "queue.Queue"):
-        self._sink = sink
-
-    def put(self, item, *args, **kwargs) -> None:
-        kind = item[0] if isinstance(item, tuple) and item else None
-        if not isinstance(kind, str):
-            self._sink.put(item, *args, **kwargs)
-            return
-        try:
-            self._sink.put_nowait(item)
-            return
-        except queue.Full:
-            pass
-        if kind in {"start", "cancel", "stop"}:
-            self._drain()
-        else:  # Never displace PCM merely to enqueue a completion marker.
-            self._sink.put(item, *args, **kwargs)
-            return
-        try:
-            self._sink.put_nowait(item)
-        except queue.Full:
-            pass
-
-    def put_nowait(self, item) -> None:
-        self.put(item)
-
-    def get_nowait(self):
-        return self._sink.get_nowait()
-
-    def _drain(self) -> None:
-        while True:
-            try:
-                self._sink.get_nowait()
-            except queue.Empty:
-                return
-
-
-class _BroadcastSink:
-    """Fan out one TTS stream to every active proactive-speech recipient."""
-
-    def __init__(self, sinks: list):
-        self._sinks = sinks
-
-    def put(self, item, *args, **kwargs) -> None:
-        for sink in self._sinks:
-            sink.put(item, *args, **kwargs)
-
-
-class _BroadcastEvent:
-    """Mirror a TTS backend's active/inactive transition across satellites."""
-
-    def __init__(self, events: list[threading.Event]):
-        self._events = events
-
-    def set(self) -> None:
-        for event in self._events:
-            event.set()
-
-    def clear(self) -> None:
-        for event in self._events:
-            event.clear()
-
-
-def _safe_sink(sink: Optional["queue.Queue"]):
-    # Both browser and native transports use bounded hand-off queues. Preserve
-    # every PCM frame by letting their send loops pace the TTS producer.
-    return _NonBlockingSink(sink) if sink is not None and sink.maxsize > 0 else sink
 
 
 def _whisper_gain(value) -> float:
@@ -760,7 +426,6 @@ class Assistant:
         # echoes it verbatim off non-speech, so the transcriber drops any result
         # containing it. Empty when the hint is off.
         self._context_prompt_marker = ""
-        self.use_vad = use_vad
         self.persistent_logging_enabled = bool(persistent_logging_enabled)
         # Built in `_load_models()` once the TTS model is in memory.
         self.voice_clone_prompt = None
@@ -790,7 +455,6 @@ class Assistant:
         self.barge_in = barge_in
         self.conversation_mode_default = bool(conversation_mode_default)
         self.follow_up_seconds = parse_barge_time(follow_up_time)
-        self.tts_start_time = 0.0
         # Written by the ASR stream generator with the speech-onset time of
         # the buffer currently being transcribed. The follow-up window
         # measures against this (when the user started talking) rather than
@@ -814,10 +478,10 @@ class Assistant:
         self._asr_audio: dict = {"buf": None}
 
         # Unified conversation memory — every user / assistant / tool entry
-        # for the agent's view of the session. Mutated only from the active
-        # turn (serialised under `_turn_lock` for the SLM portion; a turn's
-        # own history writes are done by the time it releases the lock) so no
-        # extra lock is needed. Shared across every satellite ("one assistant
+        # for the agent's view of the session. Foreground turns and terminal
+        # background report callbacks mutate it under `_turn_lock`; history
+        # policy helpers never acquire that non-reentrant lock themselves.
+        # Shared across every satellite ("one assistant
         # mind heard from multiple rooms") — see `_history_for`.
         # Each entry: {"role": "user"|"assistant"|"tool", "content": str,
         #              "name": <intent>?}  (assistant content is raw agent
@@ -828,14 +492,6 @@ class Assistant:
         # asking the conversational model to reconstruct its findings.
         self._completed_thinking_reports: dict[str, dict[str, object]] = {}
         self._pending_thinking_tasks: dict[str, str] = {}
-
-        # Partial-thinking capture for the interrupt-and-summarise path.
-        # Set when a thinking-mode chat call is cancelled mid-stream;
-        # consumed by `summarize_thinking` on the next turn. TTL'd via
-        # `THINKING_PARTIAL_TTL_S` so a stale trace doesn't leak forward.
-        self._last_thinking_partial: Optional[str] = None
-        self._last_thinking_question: Optional[str] = None
-        self._last_thinking_cancelled_at: float = 0.0
 
         # Reminder poll deduplication — keyed on (summary, YYYY-MM-DD).
         # Value is the monotonic time after which the entry expires (2 hours),
@@ -848,6 +504,7 @@ class Assistant:
         # truth. `llm_enabled` is False for `llm.backend: none`, which runs a
         # regex-only assistant that never touches the SLM.
         self._models_raw = models or {}
+        self.verify_asr_wakeword = True
         thinking = thinking or {}
         self.thinking_enabled = True
         try:
@@ -899,6 +556,7 @@ class Assistant:
         # Models loaded lazily in transcriber thread
         self.asr_pipe = None
         self.asr_stream_generator = None
+        self._live_asr_event_thread = None
         self.slm_model = None
         self.grammar = None
         self.greeting_prompt = None
@@ -908,20 +566,10 @@ class Assistant:
         self.llm_error_cache: list = []
         self.tool_unavailable_cache: list = []
         self.conversation_listening_cache: list = []
-        # Pre-rendered opening-greeting clips. `_warm_and_announce` synthesises
-        # and attempts to play these during startup — before any browser could
-        # possibly be connected (the WebSocket satellite only exists once the
-        # dashboard is already serving, which is after warmup) — so that first
-        # attempt silently drops the audio (no sink yet). Cached here and
-        # replayed once by `replay_greeting()` on the first satellite
-        # connection instead. `_greeting_delivered` guards against replaying
-        # on every reconnect (tab refresh, follow-up browser tab, etc).
-        self.greeting_cache: list = []
         self.greeting_text = ""
         # Kept outside conversation history solely for an immediate, explicit
         # "tell me more about that" response to the startup greeting.
         self._startup_greeting_response: str | None = None
-        self._greeting_delivered = False
 
         # Serializes SLM access. Voice turns run on the transcriber or barge-in
         # worker; text turns from the dashboard run on the FastAPI thread —
@@ -963,9 +611,6 @@ class Assistant:
         # parallel set of bare `self._text_*` fields. `chunk_q=None` since it
         # never receives audio; `tts_sink=None` since text turns never speak.
         self.satellites["dashboard-text"] = SatelliteSession(id="dashboard-text", chunk_q=None)
-        # Retained for legacy callers that need a default single satellite.
-        # Untargeted proactive speech broadcasts to every connected satellite.
-        self._last_connected_satellite_id: Optional[str] = None
         # Per-thread scratch space for whichever turn is running on *this*
         # thread — `.sink` / `.tts_active_event`, resolved fresh at the top of
         # `_run_half_duplex`/`_run_turn` from the turn's own satellite session
@@ -1000,6 +645,7 @@ class Assistant:
         self._asr_kws_wav_path: dict = {"path": None}
         self._asr_wake_generation: dict = {"value": None}
         self._asr_kws_early_verification: dict = {"flag": False}
+        self._asr_kws_capture_id: dict = {"value": None}
         self.wakeword_metrics = {"accepted": 0, "rejected": 0, "status": "asr"}
         # A2: the last completed turn's stats payload (`TurnStats.to_payload()`),
         # for `GET /status` to expose without the caller needing to scrape SSE
@@ -1009,7 +655,6 @@ class Assistant:
         # Obsidian plugin state — set by the dashboard when the plugin connects.
         # vault_current_file: metadata about the note currently open in Obsidian.
         self._vault_current_file: Optional[dict] = None
-        self._vault_path: Optional[str] = None
 
         # Set once `_load_models()` finishes — text turns from the dashboard
         # wait on this before calling into the pipeline.
@@ -1178,6 +823,16 @@ class Assistant:
             language=self.asr_language,
             **asr_cfg["opts"],
         )
+        live_worker = getattr(self.asr_pipe, "live_worker", None)
+        if live_worker is not None:
+            self.audio_capture.set_live_asr_backend(live_worker)
+            self._live_asr_event_thread = threading.Thread(
+                target=self._route_live_asr_events,
+                args=(live_worker,),
+                name="live-asr-events",
+                daemon=True,
+            )
+            self._live_asr_event_thread.start()
         if self.asr_context_hint:
             _MAX_CONTEXT_TERMS = 10
             extras = [t for t in self.asr_context_terms if t]
@@ -1188,25 +843,42 @@ class Assistant:
                 )
                 extras = extras[:_MAX_CONTEXT_TERMS]
             terms = [self.wakeword] + extras
-            self.asr_pipe.context = "Technical terms: " + ", ".join(terms)
-            logger.info(f"ASR context hint enabled: {self.asr_pipe.context!r}")
-            # The decoder sometimes regurgitates the prompt scaffolding verbatim
-            # off non-speech ("Technical terms: hey atticus, <garbage>") — that
-            # carries the wakeword plus a non-term tail, so neither
-            # _is_context_echo nor the bare-wakeword guard catches it. The leading
-            # marker (everything before the first colon) is an unambiguous tell a
-            # user never utters; the transcriber drops any result containing it.
-            self._context_prompt_marker = self.asr_pipe.context.split(":", 1)[0].strip().lower()
+            if hasattr(self.asr_pipe, "set_context_phrases"):
+                # NeMo TDT models use decoder-time phrase boosting, not Qwen's
+                # prompt text. Require an explicit extra term so the default
+                # wakeword-only configuration retains the model's native decode.
+                if extras:
+                    # The full phrase helps a clean decode, while the final
+                    # wakeword token recovers phonetic greeting variants such
+                    # as "Hi, Atticus" without needing a regex-like prompt.
+                    wakeword_terms = (self.wakeword, *self.wakeword.split()[-1:])
+                    nemo_terms = [*wakeword_terms, *extras]
+                    self.asr_pipe.set_context_phrases(
+                        nemo_terms, wakeword_phrases=wakeword_terms
+                    )
+                    logger.info("NeMo ASR context phrase boosting enabled: %r", nemo_terms)
+            else:
+                self.asr_pipe.context = "Technical terms: " + ", ".join(terms)
+                logger.info(f"ASR context hint enabled: {self.asr_pipe.context!r}")
+                # The decoder sometimes regurgitates the prompt scaffolding verbatim
+                # off non-speech ("Technical terms: hey atticus, <garbage>") — that
+                # carries the wakeword plus a non-term tail, so neither
+                # _is_context_echo nor the bare-wakeword guard catches it. The leading
+                # marker (everything before the first colon) is an unambiguous tell a
+                # user never utters; the transcriber drops any result containing it.
+                self._context_prompt_marker = self.asr_pipe.context.split(":", 1)[0].strip().lower()
         # KWS candidates still need the decoder's proper-name and domain-term
         # bias. The classifier is the acoustic gate; ASR verifies its text.
         self._asr_verification_context = (
             "Technical terms: " + ", ".join(terms) if self.asr_context_hint else ""
         )
         wake_cfg = (self._models_raw or {}).get("wakeword", {})
+        self.verify_asr_wakeword = bool(wake_cfg.get("verify_asr", True))
+        self.audio_capture.wake_candidates.verify_asr_wakeword = self.verify_asr_wakeword
         if wake_cfg.get("backend", "asr") == "openwakeword":
             wakeword_settings = {
                 key: wake_cfg[key]
-                for key in ("model", "threshold", "smoothing_frames", "cooldown_ms")
+                for key in ("model", "threshold", "smoothing_frames", "cooldown_ms", "verify_asr")
                 if key in wake_cfg
             }
             self.wakeword_metrics["settings"] = wakeword_settings
@@ -1491,10 +1163,6 @@ class Assistant:
             sentences = split_sentences(cleaned) or [cleaned]
             logger.info(f"Rendering warm-up prompts ({len(sentences)} sentence(s))...")
             greeting_parts = [self.synthesize(s, self.voice_clone_prompt) for s in sentences]
-            # Cached for replay_greeting() — see greeting_cache's docstring
-            # above for why the live attempt below almost never actually
-            # reaches a listener.
-            self.greeting_cache = greeting_parts
             # Synthesis above already did the real warmup work (CUDA-graph /
             # ORT session priming); playback is just for the user to hear it,
             # so a missing local output device (headless/no-PulseAudio Docker
@@ -1579,31 +1247,8 @@ class Assistant:
         t.start()
 
     def _maybe_reset_session(self) -> None:
-        """Clear unified history if every satellite has been silent past the
-        session timeout.
-
-        `_history` is shared across every satellite ("one assistant mind
-        heard from multiple rooms"), so the timeout is gated on the most
-        recently active satellite, not the one triggering this check —
-        otherwise satellite B merely being idle for a while would wipe
-        satellite A's still-fresh conversation the moment B took a turn.
-        """
-        last_ends = [s.last_turn_end for s in self.satellites.values()]
-        most_recent = max(last_ends) if last_ends else 0.0
-        if most_recent == 0.0:
-            return
-        if not self._history:
-            return
-        if time.monotonic() - most_recent > CHAT_SESSION_TIMEOUT_S:
-            logger.info(
-                f"Session timeout ({CHAT_SESSION_TIMEOUT_S:.0f}s) — "
-                f"clearing {len(self._history)} history entries"
-            )
-            self._history.clear()
-            self._last_thinking_partial = None
-            self._last_thinking_question = None
-            for s in self.satellites.values():
-                s.skip_followup_self_echo = False
+        """Reset shared history under the caller-owned turn lock."""
+        turn_history.reset_session(self._history, self.satellites, CHAT_SESSION_TIMEOUT_S)
 
     def _history_for(self, session: Optional[SatelliteSession]) -> list:
         """The conversation history a turn's prompt should be built from.
@@ -1617,123 +1262,28 @@ class Assistant:
         return self._history
 
     def _trim_history(self) -> None:
-        """Cap `_history` at HISTORY_MAX_MESSAGES with FIFO eviction."""
-        if len(self._history) > HISTORY_MAX_MESSAGES:
-            self._history = self._history[-HISTORY_MAX_MESSAGES:]
+        """Cap shared history under the caller-owned turn lock."""
+        turn_history.trim(self._history, HISTORY_MAX_MESSAGES)
 
     def _compact_completed_turns(self) -> None:
-        """Shrink tool results and drop bare planning emissions from `_history`.
-
-        Called at the start of each turn, when every tool / `{"actions": ...}`
-        entry belongs to an already-completed turn. The agent needs a tool
-        result in full only while composing that turn's reply; keeping the raw
-        dumps afterwards just bloats the context (a single note read or search
-        payload can be many KB) and evicts the real conversation.
-
-        Tool entries are NOT dropped entirely, though — only truncated to
-        `COMPACTED_TOOL_TRACE_MAX_CHARS`. A dropped-entirely tool entry left
-        history with only `{"reply": ...}` assistant turns, which is
-        indistinguishable from a fact the model merely asserted out loud: a
-        relative follow-up ("brighten them now") had no way to tell "I really
-        set this to 30%" from "I once said 30% out loud", so the model would
-        sometimes invent a new number instead of dispatching a fresh tool call.
-        Keeping a short trace of which tool ran gives it that signal back
-        without re-bloating history with full payloads.
-        """
-        kept = []
-        for msg in self._history:
-            role = msg.get("role")
-            if role == "tool":
-                content = msg.get("content") or ""
-                if len(content) > COMPACTED_TOOL_TRACE_MAX_CHARS:
-                    msg = {
-                        **msg,
-                        "content": content[:COMPACTED_TOOL_TRACE_MAX_CHARS].rstrip() + "…",
-                    }
-            elif role == "assistant":
-                try:
-                    emission = json.loads(msg.get("content") or "")
-                except Exception:
-                    emission = None
-                # Drop a bare action-emission (planning scaffolding); keep
-                # replies (what Fulloch actually said) and anything unparseable.
-                if isinstance(emission, dict) and "reply" not in emission and "actions" in emission:
-                    continue
-            kept.append(msg)
-        if len(kept) != len(self._history):
-            logger.debug(
-                "Compacted history: dropped %d scaffolding entries",
-                len(self._history) - len(kept),
-            )
-        self._history = kept
+        """Compact completed turns under the caller-owned turn lock."""
+        turn_history.compact(self._history, COMPACTED_TOOL_TRACE_MAX_CHARS)
 
     def _shed_oldest_history(self) -> bool:
-        """Drop the oldest history entries to recover from a context overflow.
-
-        Returns True if entries were shed (worth retrying the SLM call), False
-        if `_history` is already down to the recent floor — at which point a
-        single oversized message is to blame and the caller falls back to the
-        full clear + apology. Sheds roughly half the over-floor surplus per call
-        (so a few retries converge), then drops forward to the next `user`
-        message so the trimmed history still starts on a turn boundary rather
-        than an orphaned tool/assistant entry.
-        """
-        n = len(self._history)
-        if n <= CONTEXT_TRIM_KEEP_MIN:
-            return False
-        drop = max(2, (n - CONTEXT_TRIM_KEEP_MIN + 1) // 2)
-        del self._history[:drop]
-        while len(self._history) > CONTEXT_TRIM_KEEP_MIN and self._history[0].get("role") != "user":
-            del self._history[0]
-        logger.info(
-            "Context overflow: shed %d oldest history entries, %d remain",
-            drop,
-            len(self._history),
-        )
-        return True
+        """Shed context under the caller-owned turn lock."""
+        return turn_history.shed_oldest(self._history, CONTEXT_TRIM_KEEP_MIN)
 
     def _generate_with_context_recovery(self, **kwargs) -> str:
-        """`generate_slm` wrapper that degrades gracefully on context overflow.
-
-        On `ContextExhaustedError`, sheds the oldest history (preserving the
-        in-flight turn) and retries, so a long conversation loses its tail end
-        instead of being wiped. If the recent floor still cannot fit, clears
-        history and retries the current request once. Re-raises only if that
-        request cannot fit an otherwise empty conversation.
-        """
-        cleared_history = False
-        # A foreground timeout must not restart the shared server underneath a
-        # durable background request. The foreground can use its normal fallback
-        # and the thinking worker remains able to finish on its own slot.
+        """Generate/recover under the caller-owned foreground turn lock."""
         thinking_jobs = getattr(self, "thinking_jobs", None)
-        kwargs.setdefault(
-            "recover_on_failure", thinking_jobs is None or thinking_jobs.active() is None
+        return turn_history.generate_with_recovery(
+            self.slm_model,
+            conversation=self._history,
+            generate=generate_slm,
+            keep_minimum=CONTEXT_TRIM_KEEP_MIN,
+            background_active=thinking_jobs is not None and thinking_jobs.active() is not None,
+            **kwargs,
         )
-        while True:
-            try:
-                return generate_slm(self.slm_model, **kwargs)
-            except ContextExhaustedError:
-                if self._shed_oldest_history():
-                    continue
-                if cleared_history:
-                    raise
-                logger.warning(
-                    "Context overflow persists at history floor; clearing history and retrying turn"
-                )
-                # Agent calls carry the current question in history (rather
-                # than `user_prompt`), so retain it while dropping prior turns.
-                current_user = next(
-                    (
-                        message.copy()
-                        for message in reversed(self._history)
-                        if message.get("role") == "user"
-                    ),
-                    None,
-                )
-                self._history.clear()
-                if current_user is not None:
-                    self._history.append(current_user)
-                cleared_history = True
 
     def register_turn_listener(self, callback) -> None:
         """Subscribe a callable to per-turn user/assistant events.
@@ -1902,705 +1452,88 @@ class Assistant:
 
     def consume_completed_thinking_report(self, satellite_id: str | None) -> str | None:
         """Deliver a voice summary first, then the complete report on request."""
-        pending = self._completed_thinking_report_entry(satellite_id)
-        if pending is None:
-            return None
-        report = self._read_completed_thinking_report(pending)
-        if report is None:
-            return "I can't retrieve that completed report right now."
-        if pending.get("summary_delivered"):
-            return "Here is the full report. " + report
-        pending["summary_delivered"] = True
-        return (
-            "Here's the short version. "
-            + self._report_summary(report)
-            + " The full report is saved in Fulloch Reports. Would you like me to read the full report?"
-        )
+        return thinking_reports.consume_report(self._completed_thinking_report_entry(satellite_id))
 
     def _completed_thinking_report_entry(
         self, satellite_id: str | None
     ) -> dict[str, object] | None:
-        if satellite_id is None:
-            return None
-        pending = self._completed_thinking_reports.get(satellite_id)
-        if pending is not None:
-            return pending
-        # Browser sessions receive a new server-generated ID after a reconnect.
-        # Carry over the sole report whose originating session is gone.
-        disconnected = [
-            sid for sid in self._completed_thinking_reports if sid not in self.satellites
-        ]
-        if len(disconnected) != 1:
-            return None
-        pending = self._completed_thinking_reports.pop(disconnected[0])
-        self._completed_thinking_reports[satellite_id] = pending
-        return pending
+        return thinking_reports.completed_entry(
+            satellite_id, self._completed_thinking_reports, self.satellites
+        )
 
     @staticmethod
     def _read_completed_thinking_report(pending: dict[str, object]) -> str | None:
-        note_id = pending.get("note_id")
-        if not isinstance(note_id, str) or not re.fullmatch(
-            r"fulloch-reports/\d{4}-\d{2}-\d{2}-[0-9a-f]{8}", note_id
-        ):
-            return None
-        path = notes_root.get_notes_root() / f"{note_id}.md"
-        try:
-            path.resolve().relative_to((notes_root.get_notes_root() / "fulloch-reports").resolve())
-            return path.read_text(encoding="utf-8")
-        except (OSError, ValueError):
-            return None
+        return thinking_reports.read_report(pending)
 
     @staticmethod
     def _read_completed_thinking_evidence(pending: dict[str, object]) -> dict:
         """Read the bounded artifact ledger paired with a completed report."""
-        note_id = pending.get("note_id")
-        if not isinstance(note_id, str) or not re.fullmatch(
-            r"fulloch-reports/\d{4}-\d{2}-\d{2}-[0-9a-f]{8}", note_id
-        ):
-            return {}
-        path = notes_root.get_notes_root() / f"{note_id}.evidence.json"
-        try:
-            path.resolve().relative_to((notes_root.get_notes_root() / "fulloch-reports").resolve())
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError):
-            return {}
-        return data if isinstance(data, dict) else {}
+        return thinking_reports.read_evidence(pending)
 
     def answer_completed_thinking_report(
         self, satellite_id: str | None, question: str, cancel_check, stats=None
     ) -> str | None:
         """Answer a report follow-up without exposing it to normal agent context."""
-        pending = self._completed_thinking_report_entry(satellite_id)
-        if pending is None:
-            return None
-        report = self._read_completed_thinking_report(pending)
-        if report is None:
-            return "I can't retrieve that completed report right now."
-        evidence = self._read_completed_thinking_evidence(pending)
-        answer = generate_slm(
-            self.slm_model,
-            user_prompt=question,
-            system_prompt=get_thinking_report_answer_prompt(report, evidence),
+        return thinking_reports.answer_report(
+            self._completed_thinking_report_entry(satellite_id),
+            question,
+            model=self.slm_model,
+            generate=generate_slm,
             max_new_tokens=SUMMARY_MAX_NEW_TOKENS,
-            temperature=0.0,
             cancel_check=cancel_check,
             stats=stats,
         )
-        return (answer or "The report does not answer that.").strip()
 
     @staticmethod
     def _report_summary(report: str) -> str:
-        match = re.search(r"(?ims)^## Summary\s*\n+(.*?)(?=^##\s|\Z)", report)
-        if match:
-            summary = " ".join(match.group(1).split())
-            if summary:
-                sentences = split_sentences(summary)
-                if sentences:
-                    return " ".join(sentences[:3])
-        return Assistant._spoken_report_summary(report)
+        return thinking_reports.report_summary(report)
 
     @staticmethod
     def _spoken_report_summary(report: str) -> str:
         """Quote the report's conclusion without another model call."""
-        text = re.sub(r"(?m)^#{1,6}\s+", "", report)
-        sentences = split_sentences(text)
-        selected = []
-        total = 0
-        for sentence in reversed(sentences):
-            if len(selected) == 2 or total + len(sentence) > 450:
-                break
-            selected.append(sentence)
-            total += len(sentence) + 1
-        return " ".join(reversed(selected)) or "I completed the research report."
+        return thinking_reports.spoken_summary(report)
 
     def _run_background_thinking_job(
         self, job: BackgroundJob, cancelled: Callable[[], bool]
     ) -> tuple[str, str]:
-        """Run a bounded, tool-using investigation without altering foreground history."""
-        if self.slm_model is None:
-            raise RuntimeError("local language model is not loaded")
-        capabilities = {
-            name: capability
-            for name, capability in native_capabilities().items()
-            if capability.access_class == "read"
-        }
-        playbooks = matching_playbooks(job.snapshot.task, capabilities)
-        descriptions = []
-        for name in capabilities:
-            schema = tool_registry._schemas.get(name)
-            if schema is not None:
-                descriptions.append(_describe_thinking_capability(name, schema))
-        findings = job.state
-        capability_calls: dict[str, int] = {}
-        attempted_actions: set[str] = set()
-        needs_input: str | None = None
-
-        def run_capability(name: str, args: list) -> bool:
-            nonlocal findings, needs_input
-            stop_for_preliminary_report = False
-            capability = capabilities.get(name)
-            if capability is None:
-                findings = _append_thinking_observation(
-                    findings, "worker", f"Unavailable capability: {name}"
-                )
-                job.state = findings
-                return False
-            schema = tool_registry._schemas.get(name)
-            if schema is not None:
-                required = sum(param.required for param in schema.params)
-                if not required <= len(args) <= len(schema.params):
-                    findings = _append_thinking_observation(
-                        findings,
-                        "worker",
-                        f"Invalid arguments for {name}; expected {required}-{len(schema.params)} positional values.",
-                    )
-                    job.state = findings
-                    return False
-            if capability_calls.get(name, 0) >= MAX_THINKING_CAPABILITY_CALLS:
-                findings = _append_thinking_observation(
-                    findings,
-                    "worker",
-                    f"Capability budget reached for {name}; synthesise the evidence collected so far.",
-                )
-                job.state = findings
-                return False
-            capability_calls[name] = capability_calls.get(name, 0) + 1
-            self.thinking_jobs.update_stage(
-                job,
-                "Searching flights"
-                if name == "search_flights"
-                else "Comparing accommodation"
-                if name == "search_hotels"
-                else "Searching sources"
-                if name in {"external_information", "search_papers"}
-                else "Reviewing information",
-            )
-            logger.debug("Deep-think job %s dispatching %s with args=%r", job.id, name, args)
-            artifact_token = set_artifacts(job.artifacts)
-            try:
-                result = capability.invoke(args, {})
-            except Exception as exc:
-                result = (
-                    ThinkingResult(
-                        f"Tool {name} failed: {type(exc).__name__}: {exc}",
-                        status="failed",
-                        scope="The requested tool operation raised an exception.",
-                    )
-                    if schema is not None and schema.thinking_outcome
-                    else f"Tool {name} failed: {type(exc).__name__}: {exc}"
-                )
-            finally:
-                reset_artifacts(artifact_token)
-            if cancelled():
-                return False
-            if schema is not None and schema.thinking_outcome:
-                error = (
-                    "The tool did not provide its required typed evidence envelope."
-                    if not isinstance(result, ThinkingResult)
-                    else thinking_result_error(result)
-                )
-                if error:
-                    result = ThinkingResult(
-                        f"Tool {name} returned an invalid deep-think outcome: {error}",
-                        status="failed",
-                        scope="The tool result was rejected before it entered the evidence ledger.",
-                    )
-            if isinstance(result, ThinkingResult):
-                next_actions = result.next_actions
-                artifact_id = job.record_outcome(
-                    name,
-                    result.thinking_status,
-                    result.scope,
-                    result.evidence,
-                    result.next_actions,
-                    result.artifact,
-                )
-                if artifact_id:
-                    result = ThinkingResult(
-                        f"{result}\nArtifact reference: {artifact_id}",
-                        status=result.thinking_status,
-                        evidence=result.evidence,
-                        scope=result.scope,
-                        next_actions=result.next_actions,
-                        artifact=result.artifact,
-                    )
-                if result.thinking_status == "needs_input":
-                    if any(item.get("status") == "evidence" for item in job.evidence):
-                        stop_for_preliminary_report = True
-                        result = str(result)
-                    else:
-                        needs_input = (
-                            "Reactive question: "
-                            + str(result).removeprefix("Reactive question:").strip()
-                        )
-                elif result.thinking_status in {"failed", "unavailable"}:
-                    result = str(result)
-            step = intents.classify_step(result)
-            if step.kind is intents.StepKind.REACTIVE:
-                # A capability rejected malformed or incomplete input before
-                # producing evidence. Let a corrected action use its budget.
-                capability_calls[name] -= 1
-            if step.artifact is not None and job.artifact is None:
-                job.artifact = step.artifact
-            if step.kind is intents.StepKind.WEB_SEARCH:
-                summary = self._summarise_search_result(step.text, cancelled)
-                if summary and summary.strip():
-                    result = summary
-                else:
-                    logger.warning("Deep-think job %s received an empty web summary", job.id)
-            logger.info(
-                "Deep-think job %s received %d characters from %s", job.id, len(result), name
-            )
-            findings = _append_thinking_observation(findings, f"tool:{name}", result)
-            if isinstance(result, ThinkingResult) and next_actions:
-                findings = _append_thinking_observation(
-                    findings,
-                    "worker",
-                    "Suggested distinct next capabilities: " + ", ".join(next_actions) + ".",
-                )
-            if name == "evaluate_itinerary" and "not feasible" in result.lower():
-                findings = _append_thinking_observation(
-                    findings,
-                    "worker",
-                    "This rejects one evaluated itinerary only. Inspect untested retrieved combinations or take a materially different available search before making a broader feasibility conclusion.",
-                )
-            job.state = findings
-            if stop_for_preliminary_report:
-                findings = _append_thinking_observation(
-                    findings,
-                    "worker",
-                    "Further input would refine the result, but sufficient evidence exists for a preliminary scoped report now.",
-                )
-                job.state = findings
-                return False
-            return True
-
-        for _ in range(MAX_THINKING_WORKER_CALLS):
-            if cancelled():
-                return "", findings
-            self.thinking_jobs.update_stage(job, "Analysing findings")
-            prompt = get_thinking_worker_prompt(
-                job.snapshot.task,
-                list(job.snapshot.conversation),
-                notes=job.snapshot.notes,
-                job_state=findings,
-                capabilities="\n".join(descriptions),
-                capability_playbooks="\n\n".join(playbook.render() for playbook in playbooks),
-            )
-
-            def generate(worker_prompt=prompt) -> str:
-                return generate_slm(
-                    self.slm_model,
-                    user_prompt=worker_prompt,
-                    grammar=self.grammar,
-                    # One tool-selection step must yield promptly when a
-                    # foreground turn arrives; the report synthesis below is
-                    # deliberately allowed a larger budget.
-                    max_new_tokens=DEEP_THINK_STEP_MAX_TOKENS,
-                    temperature=0.4,
-                    cancel_check=cancelled,
-                    # Qwen's reasoning channel and llama.cpp's JSON grammar do
-                    # not compose: reasoning tokens can consume the completion
-                    # while leaving `content` empty. Deliberation comes from the
-                    # bounded tool/reasoning loop, so keep structured output on
-                    # the normal channel.
-                    thinking_mode=False,
-                    read_timeout=DEEP_THINK_READ_TIMEOUT_S,
-                    generation_timeout=DEEP_THINK_GENERATION_TIMEOUT_S,
-                    recover_on_failure=False,
-                )
-
-            response = (
-                generate() if self.thinking_server_slots == 2 else self._with_turn_lock(generate)
-            )
-            if cancelled():
-                return "", findings
-            response = (response or "").strip()
-            if not response:
-                logger.warning(
-                    "Deep-think job %s returned an empty worker response; synthesising collected findings",
-                    job.id,
-                )
-                findings = _append_thinking_observation(
-                    findings,
-                    "worker",
-                    "Worker stopped without a next action; synthesise only the evidence collected so far.",
-                )
-                job.state = findings
-                break
-            try:
-                emission = intents.parse_agent_emission(response)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "Deep-think job %s produced an invalid worker emission; synthesising collected findings",
-                    job.id,
-                )
-                findings = _append_thinking_observation(
-                    findings,
-                    "worker",
-                    "Worker returned an invalid planning response; select the next capability or reply sufficient findings collected.",
-                )
-                job.state = findings
-                continue
-            reply = emission.get("reply")
-            if isinstance(reply, str) and reply.strip():
-                reply = reply.strip()
-                if reply.startswith("Reactive question:"):
-                    return (
-                        reply,
-                        findings,
-                    )
-                findings = _append_thinking_observation(findings, "worker", reply)
-                break
-            plan = emission.get("plan")
-            if isinstance(plan, str) and plan.strip():
-                logger.debug("Deep-think job %s plan: %s", job.id, plan.strip())
-            actions = emission.get("actions") or []
-            if not actions and isinstance(plan, str) and plan.strip():
-                fallback_name = next(
-                    (
-                        playbook.fallback_capability
-                        for playbook in playbooks
-                        if playbook.fallback_capability in capabilities
-                    ),
-                    None,
-                )
-                if fallback_name is not None:
-                    action_key = _thinking_action_key(fallback_name, [job.snapshot.task])
-                    if action_key not in attempted_actions:
-                        attempted_actions.add(action_key)
-                        findings = _append_thinking_observation(
-                            findings,
-                            "worker",
-                            f"Worker supplied a plan without an action; using {fallback_name}.",
-                        )
-                        run_capability(fallback_name, [job.snapshot.task])
-                        if needs_input:
-                            return needs_input, findings
-                        continue
-            if len(actions) != 1 or not isinstance(actions[0], dict):
-                findings = _append_thinking_observation(
-                    findings,
-                    "worker",
-                    "Worker did not select exactly one next capability; synthesise current findings.",
-                )
-                break
-            action = actions[0]
-            name = tool_registry.canonical_name(action.get("intent", ""))
-            capability = capabilities.get(name or "")
-            if capability is None:
-                findings = _append_thinking_observation(
-                    findings,
-                    "worker",
-                    "Blocked unavailable capability: " + str(action.get("intent")),
-                )
-                job.state = findings
-                break
-            args, kwargs = intents.coerce_args(action.get("args"))
-            if kwargs:
-                findings = _append_thinking_observation(
-                    findings, "worker", f"Unsupported keyword arguments for {name}"
-                )
-                job.state = findings
-                break
-            action_key = _thinking_action_key(name, args)
-            if action_key in attempted_actions:
-                findings = _append_thinking_observation(
-                    findings,
-                    "worker",
-                    f"Duplicate capability request for {name}; synthesise the evidence collected so far.",
-                )
-                job.state = findings
-                break
-            attempted_actions.add(action_key)
-            if not run_capability(name, args):
-                break
-            if needs_input:
-                return needs_input, findings
-        if cancelled():
-            return "", findings
-        if not findings.strip():
-            raise ReportSynthesisError("No source material was retrieved for the report.")
-
-        self.thinking_jobs.update_stage(job, "Synthesising report")
-        report_prompt = get_thinking_report_prompt(
-            job.snapshot.task,
-            findings if not job.evidence else "",
-            json.dumps(job.evidence, ensure_ascii=True, sort_keys=True),
-        )
-
-        def synthesise() -> str:
-            return generate_slm(
-                self.slm_model,
-                user_prompt="Produce the final report now.",
-                system_prompt=report_prompt,
-                max_new_tokens=8192,
-                temperature=0.4,
-                cancel_check=cancelled,
-                thinking_mode=True,
-                read_timeout=DEEP_THINK_READ_TIMEOUT_S,
-                generation_timeout=DEEP_THINK_GENERATION_TIMEOUT_S,
-                recover_on_failure=False,
-            )
-
-        report = (
-            synthesise() if self.thinking_server_slots == 2 else self._with_turn_lock(synthesise)
-        )
-        if cancelled():
-            return "", findings
-        report = (report or "").strip()
-        if report:
-            logger.info("Deep-think job %s produced a %d-character report", job.id, len(report))
-            return report, findings
-        logger.warning(
-            "Deep-think job %s returned an empty final report; preserving collected evidence",
-            job.id,
-        )
-        return _fallback_thinking_report(job.snapshot.task, job.evidence, findings), findings
+        """Bind current model/services for the job-manager callback."""
+        return ThinkingWorker(
+            model=self.slm_model,
+            grammar=self.grammar,
+            jobs=self.thinking_jobs,
+            generate=generate_slm,
+            capabilities=native_capabilities,
+            registry=tool_registry,
+            summarise_search=self._summarise_search_result,
+            model_lock=self._turn_lock,
+            server_slots=self.thinking_server_slots,
+        ).run(job, cancelled)
 
     def _on_thinking_job_status(self, job: BackgroundJob) -> None:
         """Publish job transitions for dashboard and Home Assistant SSE clients."""
-        if job.status == "NEEDS_INPUT":
-            question = job.summary.removeprefix("Reactive question:").strip()
-            if job.snapshot.origin_satellite_id:
-                self._pending_thinking_tasks[job.snapshot.origin_satellite_id] = job.snapshot.task
-            self._history.append({"role": "tool", "name": "deep_think", "content": job.summary})
-            self._trim_history()
-            self._dispatch_event(
-                {
-                    "role": "thinking",
-                    "ts": time.time(),
-                    "job_id": job.id,
-                    "status": job.status,
-                    "summary": question[:500],
-                    "error": "",
-                    "note_id": "",
-                    "task": job.snapshot.task,
-                    "stage": job.stage,
-                }
-            )
-            if job.snapshot.origin_source == "conversation" and question:
-                self._emit_turn_event(
-                    "assistant",
-                    question,
-                    "proactive",
-                    satellite_id=job.snapshot.origin_satellite_id,
-                )
-                satellite_id = job.snapshot.origin_satellite_id
-                if satellite_id and satellite_id != "dashboard-text":
-                    threading.Thread(
-                        target=self.speak_proactive,
-                        args=(question,),
-                        kwargs={
-                            "emit_event": False,
-                            "satellite_id": satellite_id,
-                            "follow_up": True,
-                        },
-                        daemon=True,
-                        name=f"thinking-input-{job.id[:8]}",
-                    ).start()
-            return
-        if job.status == JobStatus.FAILED:
-            if job.snapshot.origin_satellite_id:
-                self._pending_thinking_tasks.pop(job.snapshot.origin_satellite_id, None)
-            self._dispatch_event(
-                {
-                    "role": "thinking",
-                    "ts": time.time(),
-                    "job_id": job.id,
-                    "status": job.status,
-                    "summary": "",
-                    "error": job.error,
-                    "note_id": "",
-                    "task": job.snapshot.task,
-                    "stage": job.stage,
-                }
-            )
-            if job.snapshot.origin_source == "conversation":
-                message = "I couldn't complete that report."
-                self._emit_turn_event(
-                    "assistant", message, "proactive", satellite_id=job.snapshot.origin_satellite_id
-                )
-                satellite_id = job.snapshot.origin_satellite_id
-                if satellite_id and satellite_id != "dashboard-text":
-                    threading.Thread(
-                        target=self.speak_proactive,
-                        args=(message,),
-                        kwargs={
-                            "emit_event": False,
-                            "satellite_id": satellite_id,
-                            "follow_up": False,
-                        },
-                        daemon=True,
-                        name=f"thinking-failed-{job.id[:8]}",
-                    ).start()
-            return
-        if job.status == "READY" and not job.note_id:
-            job.note_id = self._save_thinking_report(job)
-        if job.status == "READY":
-            if job.snapshot.origin_satellite_id:
-                self._pending_thinking_tasks.pop(job.snapshot.origin_satellite_id, None)
-            report_summary = self._report_summary(job.summary)
-            self._history.append(
-                {
-                    "role": "tool",
-                    "name": "deep_think",
-                    "content": (
-                        f"Completed deep-think report for: {job.snapshot.task}\n"
-                        f"Summary: {report_summary}\n"
-                        f"Report note: {job.note_id or 'unavailable'}"
-                    ),
-                }
-            )
-            self._trim_history()
-        self._dispatch_event(
-            {
-                "role": "thinking",
-                "ts": time.time(),
-                "job_id": job.id,
-                "status": job.status,
-                "summary": job.summary[:500],
-                "error": job.error,
-                "note_id": job.note_id,
-                "task": job.snapshot.task,
-                "stage": job.stage,
-            }
+        thinking_reports.publish_status(
+            job,
+            pending_tasks=self._pending_thinking_tasks,
+            completed_reports=self._completed_thinking_reports,
+            record_history=self._record_thinking_history,
+            dispatch_event=self._dispatch_event,
+            emit_turn_event=self._emit_turn_event,
+            speak_proactive=self.speak_proactive,
         )
-        artifact = self._thinking_report_artifact(job)
-        if job.status == "READY" and job.snapshot.origin_source == "conversation":
-            if job.snapshot.origin_satellite_id:
-                self._completed_thinking_reports[job.snapshot.origin_satellite_id] = {
-                    "note_id": job.note_id,
-                    "task": job.snapshot.task,
-                    "summary_delivered": False,
-                }
-            self._emit_turn_event(
-                "assistant",
-                "I've finished looking into that. Would you like a short summary?",
-                "proactive",
-                satellite_id=job.snapshot.origin_satellite_id,
-                artifact=artifact,
-            )
-            satellite_id = job.snapshot.origin_satellite_id
-            if satellite_id and satellite_id != "dashboard-text":
-                threading.Thread(
-                    target=self.speak_proactive,
-                    args=("I've finished looking into that. Would you like a short summary?",),
-                    kwargs={
-                        "emit_event": False,
-                        "satellite_id": satellite_id,
-                        "follow_up": True,
-                    },
-                    daemon=True,
-                    name=f"thinking-complete-{job.id[:8]}",
-                ).start()
-        elif artifact is not None:
-            self._emit_turn_event(
-                "assistant",
-                "I've completed the report and saved the full version.",
-                "proactive",
-                artifact=artifact,
-            )
+
+    def _record_thinking_history(self, message: dict) -> None:
+        """Serialize terminal background evidence with foreground history edits."""
+        with self._turn_lock:
+            self._history.append(message)
+            self._trim_history()
 
     def _thinking_report_artifact(self, job: BackgroundJob) -> dict | None:
         """Build a compact, domain-specific card for a completed thinking job."""
-        if job.status != JobStatus.READY:
-            return None
-        source = job.artifact if isinstance(job.artifact, dict) else None
-        finance_sources = [
-            item.get("data")
-            for item in job.artifacts.values()
-            if isinstance(item, dict) and isinstance(item.get("data"), dict)
-        ]
-        watchlist = next(
-            (item for item in finance_sources if item.get("type") == "finance_watchlist"), None
-        )
-        if watchlist is not None:
-            market = next(
-                (item for item in finance_sources if item.get("type") == "finance_market"), None
-            )
-            source = {
-                "type": "finance_summary",
-                "quotes": watchlist.get("quotes", []),
-                "markets": market.get("markets", []) if market else [],
-            }
-        source_type = source.get("type") if source else ""
-        report_url = f"/reports/{job.note_id}" if job.note_id else ""
-        domains = {
-            "paper_search": ("research_report", "Research Report"),
-            "paper_detail": ("research_report", "Research Report"),
-            "web_research": ("research_report", "Research Report"),
-            "flight_search": ("travel_report", "Travel Report"),
-            "travel_plan": ("travel_report", "Travel Report"),
-            "hotel_search": ("travel_report", "Travel Report"),
-            "finance_quote": ("finance_report", "Finance Report"),
-            "finance_exchange_rate": ("finance_report", "Finance Report"),
-            "finance_watchlist": ("finance_report", "Finance Report"),
-            "finance_market": ("finance_report", "Finance Report"),
-            "finance_summary": ("finance_report", "Finance Report"),
-        }
-        card_type, title = domains.get(
-            source_type, ("generated_report", job.snapshot.task[:160] or "Research Report")
-        )
-        artifact = {
-            "type": card_type,
-            "title": title,
-            "created_at": job.created_at,
-            "summary": job.summary[:600],
-            "report_url": report_url,
-        }
-        if source is not None:
-            artifact["data"] = source
-        return artifact if report_url or source is not None else None
+        return thinking_reports.report_artifact(job)
 
     def _save_thinking_report(self, job: BackgroundJob) -> str:
         """Append a completed worker result to a durable, retrievable Markdown report."""
-        note_id = f"fulloch-reports/{local_now().strftime('%Y-%m-%d')}-{job.id[:8]}"
-        path = notes_root.get_notes_root() / f"{note_id}.md"
-        timestamp = local_now().strftime("%Y-%m-%d %H:%M")
-        findings = job.summary or "No report was produced."
-        if not re.search(r"(?im)^## Summary\s*$", findings):
-            first_sentence = split_sentences(findings)
-            answer = first_sentence[0] if first_sentence else "No reliable conclusion was produced."
-            findings = (
-                "## Summary\n\n"
-                f"{answer} Scope: this preliminary report is limited to the retrieved evidence. "
-                "Caveat: details may remain incomplete.\n\n" + findings
-            )
-        report = (
-            f"# Deep Think Report\n\n"
-            f"**Completed:** {timestamp}\n\n"
-            f"**Objective:** {job.snapshot.task}\n\n"
-            f"## Findings\n\n{findings}\n"
-        )
-        appendix = _travel_report_appendix(job.artifacts)
-        if appendix:
-            report = report.rstrip() + "\n\n" + appendix + "\n"
-        references = _report_references(job.artifacts)
-        if references:
-            report = report.rstrip() + "\n\n" + references + "\n"
-        evidence_path = path.with_suffix(".evidence.json")
-        evidence = {
-            "task": job.snapshot.task,
-            "evidence": job.evidence,
-            "artifacts": job.artifacts,
-        }
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(report, encoding="utf-8")
-            evidence_path.write_text(
-                json.dumps(evidence, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8"
-            )
-            notes._after_write(path)
-            logger.info("Saved deep-think report %s to %s", job.id, path)
-            return note_id
-        except Exception:
-            logger.exception("Failed to persist thinking report %s", job.id)
-            return ""
-
-    def _with_turn_lock(self, action: Callable[[], str]) -> str:
-        with self._turn_lock:
-            return action()
+        return thinking_reports.save_report(job)
 
     def _background_job_admitted(self) -> bool:
         """One-slot jobs run only when no foreground turn or speech is live."""
@@ -2640,21 +1573,18 @@ class Assistant:
                 }
             )
 
-    def _begin_satellite_turn(self, sat: SatelliteSession, *, tentative: bool = False) -> None:
-        """Establish a native-satellite turn, optionally awaiting KWS verification."""
+    def _begin_satellite_turn(self, sat: SatelliteSession) -> None:
+        """Establish a native-satellite turn."""
         sat.protocol_state_generation += 1
         if sat.protocol_follow_up_timer is not None:
             sat.protocol_follow_up_timer.cancel()
             sat.protocol_follow_up_timer = None
         sat.protocol_turn_id = uuid.uuid4().hex
         self._emit_satellite_state(sat.id, "wake_detected", turn_id=sat.protocol_turn_id)
-        if not tentative:
-            self._emit_satellite_state(sat.id, "listening", turn_id=sat.protocol_turn_id)
-
-    def _confirm_pending_satellite_wake(self, sat: SatelliteSession) -> None:
-        """Make an acoustically detected wake persistent after ASR confirms it."""
-        if sat.protocol_wake_pending and sat.protocol_turn_id is not None:
-            self._emit_satellite_state(sat.id, "listening", turn_id=sat.protocol_turn_id)
+        # Satellites keep their microphone stream alive only after listening.
+        # The turn remains tentative and the early verification can still
+        # immediately return it to idle on a false acoustic match.
+        self._emit_satellite_state(sat.id, "listening", turn_id=sat.protocol_turn_id)
 
     def _set_pending_satellite_wake(self, sat: SatelliteSession) -> None:
         """Bound optimistic wake feedback until its final ASR verification completes."""
@@ -2686,7 +1616,7 @@ class Assistant:
         sat = self.satellites.get(satellite_id)
         if sat is None or sat.protocol_turn_id is not None:
             return
-        self._begin_satellite_turn(sat, tentative=True)
+        self._begin_satellite_turn(sat)
         self._set_pending_satellite_wake(sat)
 
     def _on_asr_work_dropped(
@@ -2881,7 +1811,6 @@ class Assistant:
             if not enabled:
                 self.satellites.pop(satellite_id, None)
                 raise ConversationModeUnavailable(reason)
-        self._last_connected_satellite_id = satellite_id
         session.recorder_thread = threading.Thread(
             target=self.audio_capture.satellite_recorder_thread,
             args=(session,),
@@ -3046,10 +1975,6 @@ class Assistant:
             self._turn_local.sink = prev_sink
             self._turn_local.tts_active_event = prev_active
 
-    def _sink_for(self, satellite_id: Optional[str]) -> Optional["queue.Queue"]:
-        session = self.satellites.get(satellite_id) if satellite_id else None
-        return _safe_sink(session.tts_sink) if session is not None else None
-
     def _tts_lock_for_sink(self, sink) -> Optional[threading.RLock]:
         """Find the owning satellite's stream lock through sink decorators."""
         raw_sink = sink
@@ -3141,28 +2066,6 @@ class Assistant:
         sat.higgs_delivery = ""
         return agent_prompt if sat.tts_gain != 1.0 else user_prompt
 
-    def replay_greeting(self, satellite_id: str) -> None:
-        """Mark the greeting as delivered without playing it.
-
-        The opening greeting was already synthesised during startup by
-        `_warm_and_announce` to warm the TTS model and the LLM cache — the
-        actual playback attempt during startup silently dropped because no
-        satellite was connected. Now that one is, we mark it delivered so
-        the next (real) user turn doesn't trigger a second greeting, but
-        playing it back here would inject several seconds of irrelevant
-        audio into the mic, which gets transcribed as user input while the
-        mic is still live between connect and the first `tts_start` frame.
-
-        The warming effect is already done; no audible output is needed.
-
-        No-op (no delivered mark) when cache is empty — startup may have
-        failed, and a later replay_greeting on reconnect would have nothing
-        to skip.
-        """
-        if not self.greeting_cache:
-            return
-        self._greeting_delivered = True
-
     def _play_alarm_tone(self, session: Optional[TtsSession] = None) -> float:
         """Push the pre-rendered alarm tone straight to the current turn's sink.
 
@@ -3190,15 +2093,9 @@ class Assistant:
         sink.put(("end",))
         return len(data) / sr
 
-    def set_vault_context(
-        self,
-        current_file: Optional[dict],
-        vault_path: Optional[str] = None,
-    ) -> None:
+    def set_vault_context(self, current_file: Optional[dict]) -> None:
         """Update the currently-open Obsidian note context injected into the agent prompt."""
         self._vault_current_file = current_file
-        if vault_path is not None:
-            self._vault_path = vault_path
 
     # Config paths the running assistant can apply without a restart. Voice
     # options are conditional on the active TTS backend — see apply_hot_config.
@@ -3261,6 +2158,7 @@ class Assistant:
             "pocket-tts-onnx",
             "pocket-tts-gguf",
             "pocket-tts-pytorch",
+            "audio8",
         }
         for ch in changes:
             path, value = ch["path"], ch["value"]
@@ -3552,50 +2450,9 @@ class Assistant:
             stats=stats,
         )
 
-    def _summarise_partial_thinking(self, cancel_check, stats=None) -> str:
-        """Spoken summary of the last cancelled thinking turn.
-
-        Consumes the captured partial state regardless of outcome — one
-        successful summary uses it; a stale/missing one returns a graceful
-        message and clears it so the user doesn't get prompted again.
-
-        Runs as a free-text call (no agent grammar) since we want a direct
-        spoken summary, not a JSON-wrapped agent emission.
-        """
-        partial = self._last_thinking_partial
-        question = self._last_thinking_question
-        cancelled_at = self._last_thinking_cancelled_at
-        self._last_thinking_partial = None
-        self._last_thinking_question = None
-
-        if not partial or not question:
-            return "I don't have any recent thoughts to summarise."
-        if time.monotonic() - cancelled_at > THINKING_PARTIAL_TTL_S:
-            return "Those thoughts were too long ago — I've let them go."
-
-        return generate_slm(
-            self.slm_model,
-            user_prompt=get_partial_thinking_summary_prompt(question, partial),
-            system_prompt=self.greeting_prompt,
-            cancel_check=cancel_check,
-            max_new_tokens=SUMMARY_MAX_NEW_TOKENS,
-            stats=stats,
-        )
-
     def _context_exhausted_reply(self) -> str:
-        """Reset the conversation after a context overflow and apologise.
-
-        Wipes `_history` so the next turn starts within budget, then returns
-        the spoken/returned apology. Called from the agent loop when an SLM
-        call raises `ContextExhaustedError` — otherwise the turn would fail
-        silently (the caller's generic `except` only logs).
-        """
-        logger.warning(
-            "SLM context exhausted; clearing %d history entries and apologising",
-            len(self._history),
-        )
-        self._history.clear()
-        return CONTEXT_EXHAUSTED_REPLY
+        """Clear irrecoverable context under the caller-owned turn lock."""
+        return turn_history.exhausted_reply(self._history)
 
     def _handle_wakeword(
         self,
@@ -3765,9 +2622,6 @@ class Assistant:
                             {"tts": stats.tts_payload(), "total": stats.total_with_tts()},
                         ),
                     )
-                # A2: one structured line per turn — the measurement base for
-                # A0's/A1's acceptance criteria and the seed of the deferred
-                # turn-trace dashboard.
                 logger.info(stats.log_line())
                 self._last_turn_stats = stats.to_payload()
             finally:
@@ -3965,7 +2819,6 @@ class Assistant:
             if cleaned:
                 # Recorded for self-echo suppression in `_check_barge_in`.
                 sat.last_spoken_text = cleaned.lower()
-                self.tts_start_time = time.monotonic()
                 # Emit before speaking so the dashboard reveals the text while TTS
                 # plays. Barge-in may cut speech short; the full text still shows,
                 # while _history is reconciled to the spoken text via _record_spoken.
@@ -3985,9 +2838,6 @@ class Assistant:
                         {"tts": stats.tts_payload(), "total": stats.total_with_tts()},
                     ),
                 )
-            # A2: one structured line per turn — the measurement base for
-            # A0's/A1's acceptance criteria and the seed of the deferred
-            # turn-trace dashboard.
             logger.info(stats.log_line())
             self._last_turn_stats = stats.to_payload()
             if not session.cancelled:
@@ -4114,6 +2964,9 @@ class Assistant:
         asr_worker = getattr(self.asr_pipe, "worker", None)
         if asr_worker is not None and hasattr(asr_worker, "close"):
             asr_worker.close()
+        live_asr_worker = getattr(self.asr_pipe, "live_worker", None)
+        if live_asr_worker is not None:
+            live_asr_worker.close()
         process = getattr(self.slm_model, "_fulloch_local_process", None)
         if process is not None:
             from .slm import _stop_local_server
@@ -4208,7 +3061,10 @@ class Assistant:
 
         # (2) Unbiased re-transcribe — only meaningful when a context bias is
         # actually steering the decoder.
-        if self.asr_context_hint and getattr(self.asr_pipe, "context", ""):
+        supports_unbias = getattr(self.asr_pipe, "supports_context_unbias", None)
+        if not isinstance(supports_unbias, bool):
+            supports_unbias = bool(getattr(self.asr_pipe, "context", ""))
+        if self.asr_context_hint and supports_unbias:
             buf = self._asr_audio.get("buf")
             if buf is not None and not self._wakeword_in_unbiased_pass(buf):
                 logger.info(
@@ -4276,6 +3132,8 @@ class Assistant:
         spoken_norm = _NON_WORD_RE.sub("", spoken)
         words = [_NON_WORD_RE.sub("", w) for w in text_lower.split()]
         words = [w for w in words if w]
+        while words and words[0] in _SELF_ECHO_PREFIX_TOKENS:
+            words.pop(0)
         if not words:
             return False
         # In the follow-up window, only short utterances (≤ 3 words) are
@@ -4405,6 +3263,32 @@ class Assistant:
             logger.exception("Transcriber loop crashed — switching to setup")
             self._enter_error_state(detail)
 
+    def _route_live_asr_events(self, worker) -> None:
+        """Put Parakeet worker events onto the normal ASR routing queue.
+
+        The result object is recognized by the Parakeet wrapper, so this keeps
+        all existing wakeword/follow-up routing while avoiding endpoint rework.
+        """
+        while True:
+            event = worker.get_event()
+            if event is None:
+                if getattr(worker, "_closed", None) is not None and worker._closed.is_set():
+                    return
+                continue
+            if hasattr(event, "error"):
+                self._note_runtime_error(event.error)
+                return
+            item = list(event.item)
+            item[0] = event.result
+            item[3] = not event.final
+            self.audio_capture._put_utterance(
+                tuple(item),
+                satellite_id=item[4],
+                kind="live_final" if event.final else "live_partial",
+                candidate=bool(item[7]) if len(item) > 7 else False,
+                _live_result=True,
+            )
+
     def _run_transcriber_loop(self):
         """Drain the ASR pipeline, routing each utterance through a turn."""
         stream_args = (
@@ -4432,6 +3316,8 @@ class Assistant:
             stream_kwargs["wake_generation_sink"] = self._asr_wake_generation
         if "kws_early_verification_sink" in stream_params:
             stream_kwargs["kws_early_verification_sink"] = self._asr_kws_early_verification
+        if "kws_capture_id_sink" in stream_params:
+            stream_kwargs["kws_capture_id_sink"] = self._asr_kws_capture_id
         for result in self.asr_pipe(
             self.asr_stream_generator(*stream_args, **stream_kwargs),
             batch_size=1,
@@ -4474,6 +3360,7 @@ class Assistant:
                 wake_probe = self._asr_wake_probe.get("flag", False)
                 kws_candidate = self._asr_kws_candidate.get("flag", False)
                 kws_early_verification = self._asr_kws_early_verification.get("flag", False)
+                kws_capture_id = self._asr_kws_capture_id.get("value")
                 kws_wav_path = self._asr_kws_wav_path.get("path")
                 audio = self._asr_audio.get("buf")
                 telemetry_event(
@@ -4487,36 +3374,38 @@ class Assistant:
                     provisional=provisional,
                     has_text=bool(text),
                 )
+                if kws_early_verification:
+                    accepted = bool(text and self._wakeword_re.search(text.lower()))
+                    if isinstance(kws_capture_id, int):
+                        self.audio_capture.resolve_wakeword_candidate(sat, kws_capture_id, accepted)
+                    if not accepted:
+                        self.wakeword_metrics["rejected"] += 1
+                        logger.info("openWakeWord activation rejected by ASR: %r", text)
+                        telemetry_event("wakeword_rejected", satellite_id=turn_satellite_id)
+                        self._reject_pending_satellite_wake(sat)
+                    continue
                 if not text:
                     if kws_candidate:
                         self.wakeword_metrics["rejected"] += 1
                         self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=False)
                     if not provisional:
-                        if kws_early_verification:
-                            self._stand_down_tentative_satellite_wake(sat)
-                        else:
-                            self._reject_pending_satellite_wake(sat)
+                        self._reject_pending_satellite_wake(sat)
                     continue
 
+                acoustic_wake_accepted = kws_candidate and not self.verify_asr_wakeword
                 if kws_candidate:
                     # The recorder only tags an utterance after openWakeWord
                     # fires; this transcript used the normal ASR term context.
-                    if self._wakeword_re.search(text.lower()) is None:
+                    if self.verify_asr_wakeword and self._wakeword_re.search(text.lower()) is None:
                         self.wakeword_metrics["rejected"] += 1
                         self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=False)
                         logger.info("openWakeWord activation rejected by ASR: %r", text)
                         telemetry_event("wakeword_rejected", satellite_id=turn_satellite_id)
-                        if kws_early_verification:
-                            self._stand_down_tentative_satellite_wake(sat)
-                        else:
-                            self._reject_pending_satellite_wake(sat)
+                        self._reject_pending_satellite_wake(sat)
                         continue
                     self.wakeword_metrics["accepted"] += 1
                     self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=True)
                     telemetry_event("wakeword_accepted", satellite_id=turn_satellite_id)
-                    if kws_early_verification:
-                        self._confirm_pending_satellite_wake(sat)
-                        continue
 
                 if time.monotonic() < sat.drop_results_until:
                     logger.debug(f"Dropping post-cancel ASR result: {text}")
@@ -4528,7 +3417,13 @@ class Assistant:
                 # trigger the follow-up window. Strip punctuation before matching
                 # so "Yeah." and "yeah" both hit.
                 _text_bare = re.sub(r"[^\w\s]", "", text.lower()).strip()
-                if _text_bare in _ASR_NOISE_TOKENS:
+                conversation_ack_after_tts = (
+                    sat.conversation_mode
+                    and _text_bare in _CONVERSATION_ACK_TOKENS
+                    and sat.last_turn_end > 0
+                    and self._asr_onset.get("t", 0.0) >= sat.last_turn_end
+                )
+                if _text_bare in _ASR_NOISE_TOKENS and not conversation_ack_after_tts:
                     if not provisional:
                         self._reject_pending_satellite_wake(sat)
                     logger.debug(f"Dropped noise token: {text!r}")
@@ -4575,7 +3470,14 @@ class Assistant:
                 if (
                     provisional
                     and sat.turn_active
-                    and not (sat.conversation_mode or self.barge_in == "wakeword")
+                    and (
+                        (not sat.conversation_mode and self.barge_in != "wakeword")
+                        # A rolling Parakeet partial contains TTS until its hard
+                        # endpoint. In conversation mode, wait for that endpoint
+                        # before accepting an interruption; an explicit stop stays
+                        # immediate.
+                        or (sat.conversation_mode and _BARGE_STOP_RE.search(text) is None)
+                    )
                 ):
                     logger.debug(f"Ignoring provisional during active turn: {text!r}")
                     continue
@@ -4593,7 +3495,6 @@ class Assistant:
                     same_committed_text = (
                         sat.provisional_committed_text
                         and hard_text.endswith(sat.provisional_committed_text)
-                        and time.monotonic() - sat.provisional_committed_at < 3.0
                     )
                     if abs(onset - sat.provisional_committed_onset) < 0.5 or same_committed_text:
                         logger.debug(
@@ -4601,11 +3502,9 @@ class Assistant:
                         )
                         sat.provisional_committed_onset = 0.0
                         sat.provisional_committed_text = ""
-                        sat.provisional_committed_at = 0.0
                         continue
                     sat.provisional_committed_onset = 0.0
                     sat.provisional_committed_text = ""
-                    sat.provisional_committed_at = 0.0
 
                 text_lower = text.lower()
                 wakeword_matches = list(self._wakeword_re.finditer(text_lower))
@@ -4614,7 +3513,7 @@ class Assistant:
                 # latest request; stripping the first leaves another wakeword
                 # in the prompt and defeats the anchored regex fast-path.
                 wakeword_match = wakeword_matches[-1] if wakeword_matches else None
-                wakeword_present = wakeword_match is not None
+                wakeword_present = wakeword_match is not None or acoustic_wake_accepted
                 in_follow_up = False
                 just_barged_in = False
                 bare_barge_wakeword = False
@@ -4662,6 +3561,13 @@ class Assistant:
                         sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
                     just_barged_in = True
                 elif not wakeword_present:
+                    # A bounded rolling partial eventually drops the opening
+                    # wakeword. Its earlier partial already opened a tentative,
+                    # capture-scoped turn; ignore tail-only snapshots until the
+                    # full endpoint can verify or reject that wakeword.
+                    if provisional and sat.protocol_wake_pending:
+                        logger.debug("Holding live ASR tail after pending wake: %r", text)
+                        continue
                     # Follow-up window: a brief grace period after TTS ends
                     # during which wakeword-free input is treated as a reply
                     # to the assistant's last answer. Measured from when this
@@ -4697,7 +3603,14 @@ class Assistant:
                         # even if every word also appears in the cancelled
                         # response. Consume the flag here.
                         sat.skip_followup_self_echo = False
-                    elif self._is_self_echo(turn_satellite_id, text_lower, short_only=True):
+                    elif self._is_self_echo(
+                        turn_satellite_id,
+                        text_lower,
+                        # Conversation mode accepts wakeword-free input forever.
+                        # Its live ASR can finish decoding a complete TTS sentence
+                        # after playback ends, so do not exempt long echoes there.
+                        short_only=not sat.conversation_mode,
+                    ):
                         # Suppress brief AEC reverb after TTS ends (typically
                         # 1–3 word fragments). Longer utterances are user
                         # speech — even if the words overlap the assistant's
@@ -4753,7 +3666,7 @@ class Assistant:
                     logger.info("Pure stop in follow-up — standing down")
                     continue
 
-                if wakeword_present:
+                if wakeword_match is not None:
                     logger.debug(f"WAKEWORD: {text}")
                     user_prompt = (
                         text_lower[wakeword_match.end() :]
@@ -4853,7 +3766,6 @@ class Assistant:
                     sat.provisional_committed_text = re.sub(
                         r"[^\w\s]", "", user_prompt.lower()
                     ).strip()
-                    sat.provisional_committed_at = time.monotonic()
                     logger.info(f"Committing early on soft endpoint: {user_prompt!r}")
 
                 # Snapshot the ASR latency of the utterance that triggered this

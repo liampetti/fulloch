@@ -90,7 +90,9 @@ def _asset_present(domain_cfg: dict, models_dir: str) -> bool:
     count as present, so a remote-LLM config isn't stuck reporting setup-needed.
     """
     spec = domain_cfg.get("spec")
-    if spec is not None and not (spec.hf_repo or spec.hf_file or spec.hf_files):
+    if spec is not None and not (
+        spec.hf_repo or spec.hf_file or spec.hf_files or spec.hf_snapshots
+    ):
         return True
     model = domain_cfg.get("model")
     if not model:
@@ -184,7 +186,7 @@ def detect_setup_state(
             missing_assets.append(f"{domain}:{cfg['backend']} ({cfg['model']})")
     # Local llama-server backends use the shipped GBNF grammar; external OpenAI
     # endpoints may not recognise it and fall back to JSON mode.
-    if resolved[LLM]["backend"] in {"llama", "gemma"}:
+    if resolved[LLM]["backend"] in {"llama", "gemma", "ornith"}:
         if not (Path(models_dir) / "grammars" / "agent.gbnf").is_file():
             missing_assets.append("grammar (agent.gbnf)")
 
@@ -193,7 +195,9 @@ def detect_setup_state(
     return SetupDecision(
         needs_setup=needs,
         config_present=True,
-        reason=("missing model assets" if auto_download else "setup incomplete") if needs else "ready",
+        reason=("missing model assets" if auto_download else "setup incomplete")
+        if needs
+        else "ready",
         missing_assets=missing_assets,
         auto_download=auto_download,
     )

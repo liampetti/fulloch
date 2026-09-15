@@ -105,7 +105,7 @@ class TestBargeInTranscriptDispatch:
     """A non-stop interruption must become the next request, not be discarded."""
 
     @staticmethod
-    def _run_transcript(a, text):
+    def _run_transcript(a, text, provisional=False):
         def stream_generator(
             _queue,
             onset_sink,
@@ -118,7 +118,7 @@ class TestBargeInTranscriptDispatch:
         ):
             onset_sink["t"] = 1.0
             loudness_sink["db"] = -30.0
-            provisional_sink["flag"] = False
+            provisional_sink["flag"] = provisional
             audio_sink["buf"] = object()
             satellite_id_sink["id"] = "sat-a"
             endpoint_wait_sink["s"] = 0.0
@@ -175,8 +175,65 @@ class TestBargeInTranscriptDispatch:
         assert assistant._start_turn.call_args.args[0] == "tell me more about that thing"
         assistant._run_half_duplex.assert_not_called()
 
+    def test_conversation_mode_holds_live_partial_during_playback(self, assistant):
+        assistant.satellites["sat-a"].conversation_mode = True
+        assistant._cancel_turn = MagicMock()
+        assistant._queue_conversation_turn = MagicMock()
+
+        self._run_transcript(assistant, "turn off downstairs office lights", provisional=True)
+
+        assistant._cancel_turn.assert_not_called()
+        assistant._queue_conversation_turn.assert_not_called()
+
 
 class TestConversationTurnSettle:
+    def test_conversation_mode_accepts_acknowledgement_after_tts(self, assistant):
+        sat = assistant.satellites["sat-a"]
+        sat.turn_active = False
+        sat.conversation_mode = True
+        sat.last_turn_end = 0.5
+        assistant._queue_conversation_turn = MagicMock()
+
+        TestBargeInTranscriptDispatch._run_transcript(assistant, "okay")
+
+        assistant._queue_conversation_turn.assert_called_once()
+        assert assistant._queue_conversation_turn.call_args.args[0] == "okay"
+
+    def test_conversation_mode_drops_acknowledgement_that_started_during_tts(self, assistant):
+        sat = assistant.satellites["sat-a"]
+        sat.turn_active = False
+        sat.conversation_mode = True
+        sat.last_turn_end = 2.0
+        assistant._queue_conversation_turn = MagicMock()
+
+        TestBargeInTranscriptDispatch._run_transcript(assistant, "okay")
+
+        assistant._queue_conversation_turn.assert_not_called()
+
+    def test_conversation_mode_drops_a_complete_tts_echo(self, assistant):
+        sat = assistant.satellites["sat-a"]
+        sat.turn_active = False
+        sat.conversation_mode = True
+        sat.last_spoken_text = "okay, i'll keep that in mind"
+        assistant._queue_conversation_turn = MagicMock()
+
+        TestBargeInTranscriptDispatch._run_transcript(assistant, "okay, i'll keep that in mind")
+
+        assistant._queue_conversation_turn.assert_not_called()
+
+    def test_conversation_mode_drops_acknowledgement_prefixed_tts_echo(self, assistant):
+        sat = assistant.satellites["sat-a"]
+        sat.turn_active = False
+        sat.conversation_mode = True
+        sat.last_spoken_text = "downstairs office lights are now off"
+        assistant._queue_conversation_turn = MagicMock()
+
+        TestBargeInTranscriptDispatch._run_transcript(
+            assistant, "okay, downstairs office lights are now off"
+        )
+
+        assistant._queue_conversation_turn.assert_not_called()
+
     def test_only_latest_rapid_request_starts_a_turn(self, assistant, monkeypatch):
         import time
 

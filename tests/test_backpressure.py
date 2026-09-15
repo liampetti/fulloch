@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
+from core.asr_work_queue import AsrWorkQueue
 from core.assistant import _safe_sink
 from core.audio import AUDIO_QUEUE_MAX_ITEMS, AudioCapture
 from core.satellite import SatelliteSession
@@ -29,8 +30,8 @@ def test_completed_audio_queue_is_bounded_and_drops_when_asr_is_busy():
     session = SatelliteSession(id="sat-a")
     audio = np.ones(160, dtype=np.float32)
 
-    capture._enqueue(session, audio, 1.0, -30.0, False, 2.0)
-    capture._enqueue(session, audio * 2, 2.0, -20.0, False, 3.0)
+    capture.wake_candidates._enqueue(session, audio, 1.0, -30.0, False, 2.0)
+    capture.wake_candidates._enqueue(session, audio * 2, 2.0, -20.0, False, 3.0)
 
     item = capture.audio_queue.get_nowait()
     assert item[0].tolist() == audio.tolist()
@@ -45,6 +46,35 @@ def test_tts_sink_replaces_stale_audio_with_cancel():
     sink.put(("cancel",))
 
     assert output.get_nowait() == ("cancel",)
+
+
+def test_audio_admission_and_targeted_flush_report_candidate_lifecycle():
+    capture = AudioCapture(use_vad=False)
+    capture.audio_queue = AsrWorkQueue(maxsize=2)
+    dropped = []
+    capture.set_asr_work_dropped_callback(lambda *args: dropped.append(args))
+
+    assert capture._put_utterance(("old",), satellite_id="a")
+    assert capture._put_utterance(("keep",), satellite_id="b")
+    assert capture._put_utterance(
+        ("verify",), satellite_id="c", kind="wake_verification", candidate=True
+    )
+    assert not capture._put_utterance(("full",), satellite_id="d")
+    capture.flush("c")
+
+    assert dropped == [
+        ("a", "final", False, "evicted"),
+        ("d", "final", False, "full"),
+        ("c", "wake_verification", True, "flushed"),
+    ]
+    assert capture.asr_queue_metrics == {
+        "admitted": 3,
+        "dropped": 1,
+        "evicted": 1,
+        "peak_depth": 2,
+    }
+    assert capture.audio_queue.get_nowait() == ("keep",)
+    assert capture.audio_queue.empty()
 
 
 def test_tts_sink_backpressures_instead_of_dropping_audio():
@@ -79,9 +109,13 @@ def test_satellite_tts_streams_are_serialised_across_producers():
         release.wait(timeout=1)
 
     assistant._tts_module = MagicMock(play_chunks=play_chunks)
-    safe_sink = assistant._sink_for("sat-a")
-    first = threading.Thread(target=assistant.play_chunks, args=([], 16000), kwargs={"sink": safe_sink})
-    second = threading.Thread(target=assistant.play_chunks, args=([], 16000), kwargs={"sink": safe_sink})
+    safe_sink = assistant.satellites["sat-a"].tts_sink
+    first = threading.Thread(
+        target=assistant.play_chunks, args=([], 16000), kwargs={"sink": safe_sink}
+    )
+    second = threading.Thread(
+        target=assistant.play_chunks, args=([], 16000), kwargs={"sink": safe_sink}
+    )
 
     first.start()
     assert entered.wait(timeout=1)

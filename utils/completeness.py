@@ -3,10 +3,10 @@ before the speaker has actually finished (the early-endpoint / speculation path)
 
 Two questions live here:
 
-- `is_complete(text)` — is this partial *syntactically closed*, or does it end on
-  a word that invites continuation ("turn off the …", "play some music and …")?
-  Used to gate the free-form (SLM-bound) path: commit early only when the user
-  has plausibly finished a clause.
+ - `is_complete(text)` — is this partial *syntactically closed*, or does it end on
+   a word that invites continuation ("turn off the …", "play some music and …")?
+   Used to gate deterministic intent matches: commit early only when the user has
+   plausibly finished a clause.
 - `SPECULATION_UNSAFE_INTENTS` — the `catchAll` intents whose cost-of-being-wrong
   is too high to ever fire on a partial (security, or a jarring/committing side
   effect). Everything else is reversible or read-only and may commit early.
@@ -23,8 +23,8 @@ from typing import Iterable
 #   - play_song           : wrong media mid-sentence is jarring and not silent.
 #   - start_countdown     : commits a timer that then has to be cancelled.
 # Reversible (lights, colour, volume, toggle) and read-only (time, list timers,
-# summaries, skip/resume/pause) intents are absent — they're safe to commit on a
-# regex match. A free-form query (no regex match) is gated by `is_complete`.
+ # summaries, skip/resume/pause) intents are absent — they're safe to commit on a
+ # deterministic regex match.
 SPECULATION_UNSAFE_INTENTS: frozenset[str] = frozenset(
     {
         "ha_lock",
@@ -164,7 +164,9 @@ def should_commit_provisional(prompt: str, catch_result) -> bool:
     - Regex-matched **safe** intent (lights, volume, time, …) → commit only if
       syntactically complete. This preserves quick commands but holds a broad
       regex match on a mid-sentence request such as "can you read".
-    - No regex match (free-form) → commit only if syntactically complete.
+    - No regex match or a reply-only result → wait for the hard endpoint. A soft
+      snapshot can end at a natural clause boundary while the speaker continues,
+      and free-form turns do not have a deterministic action to safely execute.
 
     Kept here (not in `intent_catch`) so the policy table lives next to
     `SPECULATION_UNSAFE_INTENTS`; the caller passes the `catchAll` result so this
@@ -172,9 +174,12 @@ def should_commit_provisional(prompt: str, catch_result) -> bool:
     """
     if isinstance(catch_result, dict):
         actions = catch_result.get("actions") or []
-        intents = {a.get("intent") for a in actions}
-        if intents & SPECULATION_UNSAFE_INTENTS:
-            return False
-        return is_complete(prompt)
-    # Free-form string → SLM. Only commit once the clause reads as finished.
-    return is_complete(prompt)
+        if actions:
+            intents = {a.get("intent") for a in actions}
+            if intents & SPECULATION_UNSAFE_INTENTS:
+                return False
+            return is_complete(prompt)
+    # Free-form and reply-only paths need the full utterance. In particular,
+    # Parakeet can snapshot after a short pause in "can you read me ..." or
+    # conversational feedback before the speaker finishes the thought.
+    return False

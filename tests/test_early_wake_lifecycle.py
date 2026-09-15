@@ -23,6 +23,7 @@ def _run_transcripts(
     assistant,
     transcripts,
     before_final=None,
+    onsets=None,
     wake_probe_indexes=(),
     kws_candidate_indexes=(),
     early_verification_indexes=(),
@@ -42,7 +43,7 @@ def _run_transcripts(
         kws_early_verification_sink=None,
     ):
         for index, _text in enumerate(transcripts):
-            onset_sink["t"] = 10.0
+            onset_sink["t"] = onsets[index] if onsets is not None else 10.0
             loudness_sink["db"] = -20.0
             provisional_sink["flag"] = index < len(transcripts) - 1
             audio_sink["buf"] = object()
@@ -90,6 +91,35 @@ def test_soft_wake_is_emitted_before_final_transcript(assistant):
     assert assistant._start_turn.call_args.args[0] == "tell me a story"
 
 
+def test_delayed_hard_endpoint_drops_matching_committed_soft_turn(assistant):
+    _run_transcripts(
+        assistant,
+        ["atticus turn off downstairs", "atticus turn off downstairs"],
+        # A VAD reset/flush can shift the final segment's onset. The text match
+        # must still consume its authoritative endpoint even after a slow tail.
+        onsets=[10.0, 11.0],
+    )
+
+    assistant._start_turn.assert_called_once()
+    assert assistant._start_turn.call_args.args[0] == "turn off downstairs"
+
+
+def test_rolling_tail_partial_keeps_pending_wake_until_final_verifies(assistant):
+    events = []
+    assistant.register_turn_listener(events.append)
+
+    _run_transcripts(
+        assistant,
+        ["atticus", "turn on the kitchen lights", "atticus turn on the kitchen lights"],
+    )
+
+    # The second partial no longer contains the wakeword, but it must not
+    # stand down or dispatch before the full endpoint confirms the capture.
+    assert [event["state"] for event in events] == ["wake_detected", "listening"]
+    assistant._start_turn.assert_called_once()
+    assert assistant._start_turn.call_args.args[0] == "turn on the kitchen lights"
+
+
 def test_repeated_wakewords_route_the_latest_command(assistant):
     _run_transcripts(assistant, ["atticus, atticus, dim upstairs lights"])
 
@@ -115,32 +145,83 @@ def test_model_wake_is_emitted_before_asr_and_can_be_rejected(assistant):
 
     assistant._on_wakeword_model_match("sat-a")
 
-    assert [event["state"] for event in events] == ["wake_detected"]
+    assert [event["state"] for event in events] == ["wake_detected", "listening"]
     assert assistant.satellites["sat-a"].protocol_wake_pending is True
 
     assistant._reject_pending_satellite_wake(assistant.satellites["sat-a"])
 
-    assert [event["state"] for event in events] == ["wake_detected", "idle"]
+    assert [event["state"] for event in events] == ["wake_detected", "listening", "idle"]
     assert assistant.satellites["sat-a"].protocol_turn_id is None
 
 
-def test_final_candidate_dispatches_after_early_verification_rejects(assistant):
+def test_unresolved_model_wake_times_out_to_idle(assistant, monkeypatch):
+    class Timer:
+        instances = []
+
+        def __init__(self, _seconds, callback):
+            self.callback = callback
+            self.daemon = False
+            self.cancelled = False
+            self.instances.append(self)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            self.cancelled = True
+
+    monkeypatch.setattr("core.assistant.threading.Timer", Timer)
+    events = []
+    assistant.register_turn_listener(events.append)
+
+    assistant._on_wakeword_model_match("sat-a")
+    Timer.instances[-1].callback()
+
+    assert [event["state"] for event in events] == ["wake_detected", "listening", "idle"]
+    assert assistant.satellites["sat-a"].protocol_wake_pending is False
+    assert assistant.satellites["sat-a"].protocol_turn_id is None
+
+
+def test_early_verification_rejection_stands_down_without_dispatch(assistant):
     events = []
     assistant.register_turn_listener(events.append)
     assistant._on_wakeword_model_match("sat-a")
-    generation = assistant.satellites["sat-a"].protocol_state_generation
 
     _run_transcripts(
         assistant,
-        ["television noise", "atticus set a timer for six minutes"],
+        ["television noise"],
+        kws_candidate_indexes={0},
+        early_verification_indexes={0},
+    )
+
+    assert [event["state"] for event in events] == ["wake_detected", "listening", "idle"]
+    assistant._start_turn.assert_not_called()
+
+
+def test_accepted_early_verification_dispatches_the_final_query(assistant):
+    events = []
+    assistant.register_turn_listener(events.append)
+    assistant._on_wakeword_model_match("sat-a")
+
+    _run_transcripts(
+        assistant,
+        ["atticus", "atticus set a timer for six minutes"],
         kws_candidate_indexes={0, 1},
         early_verification_indexes={0},
     )
 
-    assert [event["state"] for event in events] == ["wake_detected", "idle", "wake_detected", "listening"]
-    assert assistant.satellites["sat-a"].protocol_state_generation == generation + 1
+    assert [event["state"] for event in events] == ["wake_detected", "listening"]
     assistant._start_turn.assert_called_once()
     assert assistant._start_turn.call_args.args[0] == "set a timer for six minutes"
+
+
+def test_openwakeword_can_dispatch_without_asr_wakeword_verification(assistant):
+    assistant.verify_asr_wakeword = False
+
+    _run_transcripts(assistant, ["turn off the office lights"], kws_candidate_indexes={0})
+
+    assistant._start_turn.assert_called_once()
+    assert assistant._start_turn.call_args.args[0] == "turn off the office lights"
 
 
 def test_bare_hard_wake_starts_lifecycle_before_follow_up(assistant):
@@ -205,7 +286,7 @@ def test_dropping_ordinary_work_keeps_a_pending_wake(assistant):
     assistant._on_wakeword_model_match("sat-a")
     assistant._on_asr_work_dropped("sat-a", "final", False, "evicted")
 
-    assert [event["state"] for event in events] == ["wake_detected"]
+    assert [event["state"] for event in events] == ["wake_detected", "listening"]
     assert sat.protocol_wake_pending is True
     assert sat.protocol_turn_id is not None
 
@@ -218,6 +299,6 @@ def test_dropping_wake_candidate_stands_down_pending_wake(assistant):
     assistant._on_wakeword_model_match("sat-a")
     assistant._on_asr_work_dropped("sat-a", "wake_candidate", True, "full")
 
-    assert [event["state"] for event in events] == ["wake_detected", "idle"]
+    assert [event["state"] for event in events] == ["wake_detected", "listening", "idle"]
     assert sat.protocol_wake_pending is False
     assert sat.protocol_turn_id is None

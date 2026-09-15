@@ -102,6 +102,73 @@ def _register(spec: BackendSpec) -> None:
 # --- ASR --------------------------------------------------------------------
 _register(
     BackendSpec(
+        domain=TTS,
+        backend="audio8",
+        gpu_only=True,
+        experimental=True,
+        display_name="Audio8 TTS 0.6B (GPU voice clone)",
+        loader="core.tts_audio8:load_tts",
+        default_model="Edge0/Audio8-TTS-Preview-0.6b",
+        hf_snapshots=(
+            ("Edge0/Audio8-TTS-Preview-0.6b", (), "f07040f3d151f1ba0253bfb92cb2f5dd38b44594"),
+        ),
+        download_size_gb=1.5,
+        vram_gb=3.0,
+        deps=("transformers",),
+        notes="Experimental 44.1 kHz Apache-2.0 zero-shot voice clone. Requires an exact "
+        "data/voices/<name>.txt transcript beside the reference WAV; sentence-fragment PCM streaming.",
+        extra={"revision": "f07040f3d151f1ba0253bfb92cb2f5dd38b44594"},
+    )
+)
+
+_register(
+    BackendSpec(
+        domain=ASR,
+        backend="parakeet",
+        gpu_only=True,
+        experimental=True,
+        display_name="NVIDIA Parakeet TDT 0.6B (GPU)",
+        loader="core.asr_parakeet:load_asr_model",
+        default_model="nvidia/parakeet-tdt-0.6b-v3",
+        hf_repo="nvidia/parakeet-tdt-0.6b-v3",
+        download_size_gb=2.5,
+        vram_gb=2.5,
+        deps=("nemo_toolkit",),
+        notes="Multilingual FastConformer-TDT backend. Configured ASR terms use NeMo decoder phrase boosting; "
+        "it does not support Qwen-style context prompting.",
+    )
+)
+_register(
+    BackendSpec(
+        domain=ASR,
+        backend="orukeet",
+        gpu_only=True,
+        experimental=True,
+        display_name="Orukeet 0.6B (GPU)",
+        loader="core.asr_orukeet:load_asr_model",
+        default_model="oruk/orukeet",
+        hf_snapshots=(
+            (
+                "oruk/orukeet",
+                ("orukeet-v0.1.0.nemo",),
+                "555136b50265a132d4cea0d35560c26fc4f657ab",
+            ),
+        ),
+        download_size_gb=2.5,
+        vram_gb=2.5,
+        deps=("nemo_toolkit",),
+        notes="Experimental Parakeet TDT 0.6B derivative with improved multilingual/accent "
+        "benchmarks. Uses the same periodic full-buffer live transcripts as Parakeet; "
+        "configured ASR terms use NeMo decoder phrase boosting rather than context prompting. CC BY-SA 4.0 "
+        "weights require attribution and share-alike review.",
+        extra={
+            "checkpoint_file": "orukeet-v0.1.0.nemo",
+            "revision": "555136b50265a132d4cea0d35560c26fc4f657ab",
+        },
+    )
+)
+_register(
+    BackendSpec(
         domain=ASR,
         backend="qwen",
         gpu_only=True,
@@ -517,6 +584,26 @@ _register(
         notes="Grammar-constrained agent loop. Alternative full-tier SLM (Gemma 4).",
     )
 )
+# Ornith uses the Qwen3.5 architecture and bundled chat template, so it shares
+# the local llama-server path without Qwen's MTP-specific defaults.
+_register(
+    BackendSpec(
+        domain=LLM,
+        backend="ornith",
+        gpu_only=True,
+        display_name="Ornith 1.5 9B Q4 (local)",
+        loader="core.slm:load_slm",
+        default_model="./data/models/Ornith-1.5-9B-Q4_K_M.gguf",
+        hf_repo="ornith-ai/Ornith-1.5-9B-GGUF",
+        hf_file="Ornith-1.5-9B-Q4_K_M.gguf",
+        download_size_gb=5.8,
+        vram_gb=7.5,
+        n_context=12288,
+        deps=(),
+        extra={"mtp": False},
+        notes="Grammar-constrained agent loop. Alternative full-tier local SLM (MIT).",
+    )
+)
 _register(
     BackendSpec(
         domain=LLM,
@@ -562,6 +649,8 @@ def list_backends(domain: str) -> list[BackendSpec]:
     """All registered specs for a domain (for the wizard's dropdowns)."""
     order = {
         ASR: (
+            "parakeet",
+            "orukeet",
             "qwen-gguf",
             "qwen-gguf-small",
             "qwen-onnx",
@@ -576,6 +665,7 @@ def list_backends(domain: str) -> list[BackendSpec]:
             "qwen-gguf",
             "qwen-gguf-small",
             "pocket-tts-pytorch",
+            "audio8",
             "pocket-tts-gguf",
             "qwen",
             "qwen-small",
@@ -668,11 +758,13 @@ def resolve_models(config_models: Optional[dict]) -> dict:
                     backend = "llama"
                 elif local_model == "gemma":
                     backend = "gemma"
+                elif local_model == "ornith":
+                    backend = "ornith"
                 elif local_model == "custom":
                     backend = "llama"
                 else:
                     raise ValueError(
-                        f"Unknown local LLM model {local_model!r}; choose qwen, gemma, or custom"
+                        f"Unknown local LLM model {local_model!r}; choose qwen, gemma, ornith, or custom"
                     )
             elif backend == "external":
                 backend = "openai"

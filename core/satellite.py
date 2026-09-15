@@ -92,11 +92,19 @@ class SatelliteSession:
     # native lifecycle early, but never dispatches an incomplete command.
     early_wake_probe_started_at: float = 0.0
     early_wake_probe_emitted: bool = False
+    # The recorder starts live Parakeet/Orukeet snapshots only after VAD detects
+    # speech; idle browser PCM must never enter the live model buffer.
+    live_asr_speech_active: bool = False
     # Idle openWakeWord gate state. Recorder-thread owned and reset on disconnect
     # or when an endpoint completes.
     kws_pre_roll: list = field(default_factory=list)
     kws_verification_pre_roll: list = field(default_factory=list)
     kws_candidate: bool = False
+    kws_capture_id: int = 0
+    kws_verified: bool = False
+    kws_verdict: Optional[tuple[int, bool]] = None
+    kws_verdict_lock: threading.Lock = field(default_factory=threading.Lock)
+    kws_pending_final: Optional[tuple] = None
     kws_score: float = 0.0
     kws_detected_at: float = 0.0
     kws_wav_path: Optional[str] = None
@@ -113,7 +121,6 @@ class SatelliteSession:
     # Text fallback for the duplicate guard: VAD/ASR timing can differ by more
     # than the onset tolerance after a soft endpoint has flushed the recorder.
     provisional_committed_text: str = ""
-    provisional_committed_at: float = 0.0
 
     # Native-satellite metadata is optional for browser clients.
     label: Optional[str] = None  # human-readable ("kitchen"); #13/#14

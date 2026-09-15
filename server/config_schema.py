@@ -125,8 +125,8 @@ SCHEMA: tuple = (
         "bool",
         "General",
         True,
-        "Bias the ASR decoder toward your wakeword spelling via a "
-        "'Technical terms: <wakeword>' prompt.",
+        "Bias ASR toward your wakeword spelling. Qwen uses a decoder prompt; "
+        "Parakeet/Orukeet boost configured context phrases in NeMo's decoder.",
     ),
     Field(
         "general",
@@ -134,8 +134,8 @@ SCHEMA: tuple = (
         "list",
         "General",
         None,
-        "Extra terms appended after the wakeword — proper nouns/names that "
-        "get mistranscribed (max 10).",
+        "Extra proper nouns/names that get mistranscribed (max 10). With "
+        "Parakeet/Orukeet, these enable NeMo decoder phrase boosting.",
     ),
     # --- Thinking ----------------------------------------------------------
     Field(

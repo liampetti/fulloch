@@ -11,13 +11,15 @@ tests pin the recovery behaviour:
      fit does it clear `_history` and return a spoken apology.
 """
 
-import inspect
 import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
+
+from core.slm import ContextExhaustedError
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -77,12 +79,30 @@ def test_custom_llm_uses_its_filename_in_loading_status():
     assert a.Assistant._loading_display_name(cfg) == "Custom local model (Qwen3.6-35B-A3B-UD-IQ4_NL.gguf)"
 
 
-def test_foreground_agent_call_guards_context_exhaustion():
+def test_foreground_agent_call_guards_context_exhaustion(monkeypatch):
     a = _import_assistant_module()
-    src = inspect.getsource(a.AgentLoop._run)
-    # Deliberate work is now a background worker, not a second foreground call.
-    assert src.count("except ContextExhaustedError") == 1
-    assert "_context_exhausted_reply()" in src
+    import core.agent_loop as al
+
+    monkeypatch.setattr(al, "catchAll", lambda prompt: None)
+    host = SimpleNamespace(
+        llm_enabled=True,
+        grammar=None,
+        wakeword_name="Fulloch",
+        tts_session=None,
+        replan_stall_cache=[],
+        play_chunks=Mock(),
+        _turn_local=SimpleNamespace(),
+        _history=[{"role": "user", "content": "Earlier question"}],
+        _trim_history=Mock(),
+        _compact_completed_turns=Mock(),
+        _generate_with_context_recovery=Mock(side_effect=al.ContextExhaustedError("too big")),
+    )
+    host._history_for = lambda satellite: host._history
+    host._context_exhausted_reply = lambda: a.Assistant._context_exhausted_reply(host)
+
+    assert al.AgentLoop(host, source="text").run("Explain clouds") == a.CONTEXT_EXHAUSTED_REPLY
+    assert host._history == []
+    host._generate_with_context_recovery.assert_called_once()
 
 
 def test_shed_oldest_history_keeps_recent_and_turn_boundary():
@@ -124,11 +144,15 @@ def test_recovery_sheds_then_retries_instead_of_clearing(monkeypatch):
     fake._shed_oldest_history = lambda: a.Assistant._shed_oldest_history(fake)
 
     calls = {"n": 0}
+    request_history = fake._history
+    observed_lengths = []
 
     def fake_gen(_model, **_kw):
+        assert _kw["history"] is request_history
+        observed_lengths.append(len(_kw["history"]))
         calls["n"] += 1
         if calls["n"] == 1:
-            raise a.ContextExhaustedError("too big")
+            raise ContextExhaustedError("too big")
         return "ok"
 
     monkeypatch.setattr(a, "generate_slm", fake_gen)
@@ -136,6 +160,7 @@ def test_recovery_sheds_then_retries_instead_of_clearing(monkeypatch):
     assert result == "ok"
     assert calls["n"] == 2  # failed once, retried once
     assert 0 < len(fake._history) < 8  # tail preserved, not cleared
+    assert observed_lengths[0] == 8 and observed_lengths[1] < 8
 
 
 def test_recovery_clears_history_and_retries_current_turn(monkeypatch):
@@ -155,7 +180,7 @@ def test_recovery_clears_history_and_retries_current_turn(monkeypatch):
     def overflow_then_succeed(_model, **_kw):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise a.ContextExhaustedError("nope")
+            raise ContextExhaustedError("nope")
         return "ok"
 
     monkeypatch.setattr(a, "generate_slm", overflow_then_succeed)
@@ -171,8 +196,8 @@ def test_recovery_reraises_when_empty_context_overflows(monkeypatch):
     fake._shed_oldest_history = lambda: a.Assistant._shed_oldest_history(fake)
 
     def always_overflow(_model, **_kw):
-        raise a.ContextExhaustedError("nope")
+        raise ContextExhaustedError("nope")
 
     monkeypatch.setattr(a, "generate_slm", always_overflow)
-    with pytest.raises(a.ContextExhaustedError):
+    with pytest.raises(ContextExhaustedError):
         a.Assistant._generate_with_context_recovery(fake, history=fake._history)

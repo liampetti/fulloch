@@ -121,6 +121,20 @@ def test_plan_assets_covers_backends_and_always_required():
     assert llm.kind == "file" and llm.filename.endswith(".gguf")
 
 
+def test_plan_downloads_ornith_gguf(tmp_path):
+    resolved = resolve_models({"llm": {"backend": "local", "local_model": "ornith"}})
+
+    asset = next(
+        asset
+        for asset in dl.plan_assets(resolved, models_dir=str(tmp_path))
+        if asset.key == "llm:ornith"
+    )
+    assert asset.kind == "file"
+    assert asset.repo == "ornith-ai/Ornith-1.5-9B-GGUF"
+    assert asset.filename == "Ornith-1.5-9B-Q4_K_M.gguf"
+    assert asset.dest == "data/models"
+
+
 def test_plan_skips_none_llm():
     resolved = resolve_models(
         {
@@ -227,6 +241,39 @@ def test_plan_downloads_pocket_tts_pytorch_weights_into_hub_cache():
     assert all(asset.revision for asset in assets)
 
 
+def test_plan_downloads_audio8_checkpoint_into_hub_cache():
+    resolved = resolve_models(
+        {
+            "asr": {"backend": "qwen-onnx"},
+            "tts": {"backend": "audio8"},
+            "llm": {"backend": "none"},
+        }
+    )
+
+    audio8 = next(asset for asset in dl.plan_assets(resolved) if asset.key == "tts:audio8")
+
+    assert audio8.kind == "snapshot"
+    assert audio8.repo == "Edge0/Audio8-TTS-Preview-0.6b"
+    assert audio8.revision == "f07040f3d151f1ba0253bfb92cb2f5dd38b44594"
+
+
+def test_plan_downloads_pinned_orukeet_checkpoint_into_hub_cache():
+    resolved = resolve_models(
+        {
+            "asr": {"backend": "orukeet"},
+            "tts": {"backend": "pocket-tts-onnx"},
+            "llm": {"backend": "none"},
+        }
+    )
+
+    orukeet = next(asset for asset in dl.plan_assets(resolved) if asset.key == "asr:orukeet")
+
+    assert orukeet.kind == "snapshot"
+    assert orukeet.repo == "oruk/orukeet"
+    assert orukeet.allow == ["orukeet-v0.1.0.nemo"]
+    assert orukeet.revision == "555136b50265a132d4cea0d35560c26fc4f657ab"
+
+
 def test_plan_downloads_compound_small_crispasr_tts_model(tmp_path):
     resolved = resolve_models(
         {
@@ -295,7 +342,9 @@ def test_download_marks_hf_access_denial_as_token_eligible(tmp_path):
 
 
 def test_download_does_not_offer_token_for_network_error(tmp_path):
-    mgr = dl.DownloadManager(snapshot_fn=lambda *_args: (_ for _ in ()).throw(RuntimeError("network down")))
+    mgr = dl.DownloadManager(
+        snapshot_fn=lambda *_args: (_ for _ in ()).throw(RuntimeError("network down"))
+    )
     assets = [dl.Asset("tts:test", "test", "snapshot", str(tmp_path), repo="owner/model")]
     mgr.start(assets)
     _wait_done(mgr)

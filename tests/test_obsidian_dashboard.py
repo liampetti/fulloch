@@ -76,7 +76,7 @@ def test_status_does_not_leak_token(ctx):
 def test_plugin_archive_download(ctx, tmp_path, monkeypatch):
     archive = tmp_path / "fulloch-obsidian-plugin.zip"
     archive.write_bytes(b"plugin")
-    monkeypatch.setattr("server.dashboard._OBSIDIAN_PLUGIN_ZIP", archive)
+    monkeypatch.setattr("server.routes_obsidian._OBSIDIAN_PLUGIN_ZIP", archive)
 
     r = _client(ctx).get("/api/obsidian/plugin.zip")
 

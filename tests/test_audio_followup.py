@@ -121,7 +121,7 @@ def test_early_wake_probe_suppresses_duplicate_soft_probe():
     ac._use_vad_enabled = True
     ac._build_endpointer = lambda: Endpointer()
     ac.early_wake_probe_seconds = 0.0
-    ac._enqueue = MagicMock()
+    ac.wake_candidates._enqueue = MagicMock()
     session = make_session()
     session.chunk_q.put(np.zeros(320, dtype=np.float32))
     session.chunk_q.put(None)
@@ -131,6 +131,6 @@ def test_early_wake_probe_suppresses_duplicate_soft_probe():
     recorder.join(timeout=1)
 
     assert not recorder.is_alive()
-    assert ac._enqueue.call_count == 1
-    assert ac._enqueue.call_args.kwargs == {}
-    assert ac._enqueue.call_args.args[-1] is True
+    assert ac.wake_candidates._enqueue.call_count == 1
+    assert ac.wake_candidates._enqueue.call_args.kwargs == {}
+    assert ac.wake_candidates._enqueue.call_args.args[-1] is True

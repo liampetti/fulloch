@@ -49,6 +49,28 @@ onnxruntime==1.23.2
 openwakeword==0.6.0       # optional experimental idle wakeword gate
 onnx==1.22.0                # FP16→FP32 patching for qwen3-tts-onnx CPU backend
 qwen-asr==0.0.6
+# NVIDIA NeMo runtime for the optional Parakeet TDT / Orukeet live ASR backends.
+# Orukeet's pinned checkpoint requires NeMo 3.0. The full
+# `asr` extra pulls forced-alignment tooling that requires NumPy <2; its
+# `common` extra also pins an older Transformers release than Qwen ASR needs.
+# Keep only the ASR inference dependencies plus NeMo's required runtime core.
+nemo_toolkit[asr-only]==3.0.0
+# NeMo 3's `asr-only` extra omits the optional Lightning dependencies, but its
+# ASR package imports the One Logger callback during model initialization.
+nv_one_logger_core==2.3.1
+nv_one_logger_training_telemetry==2.3.1
+nv_one_logger_pytorch_lightning_integration==2.3.1
+lightning==2.4.0
+hydra-core==1.3.2
+torchmetrics==1.6.1
+# NeMo conditionally exposes `nemo.utils.webdataset` when this is installed;
+# ASR preprocessing imports that compatibility module unconditionally.
+webdataset==1.0.2
+# Imported by NeMo's ASR dataset adapters while its model package initializes.
+datasets==4.8.5
+# NeMo imports its diarization model registry with ASR models; that registry
+# imports Matplotlib for optional VAD diagnostics.
+matplotlib==3.11.2
 sentence-transformers==5.1.2
 # Tiny tier (CPU-friendly backends): Moonshine ASR rides on transformers
 # above; Kokoro TTS needs its own package (+ espeak-ng system dep for G2P).

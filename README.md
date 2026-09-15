@@ -165,6 +165,10 @@ Voices in `data/voices/`:
 
 Pocket TTS uses a selected `data/voices/<name>.wav` reference for one-shot cloning; use only voices you have permission to reproduce. The experimental official PyTorch backend streams PCM as it generates; the GGUF and ONNX options use independent conversions.
 
+## Development Disclosure
+
+This project was developed with assistance from AI coding tools. Generated contributions are reviewed, tested, and maintained by the project author.
+
 ## License
 
 MIT - see [LICENSE](LICENSE).

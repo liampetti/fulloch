@@ -6,18 +6,16 @@ resolved a turn. Host stubs mirror the pattern in test_llm_openai.py's
 touches before returning, not a full Assistant.
 """
 
-import inspect
 import sys
 import time
 import types
 from pathlib import Path
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.agent_loop import (  # noqa: E402
-    _llm_unavailable_label,
-    _take_startup_greeting_response_follow_up,
-)
+from core.agent_follow_up import startup_greeting_follow_up  # noqa: E402
+from core.agent_loop import _llm_unavailable_label  # noqa: E402
 from core.slm import RemoteUnreachable  # noqa: E402
 from core.turn_stats import TurnStats  # noqa: E402
 from utils.intents import StepKind, StepResult  # noqa: E402
@@ -41,13 +39,9 @@ def test_local_llm_failure_label_names_llama_server():
     assert _llm_unavailable_label(_host(llm_backend="local")) == "Local llama-server unavailable"
 
 
-def test_startup_greeting_response_is_available_only_to_an_immediate_explicit_follow_up():
-    host = _host(_startup_greeting_response="Storms can make frogs rain from the sky.")
-
-    assert _take_startup_greeting_response_follow_up(host, "Could you tell me more about that topic?") == (
-        "Storms can make frogs rain from the sky."
-    )
-    assert host._startup_greeting_response is None
+def test_startup_greeting_response_is_selected_for_an_explicit_follow_up():
+    response = "Storms can make frogs rain from the sky."
+    assert startup_greeting_follow_up(response, "Could you tell me more about that topic?") == response
 
 
 def test_startup_greeting_response_is_discarded_from_history_for_unrelated_first_turn(monkeypatch):
@@ -108,10 +102,12 @@ def test_route_is_regex_when_catchall_reply_resolves_without_slm(monkeypatch):
     # complete turn resolved on iteration 0 — the SLM is never called.
     monkeypatch.setattr(al, "catchAll", lambda prompt: {"reply": "no can do"})
     stats = TurnStats()
-    loop = al.AgentLoop(_host(), session=None, source="text", stats=stats)
+    on_slm_start = Mock()
+    loop = al.AgentLoop(_host(), source="text", stats=stats, on_slm_start=on_slm_start)
     out = loop.run("delete my note")
     assert out == "no can do"
     assert stats.route == "regex"
+    on_slm_start.assert_not_called()
 
 
 def test_route_is_no_llm_when_llm_disabled(monkeypatch):
@@ -121,6 +117,7 @@ def test_route_is_no_llm_when_llm_disabled(monkeypatch):
     spoken = {}
     host = _host(
         llm_enabled=False,
+        _generate_with_context_recovery=Mock(),
         _record_spoken=lambda s: spoken.__setitem__("said", s),
         _speak_no_ai_fallback=lambda session, source, satellite_id=None: (
             spoken.__setitem__("said", "NO_AI") or "NO_AI"
@@ -131,13 +128,31 @@ def test_route_is_no_llm_when_llm_disabled(monkeypatch):
     out = loop.run("tell me a joke")
     assert out == "NO_AI"
     assert stats.route == "no_llm"
+    host._generate_with_context_recovery.assert_not_called()
 
 
-def test_pending_thinking_clarification_is_left_for_the_agent_to_route():
+def test_follow_up_is_routed_to_agent_when_no_report_is_available(monkeypatch):
     import core.agent_loop as al
 
-    source = inspect.getsource(al.AgentLoop._run)
-    assert "resume_pending_thinking_task" not in source
+    monkeypatch.setattr(al, "catchAll", lambda prompt: None)
+    history = []
+    generate = Mock(return_value='{"reply": "What would you like me to investigate?"}')
+    host = _host(
+        grammar=None,
+        wakeword_name="Fulloch",
+        tts_session=None,
+        replan_stall_cache=[],
+        play_chunks=Mock(),
+        _note_llm_remote_status=Mock(),
+        _generate_with_context_recovery=generate,
+        _history_for=lambda satellite: history,
+        consume_completed_thinking_report=Mock(return_value=None),
+    )
+
+    assert al.AgentLoop(host, source="text").run("yes") == "What would you like me to investigate?"
+    host.consume_completed_thinking_report.assert_called_once_with(None)
+    generate.assert_called_once()
+    assert generate.call_args.kwargs["history"] == [{"role": "user", "content": "yes"}]
 
 
 def test_topicless_web_search_reuses_prior_question(monkeypatch):
@@ -374,39 +389,42 @@ def test_music_search_ack_plays_before_regex_spotify_dispatch(monkeypatch):
 
 
 def test_wry_announcement_fallback_changes_an_echoed_llm_message():
-    import core.agent_loop as al
+    from core.agent_emission import apply_announcement_fallback
 
     raw = {"actions": [{"intent": "send_satellite_message", "args": ["Kitchen", "dinner is ready"]}]}
     emission = {"actions": [{"intent": "send_satellite_message", "args": ["Kitchen", "dinner is ready"]}]}
 
-    al._apply_announcement_fallback(_host(personality="wry"), "tell kitchen dinner is ready", raw, emission)
+    apply_announcement_fallback("wry", "tell kitchen dinner is ready", raw, emission)
 
     assert emission["actions"][0]["args"][1] == "dinner is ready. The kitchen's patience has been noted."
 
 
 def test_announcement_fallback_keeps_verbatim_and_safety_messages_literal():
-    import core.agent_loop as al
+    from core.agent_emission import apply_announcement_fallback
 
     raw = {"actions": [{"intent": "send_satellite_message", "args": ["Kitchen", "take your medication"]}]}
     emission = {"actions": [{"intent": "send_satellite_message", "args": ["Kitchen", "take your medication"]}]}
 
-    al._apply_announcement_fallback(_host(personality="wry"), "tell kitchen verbatim: take your medication", raw, emission)
+    apply_announcement_fallback("wry", "tell kitchen verbatim: take your medication", raw, emission)
 
     assert emission == raw
 
 
 def test_delivery_is_not_spoken_for_lock_actions():
-    import core.agent_loop as al
+    from core.agent_emission import can_speak_delivery
+    from tools.capabilities import native_access_class
 
-    assert not al._can_speak_delivery(_host(personality="wry"), [{"intent": "ha_lock", "args": ["front door"]}])
-    assert al._can_speak_delivery(_host(personality="wry"), [{"intent": "turn_on", "args": ["lamp"]}])
+    assert not can_speak_delivery("wry", [{"intent": "ha_lock", "args": ["front door"]}], access_class=native_access_class)
+    assert can_speak_delivery("wry", [{"intent": "turn_on", "args": ["lamp"]}], access_class=native_access_class)
 
 
 def test_delivery_is_not_spoken_for_read_actions():
-    import core.agent_loop as al
+    from core.agent_emission import can_speak_delivery
+    from tools.capabilities import native_access_class
 
-    assert not al._can_speak_delivery(
-        _host(personality="wry"), [{"intent": "days_between", "args": ["today", "2026-10-03"]}]
+    assert not can_speak_delivery(
+        "wry", [{"intent": "days_between", "args": ["today", "2026-10-03"]}],
+        access_class=native_access_class,
     )
 
 

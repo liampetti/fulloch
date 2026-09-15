@@ -182,6 +182,29 @@ def test_missing_model_assets_needs_setup(tmp_path, monkeypatch):
     assert d.reason == "setup incomplete"
 
 
+def test_missing_orukeet_snapshot_enters_setup_and_auto_downloads(tmp_path, monkeypatch):
+    import core.setup as setup
+
+    monkeypatch.setattr(setup, "variant", lambda: "gpu")
+    models = tmp_path / "models"
+    models.mkdir()
+    complete = tmp_path / ".setup_complete"
+    complete.touch()
+    config = {
+        "general": {"wakeword": "hey atticus"},
+        "models": {
+            "asr": {"backend": "orukeet"},
+            "tts": {"backend": "pocket-tts-pytorch"},
+            "llm": {"backend": "none"},
+        },
+    }
+
+    decision = detect_setup_state(config, models_dir=str(models), completion_marker=str(complete))
+
+    assert decision.needs_setup and decision.auto_download
+    assert "asr:orukeet" in " ".join(decision.missing_assets)
+
+
 def test_only_completed_setup_auto_downloads_missing_assets(tmp_path, monkeypatch):
     import core.setup as setup
 
@@ -198,15 +221,11 @@ def test_only_completed_setup_auto_downloads_missing_assets(tmp_path, monkeypatc
     }
     complete = tmp_path / ".setup_complete"
 
-    incomplete = detect_setup_state(
-        config, models_dir=str(models), completion_marker=str(complete)
-    )
+    incomplete = detect_setup_state(config, models_dir=str(models), completion_marker=str(complete))
     assert incomplete.needs_setup and not incomplete.auto_download
 
     complete.touch()
-    completed = detect_setup_state(
-        config, models_dir=str(models), completion_marker=str(complete)
-    )
+    completed = detect_setup_state(config, models_dir=str(models), completion_marker=str(complete))
     assert completed.needs_setup and completed.auto_download
     assert completed.reason == "missing model assets"
 

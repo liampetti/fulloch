@@ -114,7 +114,7 @@ class TestHandleAction:
         assert result.startswith("Reactive question:")
         assert "'nope'" in result
         # Sanity: should_replan picks it up.
-        assert intents.should_replan(result) is True
+        assert intents.classify_step(result).should_replan is True
 
     def test_tool_exception_returns_none(self):
         with patch.object(
@@ -262,39 +262,6 @@ class TestIsLookup:
         m.assert_not_called()
 
 
-# --- should_replan ------------------------------------------------------
-
-
-class TestShouldReplan:
-    def test_none_triggers_replan(self):
-        assert intents.should_replan(None) is True
-
-    def test_plain_string_does_not_replan(self):
-        assert intents.should_replan("Set Lounge to 20 percent") is False
-        assert intents.should_replan("") is False
-
-    @pytest.mark.parametrize(
-        "prefix",
-        [
-            "User question:",
-            "Reactive question:",
-        ],
-    )
-    def test_sentinel_prefix_triggers_replan(self, prefix):
-        assert intents.should_replan(f"{prefix} some payload") is True
-
-    def test_sentinel_with_leading_whitespace_still_triggers(self):
-        assert intents.should_replan("   User question: payload") is True
-
-    def test_sentinel_must_be_at_start(self):
-        # A sentinel appearing mid-string is not a routing signal.
-        assert intents.should_replan("note says 'User question: x'") is False
-
-    def test_non_string_non_none_does_not_replan(self):
-        assert intents.should_replan(42) is False
-        assert intents.should_replan([]) is False
-
-
 # --- classify_step (typed boundary) -------------------------------------
 
 
@@ -306,21 +273,21 @@ class TestClassifyStep:
         assert step.in_output is False
         assert step.text == "<error>"
 
-    def test_plain_string_is_normal_and_spoken(self):
-        step = intents.classify_step("Set Lounge to 20 percent")
+    @pytest.mark.parametrize("text", ["Set Lounge to 20 percent", ""])
+    def test_plain_string_is_normal_and_spoken(self, text):
+        step = intents.classify_step(text)
         assert step.kind is intents.StepKind.NORMAL
         assert step.should_replan is False
         assert step.in_output is True
-        assert step.text == "Set Lounge to 20 percent"
+        assert step.text == text
 
-    def test_non_string_is_normal_but_not_spoken(self):
-        # Non-str, non-None tool output: kept in history as str(), not spoken,
-        # and does not replan.
-        step = intents.classify_step(42)
+    @pytest.mark.parametrize("raw", [42, []])
+    def test_non_string_is_normal_but_not_spoken(self, raw):
+        step = intents.classify_step(raw)
         assert step.kind is intents.StepKind.NORMAL
         assert step.in_output is False
         assert step.should_replan is False
-        assert step.text == "42"
+        assert step.text == str(raw)
 
     @pytest.mark.parametrize(
         "prefix,kind",
@@ -334,21 +301,19 @@ class TestClassifyStep:
         assert step.kind is intents.StepKind[kind]
         assert step.should_replan is True
 
-    def test_leading_whitespace_still_matches(self):
-        step = intents.classify_step("   Reactive question:\nwhy is the sky blue")
-        assert step.kind is intents.StepKind.REACTIVE
+    @pytest.mark.parametrize(
+        "prefix,kind", [("Reactive question:", "REACTIVE"), ("User question:", "WEB_SEARCH")]
+    )
+    def test_leading_whitespace_still_matches(self, prefix, kind):
+        step = intents.classify_step(f"   {prefix}\nwhy is the sky blue")
+        assert step.kind is intents.StepKind[kind]
+        assert step.should_replan is True
 
     def test_sentinel_must_be_at_start(self):
         # A note whose body merely contains a sentinel mid-string must NOT route.
         step = intents.classify_step("note says 'User question: x'")
         assert step.kind is intents.StepKind.NORMAL
         assert step.should_replan is False
-
-    def test_should_replan_delegates_to_classify(self):
-        # The legacy raw-string predicate is now a thin wrapper.
-        assert intents.should_replan("Reactive question: oops") is True
-        assert intents.should_replan("all good") is False
-
 
 # --- module surface -----------------------------------------------------
 

@@ -272,8 +272,8 @@ def _assistant_args(cfg):
     return general.get("wakeword"), cfg.get("models"), options
 
 
-def _start_dashboard(context, host, port, certfile, keyfile, http_redirect_port=None):
-    """Start the shared setup/dashboard server. The deprecated redirect-port argument is ignored."""
+def _start_dashboard(context, host, port, certfile, keyfile):
+    """Start the shared setup/dashboard server."""
     try:
         from server.dashboard import start_dashboard
 
@@ -283,7 +283,6 @@ def _start_dashboard(context, host, port, certfile, keyfile, http_redirect_port=
             ssl_certfile=certfile,
             ssl_keyfile=keyfile,
             context=context,
-            http_redirect_port=http_redirect_port,
         )
         scheme = "https" if (certfile and keyfile) else "http"
         logger.info("=" * 60)
@@ -313,7 +312,6 @@ def main():
         set_tz(tz)
     dash_cert = general.get("dashboard_ssl_certfile")
     dash_key = general.get("dashboard_ssl_keyfile")
-    dash_http_redirect_port = general.get("dashboard_http_redirect_port")
     integration_api_enabled = general.get("integration_api_enabled", True)
     integration_api_port = general.get("integration_api_port", 8766)
 
@@ -351,7 +349,6 @@ def main():
             dash_port or _SETUP_FALLBACK_PORT,
             dash_cert,
             dash_key,
-            http_redirect_port=dash_http_redirect_port,
         )
     elif dash_port:
         _start_dashboard(
@@ -360,7 +357,6 @@ def main():
             dash_port,
             dash_cert,
             dash_key,
-            http_redirect_port=dash_http_redirect_port,
         )
 
     if decision.needs_setup:

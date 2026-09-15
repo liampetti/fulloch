@@ -4,7 +4,7 @@ Network calls to Spotify itself aren't tested (matches the repo pattern of
 not unit-testing thin REST wrappers) — what's tested: the module never talks
 to Spotify at import time, degrades gracefully with no credentials, and that
 `play_song`'s HA-dispatch resolution (room/"everywhere"/default targeting)
-and hand-off behave correctly, with tools.home_assistant's HA calls mocked.
+and hand-off behave correctly, with tools.ha_client's HA calls mocked.
 """
 
 from unittest.mock import MagicMock, patch
@@ -34,9 +34,7 @@ def _reset_top_affinity_cache():
 
 def test_import_does_no_network_call(monkeypatch):
     """Importing the module must not construct a Spotify client or hit the network."""
-    monkeypatch.setattr(
-        "server.credentials_store.get_credential", lambda key, path=None: ""
-    )
+    monkeypatch.setattr("server.credentials_store.get_credential", lambda key, path=None: "")
     import tools.spotify as spotify
 
     assert spotify._client is None
@@ -91,7 +89,9 @@ def test_resolve_media_targets_room_name_uses_area_resolution():
         patch.object(spotify.ha, "_ensure_loaded"),
         patch.object(spotify.ha, "_resolve_area", return_value="kitchen"),
         patch.object(
-            spotify.ha, "_area_entities", return_value=["media_player.sonos_kitchen", "light.kitchen"]
+            spotify.ha,
+            "_area_entities",
+            return_value=["media_player.sonos_kitchen", "light.kitchen"],
         ),
         patch.object(spotify.ha, "_DENIED_ENTITIES", set()),
     ):
@@ -119,7 +119,9 @@ def test_resolve_media_targets_falls_back_to_default_when_name_unresolvable():
         patch.object(spotify.ha, "_resolve_area", return_value=None),
         patch.object(spotify.ha, "SPOTIFY_ENTITY", "media_player.sonos_living_room"),
     ):
-        assert spotify._resolve_media_targets("nonexistent room") == ["media_player.sonos_living_room"]
+        assert spotify._resolve_media_targets("nonexistent room") == [
+            "media_player.sonos_living_room"
+        ]
 
 
 def test_resolve_media_targets_none_when_nothing_named_and_no_default():
@@ -222,8 +224,16 @@ def test_dispatch_queue_via_ha_plays_first_track_and_queues_rest_in_background(m
         {"media_content_id": "spotify:track:a", "media_content_type": "music"},
         "Playing your playlist",
     )
-    assert calls[1][3] == {"media_content_id": "spotify:track:b", "media_content_type": "music", "enqueue": "add"}
-    assert calls[2][3] == {"media_content_id": "spotify:track:c", "media_content_type": "music", "enqueue": "add"}
+    assert calls[1][3] == {
+        "media_content_id": "spotify:track:b",
+        "media_content_type": "music",
+        "enqueue": "add",
+    }
+    assert calls[2][3] == {
+        "media_content_id": "spotify:track:c",
+        "media_content_type": "music",
+        "enqueue": "add",
+    }
 
 
 def test_dispatch_queue_via_ha_skips_background_queueing_if_first_track_fails(monkeypatch):
@@ -334,7 +344,9 @@ def test_play_song_playlist_match_prefers_exact_over_partial():
     with (
         patch.object(spotify, "_get_client", return_value=sp),
         patch.object(spotify, "_resolve_media_targets", return_value=None),
-        patch.object(spotify, "_playlist_track_uris", return_value=["spotify:track:x"]) as track_uris,
+        patch.object(
+            spotify, "_playlist_track_uris", return_value=["spotify:track:x"]
+        ) as track_uris,
         patch.object(spotify, "_dispatch_queue_via_ha"),
     ):
         spotify.play_song("best discovers")
@@ -350,9 +362,13 @@ def test_play_song_uses_ha_dispatch_and_skips_spotify_connect(monkeypatch):
     }
     with (
         patch.object(spotify, "_get_client", return_value=sp),
-        patch.object(spotify, "_resolve_media_targets", return_value=["media_player.sonos_kitchen"]),
+        patch.object(
+            spotify, "_resolve_media_targets", return_value=["media_player.sonos_kitchen"]
+        ),
         patch.object(spotify, "_playlist_track_uris", return_value=["spotify:track:x"]),
-        patch.object(spotify, "_dispatch_queue_via_ha", return_value='Playing your playlist "Calm Evening"'),
+        patch.object(
+            spotify, "_dispatch_queue_via_ha", return_value='Playing your playlist "Calm Evening"'
+        ),
     ):
         result = spotify.play_song("calm evening")
         assert result == 'Playing your playlist "Calm Evening"'
@@ -391,7 +407,12 @@ def test_best_track_excludes_low_confidence_candidates():
     import tools.spotify as spotify
 
     tracks = [
-        {"name": "Completely Unrelated", "artists": [{"name": "Someone Else"}], "uri": "x", "popularity": 90},
+        {
+            "name": "Completely Unrelated",
+            "artists": [{"name": "Someone Else"}],
+            "uri": "x",
+            "popularity": 90,
+        },
     ]
     assert spotify._best_track(tracks, "The Beatles", "Yesterday") is None
 
@@ -439,7 +460,11 @@ def test_best_semantic_playlist_picks_highest_scoring_above_threshold(monkeypatc
     import tools.spotify as spotify
 
     playlists = [
-        {"name": "Kitchen Bangers", "description": "cooking songs", "uri": "spotify:playlist:kitchen"},
+        {
+            "name": "Kitchen Bangers",
+            "description": "cooking songs",
+            "uri": "spotify:playlist:kitchen",
+        },
         {"name": "Road Trip Mix", "description": "driving songs", "uri": "spotify:playlist:road"},
     ]
 
@@ -458,7 +483,9 @@ def test_best_semantic_playlist_picks_highest_scoring_above_threshold(monkeypatc
 def test_best_semantic_playlist_returns_none_below_threshold(monkeypatch):
     import tools.spotify as spotify
 
-    playlists = [{"name": "Road Trip Mix", "description": "driving songs", "uri": "spotify:playlist:road"}]
+    playlists = [
+        {"name": "Road Trip Mix", "description": "driving songs", "uri": "spotify:playlist:road"}
+    ]
 
     def fake_embed(texts, query=False):
         if query:
@@ -496,8 +523,16 @@ def test_play_song_semantic_playlist_fallback_after_literal_and_artist_miss(monk
     sp = MagicMock()
     sp.current_user_playlists.return_value = {
         "items": [
-            {"name": "Kitchen Bangers", "description": "cooking songs", "uri": "spotify:playlist:kitchen"},
-            {"name": "Road Trip Mix", "description": "driving songs", "uri": "spotify:playlist:road"},
+            {
+                "name": "Kitchen Bangers",
+                "description": "cooking songs",
+                "uri": "spotify:playlist:kitchen",
+            },
+            {
+                "name": "Road Trip Mix",
+                "description": "driving songs",
+                "uri": "spotify:playlist:road",
+            },
         ]
     }
     sp.search.return_value = {"artists": {"items": []}}
@@ -510,7 +545,9 @@ def test_play_song_semantic_playlist_fallback_after_literal_and_artist_miss(monk
     with (
         patch.object(spotify, "_get_client", return_value=sp),
         patch.object(spotify, "_resolve_media_targets", return_value=None),
-        patch.object(spotify, "_playlist_track_uris", return_value=["spotify:track:x"]) as track_uris,
+        patch.object(
+            spotify, "_playlist_track_uris", return_value=["spotify:track:x"]
+        ) as track_uris,
         patch.object(spotify, "_dispatch_queue_via_ha"),
         patch("core.embeddings.embed", fake_embed),
     ):
@@ -537,7 +574,9 @@ def test_play_song_artist_only_plays_artist_context():
     with (
         patch.object(spotify, "_get_client", return_value=sp),
         patch.object(spotify, "_resolve_media_targets", return_value=None),
-        patch.object(spotify, "_artist_top_track_uris", return_value=["spotify:track:x"]) as track_uris,
+        patch.object(
+            spotify, "_artist_top_track_uris", return_value=["spotify:track:x"]
+        ) as track_uris,
         patch.object(spotify, "_dispatch_queue_via_ha"),
     ):
         spotify.play_song(artist_query="The Teskey Brothers")
@@ -559,7 +598,9 @@ def test_play_song_playlist_match_wins_over_artist_context():
     with (
         patch.object(spotify, "_get_client", return_value=sp),
         patch.object(spotify, "_resolve_media_targets", return_value=None),
-        patch.object(spotify, "_playlist_track_uris", return_value=["spotify:track:x"]) as track_uris,
+        patch.object(
+            spotify, "_playlist_track_uris", return_value=["spotify:track:x"]
+        ) as track_uris,
         patch.object(spotify, "_dispatch_queue_via_ha"),
     ):
         spotify.play_song(artist_query="The Teskey Brothers")

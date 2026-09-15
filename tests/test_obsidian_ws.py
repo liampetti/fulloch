@@ -35,6 +35,9 @@ def _stub_assistant():
 
 @pytest.fixture
 def ctx(tmp_path, monkeypatch):
+    # These cases exercise context-token fallback, independently of credentials
+    # injected by the environment or a preceding credentials endpoint test.
+    monkeypatch.delenv("OBSIDIAN_TOKEN", raising=False)
     monkeypatch.chdir(tmp_path)
     (tmp_path / "data").mkdir()
     notes_root.set_notes_root(None, persist=False)

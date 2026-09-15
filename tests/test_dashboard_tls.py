@@ -15,6 +15,7 @@ import threading
 from unittest.mock import MagicMock
 
 import server.dashboard as dashboard
+import server.tls_dispatcher as tls_dispatcher
 
 
 def _capture_config(monkeypatch):
@@ -62,7 +63,7 @@ def _capture_dispatcher(monkeypatch):
         captured["event"].set()
         return _FakeServer()
 
-    monkeypatch.setattr(dashboard.asyncio, "start_server", fake_start_server)
+    monkeypatch.setattr(tls_dispatcher.asyncio, "start_server", fake_start_server)
     return captured
 
 
@@ -84,9 +85,9 @@ def test_tls_proxy_logs_which_side_closed_first(monkeypatch, caplog):
     async def fake_open_connection(_host, _port):
         return _Reader(), backend_writer
 
-    monkeypatch.setattr(dashboard.asyncio, "open_connection", fake_open_connection)
-    with caplog.at_level(logging.DEBUG, logger="server.dashboard"):
-        asyncio.run(dashboard._pipe_to_backend(_Reader(), client_writer, "127.0.0.1", 18765))
+    monkeypatch.setattr(tls_dispatcher.asyncio, "open_connection", fake_open_connection)
+    with caplog.at_level(logging.DEBUG, logger="server.tls_dispatcher"):
+        asyncio.run(tls_dispatcher._pipe_to_backend(_Reader(), client_writer, "127.0.0.1", 18765))
 
     assert "TLS dispatcher relay closed by client (EOF, peer=('192.168.4.99', 45678))" in caplog.text
 
@@ -103,9 +104,9 @@ def test_tls_proxy_hides_loopback_health_check_closures(monkeypatch, caplog):
     async def fake_open_connection(_host, _port):
         return _Reader(), backend_writer
 
-    monkeypatch.setattr(dashboard.asyncio, "open_connection", fake_open_connection)
-    with caplog.at_level(logging.DEBUG, logger="server.dashboard"):
-        asyncio.run(dashboard._pipe_to_backend(_Reader(), client_writer, "127.0.0.1", 18765))
+    monkeypatch.setattr(tls_dispatcher.asyncio, "open_connection", fake_open_connection)
+    with caplog.at_level(logging.DEBUG, logger="server.tls_dispatcher"):
+        asyncio.run(tls_dispatcher._pipe_to_backend(_Reader(), client_writer, "127.0.0.1", 18765))
 
     assert "TLS dispatcher relay closed" not in caplog.text
 
@@ -246,7 +247,7 @@ def test_uvicorn_internal_port_differs_from_public_when_tls_on(monkeypatch, tmp_
 
 
 def test_parse_request_host_get_with_path_and_query():
-    path, host = dashboard._parse_request_host(
+    path, host = tls_dispatcher._parse_request_host(
         b"GET /ws/satellite?bypass=1 HTTP/1.1\r\nHost: 192.168.1.10:8765\r\n\r\n"
     )
     assert path == "/ws/satellite?bypass=1"
@@ -254,26 +255,26 @@ def test_parse_request_host_get_with_path_and_query():
 
 
 def test_parse_request_host_strips_port_from_host():
-    _, host = dashboard._parse_request_host(
+    _, host = tls_dispatcher._parse_request_host(
         b"GET / HTTP/1.1\r\nHost: fulloch.local:18766\r\n\r\n"
     )
     assert host == "fulloch.local"
 
 
 def test_parse_request_host_missing_host_falls_back_to_localhost():
-    _, host = dashboard._parse_request_host(b"GET / HTTP/1.1\r\nUser-Agent: x\r\n\r\n")
+    _, host = tls_dispatcher._parse_request_host(b"GET / HTTP/1.1\r\nUser-Agent: x\r\n\r\n")
     assert host == "localhost"
 
 
 def test_parse_request_host_post():
-    path, _ = dashboard._parse_request_host(
+    path, _ = tls_dispatcher._parse_request_host(
         b"POST /api/chat HTTP/1.1\r\nHost: localhost\r\n\r\n"
     )
     assert path == "/api/chat"
 
 
 def test_parse_request_host_empty_data():
-    path, host = dashboard._parse_request_host(b"")
+    path, host = tls_dispatcher._parse_request_host(b"")
     assert path == "/"
     assert host == "localhost"
 
@@ -300,8 +301,8 @@ def test_dispatch_routes_tls_byte_to_pipe(monkeypatch):
         except Exception:
             pass
 
-    monkeypatch.setattr(dashboard, "_pipe_to_backend", fake_pipe)
-    monkeypatch.setattr(dashboard, "_send_308", fake_308)
+    monkeypatch.setattr(tls_dispatcher, "_pipe_to_backend", fake_pipe)
+    monkeypatch.setattr(tls_dispatcher, "_send_308", fake_308)
 
     fake_writer_transport = MagicMock()
     sock_a, sock_b = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
@@ -316,7 +317,7 @@ def test_dispatch_routes_tls_byte_to_pipe(monkeypatch):
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(
-            dashboard._dispatch_connection(
+            tls_dispatcher._dispatch_connection(
                 fake_reader, fake_writer,
                 backend_host="127.0.0.1", backend_port=18765, https_port=8765,
             )
@@ -350,8 +351,8 @@ def test_dispatch_routes_http_byte_to_308(monkeypatch):
         except Exception:
             pass
 
-    monkeypatch.setattr(dashboard, "_pipe_to_backend", fake_pipe)
-    monkeypatch.setattr(dashboard, "_send_308", fake_308)
+    monkeypatch.setattr(tls_dispatcher, "_pipe_to_backend", fake_pipe)
+    monkeypatch.setattr(tls_dispatcher, "_send_308", fake_308)
 
     fake_writer_transport = MagicMock()
     sock_a, sock_b = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
@@ -365,7 +366,7 @@ def test_dispatch_routes_http_byte_to_308(monkeypatch):
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(
-            dashboard._dispatch_connection(
+            tls_dispatcher._dispatch_connection(
                 fake_reader, fake_writer,
                 backend_host="127.0.0.1", backend_port=18765, https_port=8765,
             )
@@ -405,8 +406,8 @@ def test_dispatch_handles_transport_socket_without_recv(monkeypatch):
         except Exception:
             pass
 
-    monkeypatch.setattr(dashboard, "_pipe_to_backend", fake_pipe)
-    monkeypatch.setattr(dashboard, "_send_308", fake_308)
+    monkeypatch.setattr(tls_dispatcher, "_pipe_to_backend", fake_pipe)
+    monkeypatch.setattr(tls_dispatcher, "_send_308", fake_308)
 
     real_a, real_b = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
     real_b.sendall(b"\x16\x03\x01\x00\x05hello")
@@ -429,7 +430,7 @@ def test_dispatch_handles_transport_socket_without_recv(monkeypatch):
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(
-            dashboard._dispatch_connection(
+            tls_dispatcher._dispatch_connection(
                 fake_reader, fake_writer,
                 backend_host="127.0.0.1", backend_port=18765, https_port=8765,
             )
@@ -467,8 +468,8 @@ def test_dispatch_pipes_to_backend_when_no_first_byte(monkeypatch):
         except Exception:
             pass
 
-    monkeypatch.setattr(dashboard, "_pipe_to_backend", fake_pipe)
-    monkeypatch.setattr(dashboard, "_send_308", fake_308)
+    monkeypatch.setattr(tls_dispatcher, "_pipe_to_backend", fake_pipe)
+    monkeypatch.setattr(tls_dispatcher, "_send_308", fake_308)
 
     real_a, real_b = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
     # Note: nothing is written to real_b, so the peek returns BlockingIOError.
@@ -481,7 +482,7 @@ def test_dispatch_pipes_to_backend_when_no_first_byte(monkeypatch):
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(
-            dashboard._dispatch_connection(
+            tls_dispatcher._dispatch_connection(
                 fake_reader, fake_writer,
                 backend_host="127.0.0.1", backend_port=18765, https_port=8765,
             )
@@ -537,7 +538,7 @@ def test_send_308_writes_correct_response(monkeypatch):
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(dashboard._send_308(reader, writer, https_port=8765))
+        loop.run_until_complete(tls_dispatcher._send_308(reader, writer, https_port=8765))
     finally:
         loop.close()
 
@@ -553,7 +554,7 @@ def test_send_308_writes_correct_response(monkeypatch):
 
 def test_pick_free_local_port_returns_ephemeral():
     """The OS-assigned port must differ from 0 and be bindable on 127.0.0.1."""
-    port = dashboard._pick_free_local_port()
+    port = tls_dispatcher._pick_free_local_port()
     assert isinstance(port, int)
     assert port > 0
     # Sanity: it's actually a valid port we can bind to.

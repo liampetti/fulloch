@@ -121,7 +121,9 @@ def _coerce(field, raw: Any) -> Optional[Any]:
                 value = json.loads(str(raw))
             except (TypeError, ValueError, json.JSONDecodeError):
                 raise ValueError("expected a JSON object") from None
-        if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+        if not isinstance(value, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+        ):
             raise ValueError("expected a JSON object with string keys and values")
         return value
     return str(raw)
@@ -210,8 +212,8 @@ def write_models(models: dict, path: str = DEFAULT_CONFIG_PATH) -> None:
     backend = llm.get("backend")
     if backend == "local":
         local_model = llm.get("local_model", "qwen")
-        if local_model not in {"qwen", "gemma", "custom"}:
-            raise ValueError("models.llm.local_model must be qwen, gemma, or custom")
+        if local_model not in {"qwen", "gemma", "ornith", "custom"}:
+            raise ValueError("models.llm.local_model must be qwen, gemma, ornith, or custom")
         if local_model == "custom":
             model = llm.get("model")
             if not isinstance(model, str) or not model.lower().endswith(".gguf"):
@@ -219,10 +221,12 @@ def write_models(models: dict, path: str = DEFAULT_CONFIG_PATH) -> None:
     elif backend == "external":
         if not isinstance(llm.get("base_url"), str) or not llm["base_url"].strip():
             raise ValueError("an external LLM needs a base_url")
-    elif backend not in {"llama", "gemma", "openai", "none"}:
+    elif backend not in {"llama", "gemma", "ornith", "openai", "none"}:
         raise ValueError("models.llm.backend must be local or external")
     if "n_context" in llm and (
-        not isinstance(llm["n_context"], int) or isinstance(llm["n_context"], bool) or llm["n_context"] <= 0
+        not isinstance(llm["n_context"], int)
+        or isinstance(llm["n_context"], bool)
+        or llm["n_context"] <= 0
     ):
         raise ValueError("models.llm.n_context must be a positive integer")
     if "generation_timeout" in llm and (
@@ -243,10 +247,20 @@ def write_models(models: dict, path: str = DEFAULT_CONFIG_PATH) -> None:
         if wakeword.get("backend") == "openwakeword":
             if not isinstance(wakeword.get("model"), str) or not wakeword["model"].strip():
                 raise ValueError("openwakeword requires models.wakeword.model")
-            for key, low, high in (("threshold", 0.0, 1.0), ("smoothing_frames", 1, 100), ("cooldown_ms", 0, 60000)):
+            for key, low, high in (
+                ("threshold", 0.0, 1.0),
+                ("smoothing_frames", 1, 100),
+                ("cooldown_ms", 0, 60000),
+            ):
                 value = wakeword.get(key)
-                if not isinstance(value, (int, float)) or isinstance(value, bool) or not low <= value <= high:
+                if (
+                    not isinstance(value, (int, float))
+                    or isinstance(value, bool)
+                    or not low <= value <= high
+                ):
                     raise ValueError(f"models.wakeword.{key} must be between {low} and {high}")
+            if "verify_asr" in wakeword and not isinstance(wakeword["verify_asr"], bool):
+                raise ValueError("models.wakeword.verify_asr must be true or false")
     doc = _load_doc(path)
     block = CommentedMap()
     for domain in ("asr", "tts", "llm", "wakeword"):
@@ -325,7 +339,11 @@ def settings_view(path: str = DEFAULT_CONFIG_PATH) -> dict:
         section = cfg.get(spec["section"])
         present = isinstance(section, dict) and spec["name"] in section
         value = section.get(spec["name"]) if present else None
-        if not present and isinstance(section, dict) and (legacy := legacy_names.get(spec["name"])) in section:
+        if (
+            not present
+            and isinstance(section, dict)
+            and (legacy := legacy_names.get(spec["name"])) in section
+        ):
             value = section[legacy]
         fields.append({**spec, "value": value, "set": present})
     from core.backends import variant

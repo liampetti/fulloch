@@ -65,12 +65,7 @@ def parse_agent_emission(text: str) -> Dict[str, Any]:
     return json.loads(obj)
 
 
-# Leading sentinels a tool can emit to request an SLM follow-up. Tools that
-# need a re-call embed one at the start of their return string. `classify_step`
-# is the SINGLE place these prefixes are matched — the agent loop then routes on
-# the typed `StepKind`, never on the raw string. Centralising the match removes
-# the hijack risk where any downstream code re-checking prefixes could mis-route
-# a tool output that merely happened to begin with a sentinel.
+# Tool-result prefixes classified once at dispatch; the loop routes on StepKind.
 WEB_QUESTION_PREFIX = "User question:"
 REACTIVE_PREFIX = "Reactive question:"
 
@@ -176,16 +171,7 @@ MAX_AGENT_CALLS_PER_TURN = 6
 WEB_SEARCH_TOOL = "external_information"
 NOTE_WRITE_TOOLS = frozenset({"write_note", "append_to_note", "append_to_today", "remember_fact"})
 
-# Data-retrieval tools whose result is raw records — a state-change dump, a
-# conversation transcript, fused note chunks — rather than a spoken-ready
-# answer. Unlike an action tool ("turn on the lights" -> "Done") or a tool that
-# pre-formats its own reply (the calendar/weather summaries), these return data
-# the agent still has to *distill* into one answer. The loop reads an ordinary
-# NORMAL result aloud verbatim, which for these means regurgitating the whole
-# dump (e.g. "when did the lights last turn on" reading back 15 state changes);
-# so it instead hands a lookup result back for one composing replan, letting the
-# agent answer the actual question from the records. See `is_lookup` + the agent
-# loop's dispatch step.
+# Raw-record tools need one composing replan before their results are spoken.
 LOOKUP_TOOLS = frozenset(
     {
         "get_entity_history",
@@ -206,8 +192,7 @@ def coerce_args(raw: Any) -> tuple:
 
     The GBNF grammar guarantees a list of primitives on the local path, but a
     grammar-less remote model may emit args as a JSON object (kwargs-style, e.g.
-    `{"query": "x"}`) or a bare scalar. Coerce so dispatch never assumes a list:
-    a dict became `KeyError(0)` the moment anything indexed `args[0]`.
+    `{"query": "x"}`) or a bare scalar.
       - dict   -> ([], dict)      kwargs by name (matches the tool's params)
       - list   -> (list, {})      positional, as the grammar intends
       - None   -> ([], {})        no-arg call
@@ -343,13 +328,3 @@ def strip_unfounded_save_claim(text: str, note_written: bool) -> str:
     if result != text:
         logger.warning("Stripped unfounded note-save claim from reply")
     return result or text  # never blank out the whole reply
-
-
-def should_replan(step_result: Optional[object]) -> bool:
-    """True if a step's result should trigger another agent call.
-
-    Thin wrapper over `classify_step` for callers/tests that work with the raw
-    string form (`None` or a sentinel-prefixed string). New code in the agent
-    loop routes on `StepResult.kind` / `StepResult.should_replan` instead.
-    """
-    return classify_step(step_result).should_replan

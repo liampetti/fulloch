@@ -2,6 +2,7 @@
 
 import queue
 import sys
+import threading
 import wave
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,7 +52,10 @@ def test_wakeword_activation_records_score():
     capture.set_wakeword_detected_callback(matched_ids.append)
     session = SatelliteSession("satellite")
 
-    assert capture._feed_wakeword_gate(session, np.zeros(1280, dtype=np.float32)) is True
+    assert (
+        capture.wake_candidates._feed_wakeword_gate(session, np.zeros(1280, dtype=np.float32))
+        is True
+    )
 
     assert session.kws_candidate is True
     assert capture.wakeword_metrics["candidates"] == 1
@@ -71,8 +75,11 @@ def test_wakeword_activation_optionally_saves_timestamped_wav(tmp_path):
     capture.wakeword_wav_dir = tmp_path
     capture.set_wakeword_backend(Backend())
     session = SatelliteSession("kitchen/phone")
-    capture._feed_wakeword_gate(session, np.ones(1280, dtype=np.float32))
-    capture._enqueue(session, np.ones(16000, dtype=np.float32), 0.0, -10.0, False, 0.0)
+    capture.wake_candidates._feed_wakeword_gate(session, np.ones(1280, dtype=np.float32))
+    session.kws_verified = True
+    capture.wake_candidates._enqueue(
+        session, np.ones(16000, dtype=np.float32), 0.0, -10.0, False, 0.0
+    )
 
     files = list(tmp_path.glob("*.wav"))
     assert len(files) == 1
@@ -92,10 +99,11 @@ def test_wakeword_candidate_does_not_prepend_overlapping_preroll():
     capture.set_wakeword_backend(Backend())
     session = SatelliteSession("satellite")
     session.kws_candidate = True
+    session.kws_verified = True
     session.kws_pre_roll.append(np.full(1600, -1.0, dtype=np.float32))
     utterance = np.full(3200, 0.5, dtype=np.float32)
 
-    capture._enqueue(session, utterance, 0.0, -10.0, False, 0.0)
+    capture.wake_candidates._enqueue(session, utterance, 0.0, -10.0, False, 0.0)
 
     queued = capture.audio_queue.get_nowait()[0]
     assert np.array_equal(queued, utterance)
@@ -106,7 +114,9 @@ def test_wakeword_candidate_waits_for_final_endpoint_before_asr():
     session = SatelliteSession("satellite")
     session.kws_candidate = True
 
-    capture._enqueue(session, np.ones(3200, dtype=np.float32), 0.0, -10.0, True, 0.0)
+    capture.wake_candidates._enqueue(
+        session, np.ones(3200, dtype=np.float32), 0.0, -10.0, True, 0.0
+    )
 
     assert capture.audio_queue.empty()
     assert session.kws_candidate is True
@@ -130,7 +140,7 @@ def test_wakeword_activation_queues_a_1250ms_verification_snapshot():
     chunks = [np.full(3200, value, dtype=np.float32) for value in range(7)]
 
     for chunk in chunks:
-        capture._feed_wakeword_gate(session, chunk)
+        capture.wake_candidates._feed_wakeword_gate(session, chunk)
 
     queued = capture.audio_queue.get_nowait()
     assert queued[0].size == 20000
@@ -139,10 +149,92 @@ def test_wakeword_activation_queues_a_1250ms_verification_snapshot():
     assert queued[10] is True
 
 
+def test_rejected_verification_rearms_the_wakeword_gate():
+    class Backend:
+        def __init__(self):
+            self.calls = 0
+
+        def feed_pcm(self, _satellite_id, _pcm):
+            self.calls += 1
+            return WakewordResult(self.calls in (1, 2), 0.9)
+
+        def reset(self, _satellite_id):
+            pass
+
+    capture = AudioCapture(use_vad=False)
+    capture.set_wakeword_backend(Backend())
+    session = SatelliteSession("satellite", chunk_q=queue.Queue(), server_vad=False)
+    detected = []
+    first_detected = threading.Event()
+    second_detected = threading.Event()
+
+    def on_detected(_satellite_id):
+        detected.append(session.kws_capture_id)
+        (first_detected if len(detected) == 1 else second_detected).set()
+
+    capture.set_wakeword_detected_callback(on_detected)
+    recorder = threading.Thread(target=capture.satellite_recorder_thread, args=(session,))
+    recorder.start()
+    session.chunk_q.put(np.ones(1280, dtype=np.float32))
+    assert first_detected.wait(timeout=1)
+    capture.resolve_wakeword_candidate(session, detected[0], False)
+    session.chunk_q.put(np.ones(1280, dtype=np.float32))
+    assert second_detected.wait(timeout=1)
+    session.chunk_q.put(None)
+    recorder.join(timeout=1)
+
+    assert detected == [1, 2]
+
+
+def test_stereo_capture_stays_mono_after_wakeword_preroll():
+    class Backend:
+        def feed_pcm(self, _satellite_id, _pcm):
+            return WakewordResult(True, 0.9)
+
+        def reset(self, _satellite_id):
+            pass
+
+    class Endpointer:
+        def __init__(self):
+            self.process_calls = 0
+            self.speech_started = False
+            self.speech_onset = 0.0
+            self.voiced_rms = 0.1
+            self.soft_endpointed = False
+            self.endpointed = False
+            self.last_speech_samples = 16000
+
+        def process(self, _pcm):
+            self.process_calls += 1
+            self.speech_started = True
+            self.endpointed = self.process_calls >= 2
+
+        def reset(self):
+            self.process_calls = 0
+            self.endpointed = False
+
+    capture = AudioCapture(use_vad=True)
+    capture.set_wakeword_backend(Backend())
+    capture._build_endpointer = Endpointer
+    session = SatelliteSession("satellite", chunk_q=queue.Queue())
+    recorder = threading.Thread(target=capture.satellite_recorder_thread, args=(session,))
+    stereo_chunk = np.ones((1280, 2), dtype=np.float32)
+
+    recorder.start()
+    session.chunk_q.put(stereo_chunk)
+    session.chunk_q.put(stereo_chunk)
+    session.chunk_q.put(None)
+    recorder.join(timeout=1)
+
+    assert not recorder.is_alive()
+
+
 def test_wakeword_wav_is_labelled_after_asr_verification(tmp_path):
     capture = AudioCapture(use_vad=False, save_wakeword_wavs=True)
     capture.wakeword_wav_dir = tmp_path
-    path = capture._save_wakeword_wav("kitchen", np.ones(1280, dtype=np.float32), 0.873)
+    path = capture.wake_candidates._save_wakeword_wav(
+        "kitchen", np.ones(1280, dtype=np.float32), 0.873
+    )
 
     capture.mark_wakeword_wav(path, accepted=True)
 
@@ -154,7 +246,7 @@ def test_wakeword_wav_preserves_stereo_samples(tmp_path):
     capture.wakeword_wav_dir = tmp_path
     pcm = np.array([[0.25, -0.5], [-0.75, 1.0]], dtype=np.float32)
 
-    path = capture._save_wakeword_wav("kitchen", pcm, 0.873)
+    path = capture.wake_candidates._save_wakeword_wav("kitchen", pcm, 0.873)
 
     with wave.open(path, "rb") as wav:
         assert wav.getnchannels() == 2
@@ -167,7 +259,19 @@ def test_wakeword_wav_preserves_stereo_samples(tmp_path):
 
 def test_wakeword_wav_path_stays_with_queued_candidate():
     items = queue.Queue()
-    items.put((np.ones(1280, dtype=np.float32), 0.0, -10.0, False, "kitchen", 0.0, False, True, "/tmp/candidate.wav"))
+    items.put(
+        (
+            np.ones(1280, dtype=np.float32),
+            0.0,
+            -10.0,
+            False,
+            "kitchen",
+            0.0,
+            False,
+            True,
+            "/tmp/candidate.wav",
+        )
+    )
     items.put(None)
     path_sink = {}
 
@@ -192,11 +296,11 @@ def test_wakeword_gate_skips_idle_audio_until_vad_detects_speech():
     session.vad_endpointer = SimpleNamespace(speech_started=False)
     chunk = np.zeros(1280, dtype=np.float32)
 
-    capture._feed_wakeword_gate(session, chunk)
+    capture.wake_candidates._feed_wakeword_gate(session, chunk)
 
     assert backend.frames == []
     session.vad_endpointer.speech_started = True
-    capture._feed_wakeword_gate(session, chunk)
+    capture.wake_candidates._feed_wakeword_gate(session, chunk)
 
     assert len(backend.frames) == 1
     assert backend.frames[0].size == 2 * chunk.size
@@ -217,7 +321,7 @@ def test_wakeword_boundary_reset_clears_idle_gate_without_candidate():
     session.kws_speech_active = True
     session.kws_pre_roll.append(np.zeros(1280, dtype=np.float32))
 
-    capture._discard_wakeword_candidate(session)
+    capture.wake_candidates._discard_wakeword_candidate(session)
 
     assert session.kws_speech_active is False
     assert session.kws_pre_roll == []
@@ -236,7 +340,7 @@ def test_wakeword_boundary_without_classification_keeps_backend_model():
     capture = AudioCapture(use_vad=False)
     capture.set_wakeword_backend(backend)
 
-    capture._discard_wakeword_candidate(SatelliteSession("satellite"))
+    capture.wake_candidates._discard_wakeword_candidate(SatelliteSession("satellite"))
 
     assert backend.reset_ids == []
 
@@ -253,7 +357,7 @@ def test_wakeword_gate_stays_closed_until_browser_playback_ends():
     session = SatelliteSession("satellite")
     session.last_turn_end = time.monotonic() + 10.0
 
-    capture._feed_wakeword_gate(session, np.zeros(1280, dtype=np.float32))
+    capture.wake_candidates._feed_wakeword_gate(session, np.zeros(1280, dtype=np.float32))
 
     assert session.kws_candidate is False
     assert capture.wakeword_metrics["candidates"] == 0
@@ -276,7 +380,7 @@ def test_discard_wakeword_candidate_resets_backend_and_state():
     session.kws_detected_at = 123.0
     session.kws_pre_roll.append(np.zeros(1280, dtype=np.float32))
 
-    capture._discard_wakeword_candidate(session)
+    capture.wake_candidates._discard_wakeword_candidate(session)
 
     assert session.kws_candidate is False
     assert session.kws_score == 0.0

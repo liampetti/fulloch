@@ -626,41 +626,6 @@ def extract_deep_think(command: str) -> Optional[str]:
 # "summarise" branch is end-anchored (\s*$) so it only catches the standalone
 # command ("summarise", "summarise so far") — not "summarise today's news" /
 # "summarise this email", which must fall through to the agent's web/reply path.
-_SUMMARIZE_THINKING_PATTERNS = [
-    re.compile(
-        r"^\s*(?:please\s+)?summari[sz]e"
-        r"(?:\s+(?:your\s+thoughts"
-        r"|what\s+you(?:'?ve|\s+have)\s+(?:got|been\s+thinking)"
-        r"|what\s+you(?:'?ve|\s+have)\s+(?:got\s+)?so\s+far))?\s*$",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^\s*(?:so\s+)?what(?:'?s)?\s+(?:have\s+you\s+got|do\s+you\s+have|"
-        r"are\s+you\s+thinking|have\s+you\s+been\s+thinking)"
-        r"(?:\s+so\s+far|\s+now)?",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^\s*(?:please\s+)?(?:give|tell)\s+me\s+(?:your\s+thoughts|"
-        r"what\s+you('?ve|\s+have)\s+got)",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^\s*(?:please\s+)?(?:stop\s+thinking|give\s+up\s+thinking|"
-        r"that('?s|\s+is)\s+enough)",
-        re.IGNORECASE,
-    ),
-]
-
-
-def extract_summarize_thinking(command: str) -> Optional[bool]:
-    for pattern in _SUMMARIZE_THINKING_PATTERNS:
-        if pattern.search(command):
-            logger.debug(f"Caught Summarize Thinking match: {command!r}")
-            return True
-    return None
-
-
 # When Obsidian edit/delete mode is off, deletion and editing are deliberately
 # not voice capabilities. Catch explicit phrasings before the SLM can claim it
 # acted when nothing happened. When the user has explicitly enabled that mode,

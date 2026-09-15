@@ -26,7 +26,6 @@ from utils.intent_catch import (
     extract_satellite_message,
     extract_skip,
     extract_stop,
-    extract_summarize_thinking,
     extract_timer,
     extract_toggle,
     extract_turn_onoff,
@@ -830,55 +829,3 @@ class TestExtractDeepThink:
     )
     def test_non_matches(self, utterance):
         assert extract_deep_think(utterance) is None
-
-
-class TestExtractSummarizeThinking:
-    """Regex catch for 'what do you have so far'-style follow-ups during
-    a thinking turn that just got interrupted."""
-
-    @pytest.mark.parametrize(
-        "utterance",
-        [
-            "summarise",
-            "summarize your thoughts",
-            "summarise what you've got",
-            "summarise what you have so far",
-            "what have you got so far",
-            "what do you have so far",
-            "what are you thinking so far",
-            "what have you been thinking",
-            "so what have you got so far",
-            "give me your thoughts",
-            "tell me what you have got",
-            "tell me your thoughts",
-            "stop thinking",
-            "give up thinking",
-            "that's enough",
-        ],
-    )
-    def test_matches(self, utterance):
-        assert extract_summarize_thinking(utterance) is True
-
-    @pytest.mark.parametrize(
-        "utterance",
-        [
-            "we discussed this so far",  # 'so far' alone shouldn't match
-            "tell me a joke",
-            "think about the weather",  # belongs to deep_think
-            "what time is it",
-            "play some music",
-            "stop",  # belongs to existing stop intent
-        ],
-    )
-    def test_non_matches(self, utterance):
-        assert extract_summarize_thinking(utterance) is None
-
-    def test_catch_all_routes_to_summarize_thinking(self):
-        result = catchAll("summarise your thoughts")
-        assert result == "summarise your thoughts"
-
-    def test_catch_all_summarize_takes_priority_over_deep_think(self):
-        # "summarise what you've been thinking" mentions 'thinking' but
-        # is asking for a summary, not a fresh deep_think.
-        result = catchAll("summarise what you've been thinking")
-        assert result == "summarise what you've been thinking"

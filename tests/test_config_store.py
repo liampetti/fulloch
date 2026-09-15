@@ -168,6 +168,9 @@ def test_write_models_validates_public_llm_modes(tmp_path):
     cs.write_models({"llm": {"backend": "local", "local_model": "qwen"}}, path)
     assert cs.read_config(path)["models"]["llm"]["local_model"] == "qwen"
 
+    cs.write_models({"llm": {"backend": "local", "local_model": "ornith"}}, path)
+    assert cs.read_config(path)["models"]["llm"]["local_model"] == "ornith"
+
 
 def test_write_models_validates_generation_timeout(tmp_path):
     path = _write(tmp_path, "general:\n  wakeword: hi\n")

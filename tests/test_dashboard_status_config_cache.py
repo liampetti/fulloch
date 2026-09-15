@@ -14,6 +14,7 @@ import textwrap
 import pytest
 
 import server.dashboard as dashboard
+import server.routes_chat as chat_routes
 
 
 @pytest.fixture
@@ -38,11 +39,7 @@ def app_ctx(tmp_path):
         lifecycle=lifecycle,
         context=AppContext(lifecycle=lifecycle, config_path=str(config_path)),
     )
-    # The cache lives on the `get_status` closure's module — re-import to
-    # make sure we have the real one. (create_app binds the closure inside
-    # the function, so we hit the live cache by re-fetching it via the
-    # module-level helper we just installed.)
-    return TestClient(app), config_path, dashboard
+    return TestClient(app), config_path, chat_routes
 
 
 def test_config_cache_hits_when_mtime_unchanged(app_ctx):

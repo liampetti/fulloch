@@ -10,18 +10,12 @@ Playback dispatch hands the resolved URI to Home Assistant's
 (`sp.start_playback`) — Spotify Connect can't reliably target devices like
 Sonos, which register as restricted/id-less and are omitted from
 `sp.devices()` entirely, while HA already controls them correctly. This
-module imports `tools.home_assistant` directly to reuse its area-resolution
-and service-call helpers rather than duplicating them — a deliberate,
-documented exception to this project's usual no-cross-tool-import rule (see
-CLAUDE.md), justified because HA's playback dispatch is genuinely downstream
-of this module's search, not a separate concern. HA owns
-`pause`/`resume`/`skip`/`previous` (also routes to AVR/TV) via
-`tools/home_assistant.py`; those fall back to direct Spotify Connect
-(`ha._spotify_transport_fallback`) when no HA media_player entity
-resolves, via a deferred import back into this module — see that
-function's docstring and CLAUDE.md for why the import is local/deferred
-rather than module-level (it would otherwise cycle with this file's own
-top-level import of `tools.home_assistant`).
+module imports `tools.ha_client` to share HA's area resolution, cache and
+service calls. That client has no dependency on Spotify or the HA tool modules.
+`tools.ha_media` owns pause/resume/skip/previous (also routed to AVR/TV), with
+public exports in `tools.home_assistant`. Its optional Connect fallback imports
+Spotify locally when no HA player resolves and Spotify is configured. This
+keeps Spotify's search and HA's transport on a one-way dependency chain.
 
 Auth is a one-time manual step (no in-app OAuth callback): create a Spotify
 app at https://developer.spotify.com/dashboard, then run
@@ -34,6 +28,7 @@ below) — a refresh token minted before that scope was added won't carry it,
 so re-run `scripts/spotify_auth.py` once after upgrading; the affinity boost
 degrades to a no-op (not an error) against a stale token in the meantime.
 """
+
 import difflib
 import logging
 import re
@@ -44,7 +39,7 @@ from typing import Optional
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
-import tools.home_assistant as ha
+import tools.ha_client as ha
 from server.credentials_store import get_credential
 
 from ._config import config
@@ -60,8 +55,7 @@ DEVICE_NAME = SPOTIFY_CONFIG.get("device_id")
 _EVERYWHERE_PHRASES = ("everywhere", "all", "every room", "every speaker")
 
 SCOPE = (
-    "user-read-playback-state user-modify-playback-state "
-    "user-read-currently-playing user-top-read"
+    "user-read-playback-state user-modify-playback-state user-read-currently-playing user-top-read"
 )
 SIMILARITY_THRESHOLD = 0.6  # How similar a user query is to a playlist, track or album
 
@@ -86,7 +80,9 @@ _client_expiry: float = 0.0
 # and `/me/top/artists` are Spotify's own computed listening-affinity data —
 # two cheap, single-page calls that directly answer "does the user actually
 # listen to this" instead of guessing from playlist order.
-TOP_AFFINITY_TIME_RANGE = "medium_term"  # ~6 months; recent enough to matter, not so short it's noisy
+TOP_AFFINITY_TIME_RANGE = (
+    "medium_term"  # ~6 months; recent enough to matter, not so short it's noisy
+)
 _TOP_AFFINITY_TTL = 3600  # top tracks/artists shift slowly; no need to refetch every play_song call
 TRACK_AFFINITY_BOOST = 0.15
 ARTIST_AFFINITY_BOOST = 0.08
@@ -134,6 +130,7 @@ def _affinity_boost(track: dict) -> float:
         return ARTIST_AFFINITY_BOOST
     return 0.0
 
+
 # --- Track ranking -------------------------------------------------------
 #
 # `sp.search()`'s default ordering is popularity/personalization-weighted,
@@ -147,7 +144,9 @@ def _affinity_boost(track: dict) -> float:
 # voice assistants (e.g. Mycroft's spotify-skill) use against this same
 # problem.
 MATCH_CONFIDENCE_FLOOR = 0.45  # below this, no candidate is trusted
-POPULARITY_TIE_MARGIN = 0.1  # candidates within this score band of the best are close enough that popularity decides
+POPULARITY_TIE_MARGIN = (
+    0.1  # candidates within this score band of the best are close enough that popularity decides
+)
 
 _FEAT_SUFFIX_RE = re.compile(r"\s*\b(?:feat\.?|featuring|ft\.?)\s+.*$", re.IGNORECASE)
 _PAREN_SUFFIX_RE = re.compile(r"\s*[\(\[][^)\]]*[\)\]]\s*$")
@@ -243,6 +242,7 @@ def _best_artist(artists: list, query: Optional[str]) -> Optional[dict]:
     `_best_track`, so callers fall back to a general search instead of
     treating a genre phrase like "some jazz" as an artist name.
     """
+
     def _score(artist: dict) -> float:
         score = _title_similarity(query, artist.get("name", ""))
         if artist.get("name", "").lower() in _top_artist_names:
@@ -285,7 +285,7 @@ def _best_semantic_playlist(query: Optional[str], playlists: list) -> Optional[d
     try:
         from core.embeddings import embed
 
-        texts = [f'{pl.get("name", "")}. {pl.get("description") or ""}'.strip() for pl in playlists]
+        texts = [f"{pl.get('name', '')}. {pl.get('description') or ''}".strip() for pl in playlists]
         query_emb = embed([query], query=True)[0]
         candidate_embs = embed(texts)
     except Exception:
@@ -549,7 +549,9 @@ def play_song(
             if len(parts) == 2:
                 artist_query, song = parts[1].strip(), parts[0].strip()
 
-        if (re.sub(r"[^A-Za-z]+", "", str(artist_query).lower()) == "music") or (artist_query is None):
+        if (re.sub(r"[^A-Za-z]+", "", str(artist_query).lower()) == "music") or (
+            artist_query is None
+        ):
             result = _dispatch_via_ha(entity_ids, "Playing music on spotify")
             if result:
                 return result
@@ -597,7 +599,7 @@ def play_song(
             artists = artist_results.get("artists", {}).get("items", [])
             artist = _best_artist(artists, artist_query)
             if artist is not None:
-                success_message = f'Playing {artist["name"]} on Spotify'
+                success_message = f"Playing {artist['name']} on Spotify"
                 track_uris = _artist_top_track_uris(sp, artist["uri"])
                 result = _dispatch_queue_via_ha(entity_ids, success_message, track_uris)
                 if result:
@@ -619,7 +621,9 @@ def play_song(
                 if result:
                     return result
                 _pause(sp)
-                sp.start_playback(device_id=_get_active_device(sp), context_uri=semantic_playlist["uri"])
+                sp.start_playback(
+                    device_id=_get_active_device(sp), context_uri=semantic_playlist["uri"]
+                )
                 return success_message
 
         # 3. General search, fetching a batch of candidates and reranking
@@ -650,7 +654,9 @@ def play_song(
 
         track = _best_track(tracks, artist_query, song)
         if track is None:
-            query_desc = f"{song} by {artist_query}" if song and artist_query else (song or artist_query)
+            query_desc = (
+                f"{song} by {artist_query}" if song and artist_query else (song or artist_query)
+            )
             # Route through the agent replan loop (like HA's unresolved-entity
             # sentinel) instead of silently starting unrelated playback.
             return (
@@ -658,7 +664,7 @@ def play_song(
                 "Ask the user to confirm the artist and song, or try different wording."
             )
 
-        success_message = f'Playing {track["name"]} by {track["artists"][0]["name"]}'
+        success_message = f"Playing {track['name']} by {track['artists'][0]['name']}"
         result = _dispatch_via_ha(entity_ids, success_message, track["uri"], "music")
         if result:
             return result

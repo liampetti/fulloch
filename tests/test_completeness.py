@@ -94,18 +94,17 @@ def test_mixed_actions_with_any_unsafe_waits():
     assert should_commit_provisional("x", _actions("turn_on", "play_song")) is False
 
 
-def test_freeform_commits_only_when_complete():
-    # No regex match → catchAll returns the raw string.
+def test_freeform_waits_for_the_hard_endpoint():
+    # A free-form snapshot can be a complete-looking prefix of a longer thought.
     assert (
         should_commit_provisional("what is the capital of France", "what is the capital of France")
-        is True
+        is False
     )
     assert should_commit_provisional("what is the capital of", "what is the capital of") is False
 
 
-def test_reply_dict_commits_when_complete():
-    # A {"reply": ...} (e.g. note-delete refusal) carries no actions — harmless.
-    assert should_commit_provisional("delete my note", {"reply": "I can't."}) is True
+def test_reply_dict_waits_for_the_hard_endpoint():
+    assert should_commit_provisional("delete my note", {"reply": "I can't."}) is False
 
 
 def test_unsafe_set_membership():
@@ -132,6 +131,6 @@ def test_commit_decision_with_real_catchall():
     assert decide("play some jazz") is False
     assert decide("set a timer for ten minutes") is False
 
-    # Free-form questions commit only when the clause reads finished.
-    assert decide("who was the first person on the moon") is True
+    # Free-form questions always wait for the authoritative endpoint.
+    assert decide("who was the first person on the moon") is False
     assert decide("tell me about the") is False

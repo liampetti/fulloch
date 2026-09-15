@@ -13,15 +13,15 @@ general:
   telemetry_enabled: false        # Write local content-free performance events to data/logs/telemetry.jsonl (restart required).
   save_wakeword_wavs: false       # Save timestamped openWakeWord candidate audio to data/logs/wake_wavs/ (restart required; diagnostic audio).
 
-  asr_context_hint: true         # bias ASR decoder toward your wakeword spelling
+  asr_context_hint: true         # Qwen prompt bias; Parakeet/Orukeet boost configured terms
   # asr_context_terms:            # extra proper nouns/names (max 10)
   #   - "phoebe bridgers"
 
   # timezone: "Australia/Sydney"  # IANA name; auto-detected from the browser
 
   # === Voice ================================================================
-  voice_clone: "atticus"         # Qwen/Pocket: data/voices/<name> clone. Kokoro: built-in name.
-  tts_speed: 1.0                 # Kokoro only; Qwen/Pocket pace comes from the reference clip.
+  voice_clone: "atticus"         # Qwen/Pocket/Audio8: data/voices/<name> clone. Kokoro: built-in name.
+  tts_speed: 1.0                 # Kokoro only; Qwen/Pocket/Audio8 pace comes from the reference clip.
   whisper_gain: 0.30             # Volume for explicit whisper/quiet requests (0.0-1.0; applies to every TTS backend).
   personality: "balanced"       # balanced | playful | calm | wry | custom; applies to every model.
   # personality_custom: "Warm and reassuring; use pauses sparingly."  # Used when personality: custom.
@@ -69,6 +69,8 @@ general:
 # models:
 #   asr:
 #     backend: qwen              # Qwen3 1.7B PyTorch (default GPU)
+#     # parakeet                 # NVIDIA Parakeet TDT 0.6B (GPU)
+#     # orukeet                  # Orukeet Parakeet-derived 0.6B (GPU, experimental; CC BY-SA 4.0 weights)
 #     # qwen-gguf                # Qwen3 1.7B GGUF (GPU)
 #     # qwen-gguf-small          # Qwen3 0.6B GGUF (GPU)
 #     # qwen-onnx                # Qwen3 1.7B ONNX (default CPU)
@@ -82,13 +84,17 @@ general:
 #     # qwen-gguf                # Qwen3 1.7B GGUF (GPU)
 #     # qwen-gguf-small          # Qwen3 0.6B GGUF (GPU)
 #     # pocket-tts-pytorch       # Pocket TTS PyTorch (GPU, experimental streaming English voice clone; HF_TOKEN + accepted terms required)
+#     # audio8                   # Audio8 0.6B (GPU, experimental 44.1 kHz Apache-2.0 voice clone; requires <name>.wav + exact <name>.txt)
 #     # pocket-tts-gguf          # Pocket TTS Q8_0 GGUF (GPU, experimental English voice clone)
 #     # qwen-small               # Qwen3 0.6B PyTorch (GPU)
 #     # kokoro-onnx              # Kokoro 82M (CPU built-in voices)
 #     # pocket-tts-onnx          # Pocket TTS ONNX (default CPU; experimental one-shot WAV voice clone)
 #   llm:
 #     backend: local             # local | external | none (regex-only commands)
-#     local_model: qwen          # qwen (recommended) | gemma | custom
+#     local_model: qwen          # Qwen3.5 9B MTP (recommended)
+#     # local_model: gemma       # Gemma 4 12B QAT
+#     # local_model: ornith      # Ornith 1.5 9B Q4
+#     # local_model: custom      # Provide `model` below for a local GGUF.
 #     # model: "/path/to/model.gguf"  # Required only when local_model: custom.
 #     # n_context: 12288         # Optional; larger contexts use more VRAM.
 #     # generation_timeout: 90   # Per-call hard limit; a local timeout restarts llama-server.
@@ -104,6 +110,7 @@ general:
 #     threshold: 0.6            # Increase threshold to reduce false activations
 #     smoothing_frames: 1       # Add frames to reduce false activations
 #     cooldown_ms: 1500         # How long to wait between successive wakeword activations
+#     verify_asr: true          # Verify each activation in ASR; set false to trust openWakeWord alone.
 #
 # External LLM (llama.cpp server / vLLM / Ollama / hosted API):
 #   llm:

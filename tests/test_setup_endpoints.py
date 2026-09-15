@@ -143,7 +143,7 @@ def test_cancel_startup_arms_setup_marker(tmp_path, monkeypatch):
     def schedule_restart(*, delay, assistant=None):
         restart_delay.append(delay)
 
-    monkeypatch.setattr("server.dashboard._schedule_restart", schedule_restart)
+    monkeypatch.setattr("server.routes_setup._schedule_restart", schedule_restart)
 
     r = client.post("/setup/cancel-startup")
 
@@ -254,7 +254,7 @@ def test_list_backups_returns_empty_then_entries(tmp_path):
 
 
 def test_create_backup_prunes_to_ten_newest_snapshots(tmp_path, monkeypatch):
-    from server import dashboard
+    from server import backups as backup_store
 
     backups = tmp_path / "backups"
     backups.mkdir()
@@ -262,11 +262,11 @@ def test_create_backup_prunes_to_ten_newest_snapshots(tmp_path, monkeypatch):
         snapshot = backups / f"2026-08-12T1200{second:02d}"
         snapshot.mkdir()
         (snapshot / "meta.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(dashboard.time, "strftime", lambda *_args: "2026-08-12T120011")
+    monkeypatch.setattr(backup_store.time, "strftime", lambda *_args: "2026-08-12T120011")
 
-    dashboard._create_backup(tmp_path)
+    backup_store._create_backup(tmp_path)
 
-    names = [backup["name"] for backup in dashboard._list_backups(tmp_path)]
+    names = [backup["name"] for backup in backup_store._list_backups(tmp_path)]
     assert len(names) == 10
     assert names[0] == "2026-08-12T120011"
     assert "2026-08-12T120000" not in names
@@ -423,12 +423,12 @@ def test_restart_endpoint_reexecs(tmp_path, monkeypatch):
 
 
 def test_voice_sample_serves_wav(tmp_path, monkeypatch):
-    import server.dashboard as dash
+    import server.routes_setup as setup_routes
 
     voices = tmp_path / "voices"
     voices.mkdir()
     (voices / "af_heart.wav").write_bytes(b"RIFFfakewav")
-    monkeypatch.setattr(dash, "_VOICES_DIR", voices)
+    monkeypatch.setattr(setup_routes, "_VOICES_DIR", voices)
     client, _, _ = _client(tmp_path)
     r = client.get("/voice/sample?name=af_heart")
     assert r.status_code == 200 and r.headers["content-type"] == "audio/wav"

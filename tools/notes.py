@@ -1,4 +1,8 @@
-"""Local markdown note store: read, write, append, full-text + semantic search.
+"""Registered voice note/fact tools, policy, and shared index notifications.
+
+Markdown persistence lives in notes_storage; Obsidian bridge transport lives in
+notes_obsidian. Dashboard CRUD wrappers pass the index notification callback
+explicitly, keeping the existing tools.notes API stable.
 
 Always loaded. The store is a flat (or nested) folder of `.md` files plus an
 optional `daily/` subfolder for daily notes. Full-text search uses Python's
@@ -12,18 +16,20 @@ daily notes in the top-level folder).
 """
 
 import logging
-import os
 import queue
 import re
-import tempfile
 import threading
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 import utils.local_time as _local_time
 
-from . import notes_root
+from . import notes_obsidian, notes_root, notes_storage
 from ._config import config
+from .notes_storage import FACTS_NOTE
+from .notes_storage import find_note as _find_note
+from .notes_storage import iter_notes as _iter_notes
+from .notes_storage import slugify as _slugify
 from .thinking_playbooks import thinking_playbook
 from .tool_registry import ArtifactText, tool
 
@@ -62,7 +68,6 @@ SEMANTIC_TOP_K = 5
 SEMANTIC_MIN_SCORE = 0.25
 # Total hits the hybrid search surfaces after fusing keyword + semantic lists.
 MAX_HYBRID_MATCHES = 5
-FACTS_NOTE = "fulloch_facts"
 INDEX_BASENAME = "notes_index"
 # The vault is commonly a read-only or externally mounted directory. Keep the
 # derived cache with Fulloch's other writable runtime data instead of beside it.
@@ -78,7 +83,6 @@ _notes_root_path.mkdir(parents=True, exist_ok=True)
 if DAILY_SUBDIR:
     (_notes_root_path / DAILY_SUBDIR).mkdir(parents=True, exist_ok=True)
 
-_SAFE_TITLE_RE = re.compile(r"[^a-z0-9]+")
 _HEADER_RE = re.compile(r"^#+\s*", flags=re.MULTILINE)
 _BULLET_RE = re.compile(r"^[-*+]\s+", flags=re.MULTILINE)
 _EMPHASIS_RE = re.compile(r"[*_`]")
@@ -189,39 +193,6 @@ def _strip_leading_title(md: str, title: str) -> str:
     return md
 
 
-def _slugify(title: str) -> str:
-    """Convert a spoken title into a filename stem ('My boiler note' → 'my-boiler-note')."""
-    slug = _SAFE_TITLE_RE.sub("-", title.strip().lower()).strip("-")
-    return slug or "note"
-
-
-def _iter_notes() -> Iterable[Path]:
-    return sorted(notes_root.get_notes_root().rglob("*.md"))
-
-
-def _find_note(query: str) -> Optional[Path]:
-    """Fuzzy-find a note by title: exact slug → slug substring → raw substring."""
-    if not query:
-        return None
-    query_slug = _slugify(query)
-    candidates = list(_iter_notes())
-
-    for p in candidates:
-        if p.stem.lower() == query_slug:
-            return p
-
-    for p in candidates:
-        if query_slug and query_slug in p.stem.lower():
-            return p
-
-    query_lower = query.lower()
-    for p in candidates:
-        if query_lower in p.stem.lower():
-            return p
-
-    return None
-
-
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -298,7 +269,9 @@ def _appendable_titles() -> list[str]:
 
 
 def _daily_base() -> Path:
-    base = notes_root.get_notes_root() / DAILY_SUBDIR if DAILY_SUBDIR else notes_root.get_notes_root()
+    base = (
+        notes_root.get_notes_root() / DAILY_SUBDIR if DAILY_SUBDIR else notes_root.get_notes_root()
+    )
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -331,27 +304,15 @@ _index_pending: set[Path] = set()
 _index_pending_lock = threading.Lock()
 _index_worker_started = False
 
-# When the Obsidian plugin is connected, the dashboard sets this queue so
-# _after_write can tell the plugin to navigate to newly-written files.
-# Items include {"type": "open_file", "path": "<absolute-path>"}, plus
-# explicit active-editor operations initiated by the user.
-_obsidian_cmd_q: Optional[queue.Queue] = None
-
 
 def set_obsidian_cmd_q(q: "Optional[queue.Queue]") -> None:
-    global _obsidian_cmd_q
-    _obsidian_cmd_q = q
+    """Attach the dashboard's live Obsidian bridge to the transport."""
+    notes_obsidian.set_command_queue(q)
 
 
 def _send_obsidian_command(command: dict) -> bool:
     """Queue an explicit editor action when the Obsidian bridge is connected."""
-    if _obsidian_cmd_q is None:
-        return False
-    try:
-        _obsidian_cmd_q.put_nowait(command)
-    except queue.Full:
-        return False
-    return True
+    return notes_obsidian.send_command(command)
 
 
 def _obsidian_edit_allowed() -> bool:
@@ -402,12 +363,7 @@ def _after_write(path: Path) -> None:
 
             threading.Thread(target=_run, daemon=True, name="notes-indexer").start()
 
-    q = _obsidian_cmd_q
-    if q is not None:
-        try:
-            q.put_nowait({"type": "open_file", "path": str(path)})
-        except Exception:
-            pass
+    notes_obsidian.open_file(path)
 
 
 @tool(
@@ -535,7 +491,7 @@ def read_note(title: str) -> str:
     if note is None:
         return f"I couldn't find a note about {title}."
     try:
-        raw = note.read_text(encoding="utf-8")
+        raw = notes_storage.read_markdown(note)
     except OSError as e:
         logger.error(f"Failed to read {note}: {e}")
         return f"I couldn't read the {title} note."
@@ -549,7 +505,12 @@ def read_note(title: str) -> str:
         truncated = " (note continues)"
     return ArtifactText(
         f"Note '{title_spoken}': {text}{truncated}",
-        {"type": "note", "title": title_spoken, "excerpt": text[:500], "truncated": bool(truncated)},
+        {
+            "type": "note",
+            "title": title_spoken,
+            "excerpt": text[:500],
+            "truncated": bool(truncated),
+        },
     )
 
 
@@ -571,8 +532,7 @@ def write_note(title: str, content: str) -> str:
         if not body:
             return f"The {title} note already exists; there was nothing to add."
         try:
-            with path.open("a", encoding="utf-8") as f:
-                f.write(f"\n{body}\n")
+            notes_storage.append_markdown(path, f"\n{body}\n")
         except OSError as e:
             logger.error(f"Failed to append to {path}: {e}")
             return f"I couldn't update the {title} note."
@@ -580,7 +540,7 @@ def write_note(title: str, content: str) -> str:
         return f"Added to your existing '{title}' note."
     header = f"# {title.strip()}\n\n"
     try:
-        path.write_text(header + body + "\n", encoding="utf-8")
+        notes_storage.write_markdown(path, header + body + "\n")
     except OSError as e:
         logger.error(f"Failed to write {path}: {e}")
         return f"I couldn't save the {title} note."
@@ -626,8 +586,7 @@ def append_to_note(title: str, content: str) -> str:
             f"of those by its exact title, or create a new note with write_note."
         )
     try:
-        with note.open("a", encoding="utf-8") as f:
-            f.write(f"\n- {line}\n")
+        notes_storage.append_markdown(note, f"\n- {line}\n")
     except OSError as e:
         logger.error(f"Failed to append to {note}: {e}")
         return f"I couldn't append to the {title} note."
@@ -653,9 +612,8 @@ def append_to_today(content: str) -> str:
     try:
         if not path.exists():
             header = f"# {now.strftime('%A %d %B %Y')}\n\n"
-            path.write_text(header, encoding="utf-8")
-        with path.open("a", encoding="utf-8") as f:
-            f.write(f"- {timestamp} {line}\n")
+            notes_storage.write_markdown(path, header)
+        notes_storage.append_markdown(path, f"- {timestamp} {line}\n")
     except OSError as e:
         logger.error(f"Failed to append to {path}: {e}")
         return "I couldn't update today's note."
@@ -687,7 +645,7 @@ def read_today(date: Optional[str] = None) -> str:
     if not path.exists():
         return f"You don't have any notes logged {when}."
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = notes_storage.read_markdown(path)
     except OSError as e:
         logger.error(f"Failed to read daily note {path}: {e}")
         return f"I couldn't read your note {when}."
@@ -721,7 +679,7 @@ def _keyword_search(query: str) -> list[tuple[str, str]]:
     hits: list[tuple[str, str]] = []
     for path in _iter_notes():
         try:
-            content = path.read_text(encoding="utf-8", errors="ignore")
+            content = notes_storage.read_markdown(path, errors="ignore")
         except OSError:
             continue
         if not all(_term_in(t, content.lower()) for t in terms):
@@ -835,9 +793,8 @@ def remember_fact(content: str) -> str:
     timestamp = _local_time.now().strftime("%Y-%m-%d")
     try:
         if not path.exists():
-            path.write_text("# Long-term facts\n\n", encoding="utf-8")
-        with path.open("a", encoding="utf-8") as f:
-            f.write(f"- [{timestamp}] {fact}\n")
+            notes_storage.write_markdown(path, "# Long-term facts\n\n")
+        notes_storage.append_markdown(path, f"- [{timestamp}] {fact}\n")
     except OSError as e:
         logger.error(f"Failed to append fact: {e}")
         return "I couldn't save that fact."
@@ -856,7 +813,7 @@ def recall_facts() -> str:
     if not path.exists():
         return ""
     try:
-        content = path.read_text(encoding="utf-8")
+        content = notes_storage.read_markdown(path)
     except OSError as e:
         logger.error(f"Failed to read facts: {e}")
         return ""
@@ -880,53 +837,10 @@ def recall_facts() -> str:
 # concurrent `recall_facts()` read never sees a partial file.
 # ---------------------------------------------------------------------------
 
-_FACTS_LOCK = threading.Lock()
-_FACT_LINE_RE = re.compile(r"^-\s*\[(\d{4}-\d{2}-\d{2})\]\s*(.*)$")
-
-
-def _facts_path() -> Path:
-    return notes_root.get_notes_root() / f"{FACTS_NOTE}.md"
-
 
 def list_facts() -> list[dict]:
     """Return parsed facts in file order. Empty list if fulloch_facts.md is missing."""
-    path = _facts_path()
-    if not path.exists():
-        return []
-    try:
-        content = path.read_text(encoding="utf-8")
-    except OSError as e:
-        logger.error(f"Failed to read facts: {e}")
-        return []
-    out: list[dict] = []
-    for line in content.splitlines():
-        m = _FACT_LINE_RE.match(line.strip())
-        if m:
-            out.append(
-                {
-                    "index": len(out),
-                    "date": m.group(1),
-                    "text": m.group(2).strip(),
-                }
-            )
-    return out
-
-
-def _write_facts_atomic(lines: list[str]) -> None:
-    path = _facts_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = "\n".join(lines)
-    if not body.endswith("\n"):
-        body += "\n"
-    fd, tmp = tempfile.mkstemp(prefix=".facts-", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(body)
-        os.replace(tmp, path)
-    except Exception:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-    _after_write(path)
+    return notes_storage.list_facts()
 
 
 def update_fact(index: int, text: str) -> bool:
@@ -934,50 +848,12 @@ def update_fact(index: int, text: str) -> bool:
     text = (text or "").strip()
     if not text:
         return False
-    path = _facts_path()
-    with _FACTS_LOCK:
-        if not path.exists():
-            return False
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError as e:
-            logger.error(f"Failed to read facts: {e}")
-            return False
-        lines = content.splitlines()
-        fact_idx = -1
-        for i, line in enumerate(lines):
-            m = _FACT_LINE_RE.match(line.strip())
-            if m:
-                fact_idx += 1
-                if fact_idx == index:
-                    lines[i] = f"- [{m.group(1)}] {text}"
-                    _write_facts_atomic(lines)
-                    return True
-    return False
+    return notes_storage.edit_fact(index, text, after_write=_after_write)
 
 
 def delete_fact(index: int) -> bool:
     """Remove the indexed fact line."""
-    path = _facts_path()
-    with _FACTS_LOCK:
-        if not path.exists():
-            return False
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError as e:
-            logger.error(f"Failed to read facts: {e}")
-            return False
-        lines = content.splitlines()
-        fact_idx = -1
-        for i, line in enumerate(lines):
-            m = _FACT_LINE_RE.match(line.strip())
-            if m:
-                fact_idx += 1
-                if fact_idx == index:
-                    del lines[i]
-                    _write_facts_atomic(lines)
-                    return True
-    return False
+    return notes_storage.edit_fact(index, None, after_write=_after_write)
 
 
 # ---------------------------------------------------------------------------
@@ -986,69 +862,23 @@ def delete_fact(index: int) -> bool:
 # The dashboard lists note files and lets the user read / edit the raw
 # markdown. Notes are addressed by `name` — the path relative to NOTES_DIR
 # without the `.md` suffix (so a daily note is `daily/2026-05-28`).
-# `_resolve_note_file` guards against path traversal so a crafted name can't
+# `notes_storage.resolve_note_file` guards against traversal so a crafted name can't
 # escape NOTES_DIR. `fulloch_facts.md` is excluded — it has its own dashboard tab and
 # its `- [DATE] text` structure would break under free-form editing.
 # ---------------------------------------------------------------------------
 
 
-def _resolve_note_file(name: str) -> Optional[Path]:
-    """Map a dashboard note `name` to a `.md` file inside NOTES_DIR.
-
-    Returns None when the name is empty, points at the facts note, or
-    resolves outside NOTES_DIR (path-traversal guard).
-    """
-    name = (name or "").strip()
-    if not name:
-        return None
-    candidate = (notes_root.get_notes_root() / name).with_suffix(".md").resolve()
-    try:
-        candidate.relative_to(notes_root.get_notes_root())
-    except ValueError:
-        return None
-    if candidate.name == f"{FACTS_NOTE}.md":
-        return None
-    return candidate
-
-
 def list_note_files() -> list[dict]:
     """Return saved notes as `{name, title}` dicts, excluding the facts note."""
-    out: list[dict] = []
-    for p in _iter_notes():
-        if p.name == f"{FACTS_NOTE}.md":
-            continue
-        name = p.relative_to(notes_root.get_notes_root()).with_suffix("").as_posix()
-        out.append({"name": name, "title": p.stem.replace("-", " ")})
-    return out
+    return notes_storage.list_note_files()
 
 
 def read_note_file(name: str) -> Optional[str]:
     """Return the raw markdown of a note, or None if it can't be read."""
-    path = _resolve_note_file(name)
-    if path is None or not path.exists():
-        return None
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError as e:
-        logger.error(f"Failed to read note {name}: {e}")
-        return None
+    return notes_storage.read_note_file(name)
 
 
 def save_note_file(name: str, content: str) -> bool:
     """Overwrite an existing note's content. Atomic via tmp+rename so a
     concurrent semantic-index read never sees a partial file."""
-    path = _resolve_note_file(name)
-    if path is None or not path.exists():
-        return False
-    body = content if content.endswith("\n") else content + "\n"
-    fd, tmp = tempfile.mkstemp(prefix=".note-", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(body)
-        os.replace(tmp, path)
-    except OSError as e:
-        Path(tmp).unlink(missing_ok=True)
-        logger.error(f"Failed to save note {name}: {e}")
-        return False
-    _after_write(path)
-    return True
+    return notes_storage.save_note_file(name, content, after_write=_after_write)

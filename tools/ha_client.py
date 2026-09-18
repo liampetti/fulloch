@@ -424,6 +424,12 @@ def _call_service(
     if not HA_TOKEN:
         return "Home Assistant isn't set up."
 
+    if data and "entity_id" in data and data["entity_id"] != entity_id:
+        return (
+            "Reactive question: Service data cannot override the selected entity. "
+            "No command was sent. Use the entity argument to select the target."
+        )
+
     # Enforcement backstop: even if a deny-listed entity_id reaches here (e.g.
     # the SLM emitted it verbatim, bypassing the filtered alias map), refuse it
     # outright rather than replanning — we don't want the agent retrying under a
@@ -432,6 +438,21 @@ def _call_service(
         friendly = _friendly_for(entity_id)
         logger.info(f"Refused voice control of deny-listed entity {entity_id}")
         return f"Sorry, {friendly} isn't available for voice control."
+
+    # A syntactically plausible ID is not evidence that the target exists.
+    # Known IDs cost no I/O; check cache misses against HA before a service can
+    # return an HTTP success for a nonexistent target. A failed lookup is not
+    # proof of absence (HA may be unreachable).
+    known_ids = set(_ENTITY_ALIASES.values())
+    for ids in _ENTITY_ALIASES_MULTI.values():
+        known_ids.update(ids)
+    targets = [entity_id] if isinstance(entity_id, str) else entity_id
+    for target in targets:
+        if target not in known_ids and _get_state(target) is None:
+            return (
+                f"Reactive question: I couldn't verify the Home Assistant target {target!r}. "
+                "No command was sent. Ask the user to clarify the target or use a lookup."
+            )
 
     path = f"/api/services/{domain}/{service}"
     payload = {"entity_id": entity_id}

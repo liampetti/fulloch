@@ -49,14 +49,11 @@ def test_context_phrases_enable_nemo_tdt_boosting():
     try:
         pipe.set_context_phrases(
             ["hey atticus", "atticus", "Phoebe Bridgers", "hey atticus"],
-            wakeword_phrases=("hey atticus", "atticus"),
         )
         config, verbose = model.calls[0]
         assert config.strategy == "greedy_batch"
-        assert config.greedy.boosting_tree.key_phrase_items_list == [
-            {"phrase": "hey atticus", "alpha": 4.0},
-            {"phrase": "atticus", "alpha": 4.0},
-            {"phrase": "Phoebe Bridgers", "alpha": None},
+        assert config.greedy.boosting_tree.key_phrases_list == [
+            "hey atticus", "atticus", "Phoebe Bridgers",
         ]
         assert config.greedy.boosting_tree.context_score == 2.0
         assert config.greedy.boosting_tree_alpha == 2.0
@@ -86,12 +83,10 @@ def test_context_phrases_do_not_require_omegaconf_in_unit_environment(monkeypatc
     model = _DecodingModel()
     pipe = ParakeetASRPipelineWrapper(model)
     try:
-        pipe.set_context_phrases(["atticus"], wakeword_phrases=("atticus",))
+        pipe.set_context_phrases(["atticus"])
         config, verbose = model.calls[0]
         assert config.strategy == "greedy_batch"
-        assert config.greedy.boosting_tree.key_phrase_items_list == [
-            {"phrase": "atticus", "alpha": 4.0}
-        ]
+        assert config.greedy.boosting_tree.key_phrases_list == ["atticus"]
         assert verbose is False
     finally:
         pipe.live_worker.close()

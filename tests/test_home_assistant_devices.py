@@ -28,6 +28,7 @@ def test_open_cover_uses_cover_domain_for_cover_entity():
         patch.object(client, "HA_TOKEN", "tok"),
         patch.object(client, "_DENIED_ENTITIES", frozenset()),
         patch("tools.ha_client._resolve_entity", return_value="cover.garage"),
+        patch.object(client, "_get_state", return_value={"entity_id": "cover.garage"}),
         patch("tools.ha_client.requests.post", return_value=resp) as post,
     ):
         devices.open_cover("garage")
@@ -46,6 +47,7 @@ def test_open_cover_uses_valve_domain_for_valve_entity():
         patch.object(client, "HA_TOKEN", "tok"),
         patch.object(client, "_DENIED_ENTITIES", frozenset()),
         patch("tools.ha_client._resolve_entity", return_value="valve.main_water"),
+        patch.object(client, "_get_state", return_value={"entity_id": "valve.main_water"}),
         patch("tools.ha_client.requests.post", return_value=resp) as post,
     ):
         result = devices.open_cover("main water valve")
@@ -63,6 +65,7 @@ def test_set_cover_position_clamps_and_targets_valve_service():
         patch.object(client, "HA_TOKEN", "tok"),
         patch.object(client, "_DENIED_ENTITIES", frozenset()),
         patch("tools.ha_client._resolve_entity", return_value="valve.main_water"),
+        patch.object(client, "_get_state", return_value={"entity_id": "valve.main_water"}),
         patch("tools.ha_client.requests.post", return_value=resp) as post,
     ):
         devices.set_cover_position("main water valve", 150)
@@ -81,6 +84,7 @@ def test_ha_vacuum_dispatches_known_action():
         patch.object(client, "HA_TOKEN", "tok"),
         patch.object(client, "_DENIED_ENTITIES", frozenset()),
         patch("tools.ha_client._resolve_entity", return_value="vacuum.roomba"),
+        patch.object(client, "_get_state", return_value={"entity_id": "vacuum.roomba"}),
         patch("tools.ha_client.requests.post", return_value=resp) as post,
     ):
         result = devices.ha_vacuum("roomba", "dock")

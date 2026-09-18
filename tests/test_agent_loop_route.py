@@ -428,7 +428,7 @@ def test_delivery_is_not_spoken_for_read_actions():
     )
 
 
-def test_delivery_replaces_raw_tool_results_after_success(monkeypatch):
+def test_execution_results_replace_model_delivery(monkeypatch):
     import core.agent_loop as al
 
     monkeypatch.setattr(
@@ -453,7 +453,7 @@ def test_delivery_replaces_raw_tool_results_after_success(monkeypatch):
 
     out = al.AgentLoop(host, session=None, source="text").run("turn on lights and play music")
 
-    assert out == "The lights are on and music is playing."
+    assert out == "Raw result for turn_on Raw result for play_song"
     assert spoken == [out]
 
 

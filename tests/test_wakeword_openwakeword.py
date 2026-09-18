@@ -76,18 +76,25 @@ def test_wakeword_activation_optionally_saves_timestamped_wav(tmp_path):
     capture.set_wakeword_backend(Backend())
     session = SatelliteSession("kitchen/phone")
     capture.wake_candidates._feed_wakeword_gate(session, np.ones(1280, dtype=np.float32))
-    session.kws_verified = True
+    early = capture.audio_queue.get_nowait()
+    capture.mark_wakeword_wav(early[8], accepted=False)
+    assert session.kws_verified is False
     capture.wake_candidates._enqueue(
         session, np.ones(16000, dtype=np.float32), 0.0, -10.0, False, 0.0
     )
 
     files = list(tmp_path.glob("*.wav"))
-    assert len(files) == 1
-    assert files[0].name.endswith("_kitchen_phone_0.873_pending.wav")
-    assert files[0].read_bytes()[:4] == b"RIFF"
-    assert files[0].stat().st_size == 32044
-    assert capture.audio_queue.get_nowait()[10] is True
-    assert capture.audio_queue.get_nowait()[8] == str(files[0])
+    assert len(files) == 2
+    final = capture.audio_queue.get_nowait()
+    early_path = Path(early[8].replace("_pending.wav", "_rejected.wav"))
+    final_path = Path(final[8])
+    assert final_path.name == early_path.name.replace("_early_rejected.wav", "_final_pending.wav")
+    assert final_path.stat().st_size == 32044
+    assert early_path.stat().st_size == 2604
+    assert early[10] is True
+    assert final[10] is False
+    capture.mark_wakeword_wav(final[8], accepted=True)
+    assert len(list(tmp_path.glob("*_final_accepted.wav"))) == 1
 
 
 def test_wakeword_candidate_does_not_prepend_overlapping_preroll():

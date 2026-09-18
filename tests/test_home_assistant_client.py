@@ -198,10 +198,49 @@ def test_call_service_allows_non_denied_entity():
     with (
         patch.object(client, "HA_TOKEN", "tok"),
         patch.object(client, "_DENIED_ENTITIES", frozenset({"lock.front_door"})),
+        patch.object(client, "_get_state", return_value={"entity_id": "light.kitchen"}),
         patch("tools.ha_client.requests.post", return_value=resp) as post,
     ):
         client._call_service("light", "turn_on", "light.kitchen", success_message="ok")
         post.assert_called_once()
+
+
+def test_call_service_does_not_send_unverified_target():
+    with (
+        patch.object(client, "HA_TOKEN", "tok"),
+        patch.object(client, "_ENTITY_ALIASES", {}),
+        patch.object(client, "_ENTITY_ALIASES_MULTI", {}),
+        patch.object(client, "_get_state", return_value=None),
+        patch.object(client, "_post") as post,
+    ):
+        result = client._call_service("cover", "open_cover", "cover.imaginary")
+    assert result.startswith("Reactive question:")
+    assert "No command was sent" in result
+    post.assert_not_called()
+
+
+def test_known_target_requires_no_preliminary_state_request():
+    with (
+        patch.object(client, "HA_TOKEN", "tok"),
+        patch.object(client, "_ENTITY_ALIASES", {"lamp": "light.lamp"}),
+        patch.object(client, "_get_state") as state,
+        patch.object(client, "_post", return_value=MagicMock()) as post,
+    ):
+        assert client._call_service("light", "turn_on", "light.lamp") == "OK"
+    state.assert_not_called()
+    post.assert_called_once()
+
+
+def test_service_data_cannot_replace_validated_target():
+    with (
+        patch.object(client, "HA_TOKEN", "tok"),
+        patch.object(client, "_post") as post,
+    ):
+        result = client._call_service(
+            "light", "turn_on", "light.lamp", {"entity_id": "light.imaginary"}
+        )
+    assert result.startswith("Reactive question:")
+    post.assert_not_called()
 
 
 def test_set_entity_denied_persists_and_takes_effect(tmp_path):

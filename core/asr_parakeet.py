@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 ASR_MODEL_NAME = "nvidia/parakeet-tdt-0.6b-v3"
 # Parakeet's live path re-decodes a rolling buffer, so shorter first/refresh
 # delays improve wake feedback and safe early commits without queueing long jobs.
-PARTIAL_INITIAL_SECONDS = 0.5
-PARTIAL_INTERVAL_SECONDS = 0.75
+PARTIAL_INITIAL_SECONDS = 0.75
+PARTIAL_INTERVAL_SECONDS = 1.0
 PARTIAL_WINDOW_SECONDS = 6.0
 
 
@@ -230,23 +230,13 @@ class ParakeetASRPipelineWrapper:
         self.supports_context_unbias = False
         self.last_transcribe_seconds = None
 
-    def set_context_phrases(
-        self, phrases: list[str], *, wakeword_phrases: tuple[str, ...] = ()
-    ) -> None:
+    def set_context_phrases(self, phrases: list[str]) -> None:
         """Bias NeMo's TDT decoder toward a small, fixed phrase list."""
         phrases = list(dict.fromkeys(phrase.strip() for phrase in phrases if phrase.strip()))
         if not phrases:
             return
-        wakeword_phrases = {phrase.casefold() for phrase in wakeword_phrases}
-        phrase_items = [
-            {
-                "phrase": phrase,
-                # openWakeWord has already acoustically confirmed these phrases,
-                # so they can be much stronger than ordinary proper-noun terms.
-                "alpha": 4.0 if phrase.casefold() in wakeword_phrases else None,
-            }
-            for phrase in phrases
-        ]
+        # NeMo 3.0 does not consume per-phrase alpha. All terms share the
+        # global boosting-tree weight, including during normal command ASR.
         current_cfg = self.model.cfg.decoding
         try:
             from omegaconf import OmegaConf, open_dict
@@ -261,10 +251,7 @@ class ParakeetASRPipelineWrapper:
                 if "greedy" not in decoding_cfg:
                     decoding_cfg.greedy = {}
                 decoding_cfg.greedy.boosting_tree = {
-                    "key_phrase_items_list": phrase_items,
-                    # NeMo's defaults are intentionally conservative for broad
-                    # transcription. Voice-assistant phrases are additionally
-                    # gated by openWakeWord, so use a stronger score here.
+                    "key_phrases_list": phrases,
                     "context_score": 2.0,
                     "depth_scaling": 2.0,
                 }
@@ -278,16 +265,15 @@ class ParakeetASRPipelineWrapper:
             if not hasattr(decoding_cfg, "greedy"):
                 decoding_cfg.greedy = SimpleNamespace()
             decoding_cfg.greedy.boosting_tree = SimpleNamespace(
-                key_phrase_items_list=phrase_items,
+                key_phrases_list=phrases,
                 context_score=2.0,
                 depth_scaling=2.0,
             )
             decoding_cfg.greedy.boosting_tree_alpha = 2.0
         self.model.change_decoding_strategy(decoding_cfg, verbose=False)
         logger.info(
-            "NeMo ASR phrase boosting enabled for %d terms (%d wakeword terms)",
+            "NeMo ASR phrase boosting enabled for %d terms (global alpha=2.0)",
             len(phrases),
-            sum(item["alpha"] is not None for item in phrase_items),
         )
 
     def __call__(

@@ -130,6 +130,9 @@ class WakewordCandidates:
             verification_pcm = np.concatenate(session.kws_verification_pre_roll)[
                 -int(self.sample_rate * KWS_EARLY_VERIFICATION_MS / 1000) :
             ]
+            session.kws_wav_path = self._save_wakeword_wav(
+                session.id, verification_pcm, session.kws_score, stage="early"
+            )
             self.put_utterance(
                 (
                     verification_pcm,
@@ -140,7 +143,7 @@ class WakewordCandidates:
                     time.monotonic(),
                     False,
                     True,
-                    None,
+                    session.kws_wav_path,
                     session.protocol_state_generation,
                     True,
                     session.kws_capture_id,
@@ -165,7 +168,10 @@ class WakewordCandidates:
             # The recorder checks the verdict before its next audio frame.
             pass
 
-    def _save_wakeword_wav(self, satellite_id: str, pcm: np.ndarray, score: float) -> Optional[str]:
+    def _save_wakeword_wav(
+        self, satellite_id: str, pcm: np.ndarray, score: float,
+        *, stage: str = "", paired_path: Optional[str] = None,
+    ) -> Optional[str]:
         """Persist a candidate clip, retaining every satellite channel for diagnostics."""
         if not self.save_wakeword_wavs or not pcm.size:
             return None
@@ -173,7 +179,14 @@ class WakewordCandidates:
             self.wakeword_wav_dir.mkdir(parents=True, exist_ok=True)
             safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in satellite_id)
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
-            path = self.wakeword_wav_dir / f"{timestamp}_{safe_id}_{score:.3f}_pending.wav"
+            suffix = f"_{stage}" if stage else ""
+            path = self.wakeword_wav_dir / f"{timestamp}_{safe_id}_{score:.3f}{suffix}_pending.wav"
+            if paired_path:
+                # Use the original path even if ASR has already labelled the early
+                # file. Both stages retain the same timestamp/capture identity.
+                path = Path(paired_path).with_name(
+                    Path(paired_path).name.replace("_early_pending.wav", "_final_pending.wav")
+                )
             samples = np.clip(pcm, -1.0, 1.0)
             channels = 1 if samples.ndim == 1 else samples.shape[1]
             data = (samples * 32767).astype("<i2", copy=False).tobytes()
@@ -237,16 +250,9 @@ class WakewordCandidates:
         if session.kws_candidate:
             if provisional:
                 return
-            if not session.kws_verified:
-                session.kws_pending_final = (
-                    buf,
-                    onset,
-                    loudness_db,
-                    endpoint_t,
-                    wake_probe,
-                    diagnostic_pcm,
-                )
-                return
+            # The trigger-time snapshot may end mid-word. Always admit the
+            # complete endpoint for authoritative verification, even after an
+            # early miss (or while the early job is still queued).
             endpoint_buf = buf
             wav_path = None
             # The gate fires on an individual classifier frame (typically 20 ms),
@@ -257,6 +263,8 @@ class WakewordCandidates:
                     session.id,
                     diagnostic_pcm if diagnostic_pcm is not None else endpoint_buf,
                     session.kws_score,
+                    stage="final",
+                    paired_path=session.kws_wav_path,
                 )
             queued = self.put_utterance(
                 (

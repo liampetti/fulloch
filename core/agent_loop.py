@@ -23,6 +23,7 @@ from utils.prompts import (
     get_agent_system_prompt,
 )
 
+from .action_evidence import FALLBACK, REPAIR, ActionEvidence, claims_execution
 from .agent_emission import normalize_emission, parse_model_emission, should_style_satellite_message
 from .agent_follow_up import route_report_follow_up, startup_greeting_follow_up
 from .agent_search import PROMPT_STRIP_CHARS as _PROMPT_STRIP_CHARS  # noqa: F401 — Assistant export
@@ -192,6 +193,7 @@ class AgentLoop:
         # confabulated "I saved this to your notes" can be scrubbed from the
         # spoken reply when no write happened (see strip_unfounded_save_claim).
         note_written = False
+        evidence = ActionEvidence()
         # Set true once a data-lookup result (intents.LOOKUP_TOOLS) has been
         # handed back for a composing replan this turn. Bounds the cost to a
         # single extra agent call: a second lookup result (or the same one
@@ -341,6 +343,13 @@ class AgentLoop:
             delivery = normalized.delivery
             bundled_reply = normalized.bundled_reply
 
+            if emission.get("actions"):
+                bundled_reply = bundled_reply or emission.get("reply")
+                emission = {key: value for key, value in emission.items() if key != "reply"}
+                # Store the plan, not a model-authored outcome written before
+                # execution. Only the actual tool observations establish results.
+                emission_text = json.dumps({"actions": emission["actions"]})
+
             host._history_for(self.satellite).append(
                 {"role": "assistant", "content": emission_text}
             )
@@ -361,14 +370,33 @@ class AgentLoop:
             # Reply branch — agent's final spoken answer.
             if "reply" in emission:
                 reply = (emission.get("reply") or "").strip()
-                # Prefer the source-grounded summary over a replan's answer;
-                # keep history consistent with what the user hears.
+                # The replan's prose is discarded when grounded findings are
+                # available, so do not repair claims in that unspoken prose.
+                # Preserve any follow-up operation's actual outcome as well.
                 if grounded := search.grounded_reply():
+                    if evidence.records:
+                        grounded = ". ".join(search.output_parts([evidence.response()]))
                     host._history_for(self.satellite)[-1] = {
                         "role": "assistant",
                         "content": json.dumps({"reply": grounded}),
                     }
                     return grounded
+                if claims_execution(reply):
+                    turn_history = host._history_for(self.satellite)
+                    # Remove the unspoken fabrication before any recovery call.
+                    turn_history.pop()
+                    logger.warning("Withheld model execution claim (operations=%d)", len(evidence.records))
+                    if evidence.records:
+                        reply = evidence.response()
+                    elif evidence.repairs == 0 and iteration < MAX_AGENT_CALLS_PER_TURN - 1:
+                        evidence.repairs += 1
+                        turn_history.append({"role": "tool", "name": "reply_guard", "content": REPAIR})
+                        host._emit_agent_event("observation", {"intent": "reply_guard", "result": REPAIR}, source=source)
+                        continue
+                    else:
+                        reply = FALLBACK
+                    turn_history.append({"role": "assistant", "content": json.dumps({"reply": reply})})
+                    return reply
                 if not reply:
                     return random.choice(ACK_PHRASES)
                 return intents.strip_unfounded_save_claim(reply, note_written)
@@ -410,6 +438,7 @@ class AgentLoop:
 
             # Dispatch each action in order. Stop on the first replan trigger.
             result_strs: list = []
+            non_operation_results: list = []
             replan = False
             for action in actions[:3]:
                 if session is not None and session.cancelled:
@@ -523,6 +552,9 @@ class AgentLoop:
                         step = search.accept(search_query, summary, step)
                         web_summarised = True
 
+                operation_step = evidence.record(
+                    {**action, "intent": tool_registry.canonical_name(intent_name) or intent_name}, step
+                )
                 host._history_for(self.satellite).append(
                     {
                         "role": "tool",
@@ -558,6 +590,8 @@ class AgentLoop:
                 # spoken output (it would be both read raw AND recomposed).
                 if step.in_output and not lookup_replan:
                     result_strs.append(step.text)
+                    if not operation_step:
+                        non_operation_results.append(step.text)
                 # A web search always hands control back to the agent: its
                 # summary is now in history, so the agent decides the next
                 # move (another search, a follow-up tool, or a reply) from
@@ -579,11 +613,20 @@ class AgentLoop:
                 # are intercepted earlier by the inline summariser.
                 continue
 
-            # All actions succeeded without replan — speak the answer.
-            # If the model bundled its spoken reply with the tool actions (split
-            # out above), the tools have now run, so speak that reply (e.g.
-            # "Done, saved to your notes") rather than raw joined tool outputs —
-            # unless a web search ran, where the grounded summary wins (below).
+            # No further replan requested. NORMAL includes plain-string failures;
+            # operation confirmations must therefore preserve actual tool output,
+            # never replace it with model-authored delivery/bundled prose.
+            if evidence.records:
+                spoken = " ".join([evidence.response(), *non_operation_results])
+                if search.grounded_reply():
+                    spoken = ". ".join(search.output_parts([spoken]))
+                host._record_spoken(spoken)
+                return spoken
+            # A lookup is not evidence that an operation occurred. Guard bundled
+            # prose too; never repeat tools merely to repair their confirmation.
+            if claims_execution(bundled_reply or "") or claims_execution(delivery or ""):
+                bundled_reply = None
+                delivery = None
             if bundled_reply and not search.latest:
                 spoken = intents.strip_unfounded_save_claim(bundled_reply, note_written)
                 host._record_spoken(spoken)
@@ -594,7 +637,7 @@ class AgentLoop:
             # completed actions to the user.
             spoken = delivery if delivery else ". ".join(parts)
             if not spoken:
-                spoken = "Done."
+                spoken = FALLBACK
             spoken = intents.strip_unfounded_save_claim(spoken, note_written)
             host._record_spoken(spoken)
             return spoken

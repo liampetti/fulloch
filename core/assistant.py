@@ -853,9 +853,7 @@ class Assistant:
                     # as "Hi, Atticus" without needing a regex-like prompt.
                     wakeword_terms = (self.wakeword, *self.wakeword.split()[-1:])
                     nemo_terms = [*wakeword_terms, *extras]
-                    self.asr_pipe.set_context_phrases(
-                        nemo_terms, wakeword_phrases=wakeword_terms
-                    )
+                    self.asr_pipe.set_context_phrases(nemo_terms)
                     logger.info("NeMo ASR context phrase boosting enabled: %r", nemo_terms)
             else:
                 self.asr_pipe.context = "Technical terms: " + ", ".join(terms)
@@ -1739,7 +1737,6 @@ class Assistant:
         server_vad: bool = True,
         auth_token: Optional[str] = None,
         device_id: Optional[str] = None,
-        initial_grace: bool = False,
     ) -> "queue.Queue":
         """Start a satellite session (browser `/ws/satellite` or a
         `/ws/satellite-v2` client). Returns the audio chunk queue.
@@ -1751,15 +1748,13 @@ class Assistant:
         16 kHz mono chunks into the returned queue; the satellite_recorder_thread
         drains it and pushes utterances to the ASR pipeline. Conversation mode is
         exclusive, disconnects any other voice satellites, and bypasses the
-        wakeword; a None request uses the configured default. Normal mode opens
-        a 60 s initial wakeword-free grace window.
+        wakeword; a None request uses the configured default. Normal mode starts
+        wakeword-gated for both browser and native clients.
 
         `label`/`server_vad`/`auth_token`/`device_id` are the satellite-v2 forward-compat
         fields (#12/#13) — the browser path leaves them at their defaults
         (`None`/`True`/`None`/`None`); only the `/ws/satellite-v2` handler passes
-        real values. `initial_grace` is browser-only: the user explicitly enters
-        Voice mode there, while an always-on native satellite must start gated by
-        its wakeword. `ha_area` (#14, 6b) IS set by the browser path too, from
+        real values. `ha_area` (#14, 6b) IS set by the browser path too, from
         the `?area=` query param on `/ws/satellite` — the user's one-time
         room picker choice, persisted client-side in `localStorage`.
         `ha_area_name` is that same choice's display name (`?area_name=`),
@@ -1818,12 +1813,6 @@ class Assistant:
             name="satellite-recorder",
         )
         session.recorder_thread.start()
-        # A browser user explicitly clicked into Voice mode and expects to speak
-        # immediately. Native satellites are always listening, so a reconnect
-        # must not turn nearby conversation into a wakeword-free follow-up.
-        if initial_grace and not session.conversation_mode:
-            session.last_turn_end = time.monotonic()
-            self.audio_capture.arm_follow_up(session, 60)
         logger.info(
             "Satellite %s connected (conversation_mode=%s)", satellite_id, session.conversation_mode
         )
@@ -3376,13 +3365,13 @@ class Assistant:
                 )
                 if kws_early_verification:
                     accepted = bool(text and self._wakeword_re.search(text.lower()))
-                    if isinstance(kws_capture_id, int):
+                    self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=accepted)
+                    if accepted and isinstance(kws_capture_id, int):
                         self.audio_capture.resolve_wakeword_candidate(sat, kws_capture_id, accepted)
                     if not accepted:
-                        self.wakeword_metrics["rejected"] += 1
-                        logger.info("openWakeWord activation rejected by ASR: %r", text)
-                        telemetry_event("wakeword_rejected", satellite_id=turn_satellite_id)
-                        self._reject_pending_satellite_wake(sat)
+                        logger.info(
+                            "Early wake verification inconclusive; awaiting final audio: %r", text
+                        )
                     continue
                 if not text:
                     if kws_candidate:

@@ -117,7 +117,9 @@ SCHEMA: tuple = (
         "bool",
         "General",
         False,
-        "Save timestamped openWakeWord candidate WAV files under data/logs/wake_wavs/. Contains microphone audio; off by default.",
+        "Save paired early-verification and final openWakeWord WAV files under "
+        "data/logs/wake_wavs/. Matching filename prefixes identify the same capture; "
+        "accepted/rejected labels describe each ASR pass. Contains microphone audio; off by default.",
     ),
     Field(
         "general",

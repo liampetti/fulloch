@@ -60,7 +60,6 @@ def register_browser_satellite_route(
                 conversation_mode=conversation_mode,
                 ha_area=ha_area,
                 ha_area_name=ha_area_name,
-                initial_grace=True,
             )
         except ConversationModeUnavailable as error:
             await ws.send_json({"type": "error", "code": "conversation_mode_active", "message": str(error)})

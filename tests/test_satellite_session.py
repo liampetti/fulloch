@@ -106,15 +106,16 @@ class TestConnectSatellite:
         a.audio_capture.arm_follow_up.assert_not_called()
         a.disconnect_satellite("native")
 
-    def test_browser_initial_grace_allows_immediate_speech(self):
+    def test_browser_session_starts_wakeword_gated(self):
         a = _make_assistant()
         a.audio_capture.satellite_recorder_thread = _blocking_recorder
 
-        a.connect_satellite("browser", initial_grace=True)
+        a.connect_satellite("browser")
 
         session = a.satellites["browser"]
-        assert session.last_turn_end > 0.0
-        a.audio_capture.arm_follow_up.assert_called_once_with(session, 60)
+        assert session.last_turn_end == 0.0
+        assert session.follow_up_deadline == 0.0
+        a.audio_capture.arm_follow_up.assert_not_called()
         a.disconnect_satellite("browser")
 
     def test_same_device_id_replaces_the_existing_session(self):

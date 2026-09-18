@@ -13,8 +13,8 @@ from core.wakeword import WakewordResult
 
 
 @pytest.mark.parametrize("accepted", [True, False])
-def test_hard_endpoint_retains_final_until_delayed_wake_verdict(accepted):
-    """ASR may finish verification after VAD has closed the command buffer."""
+def test_hard_endpoint_queues_final_before_delayed_wake_verdict(accepted):
+    """The full endpoint is authoritative even when early verification is late."""
     capture = AudioCapture(use_vad=False, min_utterance_ms=100)
     capture._use_vad_enabled = True
     capture.vad_min_speech_samples = 100
@@ -37,9 +37,9 @@ def test_hard_endpoint_retains_final_until_delayed_wake_verdict(accepted):
         def get(self, *args, **kwargs):
             self.reads += 1
             if self.reads == 3:
-                assert session.kws_candidate
-                assert session.kws_pending_final is not None
-                assert capture.audio_queue.empty()
+                assert not session.kws_candidate
+                assert session.kws_pending_final is None
+                assert capture.audio_queue.qsize() == 1
                 capture.resolve_wakeword_candidate(session, 7, accepted)
                 self.put(None)
             return super().get(*args, **kwargs)
@@ -56,12 +56,11 @@ def test_hard_endpoint_retains_final_until_delayed_wake_verdict(accepted):
     assert not session.kws_candidate
     assert session.kws_pending_final is None
     assert "sat-a" not in capture._live_endpointers
-    if accepted:
-        final = capture.audio_queue.get_nowait()
-        np.testing.assert_array_equal(final[0], np.concatenate([chunk, chunk]))
-        assert final[3] is False
-        assert final[7] is True
-        assert final[10:] == (False, 7)
+    final = capture.audio_queue.get_nowait()
+    np.testing.assert_array_equal(final[0], np.concatenate([chunk, chunk]))
+    assert final[3] is False
+    assert final[7] is True
+    assert final[10:] == (False, 7)
     assert capture.audio_queue.empty()
 
 

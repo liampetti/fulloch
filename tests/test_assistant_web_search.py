@@ -127,6 +127,22 @@ def test_search_summary_survives_a_follow_up_note_write(turn):
     turn.host._record_spoken.assert_called_once_with("Grounded findings. Saved the note.")
 
 
+def test_search_summary_preserves_failed_note_write_on_reply_replan(turn):
+    turn.catch.return_value = {"actions": [_search()]}
+    turn.save.return_value = "Reactive question: Couldn't save the note."
+    _emissions(
+        turn,
+        {"actions": [{"intent": "append_to_today", "args": ["Grounded findings."]}]},
+        {"reply": "I've saved this to your notes."},
+    )
+
+    expected = "Grounded findings. Couldn't save the note."
+    assert turn.loop.run("Find news and save it") == expected
+    turn.save.assert_called_once_with("Grounded findings.")
+    assert turn.host._generate_with_context_recovery.call_count == 2
+    assert json.loads(turn.history[-1]["content"]) == {"reply": expected}
+
+
 def test_search_discards_bundled_actions_and_replans_from_findings(turn):
     turn.catch.return_value = {"actions": [
         _search(), {"intent": "append_to_today", "args": ["Unresearched guess"]},
@@ -231,14 +247,15 @@ def test_empty_or_fragmented_emission_requests_clarification(turn, emission):
     turn.save.assert_not_called()
 
 
-def test_bundled_reply_is_spoken_after_real_tool_dispatch(turn):
+def test_real_tool_result_replaces_bundled_confirmation(turn):
     _emissions(turn, {"actions": [
         {"intent": "append_to_today", "args": ["A fact"]},
         {"intent": "reply", "args": ["I've saved this to your notes."]},
     ]})
 
-    assert turn.loop.run("Remember a fact") == "I've saved this to your notes."
+    assert turn.loop.run("Remember a fact") == "Saved the note."
     turn.save.assert_called_once_with("A fact")
+    assert not any("I've saved this" in entry["content"] for entry in turn.history)
     turn.host._speak_tool_unavailable_fallback.assert_not_called()
 
 

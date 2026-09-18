@@ -182,7 +182,7 @@ def test_unresolved_model_wake_times_out_to_idle(assistant, monkeypatch):
     assert assistant.satellites["sat-a"].protocol_turn_id is None
 
 
-def test_early_verification_rejection_stands_down_without_dispatch(assistant):
+def test_early_verification_miss_remains_pending_without_dispatch(assistant):
     events = []
     assistant.register_turn_listener(events.append)
     assistant._on_wakeword_model_match("sat-a")
@@ -194,7 +194,36 @@ def test_early_verification_rejection_stands_down_without_dispatch(assistant):
         early_verification_indexes={0},
     )
 
+    assert [event["state"] for event in events] == ["wake_detected", "listening"]
+    assert assistant.wakeword_metrics["rejected"] == 0
+    assistant._start_turn.assert_not_called()
+
+
+def test_early_miss_can_be_recovered_by_complete_wakeword(assistant):
+    assistant._on_wakeword_model_match("sat-a")
+    _run_transcripts(
+        assistant,
+        ["hey at", "atticus set a timer for six minutes"],
+        kws_candidate_indexes={0, 1},
+        early_verification_indexes={0},
+    )
+    assistant._start_turn.assert_called_once()
+    assert assistant._start_turn.call_args.args[0] == "set a timer for six minutes"
+    assert assistant.wakeword_metrics["rejected"] == 0
+
+
+def test_early_miss_is_rejected_only_when_final_audio_also_misses(assistant):
+    events = []
+    assistant.register_turn_listener(events.append)
+    assistant._on_wakeword_model_match("sat-a")
+    _run_transcripts(
+        assistant,
+        ["hey at", "television noise"],
+        kws_candidate_indexes={0, 1},
+        early_verification_indexes={0},
+    )
     assert [event["state"] for event in events] == ["wake_detected", "listening", "idle"]
+    assert assistant.wakeword_metrics["rejected"] == 1
     assistant._start_turn.assert_not_called()
 
 

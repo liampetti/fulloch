@@ -404,6 +404,7 @@ def test_complete_todo_item_matches_by_substring():
         patch.object(client, "HA_TOKEN", "tok"),
         patch.object(client, "TODO_ENTITY", "todo.shopping_list"),
         patch.object(client, "_DENIED_ENTITIES", frozenset()),
+        patch.object(client, "_ENTITY_ALIASES", {"shopping list": "todo.shopping_list"}),
         patch(
             "tools.ha_client._call_service_with_response",
             return_value={"todo.shopping_list": {"items": items}},

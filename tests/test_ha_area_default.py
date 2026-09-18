@@ -176,6 +176,9 @@ class TestToolsUseAreaDefault:
                 return_value=json.dumps(["light.kitchen_ceiling", "light.kitchen_lamp"]),
             ),
             patch.object(client, "_DENIED_ENTITIES", set()),
+            patch.object(client, "_ENTITY_ALIASES", {
+                "ceiling": "light.kitchen_ceiling", "lamp": "light.kitchen_lamp",
+            }),
             patch("tools.ha_client.requests.post") as post,
         ):
             post.return_value = MagicMock(status_code=200)
@@ -209,6 +212,7 @@ class TestToolsUseAreaDefault:
                 client, "_render_template", return_value=json.dumps(["light.kitchen_ceiling"])
             ),
             patch.object(client, "_DENIED_ENTITIES", set()),
+            patch.object(client, "_ENTITY_ALIASES", {"ceiling": "light.kitchen_ceiling"}),
             patch("tools.ha_client.requests.post") as post,
         ):
             post.return_value = MagicMock(status_code=200)

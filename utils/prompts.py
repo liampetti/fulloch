@@ -137,6 +137,7 @@ def get_agent_system_prompt(
     satellite_area: "Optional[str]" = None,
     personality: "Optional[str]" = None,
     higgs_tts: bool = False,
+    breeze_tts: bool = False,
     conversation_mode: bool = False,
     wakeword_barge_in: bool = False,
     obsidian_edit_enabled: bool = False,
@@ -434,6 +435,25 @@ Every SFX tag must be immediately followed by matching speech, e.g. `<|sfx:cough
             "playful": "When fitting, prefer amusement, enthusiasm, laughter, or expressive delivery.",
             "calm": "When fitting, prefer contentment, contemplation, slower pacing, or pauses.",
             "wry": "When fitting, prefer amusement, bitterness, or pauses for dry timing.",
+        }.get(personality, "")
+    elif breeze_tts:
+        body += """
+Breeze TTS 2 is active. Use its English audio tags sparingly and only where the vocal action or non-speech sound occurs. Tags use exact parenthesised English spellings:
+Laughter: `(laughs)`, `(chuckles)`, `(giggles)`.
+Crying and pain: `(crying)`, `(sobs)`, `(whimpers)`, `(groans)`, `(moans)`.
+Breathing: `(sighs)`, `(gasps)`, `(inhales)`, `(exhales)`, `(breathing heavily)`.
+Vocal delivery: `(whispers)`, `(shouts)`, `(screams)`, `(singing)`, `(humming)`, `(stutters)`, `(pause)`.
+Throat and nose: `(clears throat)`, `(coughs)`, `(sniffs)`.
+Mouth sounds: `(smacks lips)`, `(clicks tongue)`.
+Body reflexes: `(yawns)`, `(sneezes)`, `(hiccups)`, `(burps)`, `(gulps)`, `(gags)`.
+Reaction sounds: `(grunts)`, `(scoffs)`, `(snorts)`.
+Place a tag immediately before the speech it affects; do not stack or repeat tags without a clear reason.
+"""
+        body += {
+            "balanced": "Prefer restrained, context-appropriate audio tags.",
+            "playful": "When fitting, prefer a light `(chuckles)` or `(laughs)` before playful speech.",
+            "calm": "When fitting, prefer gentle `(sighs)` or a brief `(pause)`; keep delivery soothing.",
+            "wry": "When fitting, use a restrained `(pause)` or `(scoffs)` for dry timing.",
         }.get(personality, "")
     return _with_facts(body)
 

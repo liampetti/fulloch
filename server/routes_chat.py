@@ -1,7 +1,9 @@
 """Dashboard chat/status, history/SSE and assistant-backed management routes."""
 
 import asyncio
+import html
 import json
+import logging
 import os
 import queue
 import re
@@ -24,10 +26,86 @@ _SERVER_DIR = Path(__file__).resolve().parent
 _LOGO_PATH = _SERVER_DIR.parent / "fulloch.png"
 _PARLOCH_PATH = _SERVER_DIR.parent / "parloch.png"
 _SERVER_INSTANCE_ID = uuid.uuid4().hex
+logger = logging.getLogger(__name__)
 HISTORY_LIMIT = 200
 SUBSCRIBER_IDLE_KEEPALIVE_S = 15
 SSE_SUBSCRIBER_QUEUE_SIZE = 100
 PROACTIVE_REQUEST_LIMIT = 2
+
+_DOCUMENT_ALLOWED_TAGS = {
+    "a", "blockquote", "br", "code", "del", "details", "div", "em", "figcaption", "figure",
+    "h1", "h2", "h3", "h4", "h5", "h6", "hr", "img", "kbd", "li", "ol", "p", "pre",
+    "s", "small", "span", "strong", "summary", "table", "tbody", "td", "th", "thead", "tr",
+    "ul",
+}
+_DOCUMENT_ALLOWED_ATTRIBUTES = {"a": {"href", "title"}, "img": {"alt", "height", "src", "title", "width"}}
+
+
+def _render_markdown_document(markdown_text: str) -> str:
+    """Convert Markdown to a small, safe HTML subset for the document viewer."""
+    try:
+        from markdown import markdown
+
+        rendered = markdown(markdown_text, extensions=["extra", "sane_lists"])
+    except ImportError:  # Keep an older install readable until its dependencies are updated.
+        rendered = f"<pre>{html.escape(markdown_text)}</pre>"
+
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(rendered, "html.parser")
+    for tag in soup.find_all(["embed", "form", "iframe", "object", "script", "style"]):
+        tag.decompose()
+    for tag in soup.find_all(True):
+        if tag.name not in _DOCUMENT_ALLOWED_TAGS:
+            tag.unwrap()
+            continue
+        allowed = _DOCUMENT_ALLOWED_ATTRIBUTES.get(tag.name, set())
+        for attribute in list(tag.attrs):
+            if attribute not in allowed:
+                del tag.attrs[attribute]
+        if tag.name in {"a", "img"}:
+            url = tag.get("href") or tag.get("src") or ""
+            if url.lower().lstrip().startswith(("javascript:", "data:")):
+                if tag.name == "a":
+                    tag.attrs.pop("href", None)
+                else:
+                    tag.decompose()
+                    continue
+        if tag.name == "a" and tag.get("href"):
+            tag["target"] = "_blank"
+            tag["rel"] = "noopener noreferrer"
+    return str(soup)
+
+
+def _document_html(title: str, markdown_text: str) -> str:
+    """Build a standalone, readable document page without dashboard chrome."""
+    body = _render_markdown_document(markdown_text)
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)} · Fulloch</title><style>
+:root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
+body {{ margin: 0; background: #f8faf9; color: #19231e; }}
+main {{ max-width: 860px; margin: 0 auto; padding: clamp(24px, 6vw, 72px) clamp(18px, 4vw, 42px); }}
+article {{ font-size: 1.05rem; line-height: 1.7; }}
+h1, h2, h3 {{ line-height: 1.2; margin-top: 1.8em; }} h1 {{ margin-top: 0; }}
+a {{ color: #087f72; }} pre, code {{ font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }}
+pre {{ overflow-x: auto; padding: 1rem; border-radius: 8px; background: #eaf0ec; }}
+code {{ padding: .12em .3em; border-radius: 4px; background: #eaf0ec; }} pre code {{ padding: 0; background: none; }}
+blockquote {{ margin-left: 0; padding-left: 1rem; border-left: 3px solid #49a38f; color: #425148; }}
+table {{ width: 100%; border-collapse: collapse; overflow: hidden; }} th, td {{ padding: .6rem; border: 1px solid #ccd8d1; text-align: left; }}
+img {{ max-width: 100%; height: auto; }}
+.document-action {{ position: fixed; top: 14px; right: 16px; width: 34px; height: 34px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: inherit; cursor: pointer; }}
+.document-action:hover {{ background: #8882; }} .document-action:disabled {{ opacity: .5; cursor: wait; }}
+.document-action svg {{ width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }}
+#document-editor {{ box-sizing: border-box; width: 100%; min-height: 75vh; resize: vertical; border: 1px solid #8885; border-radius: 8px; padding: 16px; background: transparent; color: inherit; font: .95rem/1.6 ui-monospace, monospace; }}
+#document-error {{ color: #c44; font-size: .9rem; }}
+@media (prefers-color-scheme: dark) {{ body {{ background: #121a16; color: #e5eee8; }} pre, code {{ background: #202b25; }} blockquote {{ color: #b7c6bd; }} th, td {{ border-color: #3b4b42; }} a {{ color: #62c9af; }} }}
+</style><script src="/static/js/document-viewer.js" defer></script></head><body>
+<button class="document-action" id="document-action" type="button" aria-label="Edit document" title="Edit document">
+<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 5 5L8 21H3v-5ZM14 5l5 5"/></svg></button>
+<main><p id="document-error" role="alert" hidden></p><article id="document-content">{body}</article>
+<textarea id="document-editor" aria-label="Markdown document" spellcheck="false" hidden>{html.escape(markdown_text)}</textarea>
+</main></body></html>"""
 
 # /status is polled frequently. Cache YAML parsing by path and mtime; edits
 # invalidate automatically, including changes made by the settings routes.
@@ -203,18 +281,88 @@ def register_chat_routes(
         with history_lock:
             return JSONResponse(list(history_log))
 
-    @app.get("/reports/{note_id:path}")
-    def get_report(note_id: str) -> Response:
-        """Serve reports only from the dedicated reports note directory."""
-        if not re.fullmatch(r"fulloch-reports/\d{4}-\d{2}-\d{2}-[0-9a-f]{8}", note_id):
-            raise HTTPException(status_code=404, detail="report not found")
+    def resolve_document(document_path: str) -> Path:
+        """Resolve a visible Markdown document without exposing the filesystem."""
         from tools.notes_root import get_notes_root
 
         root = get_notes_root().resolve()
-        path = (root / f"{note_id}.md").resolve()
-        if not path.is_relative_to(root) or not path.is_file():
+        path = (root / document_path).resolve()
+        if (
+            not path.is_relative_to(root)
+            or path.suffix.lower() != ".md"
+            or not path.is_file()
+            or any(part.startswith(".") for part in path.relative_to(root).parts)
+        ):
+            raise HTTPException(status_code=404, detail="document not found")
+        return path
+
+    def document_response(path: Path) -> HTMLResponse:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as error:
+            logger.warning("Unable to open document %s: %s", path, error)
+            raise HTTPException(status_code=404, detail="document not found") from error
+        return HTMLResponse(_document_html(path.stem.replace("-", " "), text))
+
+    @app.get("/api/documents")
+    def list_documents() -> JSONResponse:
+        """Return Markdown documents that are available to Fulloch's notes tools."""
+        from tools.notes_root import get_notes_root
+
+        root = get_notes_root().resolve()
+        documents = []
+        try:
+            candidates = root.rglob("*.md")
+            for path in candidates:
+                try:
+                    resolved = path.resolve()
+                    relative = resolved.relative_to(root)
+                    if not resolved.is_file() or any(part.startswith(".") for part in relative.parts):
+                        continue
+                    documents.append({
+                        "path": relative.as_posix(),
+                        "title": resolved.stem.replace("-", " "),
+                        "modified_at": resolved.stat().st_mtime,
+                    })
+                except (OSError, ValueError):
+                    continue
+        except OSError as error:
+            logger.warning("Unable to list documents in %s: %s", root, error)
+        documents.sort(key=lambda document: document["path"].casefold())
+        return JSONResponse({"documents": documents})
+
+    @app.get("/documents/{document_path:path}")
+    def get_document(document_path: str) -> HTMLResponse:
+        return document_response(resolve_document(document_path))
+
+    def save_document(path: Path, content: str) -> dict:
+        from tools.notes import _after_write
+        from tools.notes_storage import write_atomic
+
+        try:
+            write_atomic(path, content, prefix=".document-")
+        except OSError as error:
+            logger.warning("Unable to save document %s: %s", path, error)
+            raise HTTPException(status_code=500, detail="Could not save the document.") from error
+        _after_write(path)
+        return {"html": _render_markdown_document(content)}
+
+    @app.put("/documents/{document_path:path}")
+    def update_document(document_path: str, req: NoteRequest) -> dict:
+        return save_document(resolve_document(document_path), req.content)
+
+    @app.put("/reports/{note_id:path}")
+    def update_report(note_id: str, req: NoteRequest) -> dict:
+        if not re.fullmatch(r"fulloch-reports/\d{4}-\d{2}-\d{2}-[0-9a-f]{8}", note_id):
             raise HTTPException(status_code=404, detail="report not found")
-        return Response(path.read_text(encoding="utf-8"), media_type="text/markdown")
+        return save_document(resolve_document(f"{note_id}.md"), req.content)
+
+    @app.get("/reports/{note_id:path}")
+    def get_report(note_id: str) -> HTMLResponse:
+        """Render reports from the dedicated reports directory in a new browser tab."""
+        if not re.fullmatch(r"fulloch-reports/\d{4}-\d{2}-\d{2}-[0-9a-f]{8}", note_id):
+            raise HTTPException(status_code=404, detail="report not found")
+        return document_response(resolve_document(f"{note_id}.md"))
 
     @app.post("/reset")
     def reset_chat() -> dict:

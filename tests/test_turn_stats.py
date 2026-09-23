@@ -110,6 +110,15 @@ class TestToPayloadAdaptive:
         patch = s.tts_payload()
         assert patch == {"seconds": 0.24, "model": TTS_MODEL}
 
+    def test_laya_payload_is_separate_from_llm_generation(self):
+        s = TurnStats(route="laya", laya_seconds=0.42)
+
+        payload = s.to_payload()
+
+        assert payload["route"] == "laya"
+        assert payload["laya"] == {"seconds": 0.42, "model": LLM_MODEL}
+        assert "llm" not in payload
+
 
 class TestTotalWithTts:
     def test_extends_emitted_total(self):

@@ -9,7 +9,7 @@ import torch
 
 # Generic queue drainer — backend-agnostic, re-exported so the assistant can
 # pull it from whichever ASR module the registry selected.
-from .asr import stream_generator  # noqa: F401
+from .asr import AsrInput, stream_generator  # noqa: F401
 from .inference_safety import InferenceWatchdog
 
 logger = logging.getLogger(__name__)
@@ -22,11 +22,16 @@ DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 
 def _to_array(chunk) -> np.ndarray:
     """Coerce a queue buffer (tensor / list / ndarray) to a float32 array."""
+    # The assistant wraps queued audio in AsrInput when it needs a per-turn
+    # context override.  Moonshine does not use that context, but it must still
+    # unwrap the PCM exactly like the other ASR backends do.
+    if isinstance(chunk, AsrInput):
+        chunk = chunk.pcm
     if isinstance(chunk, torch.Tensor):
-        return chunk.detach().cpu().numpy()
+        chunk = chunk.detach().cpu().numpy()
     if not isinstance(chunk, np.ndarray):
         return np.asarray(chunk, dtype=np.float32)
-    return chunk
+    return np.asarray(chunk, dtype=np.float32)
 
 
 class MoonshineASRPipelineWrapper:
@@ -46,10 +51,14 @@ class MoonshineASRPipelineWrapper:
     def _transcribe(self, arr: np.ndarray, generate_kwargs: dict) -> str:
         _t0 = time.monotonic()
         with InferenceWatchdog("Moonshine ASR transcription"):
-            result = self.pipe(
-                {"raw": arr, "sampling_rate": SAMPLE_RATE},
-                generate_kwargs=generate_kwargs or None,
-            )
+            inputs = {"raw": arr, "sampling_rate": SAMPLE_RATE}
+            # Passing ``generate_kwargs=None`` trips Transformers 4.57's ASR
+            # pipeline parameter sanitiser.  Omit it unless a caller has an
+            # actual generation override (the assistant supplies a token cap).
+            if generate_kwargs:
+                result = self.pipe(inputs, generate_kwargs=generate_kwargs)
+            else:
+                result = self.pipe(inputs)
         self.last_transcribe_seconds = time.monotonic() - _t0
         if isinstance(result, list):
             result = result[0] if result else {}
@@ -101,9 +110,12 @@ def load_asr_model(model_name: Optional[str] = None, language: Optional[str] = N
         model=model,
         tokenizer=processor.tokenizer,
         feature_extractor=processor.feature_extractor,
-        device=DEVICE,
+        # Transformers pipelines use -1 for CPU.  Passing the torch device
+        # string works with some releases but is not portable across the CPU
+        # image's supported Transformers versions.
+        device=0 if DEVICE == "cuda" else -1,
         dtype=DTYPE,
     )
     if language:
-        logger.info(f"ASR language requested ({language!r}); Moonshine-tiny is English-only")
+        logger.info(f"ASR language requested ({language!r}); Moonshine is English-only")
     return MoonshineASRPipelineWrapper(pipe, language=language)

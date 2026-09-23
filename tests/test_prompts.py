@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from core.breeze_controls import _AUDIO_TAGS  # noqa: E402
 from core.higgs_controls import _ALLOWED  # noqa: E402
 from tools import notes, notes_root  # noqa: E402
 from utils import prompts  # noqa: E402
@@ -70,6 +71,16 @@ class TestAgentPromptShape:
         for values in _ALLOWED.values():
             for value in values:
                 assert value in prompt
+
+    def test_breeze_prompt_teaches_documented_audio_tags_and_personality(self, notes_dir):
+        prompt = prompts.get_agent_system_prompt(personality="playful", breeze_tts=True)
+
+        assert "Breeze TTS 2 is active" in prompt
+        assert "(laughs)" in prompt
+        assert "(whispers)" in prompt
+        assert "(chuckles)" in prompt
+        for tag in _AUDIO_TAGS:
+            assert f"({tag})" in prompt
 
     def test_personality_applies_without_higgs_delivery_tokens(self, notes_dir):
         prompt = prompts.get_agent_system_prompt(personality="wry")

@@ -299,7 +299,7 @@ def _start_dashboard(context, host, port, certfile, keyfile):
 def main():
     # First-run scaffolding: create the data subtree + seed config/grammar from
     # the bundled template so an empty ./data boots straight into the wizard.
-    ensure_scaffolding()
+    freshly_seeded_config = ensure_scaffolding()
 
     # Read config fresh (it may have just been seeded) and derive dashboard
     # settings + the setup decision from it.
@@ -316,7 +316,7 @@ def main():
     integration_api_port = general.get("integration_api_port", 8766)
 
     # Phase A: decide whether first-run setup is needed before loading anything.
-    decision = detect_setup_state(cfg)
+    decision = detect_setup_state(cfg, freshly_seeded_config=freshly_seeded_config)
 
     # HF offline policy, set BEFORE anything imports huggingface_hub (it reads
     # this as an import-time constant): online when setup will download models so

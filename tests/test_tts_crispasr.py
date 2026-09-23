@@ -140,3 +140,73 @@ def test_pocket_tts_does_not_periodically_recycle_its_warm_worker(monkeypatch):
     tts._recycle_worker_if_needed()
 
     assert tts._session is worker
+
+
+def test_breeze_tts_uses_complete_pcm_api_and_validates_audio_tags(monkeypatch):
+    class FakeWorker:
+        def call(self, command, **payload):
+            assert (command, payload) == ("synthesize", {"text": "(sighs) Hello"})
+            return [0.1, 0.2]
+
+        def stream(self, *_args, **_kwargs):
+            raise AssertionError("Breeze TTS uses CrispASR's complete PCM API")
+
+    monkeypatch.setattr(tts, "CrispASRWorker", FakeWorker)
+    monkeypatch.setattr(tts, "_session", FakeWorker())
+    monkeypatch.setattr(tts, "_pocket_tts", False)
+    monkeypatch.setattr(tts, "_breeze_tts", True)
+
+    chunks = list(tts._synth_stream("(sighs) Hello (invented sound)"))
+
+    assert len(chunks) == 1
+    np.testing.assert_allclose(chunks[0], [0.1, 0.2])
+
+
+def test_breeze_load_uses_native_worker_api_for_voice_cloning(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    (runtime / "crispasr").mkdir(parents=True)
+    (runtime / "crispasr" / "__init__.py").touch()
+    model_dir = tmp_path / "breeze"
+    model_dir.mkdir()
+    (model_dir / tts.BREEZE_MODEL_FILE).touch()
+    (model_dir / tts.CODEC_FILE).touch()
+
+    created = []
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            created.append(self)
+
+    monkeypatch.setattr(tts, "CrispASRWorker", FakeWorker)
+    session = tts.load_tts(
+        model_id=str(model_dir),
+        lib_dir=str(runtime),
+        backend="bt2-tts",
+        gpu=True,
+        num_threads=7,
+    )
+
+    assert session is created[0]
+    assert session.kwargs == {
+        "model_path": model_dir / tts.BREEZE_MODEL_FILE,
+        "lib_dir": runtime,
+        "codec_path": model_dir / tts.CODEC_FILE,
+        "num_threads": 7,
+        "direct_breeze_tts": True,
+    }
+
+
+def test_breeze_tts_does_not_periodically_recycle_its_warm_worker(monkeypatch):
+    class FakeWorker:
+        alive = True
+
+    worker = FakeWorker()
+    monkeypatch.setattr(tts, "_session", worker)
+    monkeypatch.setattr(tts, "_pocket_tts", False)
+    monkeypatch.setattr(tts, "_breeze_tts", True)
+    monkeypatch.setattr(tts, "_worker_stream_count", 8)
+
+    tts._recycle_worker_if_needed()
+
+    assert tts._session is worker

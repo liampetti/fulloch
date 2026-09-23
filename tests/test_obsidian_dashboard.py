@@ -73,6 +73,74 @@ def test_status_does_not_leak_token(ctx):
     assert "token" not in r.json()
 
 
+def test_documents_list_and_viewer_are_limited_to_the_notes_folder(ctx, tmp_path, monkeypatch):
+    root = tmp_path / "documents"
+    monkeypatch.setattr(notes_root, "_override", root)
+    (root / "Projects").mkdir(parents=True)
+    document = root / "Projects" / "garden-plan.md"
+    document.write_text("# Garden plan\n\nPlant herbs in spring.", encoding="utf-8")
+    (root / ".obsidian").mkdir()
+    (root / ".obsidian" / "hidden.md").write_text("hidden", encoding="utf-8")
+
+    client = _client(ctx)
+    listing = client.get("/api/documents")
+
+    assert listing.status_code == 200
+    documents = listing.json()["documents"]
+    assert {
+        "path": "Projects/garden-plan.md",
+        "title": "garden plan",
+        "modified_at": document.stat().st_mtime,
+    } in documents
+    assert all(not item["path"].startswith(".obsidian/") for item in documents)
+    viewer = client.get("/documents/Projects/garden-plan.md")
+    assert viewer.status_code == 200
+    assert viewer.headers["content-type"].startswith("text/html")
+    assert "<h1>Garden plan</h1>" in viewer.text and "Plant herbs in spring." in viewer.text
+    assert client.get("/documents/../credentials.md").status_code == 404
+
+
+def test_report_link_renders_formatted_html(ctx, tmp_path, monkeypatch):
+    root = tmp_path / "documents"
+    monkeypatch.setattr(notes_root, "_override", root)
+    report = root / "fulloch-reports" / "2026-08-27-12345678.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("# Report\n\nA useful finding.", encoding="utf-8")
+
+    response = _client(ctx).get("/reports/fulloch-reports/2026-08-27-12345678")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Report" in response.text and "A useful finding." in response.text
+
+
+@pytest.mark.parametrize("url", [
+    "/documents/fulloch-reports/2026-08-27-12345678.md",
+    "/reports/fulloch-reports/2026-08-27-12345678",
+])
+def test_document_edits_save_markdown_and_reindex(ctx, tmp_path, monkeypatch, url):
+    root = tmp_path / "documents"
+    monkeypatch.setattr(notes_root, "_override", root)
+    after_write = MagicMock()
+    monkeypatch.setattr(notes, "_after_write", after_write)
+    path = root / "fulloch-reports/2026-08-27-12345678.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("# Original\n", encoding="utf-8")
+    client = _client(ctx)
+    response = client.put(url, json={"content": "# Edited\n\n**Updated**\n"})
+    assert response.status_code == 200
+    assert "<strong>Updated</strong>" in response.json()["html"]
+    assert path.read_text(encoding="utf-8") == "# Edited\n\n**Updated**\n"
+    after_write.assert_called_once_with(path)
+    assert "# Edited" in client.get(url).text
+    assert client.put("/documents/missing.md", json={"content": "new"}).status_code == 404
+    outside = tmp_path / "outside.md"
+    outside.write_text("private", encoding="utf-8")
+    (root / "escape.md").symlink_to(outside)
+    assert client.put("/documents/escape.md", json={"content": "changed"}).status_code == 404
+    assert outside.read_text(encoding="utf-8") == "private"
+
+
 def test_plugin_archive_download(ctx, tmp_path, monkeypatch):
     archive = tmp_path / "fulloch-obsidian-plugin.zip"
     archive.write_bytes(b"plugin")

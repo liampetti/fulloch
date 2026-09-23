@@ -600,7 +600,7 @@ nav.tabs {
 .switch input:checked + .slider::before { transform: translateX(18px); }
 .entities-empty { color: var(--text-muted); padding: 16px 4px; }
 
-/* Obsidian panel */
+/* Documents workspace and optional Obsidian integration */
 .obs-plugin-info {
   display: flex; align-items: flex-start; gap: 10px;
   padding: 10px 12px;
@@ -703,6 +703,37 @@ nav.tabs {
 }
 .obs-help { font-size: 0.78rem; color: var(--text-muted); margin: 0; line-height: 1.5; }
 .obs-help code { font-family: var(--font-mono); font-size: 0.78rem; background: var(--surface-2); padding: 0 4px; border-radius: 4px; }
+.documents-browser {
+  padding: 16px 18px;
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  background: var(--glass);
+  box-shadow: var(--shadow-sm);
+}
+.documents-browser-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.documents-browser-heading h2 { margin: 0; font-size: 1rem; }
+.documents-browser-heading p { margin: 4px 0 0; color: var(--text-muted); font-size: .82rem; line-height: 1.4; }
+.documents-browser-heading .obs-btn { padding: 6px 10px; font-size: .78rem; }
+.documents-controls, .documents-pagination { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: .78rem; color: var(--text-muted); }
+.documents-controls select, .documents-pagination button { padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }
+.documents-pagination { margin-top: 10px; }
+.documents-pagination button { cursor: pointer; }
+.documents-pagination button:disabled { opacity: .45; cursor: default; }
+@media (max-width: 620px) { .documents-browser-heading { flex-direction: column; } }
+.documents-list { display: flex; flex-direction: column; gap: 3px; margin-top: 14px; }
+.documents-folder { min-width: 0; }
+.documents-folder summary {
+  cursor: pointer; color: var(--text); font-size: .87rem; font-weight: 600;
+  list-style: none; padding: 5px 6px; border-radius: 6px;
+}
+.documents-folder summary::-webkit-details-marker { display: none; }
+.documents-folder summary::before { content: '▾'; display: inline-block; width: 1.1em; color: var(--text-muted); transition: transform .15s; }
+.documents-folder:not([open]) summary::before { transform: rotate(-90deg); }
+.documents-folder summary:hover, .document-file:hover { background: var(--surface-2); }
+.documents-folder-children { display: flex; flex-direction: column; gap: 3px; margin-left: 13px; padding-left: 8px; border-left: 1px solid var(--border); }
+.document-file { display: block; min-width: 0; padding: 5px 7px; border-radius: 6px; color: var(--text-muted); font-size: .85rem; overflow: hidden; text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
+.document-file::before { content: '⌁'; margin-right: 7px; color: var(--primary); }
+.documents-empty { margin: 14px 0 2px; color: var(--text-muted); font-size: .84rem; }
 .satellites-view { padding: 0; gap: 0; }
 #satellites-stage { min-height: 100%; padding: clamp(20px, 4vw, 46px); position: relative; overflow: hidden; }
 #satellites-stage::before {

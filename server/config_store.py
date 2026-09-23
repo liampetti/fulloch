@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -212,8 +213,8 @@ def write_models(models: dict, path: str = DEFAULT_CONFIG_PATH) -> None:
     backend = llm.get("backend")
     if backend == "local":
         local_model = llm.get("local_model", "qwen")
-        if local_model not in {"qwen", "gemma", "ornith", "custom"}:
-            raise ValueError("models.llm.local_model must be qwen, gemma, ornith, or custom")
+        if local_model not in {"qwen", "gemma", "ornith", "neohorse", "custom"}:
+            raise ValueError("models.llm.local_model must be qwen, gemma, ornith, neohorse, or custom")
         if local_model == "custom":
             model = llm.get("model")
             if not isinstance(model, str) or not model.lower().endswith(".gguf"):
@@ -221,8 +222,15 @@ def write_models(models: dict, path: str = DEFAULT_CONFIG_PATH) -> None:
     elif backend == "external":
         if not isinstance(llm.get("base_url"), str) or not llm["base_url"].strip():
             raise ValueError("an external LLM needs a base_url")
-    elif backend not in {"llama", "gemma", "ornith", "openai", "none"}:
-        raise ValueError("models.llm.backend must be local or external")
+    elif backend not in {"llama", "gemma", "ornith", "neohorse", "openai", "none", "laya"}:
+        raise ValueError("models.llm.backend must be local, external, laya, or none")
+    if "confidence_threshold" in llm and (
+        not isinstance(llm["confidence_threshold"], (int, float))
+        or isinstance(llm["confidence_threshold"], bool)
+        or not math.isfinite(llm["confidence_threshold"])
+        or not 0.0 <= llm["confidence_threshold"] <= 1.0
+    ):
+        raise ValueError("models.llm.confidence_threshold must be a number between 0 and 1")
     if "n_context" in llm and (
         not isinstance(llm["n_context"], int)
         or isinstance(llm["n_context"], bool)
@@ -346,12 +354,22 @@ def settings_view(path: str = DEFAULT_CONFIG_PATH) -> dict:
         ):
             value = section[legacy]
         fields.append({**spec, "value": value, "set": present})
-    from core.backends import variant
+    from core.backends import resolve_models, variant
+
+    # Keep the settings console's unconfigured selections aligned with the
+    # runtime. Backend dropdown ordering is a presentation choice (and puts
+    # some experimental GPU backends first), so it cannot stand in for the
+    # actual defaults.
+    default_backends = {
+        domain: resolved["backend"]
+        for domain, resolved in resolve_models(None).items()
+    }
 
     return {
         "groups": list(GROUPS),
         "fields": fields,
         "models": cfg.get("models"),
+        "default_backends": default_backends,
         "variant": variant(),
         "backends": _backends_view(),
         "wakeword_presets": wakeword_presets_as_dicts(),

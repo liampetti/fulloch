@@ -8,6 +8,7 @@ import logging
 from typing import Optional
 
 from core.satellite_context import current_satellite_id, get_current_assistant
+from utils.value_parsing import parse_percentage
 
 from . import ha_client as client
 
@@ -207,14 +208,17 @@ def toggle(entity: str) -> str:
     description="Set the brightness of a light in Home Assistant",
     aliases=["ha_brightness", "ha_dim_light"],
 )
-def set_ha_brightness(entity: str, brightness: int) -> str:
+def set_ha_brightness(entity: str, brightness: int | str) -> str:
     """Set the brightness of a light.
 
     Args:
         entity: Light entity name or ID
         brightness: Brightness percentage (0-100)
     """
-    brightness = max(0, min(100, brightness))
+    try:
+        brightness = parse_percentage(brightness)
+    except ValueError:
+        return "I couldn't read that brightness percentage."
     brightness_255 = int((brightness / 100) * 255)
 
     area_lights = _bare_light_area_entities(entity)

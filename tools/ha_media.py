@@ -6,6 +6,8 @@ Uses ha_client as the single owner of configuration and resolution state.
 import logging
 from typing import Optional
 
+from utils.value_parsing import parse_percentage
+
 from . import ha_client as client
 
 logger = logging.getLogger(__name__)
@@ -20,7 +22,7 @@ logger = logging.getLogger(__name__)
     description="Set the volume of a media player (TV, AVR, speakers) by percentage 0-100",
     aliases=["set_volume", "volume", "tv_volume", "volume_tv"],
 )
-def volume_set(entity: str, volume: int) -> str:
+def volume_set(entity: str, volume: int | str) -> str:
     """Set the volume of a media_player entity.
 
     Args:
@@ -32,7 +34,10 @@ def volume_set(entity: str, volume: int) -> str:
         return "I don't know which speakers to adjust."
     friendly = client._friendly_for(entity_id)
 
-    pct = max(0, min(100, int(volume)))
+    try:
+        pct = parse_percentage(volume)
+    except ValueError:
+        return "I couldn't read that volume percentage."
     return client._call_service(
         "media_player",
         "volume_set",

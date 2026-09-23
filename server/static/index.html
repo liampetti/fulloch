@@ -66,7 +66,7 @@
     <button class="tab active" data-tab="chat" role="tab" aria-selected="true">Chat</button>
     <button class="tab" data-tab="facts" role="tab" aria-selected="false">Facts</button>
     <button class="tab" data-tab="entities" role="tab" aria-selected="false">Entities</button>
-    <button class="tab obsidian-tab" data-tab="obsidian" role="tab" aria-selected="false">Obsidian<span id="obs-edit-alert" hidden aria-label="Edit/delete mode active" title="Obsidian edit/delete mode active"></span></button>
+    <button class="tab obsidian-tab" data-tab="obsidian" role="tab" aria-selected="false">Documents<span id="obs-edit-alert" hidden aria-label="Obsidian edit/delete mode active" title="Obsidian edit/delete mode active"></span></button>
     <button class="tab" data-tab="satellites" role="tab" aria-selected="false">Satellites</button>
     <button id="llm-alert" type="button" hidden aria-label="Remote language model unreachable"
             title="Remote language model unreachable — running in regex / fast-path mode only. Check the OpenAI endpoint and model in settings. Click to show details.">
@@ -100,7 +100,7 @@
 
     <section id="obsidian" class="view" hidden>
       <aside id="obsidian-plugin-info" class="obs-plugin-info" aria-label="About the Obsidian plugin">
-        <span>The folder link handles notes. The optional plugin adds live active-note and selection context, editor actions, and note opening. In Docker, automatic note opening needs matching host and container paths.</span>
+        <span>This is Fulloch's document folder. Obsidian is optional: its plugin adds live active-note and selection context, editor actions, and opening notes in Obsidian. In Docker, automatic Obsidian opening needs matching host and container paths.</span>
         <button id="obsidian-plugin-info-dismiss" type="button" aria-label="Dismiss plugin information" title="Dismiss">×</button>
       </aside>
       <div id="obs-path-warning" class="obs-path-warning" role="alert" hidden></div>
@@ -118,6 +118,23 @@
 
       <div class="obs-actions" id="obs-actions"></div>
       <p class="facts-hint" id="obsidian-hint"></p>
+      <section class="documents-browser" aria-labelledby="documents-heading">
+        <div class="documents-browser-heading">
+          <div>
+            <h2 id="documents-heading">Documents</h2>
+            <p>Markdown files Fulloch can read. Open a document in a formatted new tab.</p>
+          </div>
+          <div class="documents-controls">
+            <label for="documents-sort">Sort by</label>
+            <select id="documents-sort">
+              <option value="name">Name</option>
+              <option value="recent">Most recent</option>
+            </select>
+            <button id="documents-refresh" class="obs-btn ghost" type="button">Refresh</button>
+          </div>
+        </div>
+        <div id="documents-list" class="documents-list" aria-live="polite"></div>
+      </section>
     </section>
 
     <section id="satellites" class="view satellites-view" hidden>

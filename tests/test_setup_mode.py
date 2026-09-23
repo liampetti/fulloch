@@ -60,6 +60,26 @@ def test_existing_install_with_assets_present(tmp_path):
     assert d.missing_assets == []
 
 
+def test_freshly_seeded_config_requires_wizard_even_when_default_assets_exist(tmp_path):
+    """Deleting config.yml must not make a GPU install silently reuse defaults."""
+    models = tmp_path / "models"
+    _mk_hub(models, "Qwen/Qwen3-ASR-1.7B")
+    _mk_hub(models, "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
+    (models / "qwen3.5-9b-mtp").mkdir()
+    (models / "qwen3.5-9b-mtp" / "Qwen3.5-9B-UD-Q4_K_XL.gguf").touch()
+    (models / "grammars").mkdir()
+    (models / "grammars" / "agent.gbnf").touch()
+
+    decision = detect_setup_state(
+        {"general": {"wakeword": "hey atticus"}},
+        models_dir=str(models),
+        freshly_seeded_config=True,
+    )
+
+    assert decision.needs_setup
+    assert decision.reason == "new config — first run"
+
+
 def test_cpu_variant_forces_setup_for_gpu_only_backends(tmp_path, monkeypatch):
     """On the CPU image, a config resolving to gpu_only backends (e.g. the qwen
     defaults, even with the GPU assets on disk from a shared ./data) must route
@@ -281,6 +301,27 @@ def test_llama_requires_gguf_and_grammar(tmp_path):
     (models / "grammars" / "agent.gbnf").write_text('root ::= "x"')
     d2 = detect_setup_state(config, models_dir=str(models))
     assert not d2.needs_setup
+
+
+def test_neohorse_requires_gguf_and_grammar(tmp_path):
+    models = tmp_path / "models"
+    _mk_hub(models, "Qwen/Qwen3-ASR-1.7B")
+    _mk_hub(models, "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
+    gguf = models / "NeoHorse-1-9B-Q4_K_M.gguf"
+    config = {
+        "general": {"wakeword": "hey atticus"},
+        "models": {"llm": {"backend": "local", "local_model": "neohorse", "model": str(gguf)}},
+    }
+
+    d = detect_setup_state(config, models_dir=str(models))
+    assert d.needs_setup
+    joined = " ".join(d.missing_assets)
+    assert "llm:neohorse" in joined and "grammar" in joined
+
+    gguf.write_text("x")
+    (models / "grammars").mkdir()
+    (models / "grammars" / "agent.gbnf").write_text('root ::= "x"')
+    assert not detect_setup_state(config, models_dir=str(models)).needs_setup
 
 
 # --- Lifecycle --------------------------------------------------------------

@@ -51,7 +51,7 @@ class SatelliteSession:
     turn_thread: Optional[threading.Thread] = None
     last_turn_end: float = 0.0
     last_spoken_text: str = ""  # self-echo suppression compares against this
-    higgs_delivery: str = ""  # explicit user delivery request for the active/follow-up turn
+    higgs_delivery: str = ""  # explicit active/follow-up delivery control (Higgs or Breeze syntax)
     tts_gain: float = 1.0  # per-turn output gain for explicit quiet/whisper requests
     skip_followup_self_echo: bool = False
     drop_results_until: float = 0.0

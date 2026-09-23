@@ -29,9 +29,11 @@ def test_creates_data_subtree(tmp_path):
 def test_seeds_config_and_grammar_on_first_run(tmp_path):
     seed = _make_seed(tmp_path)
     data = tmp_path / "data"
-    ensure_scaffolding(str(data), seed_dir=str(seed))
+    assert ensure_scaffolding(str(data), seed_dir=str(seed)) is True
     assert (data / "config.yml").read_text().startswith("general:")
     assert (data / "models" / "grammars" / "agent.gbnf").is_file()
+    # Later starts must remain distinguishable from the first seed.
+    assert ensure_scaffolding(str(data), seed_dir=str(seed)) is False
 
 
 def test_seeds_wakeword_models_without_overwriting_a_replacement(tmp_path):

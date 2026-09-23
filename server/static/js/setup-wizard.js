@@ -72,6 +72,7 @@ function tlsBanner() {
 // Plain-English labels for the wizard (no model sizes in main view)
 const TIER_META = {
   'cpu_local':  { icon: '⚡', label: 'Simple commands',  blurb: 'Pattern-matching for smart home, timers, and quick questions. ASR and TTS run locally on the CPU; no language model or cloud service.' },
+  'cpu_laya':   { icon: '◈', label: 'Semantic commands', blurb: 'Understands more natural local commands on CPU. It does not support free-form conversation.' },
   'full':       { icon: '🧠', label: 'Full conversation', blurb: 'A local AI handles anything you ask. ASR, TTS, and the language model run on your GPU, fully private and offline.' },
   'cpu_server': { icon: '🌐', label: 'Remote AI',         blurb: 'Uses an AI server you already run (Ollama, LM Studio, OpenAI). ASR and TTS run locally on the CPU.' },
 };
@@ -202,10 +203,11 @@ function renderBackendCfg() {
   const mk = (domain, label) => {
     const cur = curBackend(domain);
     if (domain === 'llm') {
-      const mode = cur === 'none' ? 'none' : (cur === 'openai' || cur === 'external' ? 'external' : 'local');
+      const mode = cur === 'none' || cur === 'laya' ? cur : (cur === 'openai' || cur === 'external' ? 'external' : 'local');
       return `<div><label>${label}</label><select id="be-llm">
         <option value="local"${mode === 'local' ? ' selected' : ''}>Local</option>
         <option value="external"${mode === 'external' ? ' selected' : ''}>External</option>
+        <option value="laya"${mode === 'laya' ? ' selected' : ''}>Local semantic commands (Laya)</option>
         <option value="none"${mode === 'none' ? ' selected' : ''}>Regex-only commands</option>
       </select></div>`;
     }
@@ -229,7 +231,8 @@ function renderBackendCfg() {
     sel.models = { asr: { backend: $('be-asr').value }, tts: { backend: $('be-tts').value },
                     llm: llmMode === 'local'
                       ? { backend: 'local', local_model: 'qwen' }
-                      : llmMode === 'external' ? { backend: 'external' } : { backend: 'none' } };
+                       : llmMode === 'external' ? { backend: 'external' }
+                       : { backend: llmMode } };
     document.querySelectorAll('#tier-list .opt').forEach(o => o.classList.remove('sel'));
     syncOpenaiForm();
   };

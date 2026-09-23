@@ -38,6 +38,24 @@ class _QwenTtsParams(ctypes.Structure):
     ]
 
 
+class _BreezeTtsParams(ctypes.Structure):
+    """Matches ``breeze_tts_2_context_params`` in CrispASR's C ABI."""
+
+    _fields_ = [
+        ("n_threads", ctypes.c_int),
+        ("verbosity", ctypes.c_int),
+        ("use_gpu", ctypes.c_bool),
+        ("temperature", ctypes.c_float),
+        ("depth_temperature", ctypes.c_float),
+        ("topk", ctypes.c_int),
+        ("topp", ctypes.c_float),
+        ("repetition_penalty", ctypes.c_float),
+        ("seed", ctypes.c_uint64),
+        ("max_new_tokens", ctypes.c_int),
+        ("codec_path", ctypes.c_char_p),
+    ]
+
+
 class _QwenTtsSession:
     """Direct Qwen TTS ABI wrapper, including CrispASR's PCM callback API."""
 
@@ -167,10 +185,130 @@ class _QwenTtsSession:
             self._context = None
 
 
+class _BreezeTtsSession:
+    """Direct Breeze TTS 2 ABI wrapper with persistent voice-clone state.
+
+    CrispASR v0.8.35's generic Session ABI provides only Breeze plain TTS;
+    ``crispasr_session_set_voice`` deliberately returns ``-3`` for this
+    backend. Its native ABI accepts the clone reference as 24 kHz float32 PCM
+    on every synthesis request, so cache the decoded reference here.
+    """
+
+    _SAMPLE_RATE = 24_000
+
+    def __init__(self, settings):
+        lib_path = Path(settings["lib_dir"]) / "crispasr" / "libcrispasr.so"
+        self._lib = ctypes.CDLL(str(lib_path))
+        required = (
+            "breeze_tts_2_context_default_params",
+            "breeze_tts_2_init_from_file",
+            "breeze_tts_2_synthesize",
+            "breeze_tts_2_synthesize_with_reference",
+            "breeze_tts_2_pcm_free",
+            "breeze_tts_2_free",
+        )
+        if missing := [name for name in required if not hasattr(self._lib, name)]:
+            raise RuntimeError(
+                "CrispASR runtime does not provide the native Breeze TTS 2 ABI "
+                f"({', '.join(missing)} missing); rebuild the GPU image with v0.8.35 or later."
+            )
+        self._lib.breeze_tts_2_context_default_params.argtypes = []
+        self._lib.breeze_tts_2_context_default_params.restype = _BreezeTtsParams
+        self._lib.breeze_tts_2_init_from_file.argtypes = [ctypes.c_char_p, _BreezeTtsParams]
+        self._lib.breeze_tts_2_init_from_file.restype = ctypes.c_void_p
+        self._lib.breeze_tts_2_synthesize.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_int),
+        ]
+        self._lib.breeze_tts_2_synthesize.restype = ctypes.POINTER(ctypes.c_float)
+        self._lib.breeze_tts_2_synthesize_with_reference.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        self._lib.breeze_tts_2_synthesize_with_reference.restype = ctypes.POINTER(ctypes.c_float)
+        self._lib.breeze_tts_2_pcm_free.argtypes = [ctypes.POINTER(ctypes.c_float)]
+        self._lib.breeze_tts_2_pcm_free.restype = None
+        self._lib.breeze_tts_2_free.argtypes = [ctypes.c_void_p]
+        self._lib.breeze_tts_2_free.restype = None
+
+        params = self._lib.breeze_tts_2_context_default_params()
+        params.n_threads = int(settings.get("num_threads", 4))
+        params.use_gpu = True
+        codec_path = settings.get("codec_path")
+        if not codec_path:
+            raise RuntimeError("Breeze TTS 2 requires the Qwen 12 Hz codec path")
+        # Keep the bytes alive for the lifetime of the C context: this struct's
+        # pointer is retained by CrispASR rather than copied at initialisation.
+        self._codec_path = str(codec_path).encode("utf-8")
+        params.codec_path = self._codec_path
+        self._context = self._lib.breeze_tts_2_init_from_file(
+            str(settings["model_path"]).encode("utf-8"), params
+        )
+        if not self._context:
+            raise RuntimeError(f"failed to open Breeze TTS 2 model {settings['model_path']}")
+        self._reference_pcm = None
+        self._reference_text = None
+
+    def set_voice(self, audio, text):
+        try:
+            import soundfile as sf
+        except ImportError as exc:  # pragma: no cover - pinned runtime dependency
+            raise RuntimeError("Breeze TTS 2 voice cloning requires soundfile") from exc
+
+        pcm, sample_rate = sf.read(audio, dtype="float32", always_2d=True)
+        pcm = np.asarray(pcm, dtype=np.float32).mean(axis=1)
+        if not pcm.size:
+            raise ValueError(f"Breeze TTS 2 voice reference is empty: {audio}")
+        if sample_rate != self._SAMPLE_RATE:
+            # scipy is already a pinned runtime dependency. Polyphase avoids
+            # speeding up/down the clone, which would corrupt its conditioning.
+            from math import gcd
+
+            from scipy.signal import resample_poly
+
+            divisor = gcd(int(sample_rate), self._SAMPLE_RATE)
+            pcm = resample_poly(pcm, self._SAMPLE_RATE // divisor, int(sample_rate) // divisor)
+        self._reference_pcm = np.ascontiguousarray(pcm, dtype=np.float32)
+        self._reference_text = text.encode("utf-8")
+
+    def synthesize(self, text):
+        n_samples = ctypes.c_int()
+        if self._reference_pcm is None:
+            pcm = self._lib.breeze_tts_2_synthesize(
+                self._context, text.encode("utf-8"), ctypes.byref(n_samples)
+            )
+        else:
+            pcm = self._lib.breeze_tts_2_synthesize_with_reference(
+                self._context,
+                text.encode("utf-8"),
+                self._reference_pcm.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                len(self._reference_pcm),
+                self._reference_text,
+                ctypes.byref(n_samples),
+            )
+        if not pcm:
+            mode = "with voice clone" if self._reference_pcm is not None else "plain"
+            raise RuntimeError(f"Breeze TTS 2 {mode} synthesis failed")
+        try:
+            return np.ctypeslib.as_array(pcm, shape=(n_samples.value,)).copy()
+        finally:
+            self._lib.breeze_tts_2_pcm_free(pcm)
+
+    def close(self):
+        if getattr(self, "_context", None):
+            self._lib.breeze_tts_2_free(self._context)
+            self._context = None
+
+
 def _run(connection, settings):
     session = None
     try:
-        if settings.get("direct_tts"):
+        if settings.get("direct_breeze_tts"):
+            session = _BreezeTtsSession(settings)
+        elif settings.get("direct_tts"):
             session = _QwenTtsSession(settings)
         else:
             lib_dir = str(settings["lib_dir"])
@@ -230,7 +368,15 @@ class CrispASRWorker:
     """Synchronous client for one persistent, isolated CrispASR subprocess."""
 
     def __init__(
-        self, *, model_path, lib_dir, backend=None, codec_path=None, num_threads=4, direct_tts=False
+        self,
+        *,
+        model_path,
+        lib_dir,
+        backend=None,
+        codec_path=None,
+        num_threads=4,
+        direct_tts=False,
+        direct_breeze_tts=False,
     ):
         if not (Path(lib_dir) / "crispasr" / "__init__.py").is_file():
             raise FileNotFoundError(f"CrispASR runtime not found at {lib_dir}")
@@ -248,6 +394,7 @@ class CrispASRWorker:
             "codec_path": str(codec_path) if codec_path else None,
             "num_threads": int(num_threads),
             "direct_tts": bool(direct_tts),
+            "direct_breeze_tts": bool(direct_breeze_tts),
         }
         encoded_authkey = base64.urlsafe_b64encode(authkey).decode("ascii")
         encoded_settings = base64.urlsafe_b64encode(json.dumps(settings).encode("utf-8")).decode("ascii")

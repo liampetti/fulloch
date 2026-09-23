@@ -59,10 +59,12 @@ class TurnStats:
     # A2: which path resolved the turn — "regex" (utils/intent_catch.py
     # matched, no SLM call), "agent" (the SLM/agent loop ran, even if it
     # started from a regex catch and only replanned into the SLM), or
-    # "no_llm" (llm.backend: none — regex-or-fallback only). Set by
+    # "no_llm" (llm.backend: none — regex-or-fallback only), or "laya"
+    # (semantic command route after a regex miss). Set by
     # core.agent_loop.AgentLoop._run; None for text turns that never reach
     # the agent loop's routing decision (shouldn't happen in practice).
     route: Optional[str] = None
+    laya_seconds: Optional[float] = None
 
     # Context retrieval (only when a note-search tool ran this turn).
     retrieval_seconds: Optional[float] = None
@@ -129,6 +131,8 @@ class TurnStats:
             ttft = f"{self.llm_ttft:.2f}s" if self.llm_ttft is not None else "n/a"
             parts.append(f"llm_ttft={ttft}")
             parts.append(f"llm_gen={self.llm_gen_seconds:.2f}s")
+        if self.laya_seconds is not None:
+            parts.append(f"laya={self.laya_seconds:.2f}s")
         if self.tts_seconds is not None:
             parts.append(f"tts_ttfa={self.tts_seconds:.2f}s")
         return "turn_stats " + " ".join(parts)
@@ -154,6 +158,9 @@ class TurnStats:
 
         if self.route is not None:
             payload["route"] = self.route
+
+        if self.laya_seconds is not None:
+            payload["laya"] = {"seconds": round(self.laya_seconds, 2), "model": _LABELS["llm"]}
 
         if self.retrieval_seconds is not None:
             payload["retrieval"] = {

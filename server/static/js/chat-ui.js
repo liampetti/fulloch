@@ -2,6 +2,8 @@ import { escapeHtml } from './browser-utils.js';
 import { createLifetime } from './browser-lifetime.js';
 import { createArtifactCards } from './artifact-cards.js';
 
+const BREEZE_AUDIO_TAG_RE = /\((?:laughs|chuckles|giggles|crying|sobs|whimpers|groans|moans|sighs|gasps|inhales|exhales|breathing heavily|whispers|shouts|screams|singing|humming|stutters|pause|clears throat|coughs|sniffs|smacks lips|clicks tongue|yawns|sneezes|hiccups|burps|gulps|gags|grunts|scoffs|snorts)\)/gi;
+
 export function createChatUI({ connectSpeaker, onThinking }) {
   const lifetime = createLifetime();
   let stream = null;
@@ -323,6 +325,8 @@ export function createChatUI({ connectSpeaker, onThinking }) {
       L.push(`  ├─ Token Count    : ${m.prompt_tokens} prompt | ${m.output_tokens} output`);
       L.push(`  └─ Agent Loop     : ${m.calls} call${m.calls === 1 ? '' : 's'} | ${m.tools} tool${m.tools === 1 ? '' : 's'}`);
     }
+    if (s.laya)
+      L.push(`↳ Semantic Routing  : ${fmtSecs(s.laya.seconds)} (${s.laya.model})`);
     if (s.tts)
       L.push(`↳ Audio Output(TTS) : ${fmtSecs(s.tts.seconds)} (${s.tts.model})`);
     L.push('-'.repeat(50));
@@ -416,7 +420,7 @@ export function createChatUI({ connectSpeaker, onThinking }) {
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     const text = ev.role === 'assistant'
-      ? naturalize(ev.content).replace(/<\|[^|>]+\|>/g, '').replace(/\s{2,}/g, ' ').trim()
+      ? naturalize(ev.content).replace(/<\|[^|>]+\|>/g, '').replace(BREEZE_AUDIO_TAG_RE, '').replace(/\s{2,}/g, ' ').trim()
       : ev.content;
     const animate = ev.role === 'assistant' && ev.source === 'voice' && live && !!text;
     bubble.textContent = animate ? '' : text;

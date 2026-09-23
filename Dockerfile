@@ -59,7 +59,7 @@ RUN set -eux; \
 FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
-ARG CRISPASR_RELEASE_TAG=v0.8.7
+ARG CRISPASR_RELEASE_TAG=v0.8.35
 
 WORKDIR /app
 
@@ -100,12 +100,8 @@ RUN set -eux; \
     tar -xzf /tmp/crispasr-python.tar.gz -C /tmp; \
     mv /tmp/crispasr-python-linux-x86_64 /opt/crispasr-python-cuda; \
     tar -xzf /tmp/crispasr-cuda.tar.gz -C /tmp; \
-    rm -f /opt/crispasr-python-cuda/crispasr/libcrispasr.so /opt/crispasr-python-cuda/crispasr/libggml*.so*; \
-    cp /tmp/libcrispasr-linux-x86_64-cuda/src/libcrispasr.so.0.8.7 /opt/crispasr-python-cuda/crispasr/libcrispasr.so; \
-    cp /tmp/libcrispasr-linux-x86_64-cuda/ggml/src/libggml.so.0.10.2 /opt/crispasr-python-cuda/crispasr/libggml.so.0; \
-    cp /tmp/libcrispasr-linux-x86_64-cuda/ggml/src/libggml-cpu.so.0.10.2 /opt/crispasr-python-cuda/crispasr/libggml-cpu.so.0; \
-    cp /tmp/libcrispasr-linux-x86_64-cuda/ggml/src/libggml-base.so.0.10.2 /opt/crispasr-python-cuda/crispasr/libggml-base.so.0; \
-    cp /tmp/libcrispasr-linux-x86_64-cuda/ggml/src/libggml-cuda.so.0.10.2 /opt/crispasr-python-cuda/crispasr/libggml-cuda.so.0; \
+    rm -f /opt/crispasr-python-cuda/crispasr/libcrispasr.so* /opt/crispasr-python-cuda/crispasr/libggml*.so*; \
+    cp -a /tmp/libcrispasr-linux-x86_64-cuda/lib/. /opt/crispasr-python-cuda/crispasr/; \
     rm -rf /tmp/crispasr-python.tar.gz /tmp/crispasr-cuda.tar.gz /tmp/libcrispasr-linux-x86_64-cuda
 
 # Route ALSA's default device through PulseAudio so the host's selected

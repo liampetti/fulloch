@@ -40,6 +40,47 @@ def test_start_countdown_attaches_timer_artifact(monkeypatch):
     }
 
 
+def test_compound_countdown_preserves_every_duration_component(monkeypatch):
+    import tools.time_tools as timers
+
+    monkeypatch.setattr(timers.threading, "Timer", _Timer)
+    monkeypatch.setattr(timers, "active_timers", {})
+    monkeypatch.setattr(timers.time, "time", lambda: 1000)
+
+    result = timers.start_countdown("one minute and thirty-five seconds")
+
+    assert result == "Timer started for 1 minute 35 seconds"
+    assert result.artifact["timers"][0]["duration"] == 95
+    assert result.artifact["timers"][0]["remaining"] == 95
+
+
+def test_bare_numeric_countdown_remains_seconds(monkeypatch):
+    import tools.time_tools as timers
+
+    monkeypatch.setattr(timers.threading, "Timer", _Timer)
+    monkeypatch.setattr(timers, "active_timers", {})
+    monkeypatch.setattr(timers.time, "time", lambda: 1000)
+
+    result = timers.start_countdown("60")
+
+    assert result == "Timer started for 1 minute"
+
+
+def test_cancel_timer_without_id_cancels_the_only_active_timer(monkeypatch):
+    import tools.time_tools as timers
+
+    timer = _Timer(60, lambda: None)
+    timer.start_time = 1000
+    timer.reminder = None
+    monkeypatch.setattr(timers, "active_timers", {"timer_1": timer})
+
+    result = timers.cancel_timer()
+
+    assert result == "Timer timer_1 cancelled"
+    assert timer.cancelled is True
+    assert result.artifact == {"type": "timers", "timers": []}
+
+
 def test_extend_timer_preserves_id_and_attaches_updated_artifact(monkeypatch):
     import tools.time_tools as timers
 

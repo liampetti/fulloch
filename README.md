@@ -32,7 +32,7 @@ Fulloch is your privacy-focused local voice assistant running on your own PC or 
 
 ## Quick installation
 
-The default stack runs on **CPU (mac/linux/windows)**. Audio runs through the browser dashboard. The LLM is either regex-only (simple commands) or off-box via an OpenAI-compatible endpoint you configure in the wizard (e.g. Ollama / LM Studio / another machine on your LAN). The dashboard avatar swaps to Parloch, the **Par**tially-**loc**al **h**ome voice assistant, when the LLM is running off-device.
+The default stack runs on **CPU (mac/linux/windows)**. Audio runs through the browser dashboard. Choose regex-only commands, Laya semantic commands, or an off-box OpenAI-compatible language model in the wizard (e.g. Ollama / LM Studio / another machine on your LAN). The dashboard avatar swaps to Parloch, the **Par**tially-**loc**al **h**ome voice assistant, when the LLM is running off-device.
 
 Install Docker Desktop (or Docker Engine) first. The first run downloads the selected speech models, so it needs an internet connection, several GB of free disk, and enough Docker memory for the wizard's displayed estimate. For the GPU image, install a current NVIDIA driver and NVIDIA Container Toolkit, then confirm `docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi` works before launching Fulloch.
 
@@ -84,6 +84,18 @@ The moment you point the language model at an OpenAI-compatible endpoint, the av
 Use **Settings** for normal changes: voices, model backends, language-model mode, Home Assistant, Search, and dashboard preferences. Model changes need a restart; if their weights are missing, the restart returns to the wizard to download them. The **Re-run setup wizard** action makes a backup under `data/backups/`; use it to choose a different stack, not to edit a custom model path or advanced remote-LLM settings. To repair a failed download, re-run setup and select the same stack; incomplete model caches are detected and downloaded again.
 
 Advanced options not shown in Settings are documented in `data/config.example.yml`: Spotify OAuth, native satellite tokens, and external-LLM timeouts. Keep those files under the persistent `data` volume.
+
+## Model options
+
+Choose a model for each part of the stack during setup or in **Settings**. CPU options work in the `:cpu` image; GPU options require the CUDA image. Download sources and licence details are in [MODELS.md](MODELS.md).
+
+| Component | CPU options | GPU options |
+| -- | -- | -- |
+| Speech recognition (ASR) | Qwen3-ASR ONNX 1.7B or 0.6B; Parakeet TDT v3 ONNX 0.6B; Moonshine Base or Tiny | Qwen3-ASR PyTorch 1.7B or 0.6B; Qwen3-ASR GGUF 1.7B or 0.6B; NVIDIA Parakeet TDT 0.6B; Orukeet 0.6B |
+| Text to speech (TTS) | Kokoro 82M; Pocket TTS ONNX voice cloning | Qwen3-TTS PyTorch 1.7B or 0.6B; Qwen3-TTS GGUF 1.7B or 0.6B; Pocket TTS PyTorch or GGUF; Audio8; Higgs TTS 3; Breeze TTS 2 |
+| Language and command routing | Regex-only commands; Laya semantic commands; an external OpenAI-compatible endpoint | Local Qwen3.5 9B MTP, Gemma 4 12B, Ornith 1.5 9B, NeoHorse 1 9B, or a custom GGUF; an external OpenAI-compatible endpoint |
+
+The optional **Hey Atticus** wakeword gate uses the bundled openWakeWord classifier; without it, wakeword detection uses ASR.
 
 ### Obsidian Integration
 Connect your Obsidian vault so Fulloch reads, writes, appends, and searches your notes by voice.
@@ -145,6 +157,12 @@ Common commands take a regex fast-path that skips the language model entirely, f
 | *"set a timer for 5 minutes"* · *"list my timers"* | timers |
 | *"what time is it"* | time |
 | *"think about …"* · *"summarise your thinking"* | thinking mode |
+
+### Laya semantic commands
+
+Laya is a local CPU-only option between the regex fast-path and a full language model. Regex commands still run first; after a miss, Laya can recognise common command phrasing and select only from Fulloch's supported action schemas, using locally validated values and Home Assistant aliases.
+
+It does not provide free-form conversation or generate arbitrary tool arguments. Choose **CPU semantic commands** in the setup wizard when you want more flexible command phrasing without running a full LLM.
 
 ## Reporting a Problem
 

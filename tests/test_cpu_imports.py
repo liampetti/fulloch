@@ -1,7 +1,8 @@
 """Guard the CPU-image import chain.
 
 The slim CPU image has no qwen_asr / qwen_tts / flash_attn. The
-CPU ASR backends (`core.asr_tiny`, `core.asr_onnx`, `core.asr_onnx_qwen17b`)
+CPU ASR backends (`core.asr_tiny`, `core.asr_onnx`, `core.asr_onnx_qwen17b`,
+`core.asr_parakeet_onnx`)
 re-export `stream_generator` from `core.asr`, and `core.assistant` imports `core.slm` — so those modules must
 import WITHOUT the GPU-only libraries. Their heavy imports must be lazy (inside
 the load function), not at module top. These source checks lock that in (and run
@@ -38,9 +39,9 @@ def test_slm_has_no_python_llama_cpp_dependency():
 
 
 def test_tiny_asr_backends_reexport_stream_generator():
-    for name in ("asr_tiny", "asr_onnx", "asr_onnx_qwen17b"):
+    for name in ("asr_tiny", "asr_onnx", "asr_onnx_qwen17b", "asr_parakeet_onnx"):
         src = (ROOT / "core" / f"{name}.py").read_text()
-        assert "from .asr import stream_generator" in src
+        assert "stream_generator" in src
         # ...and don't pull qwen_asr themselves.
         assert not _top_level_imports(ROOT / "core" / f"{name}.py", "qwen_asr")
 
@@ -48,7 +49,7 @@ def test_tiny_asr_backends_reexport_stream_generator():
 def test_onnx_asr_backends_are_torch_free():
     # The ONNX backends (onnxruntime, no torch) must not import torch at top —
     # unlike asr_tiny/Moonshine, which is transformers/torch-based.
-    for name in ("asr_onnx", "asr_onnx_qwen17b"):
+    for name in ("asr_onnx", "asr_onnx_qwen17b", "asr_parakeet_onnx"):
         assert not _top_level_imports(ROOT / "core" / f"{name}.py", "torch"), (
             f"{name} must stay torch-free (onnxruntime-only CPU backend)"
         )
@@ -78,6 +79,7 @@ def test_cpu_image_modules_import_without_gpu_libs():
             "core.asr_tiny",
             "core.asr_onnx",
             "core.asr_onnx_qwen17b",
+            "core.asr_parakeet_onnx",
             "core.tts_onnx",
             "core.slm",
         ):

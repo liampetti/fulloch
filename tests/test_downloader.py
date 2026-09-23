@@ -135,6 +135,20 @@ def test_plan_downloads_ornith_gguf(tmp_path):
     assert asset.dest == "data/models"
 
 
+def test_plan_downloads_neohorse_gguf(tmp_path):
+    resolved = resolve_models({"llm": {"backend": "local", "local_model": "neohorse"}})
+
+    asset = next(
+        asset
+        for asset in dl.plan_assets(resolved, models_dir=str(tmp_path))
+        if asset.key == "llm:neohorse"
+    )
+    assert asset.kind == "file"
+    assert asset.repo == "TokenRhythm/NeoHorse-1-9B-GGUF"
+    assert asset.filename == "NeoHorse-1-9B-Q4_K_M.gguf"
+    assert asset.dest == "data/models"
+
+
 def test_plan_skips_none_llm():
     resolved = resolve_models(
         {

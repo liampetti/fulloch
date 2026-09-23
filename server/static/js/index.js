@@ -307,7 +307,7 @@ const satellite = createBrowserSatellite({
 
   entitySearch.addEventListener('input', renderEntities);
 
-  // ---- Obsidian viewer ----
+  // ---- Documents workspace + optional Obsidian integration ----
   const obsPill = document.getElementById('obs-pill');
   const obsStatusDetail = document.getElementById('obs-status-detail');
   const obsError = document.getElementById('obs-error');
@@ -320,6 +320,11 @@ const satellite = createBrowserSatellite({
   const obsidianPluginInfo = document.getElementById('obsidian-plugin-info');
   const obsidianPluginInfoDismiss = document.getElementById('obsidian-plugin-info-dismiss');
   const obsPathWarning = document.getElementById('obs-path-warning');
+  const documentsList = document.getElementById('documents-list');
+  const documentsRefresh = document.getElementById('documents-refresh');
+  const documentsSort = document.getElementById('documents-sort');
+  const DOCUMENTS_PAGE_SIZE = 25;
+  let loadedDocuments = [];
   const OBSIDIAN_PLUGIN_INFO_DISMISS_KEY = 'fulloch.obsidian_plugin_info_dismissed_v1';
   let obsState = null;
 
@@ -332,6 +337,123 @@ const satellite = createBrowserSatellite({
   });
 
   const escapeObs = (s) => escapeHtml(s || '');
+
+  const documentUrl = (path) => '/documents/' + path.split('/').map(encodeURIComponent).join('/');
+
+  const makeDocumentLink = (file) => {
+    const link = document.createElement('a');
+    link.className = 'document-file';
+    link.href = documentUrl(file.path);
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = file.title || file.path.split('/').at(-1).replace(/\.md$/i, '');
+    link.title = file.path;
+    return link;
+  };
+
+  const renderDocuments = (documents) => {
+    documentsList.innerHTML = '';
+    if (!documents.length) {
+      const empty = document.createElement('p');
+      empty.className = 'documents-empty';
+      empty.textContent = 'No Markdown documents are available in this folder yet.';
+      documentsList.appendChild(empty);
+      return;
+    }
+    const root = { folders: new Map(), files: [] };
+    for (const file of documents) {
+      if (!file || typeof file.path !== 'string' || !file.path.endsWith('.md')) continue;
+      const parts = file.path.split('/');
+      const filename = parts.pop();
+      if (!filename || parts.some(part => !part || part === '.' || part === '..')) continue;
+      let current = root;
+      for (const folder of parts) {
+        if (!current.folders.has(folder)) current.folders.set(folder, { folders: new Map(), files: [] });
+        current = current.folders.get(folder);
+      }
+      current.files.push(file);
+    }
+    const prepareTree = (node) => {
+      node.entries = [
+        ...[...node.folders].map(([name, child]) => {
+          prepareTree(child);
+          return { name, child, modified: child.modified };
+        }),
+        ...node.files.map(file => ({ name: file.path.split('/').at(-1), file, modified: file.modified_at || 0 })),
+      ];
+      node.modified = node.entries.reduce((latest, entry) => Math.max(latest, entry.modified), 0);
+      node.entries.sort((a, b) => {
+        const byName = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+        return documentsSort.value === 'recent' ? b.modified - a.modified || byName : byName;
+      });
+    };
+    prepareTree(root);
+    const appendTree = (container, node, page = 0) => {
+      container.replaceChildren();
+      const start = page * DOCUMENTS_PAGE_SIZE;
+      for (const entry of node.entries.slice(start, start + DOCUMENTS_PAGE_SIZE)) {
+        if (entry.file) {
+          container.appendChild(makeDocumentLink(entry.file));
+          continue;
+        }
+        const details = document.createElement('details');
+        details.className = 'documents-folder';
+        const summary = document.createElement('summary');
+        summary.textContent = entry.name;
+        const children = document.createElement('div');
+        children.className = 'documents-folder-children';
+        // Populate only when opened, keeping large collapsed trees lightweight.
+        details.addEventListener('toggle', () => {
+          if (details.open && !children.childElementCount) appendTree(children, entry.child);
+        });
+        details.append(summary, children);
+        container.appendChild(details);
+      }
+      if (node.entries.length > DOCUMENTS_PAGE_SIZE) {
+        const pager = document.createElement('nav');
+        pager.className = 'documents-pagination';
+        pager.setAttribute('aria-label', 'Document pages');
+        const pages = Math.ceil(node.entries.length / DOCUMENTS_PAGE_SIZE);
+        const previous = document.createElement('button');
+        previous.type = 'button';
+        previous.textContent = 'Previous';
+        previous.disabled = page === 0;
+        const next = document.createElement('button');
+        next.type = 'button';
+        next.textContent = 'Next';
+        next.disabled = page + 1 === pages;
+        const status = document.createElement('span');
+        status.textContent = `Page ${page + 1} of ${pages} · ${node.entries.length} entries`;
+        const changePage = (newPage, direction) => {
+          appendTree(container, node, newPage);
+          const buttons = container.lastElementChild.querySelectorAll('button');
+          const preferred = buttons[direction];
+          (preferred.disabled ? buttons[1 - direction] : preferred).focus();
+        };
+        previous.addEventListener('click', () => changePage(page - 1, 0));
+        next.addEventListener('click', () => changePage(page + 1, 1));
+        pager.append(previous, status, next);
+        container.appendChild(pager);
+      }
+    };
+    appendTree(documentsList, root);
+  };
+
+  const loadDocuments = async () => {
+    documentsList.innerHTML = '<p class="documents-empty">Loading documents…</p>';
+    try {
+      const r = await fetch('/api/documents');
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      const data = await r.json();
+      loadedDocuments = Array.isArray(data.documents) ? data.documents : [];
+      renderDocuments(loadedDocuments);
+    } catch (e) {
+      console.warn('documents load failed', e);
+      documentsList.innerHTML = '<p class="documents-empty">Couldn\'t load documents.</p>';
+    }
+  };
+  documentsRefresh.addEventListener('click', loadDocuments);
+  documentsSort.addEventListener('change', () => renderDocuments(loadedDocuments));
 
   const obsJson = async (url, opts) => {
     const r = await fetch(url, opts);
@@ -367,12 +489,12 @@ const satellite = createBrowserSatellite({
         : 'Connection error: ' + escapeObs(err);
       obsError.textContent = msg;
       obsError.hidden = false;
-      obsStatusDetail.innerHTML = vaultPath ? `Last vault: <code>${escapeObs(vaultPath)}</code>` : '';
+      obsStatusDetail.innerHTML = `Document folder: <code>${escapeObs(state.notes_path || './data/notes')}</code>`;
       renderObsActions(connected);
     } else if (connected) {
-      obsPill.textContent = 'Connected';
+      obsPill.textContent = 'Obsidian connected';
       obsPill.classList.add('connected');
-      obsStatusDetail.innerHTML = vaultPath ? `<code>${escapeObs(vaultPath)}</code>` : '';
+      obsStatusDetail.innerHTML = `Document folder: <code>${escapeObs(state.notes_path || './data/notes')}</code>`;
       if (state.indexing_progress != null) {
         const pct = Math.max(0, Math.min(1, state.indexing_progress));
         obsProgress.hidden = false;
@@ -381,16 +503,16 @@ const satellite = createBrowserSatellite({
       }
       renderObsActions(connected);
     } else if (vaultPath) {
-      obsPill.textContent = 'Disconnected';
+      obsPill.textContent = 'Obsidian disconnected';
       obsPill.classList.add('disconnected');
       const last = lastConn ? new Date(lastConn * 1000).toLocaleString() : '';
-      obsStatusDetail.innerHTML = `Last vault: <code>${escapeObs(vaultPath)}</code>` +
+      obsStatusDetail.innerHTML = `Document folder: <code>${escapeObs(state.notes_path || vaultPath)}</code>` +
         (last ? ` <span class="obs-help">— last seen ${escapeObs(last)}</span>` : '');
       renderObsActions(connected);
     } else {
-      obsPill.textContent = 'Not configured';
+      obsPill.textContent = 'Folder ready';
       obsPill.classList.add('idle');
-      obsStatusDetail.textContent = 'Fulloch hasn\'t connected to an Obsidian vault yet.';
+      obsStatusDetail.innerHTML = `Document folder: <code>${escapeObs(state.notes_path || './data/notes')}</code>`;
       renderObsActions(connected);
     }
   };
@@ -400,7 +522,7 @@ const satellite = createBrowserSatellite({
     const settingsBtn = document.createElement('button');
     settingsBtn.className = 'obs-btn';
     settingsBtn.type = 'button';
-    settingsBtn.textContent = 'Configure notes & Obsidian';
+    settingsBtn.textContent = 'Configure document folder';
     settingsBtn.addEventListener('click', () => { location.href = '/setup?section=notes'; });
     obsActions.appendChild(settingsBtn);
     if (connected && obsState.allow_edit_delete) {
@@ -410,8 +532,8 @@ const satellite = createBrowserSatellite({
       obsActions.appendChild(indicator);
     }
     obsidianHint.innerHTML = connected
-      ? 'The plugin supplies the active note and selected text. With edit/delete enabled in Settings, Fulloch can insert at the cursor, replace selected text, rename, and delete the active note.'
-      : 'Fulloch still creates, appends, reads, and searches Markdown notes directly in the notes location above. Connect the plugin in Settings for active-note and selected-text context.';
+      ? 'Obsidian is connected. Its plugin supplies the active note and selected text; with edit/delete enabled in Settings, Fulloch can edit the active note.'
+      : 'Fulloch creates, appends, reads, and searches Markdown documents directly in the folder above. Connect Obsidian in Settings only if you want active-note and selected-text context.';
   };
 
   const loadObsidian = async () => {
@@ -617,7 +739,7 @@ const satellite = createBrowserSatellite({
     chatFooter.hidden = name !== 'chat';
     if (name === 'facts') loadFacts();
     if (name === 'entities') loadEntities();
-    if (name === 'obsidian') loadObsidian();
+    if (name === 'obsidian') { loadObsidian(); loadDocuments(); }
     if (name === 'satellites') loadSatellites();
   };
 

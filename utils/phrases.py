@@ -21,7 +21,10 @@ MUSIC_SEARCH_PHRASES = ["Finding that.", "Putting that on."]
 # a generic acknowledgement repeatedly.
 WEB_SEARCH_PHRASES = ["Looking it up.", "Checking now."]
 BUSY_PHRASES = ["I'm helping in another room right now."]
-NO_AI_PHRASES = ["I can't do that without an AI model running."]
+# This path is also used by Laya: a semantic-command model can be healthy but
+# intentionally decline a request outside its bounded local command set. Avoid
+# incorrectly telling the user that no AI model is running in that case.
+NO_AI_PHRASES = ["I can only handle supported local commands right now."]
 LLM_ERROR_PHRASES = ["I can't reach the AI server right now. Basic commands still work."]
 TOOL_UNAVAILABLE_PHRASES = ["I don't have a tool for that setup yet."]
 CONVERSATION_LISTENING_PHRASE = "I'm listening."

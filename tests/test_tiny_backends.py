@@ -46,6 +46,15 @@ def test_moonshine_non_streaming_path_returns_list():
     assert res == [{"text": "single"}]
 
 
+def test_moonshine_accepts_assistant_asr_input():
+    """Context-wrapped turn audio must not crash Moonshine's stream path."""
+    w = asr_tiny.MoonshineASRPipelineWrapper(lambda *a, **k: {"text": "wrapped"})
+    wrapped = asr_tiny.AsrInput(np.zeros(1600, dtype=np.float64), context="hey atticus")
+
+    assert w(wrapped) == [{"text": "wrapped"}]
+    assert list(w(_gen([wrapped]))) == [{"text": "wrapped"}]
+
+
 def test_moonshine_load_signature_matches_registry():
     import inspect
 

@@ -55,8 +55,13 @@ def _seed_https_cert(data: Path) -> None:
         logger.exception("Self-signed HTTPS cert setup failed; dashboard will serve over HTTP")
 
 
-def ensure_scaffolding(data_dir: str = "./data", seed_dir: str = None) -> None:
-    """Create the data subtree and seed config + grammar on first run."""
+def ensure_scaffolding(data_dir: str = "./data", seed_dir: str = None) -> bool:
+    """Create the data subtree and seed config + grammar on first run.
+
+    Return whether this call created ``config.yml`` from the bundled template.
+    The caller uses that signal to distinguish a newly seeded install from an
+    existing configuration whose selected assets happen to be present.
+    """
     seed = Path(seed_dir or os.environ.get("FULLOCH_SEED_DIR", DEFAULT_SEED_DIR))
     data = Path(data_dir)
 
@@ -121,3 +126,5 @@ def ensure_scaffolding(data_dir: str = "./data", seed_dir: str = None) -> None:
 
     if is_new_install and config.is_file():
         _seed_https_cert(data)
+
+    return is_new_install and config.is_file()

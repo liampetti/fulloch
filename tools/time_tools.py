@@ -1,13 +1,11 @@
 """Time and timer/alarm tools. (Weather lives in the Home Assistant tool.)"""
 
-import re
 import threading
 import time
 from typing import Dict, Optional
 
-from word2number import w2n
-
 import utils.local_time as _local_time
+from utils.duration import parse_duration
 
 from .tool_registry import ArtifactText, tool
 
@@ -31,27 +29,17 @@ def set_speak_callback(fn) -> None:
 
 def _parse_duration(duration_str: str) -> int:
     """Parse a timer duration; shared by create and extend operations."""
-    duration_str = duration_str.lower()
-    number_str = ""
-    unit = ""
-    for word in duration_str.split():
-        try:
-            number_str = str(w2n.word_to_num(word))
-        except ValueError:
-            unit += word + " "
-    if not number_str:
-        numbers = re.findall(r"\d+", duration_str)
-        if not numbers:
-            raise ValueError("No valid duration value found")
-        number_str = numbers[0]
-    value = int(number_str)
-    if "hour" in unit:
-        return value * 3600
-    if "minute" in unit:
-        return value * 60
-    if "second" in unit or not unit.strip():
-        return value
-    raise ValueError(f"Unknown duration unit: {unit.strip()!r}")
+    return parse_duration(duration_str)
+
+
+def _format_duration(seconds: int) -> str:
+    """Format a duration without losing its minute/second remainder."""
+    parts = []
+    for unit, size in (("hour", 3600), ("minute", 60), ("second", 1)):
+        value, seconds = divmod(seconds, size)
+        if value:
+            parts.append(f"{value} {unit}{'' if value == 1 else 's'}")
+    return " ".join(parts) or "0 seconds"
 
 
 def _timer_artifact() -> dict:
@@ -238,14 +226,7 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
             active_timers[timer_id] = timer
             timer.start()
 
-        if seconds >= 3600:
-            hours = seconds // 3600
-            text = f"Timer started for {hours} {'hour' if hours == 1 else 'hours'}"
-        elif seconds >= 60:
-            minutes = seconds // 60
-            text = f"Timer started for {minutes} {'minute' if minutes == 1 else 'minutes'}"
-        else:
-            text = f"Timer started for {seconds} {'second' if seconds == 1 else 'seconds'}"
+        text = f"Timer started for {_format_duration(seconds)}"
         return ArtifactText(text, _timer_artifact())
 
     except ValueError as e:
@@ -255,17 +236,24 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
 @tool(
     name="cancel_timer", description="Cancel an active timer", aliases=["stop_timer", "end_timer"]
 )
-def cancel_timer(timer_id: str) -> str:
+def cancel_timer(timer_id: Optional[str] = None) -> str:
     """
     Cancel an active timer.
 
     Args:
-        timer_id: ID of timer to cancel
+        timer_id: ID of timer to cancel. When omitted, cancels the only active
+            timer; with multiple timers, asks the caller to provide an ID.
 
     Returns:
         Confirmation message
     """
     with _timers_lock:
+        if timer_id is None:
+            if not active_timers:
+                return "No active timers"
+            if len(active_timers) > 1:
+                return "Multiple timers are active. Say cancel timer followed by its ID."
+            timer_id = next(iter(active_timers))
         timer = active_timers.pop(timer_id, None)
     if timer is not None:
         timer.cancel()

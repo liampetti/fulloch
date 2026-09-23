@@ -40,6 +40,22 @@ def test_empty_block_falls_back_per_domain():
     assert r["llm"]["model"] is None  # no default_model for the bypass
 
 
+def test_laya_resolves_as_a_cpu_semantic_command_backend():
+    resolved = b.resolve_models({"llm": {"backend": "laya"}})["llm"]
+
+    assert resolved["backend"] == "laya"
+    assert resolved["model"] == "./data/models/laya"
+    assert resolved["opts"]["confidence_threshold"] == 0.90
+    assert resolved["spec"].cpu_ok is True
+
+
+def test_stats_ui_renders_laya_semantic_routing():
+    ui = Path("server/static/js/chat-ui.js").read_text()
+
+    assert "Semantic Routing" in ui
+    assert "s.laya" in ui
+
+
 def test_model_override_and_opts_passthrough():
     r = b.resolve_models({"asr": {"backend": "qwen", "model": "X", "foo": 1}})
     assert r["asr"]["model"] == "X"
@@ -65,6 +81,7 @@ def test_backends_are_implemented():
     assert b.get_spec("llm", "openai").implemented is True
     assert b.get_spec("asr", "qwen").implemented is True
     assert b.get_spec("asr", "parakeet").implemented is True
+    assert b.get_spec("asr", "parakeet-onnx").implemented is True
     assert b.get_spec("asr", "orukeet").implemented is True
     assert b.get_spec("asr", "moonshine").implemented is True
     assert b.get_spec("tts", "kokoro-onnx").implemented is True
@@ -78,11 +95,13 @@ def test_backends_are_implemented():
 def test_gpu_only_flags():
     assert b.get_spec("asr", "qwen").gpu_only is True
     assert b.get_spec("asr", "parakeet").gpu_only is True
+    assert b.get_spec("asr", "parakeet-onnx").gpu_only is False
     assert b.get_spec("asr", "orukeet").gpu_only is True
     assert b.get_spec("tts", "qwen").gpu_only is True
     assert b.get_spec("llm", "llama").gpu_only is True
     assert b.get_spec("llm", "gemma").gpu_only is True
     assert b.get_spec("llm", "ornith").gpu_only is True
+    assert b.get_spec("llm", "neohorse").gpu_only is True
     assert b.get_spec("asr", "moonshine").gpu_only is False
     assert b.get_spec("tts", "kokoro-onnx").gpu_only is False
     assert b.get_spec("tts", "pocket-tts-onnx").gpu_only is False
@@ -95,6 +114,7 @@ def test_gpu_only_flags():
     assert b.get_spec("asr", "qwen-gguf-small").gpu_only is True
     assert b.get_spec("tts", "qwen-gguf-small").gpu_only is True
     assert b.get_spec("tts", "higgs-gguf").gpu_only is True
+    assert b.get_spec("tts", "breeze-tts-2-gguf").gpu_only is True
 
 
 def test_gpu_crispasr_backend_metadata():
@@ -117,6 +137,18 @@ def test_higgs_backend_metadata_and_cpu_gating():
     assert higgs.extra["max_actions"] == 256
     assert b.is_offerable(higgs, "gpu") is True
     assert b.is_offerable(higgs, "cpu") is False
+
+
+def test_breeze_backend_metadata_and_cpu_gating():
+    breeze = b.get_spec("tts", "breeze-tts-2-gguf")
+    assert breeze.loader == "core.tts_crispasr:load_tts"
+    assert breeze.hf_files == (
+        ("cstr/breeze-tts-2-GGUF", "breeze-tts-2-q4_k.gguf"),
+        ("cstr/qwen3-tts-tokenizer-12hz-GGUF", "qwen3-tts-tokenizer-12hz.gguf"),
+    )
+    assert breeze.extra == {"gpu": True, "backend": "bt2-tts"}
+    assert b.is_offerable(breeze, "gpu") is True
+    assert b.is_offerable(breeze, "cpu") is False
 
 
 def test_pocket_gguf_backend_metadata_and_cpu_gating():
@@ -199,10 +231,31 @@ def test_ornith_backend_metadata_and_public_resolution():
     assert resolved["opts"]["mtp"] is False
 
 
+def test_neohorse_backend_metadata_and_public_resolution():
+    neohorse = b.get_spec("llm", "neohorse")
+    assert neohorse.loader == "core.slm:load_slm"
+    assert neohorse.hf_repo == "TokenRhythm/NeoHorse-1-9B-GGUF"
+    assert neohorse.hf_file == "NeoHorse-1-9B-Q4_K_M.gguf"
+    assert neohorse.experimental is True
+    assert neohorse.extra == {"mtp": False}
+
+    resolved = b.resolve_models({"llm": {"backend": "local", "local_model": "neohorse"}})["llm"]
+    assert resolved["backend"] == "neohorse"
+    assert resolved["model"].endswith(neohorse.hf_file)
+    assert resolved["opts"]["mtp"] is False
+
+    # NeoHorse has no compatible MTP draft head, regardless of a stale config.
+    override = b.resolve_models(
+        {"llm": {"backend": "local", "local_model": "neohorse", "mtp": True}}
+    )["llm"]
+    assert override["opts"]["mtp"] is False
+
+
 def test_public_local_llm_modes_resolve_to_their_internal_servers():
     qwen = b.resolve_models({"llm": {"backend": "local", "local_model": "qwen"}})["llm"]
     gemma = b.resolve_models({"llm": {"backend": "local", "local_model": "gemma"}})["llm"]
     ornith = b.resolve_models({"llm": {"backend": "local", "local_model": "ornith"}})["llm"]
+    neohorse = b.resolve_models({"llm": {"backend": "local", "local_model": "neohorse"}})["llm"]
     external = b.resolve_models({"llm": {"backend": "external", "base_url": "http://llm/v1"}})[
         "llm"
     ]
@@ -212,6 +265,7 @@ def test_public_local_llm_modes_resolve_to_their_internal_servers():
     assert qwen["opts"]["flash_attn"] is False
     assert gemma["backend"] == "gemma"
     assert ornith["backend"] == "ornith"
+    assert neohorse["backend"] == "neohorse"
     assert external["backend"] == "openai"
     assert external["opts"]["base_url"] == "http://llm/v1"
 
@@ -231,10 +285,10 @@ def test_model_docs_and_settings_cover_the_registry():
 
     # Local LLMs have public config aliases rather than their internal server
     # backend names; keep the explicit selector and config docs in sync.
-    for local_model in ("qwen", "gemma", "ornith", "custom"):
+    for local_model in ("qwen", "gemma", "ornith", "neohorse", "custom"):
         assert f"local_model: {local_model}" in example
         assert f'<option value="{local_model}"' in settings
-    assert "backend: local             # local | external | none" in example
+    assert "backend: local             # local | external | laya | none" in example
     assert '<option value="external"' in settings
     assert '<option value="none"' in settings
 
@@ -264,6 +318,7 @@ def test_is_offerable_by_variant():
     assert b.is_offerable(qwen, "gpu") is True
     assert b.is_offerable(qwen, "cpu") is False
     assert b.is_offerable(moon, "cpu") is True
+    assert b.is_offerable(b.get_spec("asr", "parakeet-onnx"), "cpu") is True
     assert b.is_offerable(b.get_spec("asr", "qwen-gguf"), "cpu") is False
     assert b.is_offerable(b.get_spec("llm", "openai"), "cpu") is True
 
@@ -283,6 +338,7 @@ def test_asr_and_tts_options_have_stable_user_facing_order():
         "qwen-gguf-small",
         "qwen-onnx",
         "qwen-onnx-small",
+        "parakeet-onnx",
         "qwen",
         "qwen-small",
         "moonshine",
@@ -290,6 +346,7 @@ def test_asr_and_tts_options_have_stable_user_facing_order():
     ]
     assert [spec.backend for spec in b.list_backends(b.TTS)] == [
         "higgs-gguf",
+        "breeze-tts-2-gguf",
         "qwen-gguf",
         "qwen-gguf-small",
         "pocket-tts-pytorch",

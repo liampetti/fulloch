@@ -22,7 +22,7 @@ The `models:` config block selects backends:
       tts:
         backend: qwen
       llm:
-        backend: llama                  # llama | none | openai
+        backend: llama                  # llama | none | laya | openai
         model: "./data/models/qwen3.5-9b-mtp/Qwen3.5-9B-UD-Q4_K_XL.gguf"  # or any absolute path
         n_context: 12288
 
@@ -279,6 +279,31 @@ _register(
         "wakeword/context biasing. onnxruntime-only, no torch.",
     )
 )
+_register(
+    BackendSpec(
+        domain=ASR,
+        backend="parakeet-onnx",
+        cpu_ok=True,
+        experimental=True,
+        display_name="NVIDIA Parakeet TDT 0.6B v3 ONNX (CPU)",
+        loader="core.asr_parakeet_onnx:load_asr_model",
+        default_model="./data/models/parakeet-tdt-0.6b-v3-onnx",
+        hf_repo="istupakov/parakeet-tdt-0.6b-v3-onnx",
+        hf_allow=(
+            "config.json",
+            "decoder_joint-model.int8.onnx",
+            "encoder-model.int8.onnx",
+            "nemo128.onnx",
+            "vocab.txt",
+        ),
+        download_size_gb=0.7,
+        vram_gb=0.0,
+        ram_gb=1.5,
+        deps=("onnxruntime", "onnx_asr"),
+        notes="CPU-only int8 ONNX export of Parakeet TDT v3 (25 European languages). "
+        "Fast greedy TDT decoding through onnx-asr; no phrase/context biasing or live partials.",
+    )
+)
 # Ultra-light CPU ASR for constrained edge devices — English-only, no wakeword
 # biasing (unlike the Qwen3-ASR ONNX backends above), so an experimental
 # fallback rather than a tier default.
@@ -525,6 +550,29 @@ _register(
 _register(
     BackendSpec(
         domain=TTS,
+        backend="breeze-tts-2-gguf",
+        gpu_only=True,
+        experimental=True,
+        display_name="Breeze TTS 2 Q4_K GGUF (GPU voice clone)",
+        loader="core.tts_crispasr:load_tts",
+        default_model="./data/models/breeze-tts-2-q4",
+        hf_files=(
+            ("cstr/breeze-tts-2-GGUF", "breeze-tts-2-q4_k.gguf"),
+            ("cstr/qwen3-tts-tokenizer-12hz-GGUF", "qwen3-tts-tokenizer-12hz.gguf"),
+        ),
+        download_size_gb=2.3,
+        vram_gb=5.0,
+        deps=(),
+        notes="Experimental CUDA CrispASR Breeze TTS 2 voice clone with documented English "
+        "audio tags for vocal actions and non-speech sounds. Research/non-commercial weights; "
+        "requires the GPU image's CrispASR runtime and consent for every voice reference.",
+        extra={"gpu": True, "backend": "bt2-tts"},
+    )
+)
+
+_register(
+    BackendSpec(
+        domain=TTS,
         backend="qwen-gguf",
         gpu_only=True,
         display_name="Qwen3 1.7B GGUF (GPU)",
@@ -604,6 +652,27 @@ _register(
         notes="Grammar-constrained agent loop. Alternative full-tier local SLM (MIT).",
     )
 )
+# NeoHorse is a text-only Qwen3.5-9B agentic fine-tune. It uses the bundled
+# llama-server path, but does not include an MTP draft head.
+_register(
+    BackendSpec(
+        domain=LLM,
+        backend="neohorse",
+        gpu_only=True,
+        experimental=True,
+        display_name="NeoHorse 1 9B Q4",
+        loader="core.slm:load_slm",
+        default_model="./data/models/NeoHorse-1-9B-Q4_K_M.gguf",
+        hf_repo="TokenRhythm/NeoHorse-1-9B-GGUF",
+        hf_file="NeoHorse-1-9B-Q4_K_M.gguf",
+        download_size_gb=5.63,
+        vram_gb=7.5,
+        n_context=12288,
+        deps=(),
+        extra={"mtp": False},
+        notes="Experimental grammar-constrained agent loop. Text-only Qwen3.5 9B fine-tune; no MTP draft head.",
+    )
+)
 _register(
     BackendSpec(
         domain=LLM,
@@ -613,6 +682,29 @@ _register(
         loader=None,
         notes="No language model. Regex fast-path only; everything else gets a "
         "spoken 'basic commands only' fallback. The cpu_local stack's LLM.",
+    )
+)
+_register(
+    BackendSpec(
+        domain=LLM,
+        backend="laya",
+        cpu_ok=True,
+        display_name="Laya semantic commands (CPU)",
+        loader="core.laya:load_laya",
+        default_model="./data/models/laya",
+        hf_repo="convaiinnovations/laya",
+        hf_allow=(
+            "rl_agent_config.json",
+            "model.safetensors",
+            "tokenizer/*",
+            "encoder/*",
+        ),
+        download_size_gb=0.81,
+        ram_gb=2.0,
+        deps=("laya",),
+        notes="Local two-pass semantic command routing after regex misses. It does not generate "
+        "conversation or arbitrary tool arguments.",
+        extra={"confidence_threshold": 0.90},
     )
 )
 # Advanced remote backend — any OpenAI-compatible chat endpoint.
@@ -655,6 +747,7 @@ def list_backends(domain: str) -> list[BackendSpec]:
             "qwen-gguf-small",
             "qwen-onnx",
             "qwen-onnx-small",
+            "parakeet-onnx",
             "qwen",
             "qwen-small",
             "moonshine",
@@ -662,6 +755,7 @@ def list_backends(domain: str) -> list[BackendSpec]:
         ),
         TTS: (
             "higgs-gguf",
+            "breeze-tts-2-gguf",
             "qwen-gguf",
             "qwen-gguf-small",
             "pocket-tts-pytorch",
@@ -760,11 +854,13 @@ def resolve_models(config_models: Optional[dict]) -> dict:
                     backend = "gemma"
                 elif local_model == "ornith":
                     backend = "ornith"
+                elif local_model == "neohorse":
+                    backend = "neohorse"
                 elif local_model == "custom":
                     backend = "llama"
                 else:
                     raise ValueError(
-                        f"Unknown local LLM model {local_model!r}; choose qwen, gemma, ornith, or custom"
+                        f"Unknown local LLM model {local_model!r}; choose qwen, gemma, ornith, neohorse, or custom"
                     )
             elif backend == "external":
                 backend = "openai"
@@ -776,6 +872,9 @@ def resolve_models(config_models: Optional[dict]) -> dict:
         n_context = block.pop("n_context", None) or spec.n_context
         opts = dict(spec.extra)
         opts.update(block)  # Explicit config overrides registry loader defaults.
+        if domain == LLM and backend == "neohorse":
+            # NeoHorse's GGUF does not include a compatible MTP draft head.
+            opts["mtp"] = False
         resolved[domain] = {
             "backend": backend,
             "model": model,

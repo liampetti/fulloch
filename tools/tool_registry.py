@@ -195,6 +195,11 @@ class ToolRegistry:
         available = self._availability.get(canonical)
         return available is None or available()
 
+    def get_schema(self, name: str) -> Optional[ToolSchema]:
+        """Return a tool's public schema, resolving aliases when necessary."""
+        canonical = self.canonical_name(name)
+        return self._schemas.get(canonical) if canonical is not None else None
+
     def is_deep_think_only(self, name: str) -> bool:
         """Whether foreground calls to this tool must use the planning worker."""
         canonical = self.canonical_name(name)

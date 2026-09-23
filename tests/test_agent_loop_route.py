@@ -131,6 +131,50 @@ def test_route_is_no_llm_when_llm_disabled(monkeypatch):
     host._generate_with_context_recovery.assert_not_called()
 
 
+def test_laya_routes_only_after_a_regex_miss(monkeypatch):
+    import core.agent_loop as al
+
+    monkeypatch.setattr(al, "catchAll", lambda prompt: prompt)
+    captured = {}
+    monkeypatch.setattr(
+        al.AgentLoop,
+        "_run_without_llm",
+        lambda self, prompt, emission: captured.__setitem__("emission", emission) or "paused",
+    )
+    router = Mock(return_value={"actions": [{"intent": "pause", "args": []}]})
+    host = _host(
+        llm_enabled=False,
+        laya_enabled=True,
+        laya_router=types.SimpleNamespace(route=router),
+    )
+    stats = TurnStats()
+
+    assert al.AgentLoop(host, source="text", stats=stats).run("please stop playback") == "paused"
+    router.assert_called_once_with("please stop playback")
+    assert captured["emission"] == {"actions": [{"intent": "pause", "args": []}]}
+    assert stats.route == "laya"
+    assert stats.laya_seconds is not None
+
+
+def test_laya_enabled_keeps_regex_telemetry_as_regex(monkeypatch):
+    import core.agent_loop as al
+
+    monkeypatch.setattr(al, "catchAll", lambda prompt: {"reply": "done"})
+    router = Mock()
+    stats = TurnStats()
+    host = _host(
+        llm_enabled=False,
+        laya_enabled=True,
+        laya_router=types.SimpleNamespace(route=router),
+        _record_spoken=lambda _text: None,
+    )
+
+    assert al.AgentLoop(host, source="text", stats=stats).run("a regex command") == "done"
+    router.assert_not_called()
+    assert stats.route == "regex"
+    assert stats.laya_seconds is None
+
+
 def test_follow_up_is_routed_to_agent_when_no_report_is_available(monkeypatch):
     import core.agent_loop as al
 

@@ -126,8 +126,15 @@ def detect_setup_state(
     models_dir: str = DEFAULT_MODELS_DIR,
     reset_marker: str = DEFAULT_RESET_MARKER,
     completion_marker: str = DEFAULT_COMPLETE_MARKER,
+    freshly_seeded_config: bool = False,
 ) -> SetupDecision:
-    """Classify the install so `main` can route to setup vs. run."""
+    """Classify the install so `main` can route to setup vs. run.
+
+    ``freshly_seeded_config`` is true only when bootstrap created config.yml in
+    this process. A seed has a valid ``general:`` block but intentionally no
+    model choices, so cached assets from an earlier install must not silently
+    bypass the first-run wizard.
+    """
     config_present = bool(config) and isinstance(config.get("general"), dict)
 
     # An explicit reset (dashboard "Re-run setup wizard") wins over everything:
@@ -145,6 +152,13 @@ def detect_setup_state(
             needs_setup=True,
             config_present=False,
             reason="no config — first run",
+        )
+
+    if freshly_seeded_config:
+        return SetupDecision(
+            needs_setup=True,
+            config_present=True,
+            reason="new config — first run",
         )
 
     missing_keys = _missing_required_keys(config)
@@ -186,7 +200,7 @@ def detect_setup_state(
             missing_assets.append(f"{domain}:{cfg['backend']} ({cfg['model']})")
     # Local llama-server backends use the shipped GBNF grammar; external OpenAI
     # endpoints may not recognise it and fall back to JSON mode.
-    if resolved[LLM]["backend"] in {"llama", "gemma", "ornith"}:
+    if resolved[LLM]["backend"] in {"llama", "gemma", "ornith", "neohorse"}:
         if not (Path(models_dir) / "grammars" / "agent.gbnf").is_file():
             missing_assets.append("grammar (agent.gbnf)")
 

@@ -171,6 +171,12 @@ def test_write_models_validates_public_llm_modes(tmp_path):
     cs.write_models({"llm": {"backend": "local", "local_model": "ornith"}}, path)
     assert cs.read_config(path)["models"]["llm"]["local_model"] == "ornith"
 
+    cs.write_models({"llm": {"backend": "local", "local_model": "neohorse"}}, path)
+    assert cs.read_config(path)["models"]["llm"]["local_model"] == "neohorse"
+
+    cs.write_models({"llm": {"backend": "laya"}}, path)
+    assert cs.read_config(path)["models"]["llm"]["backend"] == "laya"
+
 
 def test_write_models_validates_generation_timeout(tmp_path):
     path = _write(tmp_path, "general:\n  wakeword: hi\n")
@@ -184,6 +190,14 @@ def test_write_models_validates_generation_timeout(tmp_path):
         {"llm": {"backend": "local", "local_model": "qwen", "generation_timeout": 120}}, path
     )
     assert cs.read_config(path)["models"]["llm"]["generation_timeout"] == 120
+
+
+@pytest.mark.parametrize("threshold", [-0.1, 1.1, float("nan"), True])
+def test_write_models_rejects_invalid_laya_confidence_threshold(tmp_path, threshold):
+    path = _write(tmp_path, "general:\n  wakeword: hi\n")
+
+    with pytest.raises(ValueError, match="confidence_threshold"):
+        cs.write_models({"llm": {"backend": "laya", "confidence_threshold": threshold}}, path)
 
 
 def test_write_models_validates_and_preserves_openwakeword_config(tmp_path):
@@ -253,8 +267,13 @@ def test_settings_view_merges_values(tmp_path):
     asr = {x["backend"]: x for x in view["backends"]["asr"]}
     assert asr["qwen-onnx"]["experimental"] is False
     assert asr["qwen-onnx-small"]["experimental"] is False
+    assert asr["parakeet-onnx"]["experimental"] is True
     assert asr["qwen"]["display_name"] == "Qwen3 1.7B PyTorch (default GPU)"
     assert asr["moonshine"]["experimental"] is True
+    # Dropdown order is not the runtime default: on GPU it starts with
+    # experimental Parakeet/Higgs options, while an absent models block runs
+    # the Qwen stack.
+    assert view["default_backends"] == {"asr": "qwen", "tts": "qwen", "llm": "llama"}
 
 
 def test_settings_view_reads_legacy_higgs_personality(tmp_path):
@@ -291,14 +310,15 @@ def test_settings_view_marks_offerable_by_variant(tmp_path, monkeypatch):
         "full": True,
         "cpu_server": True,
         "cpu_local": True,
+        "cpu_laya": True,
     }
 
     monkeypatch.setenv("FULLOCH_VARIANT", "cpu")
     cpu = cs.settings_view(path)
     assert cpu["variant"] == "cpu"
     tiers = {t["id"]: t["offerable"] for t in cpu["tier_presets"]}
-    # Full needs GPU-only backends; the two CPU stacks run on the CPU image.
-    assert tiers == {"full": False, "cpu_server": True, "cpu_local": True}
+    # Full needs GPU-only backends; the CPU stacks run on the CPU image.
+    assert tiers == {"full": False, "cpu_server": True, "cpu_local": True, "cpu_laya": True}
     llm = {x["backend"]: x["offerable"] for x in cpu["backends"]["llm"]}
     assert llm["none"] is True and llm["openai"] is True and llm["llama"] is False
     asr = {x["backend"]: x["offerable"] for x in cpu["backends"]["asr"]}

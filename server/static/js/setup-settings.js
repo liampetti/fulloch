@@ -641,6 +641,8 @@ async function restoreBackup(name) {
 function currentBackend(domain) {
   const m = state.schema.models;
   if (m && m[domain] && m[domain].backend) return m[domain].backend;
+  const runtimeDefault = state.schema.default_backends && state.schema.default_backends[domain];
+  if (runtimeDefault) return runtimeDefault;
   const off = (state.schema.backends[domain] || []).filter(o => o.offerable);
   return off.length ? off[0].backend : '';
 }
@@ -655,6 +657,7 @@ function modelSettingsSignature() {
     'sm-wakeword-smoothing-frames', 'sm-wakeword-cooldown-ms', 'sm-personality-sel',
     'sm-personality-custom-text', 'sm-llama-sel', 'sm-local-model', 'sm-llama-model',
     'sm-llama-ctx', 'sm-mtp', 'sm-flash-attn', 'sm-oai-url', 'sm-oai-model', 'sm-oai-key',
+    'sm-laya-model', 'sm-laya-threshold',
   ].map(id => {
     const node = $(id) || {};
     return node.type === 'checkbox' ? String(node.checked) : (node.value || '');
@@ -664,11 +667,14 @@ function modelSettingsSignature() {
 function modelsCard() {
   const b = state.schema.backends;
   const llm = (state.schema.models && state.schema.models.llm) || {};
-  const llmMode = llm.backend === 'none' ? 'none' : (llm.backend === 'openai' || llm.backend === 'external' ? 'external' : 'local');
+  const llmMode = llm.backend === 'none' || llm.backend === 'laya' ? llm.backend : (llm.backend === 'openai' || llm.backend === 'external' ? 'external' : 'local');
   const llamaCustom = (llm.local_model === 'custom' || llm.backend === 'llama') && llm.model &&
     !String(llm.model).endsWith(DEFAULT_LLAMA_FILE);
-  const llmChoice = llamaCustom ? 'custom' : (llm.local_model || (llm.backend === 'gemma' ? 'gemma' : (llm.backend === 'ornith' ? 'ornith' : 'qwen')));
+  const localBackendChoices = { gemma: 'gemma', ornith: 'ornith', neohorse: 'neohorse' };
+  const llmChoice = llamaCustom ? 'custom' : (llm.local_model || localBackendChoices[llm.backend] || 'qwen');
   const llamaPath = llamaCustom ? String(llm.model) : '';
+  const layaPath = llmMode === 'laya' ? String(llm.model || '') : '';
+  const layaThreshold = llmMode === 'laya' && llm.confidence_threshold != null ? llm.confidence_threshold : '0.90';
   const llamaCtx = llmMode === 'local' && llm.n_context ? llm.n_context : '';
   const asrPath = String(((state.schema.models && state.schema.models.asr) || {}).model || '');
   const ttsPath = String(((state.schema.models && state.schema.models.tts) || {}).model || '');
@@ -709,8 +715,9 @@ function modelsCard() {
     <label>Language model</label>
     <select id="sm-llama-sel">
       <option value="local"${llmMode === 'local' ? ' selected' : ''}>Local</option>
-      <option value="external"${llmMode === 'external' ? ' selected' : ''}>External</option>
-      <option value="none"${llmMode === 'none' ? ' selected' : ''}>Regex-only commands</option>
+        <option value="external"${llmMode === 'external' ? ' selected' : ''}>External</option>
+        <option value="laya"${llmMode === 'laya' ? ' selected' : ''}>Local semantic commands (Laya)</option>
+        <option value="none"${llmMode === 'none' ? ' selected' : ''}>Regex-only commands</option>
     </select>
     <div id="sm-openai" style="display:none;margin-top:0.75rem">
       <label>Base URL</label><input type="text" id="sm-oai-url" placeholder="http://localhost:8888/v1" value="${(llmMode === 'external' ? llm.base_url || '' : '').replace(/"/g,'&quot;')}">
@@ -734,6 +741,7 @@ function modelsCard() {
         <option value="qwen"${llmChoice === 'qwen' ? ' selected' : ''}>Qwen3.5 9B MTP (recommended)</option>
         <option value="gemma"${llmChoice === 'gemma' ? ' selected' : ''}>Gemma 4 12B QAT</option>
         <option value="ornith"${llmChoice === 'ornith' ? ' selected' : ''}>Ornith 1.5 9B Q4</option>
+        <option value="neohorse"${llmChoice === 'neohorse' ? ' selected' : ''}>NeoHorse 1 9B Q4</option>
         <option value="custom"${llmChoice === 'custom' ? ' selected' : ''}>Custom GGUF file</option>
       </select>
       <div id="sm-llama-custom" style="display:none;margin-top:0.5rem">
@@ -749,6 +757,14 @@ function modelsCard() {
         <label><input type="checkbox" id="sm-flash-attn"${llm.flash_attn ? ' checked' : ''}> Enable experimental llama.cpp Flash Attention</label>
         <div>Both are off by default. Enable only after stability-testing this GPU.</div>
       </div>
+    </div>
+    <div id="sm-laya" style="display:none;margin-top:0.75rem">
+      <label>Model directory</label>
+      <input type="text" id="sm-laya-model" placeholder="./data/models/laya" value="${layaPath.replace(/"/g,'&quot;')}">
+      <div class="help">Leave blank for Fulloch's downloaded Laya model. Use a local fine-tuned checkpoint directory to override it.</div>
+      <label>Minimum confidence</label>
+      <input type="number" id="sm-laya-threshold" min="0" max="1" step="0.01" value="${layaThreshold}">
+      <div class="help">Only dispatch a semantic command when every Laya decision meets this threshold. Higher values are safer but fall back more often.</div>
     </div>
     <div id="models-note"></div>
     <div class="actions"><span></span><button class="primary" id="save-models">Save models</button></div>
@@ -775,9 +791,14 @@ function wireModelsCard() {
     const mode = $('sm-llama-sel').value;
     const isOpenai = mode === 'external';
     const isLocal = mode === 'local';
+    const isLaya = mode === 'laya';
     $('sm-openai').style.display = isOpenai ? '' : 'none';
     $('sm-llama').style.display = isLocal ? '' : 'none';
+    $('sm-laya').style.display = isLaya ? '' : 'none';
     $('sm-llama-custom').style.display = isLocal && $('sm-local-model').value === 'custom' ? '' : 'none';
+    const supportsMtp = isLocal && $('sm-local-model').value === 'qwen';
+    $('sm-mtp').disabled = !supportsMtp;
+    if (!supportsMtp) $('sm-mtp').checked = false;
     setBranding(isOpenai);
   };
   $('sm-llama-sel').addEventListener('change', toggleLlmModel);
@@ -871,6 +892,15 @@ async function saveModels() {
     if (ctx) llm.n_context = parseInt(ctx, 10);
     llm.mtp = $('sm-mtp').checked;
     llm.flash_attn = $('sm-flash-attn').checked;
+  } else if (llmMode === 'laya') {
+    const model = $('sm-laya-model').value.trim();
+    const threshold = Number($('sm-laya-threshold').value);
+    if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+      $('models-note').innerHTML = `<div class="banner error">Laya confidence must be between 0 and 1.</div>`;
+      return false;
+    }
+    if (model) llm.model = model;
+    llm.confidence_threshold = threshold;
   }
   const models = {
     asr: { backend: $('sm-asr').value === 'custom' ? currentBackend('asr') : $('sm-asr').value },

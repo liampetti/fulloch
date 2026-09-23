@@ -614,6 +614,17 @@ TIER_PRESETS: tuple = (
         },
         recommended=True,
     ),
+    TierPreset(
+        "cpu_laya",
+        "CPU semantic commands",
+        "Everything runs locally on CPU. Laya understands common command phrasing but does not "
+        "provide free-form conversation.",
+        {
+            "asr": {"backend": "qwen-onnx"},
+            "tts": {"backend": "pocket-tts-onnx"},
+            "llm": {"backend": "laya"},
+        },
+    ),
 )
 
 

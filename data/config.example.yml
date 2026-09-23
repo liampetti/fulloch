@@ -70,36 +70,44 @@ general:
 #   asr:
 #     backend: qwen              # Qwen3 1.7B PyTorch (default GPU)
 #     # parakeet                 # NVIDIA Parakeet TDT 0.6B (GPU)
-#     # orukeet                  # Orukeet Parakeet-derived 0.6B (GPU, experimental; CC BY-SA 4.0 weights)
+#     # orukeet                  # Orukeet Parakeet-derived 0.6B (GPU; CC BY-SA 4.0 weights)
 #     # qwen-gguf                # Qwen3 1.7B GGUF (GPU)
 #     # qwen-gguf-small          # Qwen3 0.6B GGUF (GPU)
 #     # qwen-onnx                # Qwen3 1.7B ONNX (default CPU)
 #     # qwen-onnx-small          # Qwen3 0.6B ONNX (CPU)
+#     # parakeet-onnx             # NVIDIA Parakeet TDT 0.6B v3 ONNX (CPU; multilingual, no context bias)
 #     # qwen-small               # Qwen3 0.6B PyTorch (GPU)
 #     # moonshine                 # Moonshine Base (CPU)
 #     # moonshine-tiny            # Moonshine Tiny (CPU)
 #   tts:
 #     backend: qwen              # Qwen3 1.7B PyTorch (default GPU)
-#     # higgs-gguf               # Higgs TTS 3 Q4 GGUF (GPU, experimental)
+#     # higgs-gguf               # Higgs TTS 3 Q4 GGUF (GPU)
+#     # breeze-tts-2-gguf        # Breeze TTS 2 Q4_K GGUF (GPU voice clone with English audio tags)
 #     # qwen-gguf                # Qwen3 1.7B GGUF (GPU)
 #     # qwen-gguf-small          # Qwen3 0.6B GGUF (GPU)
-#     # pocket-tts-pytorch       # Pocket TTS PyTorch (GPU, experimental streaming English voice clone; HF_TOKEN + accepted terms required)
-#     # audio8                   # Audio8 0.6B (GPU, experimental 44.1 kHz Apache-2.0 voice clone; requires <name>.wav + exact <name>.txt)
-#     # pocket-tts-gguf          # Pocket TTS Q8_0 GGUF (GPU, experimental English voice clone)
+#     # pocket-tts-pytorch       # Pocket TTS PyTorch (GPU streaming English voice clone; HF_TOKEN + accepted terms required)
+#     # audio8                   # Audio8 0.6B (GPU 44.1 kHz Apache-2.0 voice clone; requires <name>.wav + exact <name>.txt)
+#     # pocket-tts-gguf          # Pocket TTS Q8_0 GGUF (GPU English voice clone)
 #     # qwen-small               # Qwen3 0.6B PyTorch (GPU)
 #     # kokoro-onnx              # Kokoro 82M (CPU built-in voices)
 #     # pocket-tts-onnx          # Pocket TTS ONNX (default CPU; experimental one-shot WAV voice clone)
 #   llm:
-#     backend: local             # local | external | none (regex-only commands)
+#     backend: local             # local | external | laya | none (regex-only commands)
 #     local_model: qwen          # Qwen3.5 9B MTP (recommended)
 #     # local_model: gemma       # Gemma 4 12B QAT
 #     # local_model: ornith      # Ornith 1.5 9B Q4
+#     # local_model: neohorse    # NeoHorse 1 9B Q4
 #     # local_model: custom      # Provide `model` below for a local GGUF.
 #     # model: "/path/to/model.gguf"  # Required only when local_model: custom.
 #     # n_context: 12288         # Optional; larger contexts use more VRAM.
 #     # generation_timeout: 90   # Per-call hard limit; a local timeout restarts llama-server.
 #     mtp: false                 # Experimental speculative decoding; enable only after benchmarking your GPU.
 #     flash_attn: false          # Experimental llama.cpp Flash Attention; enable only after stability testing.
+#
+# Local semantic commands (CPU; no free-form conversation):
+#   llm:
+#     backend: laya
+#     # confidence_threshold: 0.90  # Optional; lower values accept more semantic routes.
 #   # Optional idle gate. Omit this block (or use backend: asr) for default
 #   # always-running ASR wakeword detection, which transcribes voice activity.
 #   # Current model is v0.6 for the "Hey Atticus" wakeword, otherwise use

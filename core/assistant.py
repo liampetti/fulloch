@@ -39,6 +39,8 @@ from .agent_loop import (
 from .audio import AudioCapture
 from .backends import ASR, LLM, TTS, get_module, resolve_models
 from .background_jobs import BackgroundJob, BackgroundJobManager
+from .breeze_controls import apply_delivery as apply_breeze_delivery
+from .breeze_controls import extract_delivery_request as extract_breeze_delivery_request
 from .higgs_controls import apply_delivery, extract_delivery_request
 from .satellite import SatelliteSession
 from .satellite_context import current_satellite_id as _current_satellite_id
@@ -487,6 +489,9 @@ class Assistant:
         #              "name": <intent>?}  (assistant content is raw agent
         # JSON; tool content is the tool's return string).
         self._history: list = []
+        # Laya is not a conversational model. Keep only the last confirmed
+        # operation as bounded context for a pronoun follow-up after a regex miss.
+        self._laya_context: Optional[dict] = None
         # Completed background reports stay outside compacted history as durable
         # references. Follow-up answers re-read the saved report rather than
         # asking the conversational model to reconstruct its findings.
@@ -501,8 +506,9 @@ class Assistant:
         # Backend selection. `models` is the parsed `models:` config block
         # (or None — defaults to the Qwen stack). Resolved once through the
         # registry so `_load_models` and the no-LLM gate share one source of
-        # truth. `llm_enabled` is False for `llm.backend: none`, which runs a
-        # regex-only assistant that never touches the SLM.
+        # truth. `llm_enabled` is False for non-generative CPU backends. Laya
+        # adds bounded command classification after regex misses but never
+        # invokes the conversational SLM.
         self._models_raw = models or {}
         self.verify_asr_wakeword = True
         thinking = thinking or {}
@@ -524,7 +530,8 @@ class Assistant:
             self._on_thinking_job_status,
             self._background_job_admitted,
         )
-        self.llm_enabled = self._models[LLM]["backend"] != "none"
+        self.llm_enabled = self._models[LLM]["backend"] not in {"none", "laya"}
+        self.laya_enabled = self._models[LLM]["backend"] == "laya"
         # The resolved LLM backend name (e.g. "llama"/"openai"/"none"). The
         # dashboard reads this to swap to the "Parloch" branding when the model
         # runs off-device over a remote OpenAI-compatible endpoint.
@@ -559,6 +566,7 @@ class Assistant:
         self._live_asr_event_thread = None
         self.slm_model = None
         self.grammar = None
+        self.laya_router = None
         self.greeting_prompt = None
         self.web_summary_prompt = None
         # Pre-rendered fallback clips, populated in `_warm_and_announce`.
@@ -666,6 +674,8 @@ class Assistant:
         backend = llm_cfg["backend"]
         if backend == "none":
             return "none (regex-only)"
+        if backend == "laya":
+            return "Laya (semantic commands)"
         if backend == "openai":
             return f"OpenAI: {llm_cfg.get('model') or '?'}"
         # Local llama.cpp — show the gguf filename without the extension.
@@ -939,7 +949,13 @@ class Assistant:
         self.replan_stall_cache: list = []
 
         # --- LLM -----------------------------------------------------------
-        if self.llm_enabled:
+        if self.laya_enabled:
+            self._loading_backend = llm_cfg["spec"]
+            self._set_loading_detail(LLM, llm_cfg)
+            from .laya import load_laya
+
+            self.laya_router = load_laya(model_path=llm_cfg["model"], **llm_cfg["opts"])
+        elif self.llm_enabled:
             self._loading_backend = llm_cfg["spec"]
             self._set_loading_detail(LLM, llm_cfg)
             logger.info("Using %s", self._loading_display_name(llm_cfg))
@@ -1109,6 +1125,7 @@ class Assistant:
                             self.wakeword_name,
                             personality=self._personality_for_prompt(),
                             higgs_tts=self._tts_backend == "higgs-gguf",
+                            breeze_tts=self._tts_backend == "breeze-tts-2-gguf",
                             obsidian_edit_enabled=notes._obsidian_edit_allowed(),
                         ),
                     )
@@ -1246,7 +1263,31 @@ class Assistant:
 
     def _maybe_reset_session(self) -> None:
         """Reset shared history under the caller-owned turn lock."""
+        had_history = bool(self._history)
         turn_history.reset_session(self._history, self.satellites, CHAT_SESSION_TIMEOUT_S)
+        if had_history and not self._history:
+            self._laya_context = None
+
+    def _record_laya_action(self, request: str, action: dict, result: str) -> None:
+        """Store one successful command result for Laya's next routing attempt."""
+        # Tools still return a few plain-text failures rather than a typed error.
+        # Never anchor a later pronoun to one of those uncertain outcomes.
+        failed_markers = (
+            "reactive question:", "error:", "couldn't", "isn't set up", "don't know", "not found",
+            "not available", "no command was sent",
+        )
+        if not result.strip() or any(marker in result.lower() for marker in failed_markers):
+            return
+        args = action.get("args") or []
+        target = args[0] if args and isinstance(args[0], str) else None
+        value = args[1] if len(args) > 1 and isinstance(args[1], str) else None
+        self._laya_context = {
+            "request": request[:240],
+            "intent": str(action.get("intent", ""))[:80],
+            "target": target[:160] if target else None,
+            "value": value[:80] if value else None,
+            "result": result[:240],
+        }
 
     def _history_for(self, session: Optional[SatelliteSession]) -> list:
         """The conversation history a turn's prompt should be built from.
@@ -2042,11 +2083,17 @@ class Assistant:
 
     def _prepare_delivery_request(self, user_prompt: str, sat: SatelliteSession) -> str:
         """Extract delivery controls and retain the cross-backend quiet setting."""
-        previous = sat.higgs_delivery if self._tts_backend == "higgs-gguf" else ""
-        agent_prompt, delivery = extract_delivery_request(user_prompt, previous)
-        sat.tts_gain = self.whisper_gain if delivery == "<|style:whispering|>" else 1.0
+        expressive_tts = {"higgs-gguf", "breeze-tts-2-gguf"}
+        previous = sat.higgs_delivery if self._tts_backend in expressive_tts else ""
+        if self._tts_backend == "breeze-tts-2-gguf":
+            agent_prompt, delivery = extract_breeze_delivery_request(user_prompt, previous)
+            whisper_delivery = "(whispers)"
+        else:
+            agent_prompt, delivery = extract_delivery_request(user_prompt, previous)
+            whisper_delivery = "<|style:whispering|>"
+        sat.tts_gain = self.whisper_gain if delivery == whisper_delivery else 1.0
 
-        if self._tts_backend == "higgs-gguf":
+        if self._tts_backend in expressive_tts:
             sat.higgs_delivery = delivery
             return agent_prompt
 
@@ -2548,10 +2595,12 @@ class Assistant:
         ack_thread: list = []
 
         def _start_ack() -> None:
-            # Cached PCM cannot inherit a per-turn Higgs delivery control. Skip
+            # Cached PCM cannot inherit a per-turn expressive delivery control. Skip
             # it rather than breaking a whisper/slow/fast request with a loud,
             # unstyled acknowledgement immediately before the answer.
-            if sat.tts_gain != 1.0 or (self._tts_backend == "higgs-gguf" and sat.higgs_delivery):
+            if sat.tts_gain != 1.0 or (
+                self._tts_backend in {"higgs-gguf", "breeze-tts-2-gguf"} and sat.higgs_delivery
+            ):
                 return
             # Mute this satellite's recorder before the ack plays so it
             # doesn't re-enter the ASR queue. Half-duplex relies on this
@@ -2581,6 +2630,8 @@ class Assistant:
             cleaned = clean_for_tts(answer)
             if self._tts_backend == "higgs-gguf":
                 cleaned = apply_delivery(cleaned, sat.higgs_delivery)
+            elif self._tts_backend == "breeze-tts-2-gguf":
+                cleaned = apply_breeze_delivery(cleaned, sat.higgs_delivery)
             sat.transcribing = False
             try:
                 if ack_thread:
@@ -2766,7 +2817,7 @@ class Assistant:
 
             def _start_ack() -> None:
                 if sat.tts_gain != 1.0 or (
-                    self._tts_backend == "higgs-gguf" and sat.higgs_delivery
+                    self._tts_backend in {"higgs-gguf", "breeze-tts-2-gguf"} and sat.higgs_delivery
                 ):
                     return
                 # Barge-in mode: recorder stays live; ack shares the turn's
@@ -2802,6 +2853,8 @@ class Assistant:
             cleaned = clean_for_tts(answer)
             if self._tts_backend == "higgs-gguf":
                 cleaned = apply_delivery(cleaned, sat.higgs_delivery)
+            elif self._tts_backend == "breeze-tts-2-gguf":
+                cleaned = apply_breeze_delivery(cleaned, sat.higgs_delivery)
             # Empty answer = the no-LLM bypass already played a pre-rendered
             # fallback clip (and emitted its bubble), so don't speak again.
             playback_end = None

@@ -125,3 +125,5 @@ scripts/gen_kokoro_demos.py
 !.env.example
 !data/models/grammars/agent.gbnf
 searxng_data/settings.yml.new
+data/credentials.backup.json
+data/config.cpu.yml

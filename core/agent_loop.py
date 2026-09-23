@@ -164,12 +164,30 @@ class AgentLoop:
             if stats is not None:
                 stats.route = "regex"
 
-        # No-LLM tier (llm.backend: none): the regex catch is the only path.
-        # Dispatch a match, or speak the 'basic commands only' fallback —
-        # never touch the SLM.
+        # Non-generative CPU backends dispatch an existing regex match first.
+        # Laya gets one bounded semantic-routing attempt only after a miss;
+        # neither path can start the conversational SLM.
         if not host.llm_enabled:
+            laya_routed = False
+            if first_emission is None and getattr(host, "laya_enabled", False):
+                router = getattr(host, "laya_router", None)
+                if router is not None:
+                    laya_started = time.monotonic()
+                    try:
+                        context = getattr(host, "_laya_context", None)
+                        first_emission = (
+                            router.route(user_prompt, context=context)
+                            if context is not None
+                            else router.route(user_prompt)
+                        )
+                        laya_routed = first_emission is not None
+                    except Exception:
+                        logger.exception("Laya routing failed; using CPU fallback")
+                    finally:
+                        if stats is not None:
+                            stats.laya_seconds = time.monotonic() - laya_started
             if stats is not None:
-                stats.route = "no_llm"
+                stats.route = "laya" if laya_routed else ("regex" if first_emission is not None else "no_llm")
             return self._run_without_llm(user_prompt, first_emission or regex_emission)
 
         def remote_fallback() -> str:
@@ -268,6 +286,7 @@ class AgentLoop:
                                 ),
                                 personality=_personality(host),
                                 higgs_tts=getattr(host, "_tts_backend", None) == "higgs-gguf",
+                                breeze_tts=getattr(host, "_tts_backend", None) == "breeze-tts-2-gguf",
                                 conversation_mode=bool(
                                     source == "voice"
                                     and self.satellite is not None
@@ -722,6 +741,10 @@ class AgentLoop:
             if step.artifact is not None:
                 observation["artifact"] = step.artifact
             host._emit_agent_event("observation", observation, source=source)
+            if step.kind is intents.StepKind.NORMAL:
+                record_context = getattr(host, "_record_laya_action", None)
+                if record_context is not None:
+                    record_context(user_prompt, action, step.text)
             # No SLM to replan with. A REACTIVE step still ran the tool and
             # produced a real observation (e.g. HA "couldn't find that entity")
             # — speak that directly rather than the generic "no AI" phrase, since

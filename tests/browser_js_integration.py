@@ -107,6 +107,7 @@ class BrowserModules(unittest.TestCase):
             field.update(value=field["default"], set=False)
         self.schema = {
             "fields": fields, "models": None, "credentials": {}, "variant": "cpu",
+            "default_backends": {"asr": "qwen", "tts": "qwen", "llm": "llama"},
             "tier_presets": tier_presets_as_dicts(),
             "wakeword_presets": [{"wakeword": "hey atticus", "pattern": "atticus",
                                   "model": "", "label": "Hey Atticus", "recommended": True}],
@@ -121,6 +122,7 @@ class BrowserModules(unittest.TestCase):
             },
         }
         self.status = {"phase": "READY", "state": "idle", "server_instance_id": "test"}
+        self.documents = {"documents": [{"path": "Fulloch/example-report.md", "title": "example report"}]}
         self.progress = {"state": "downloading", "assets": []}
         self.history = [{"role": "assistant", "source": "startup", "ts": 1, "content": "Hello"}]
         self.page.route("**/*", self.route)
@@ -145,6 +147,7 @@ class BrowserModules(unittest.TestCase):
             "/status": self.status, "/history": self.history,
             "/config": {"wakeword": "hey atticus", "restart_required": False},
             "/api/obsidian/status": {}, "/api/obsidian/show-token": {"token": "test-token"},
+            "/api/documents": self.documents,
             "/ha/areas": {"available": True, "areas": [{"id": "kitchen", "name": "Kitchen"}]},
             "/setup/schema": self.schema, "/setup/preflight": {},
             "/setup/voices": {"voices": ["atticus", "other"]},
@@ -192,6 +195,68 @@ class BrowserModules(unittest.TestCase):
         self.assertEqual(self.page.locator("#empty").count(), 0)
         self.page.evaluate("window.dispatchEvent(new Event('pagehide'))")
         self.assertTrue(self.page.evaluate("boundary.streams.every(s => s.closed) && boundary.intervals.size === 0"))
+
+    def test_documents_tab_lists_markdown_documents_in_new_tabs(self):
+        self.open_chat()
+        self.page.get_by_role("tab", name="Documents", exact=True).click()
+        self.assertFalse(self.page.locator('.documents-folder').evaluate('(el) => el.open'))
+        self.page.locator('.documents-folder summary').click()
+        document = self.page.locator(".document-file")
+        self.assertEqual(document.inner_text(), "example report")
+        self.assertEqual(document.get_attribute("href"), "/documents/Fulloch/example-report.md")
+        self.assertEqual(document.get_attribute("target"), "_blank")
+
+    def test_document_sorting_and_folder_pagination(self):
+        self.documents = {"documents": [
+            {"path": f"Reports/note-{i}.md", "title": f"Note {i}", "modified_at": i}
+            for i in range(30, 0, -1)
+        ]}
+        self.open_chat()
+        self.page.get_by_role("tab", name="Documents", exact=True).click()
+        self.page.locator('.documents-folder summary').click()
+        links = self.page.locator('.document-file')
+        self.assertEqual(links.first.inner_text(), 'Note 1')
+        self.assertEqual(links.count(), 25)
+        self.page.get_by_role('button', name='Next', exact=True).click()
+        self.assertEqual(links.first.inner_text(), 'Note 26')
+        self.assertEqual(links.count(), 5)
+        self.assertTrue(self.page.get_by_role('button', name='Next', exact=True).is_disabled())
+        self.page.get_by_role('button', name='Previous', exact=True).click()
+        self.assertEqual(links.first.inner_text(), 'Note 1')
+        self.page.locator('#documents-sort').select_option('recent')
+        self.page.locator('.documents-folder summary').click()
+        self.assertEqual(links.first.inner_text(), 'Note 30')
+        self.page.get_by_role('button', name='Next', exact=True).click()
+        self.assertEqual(links.first.inner_text(), 'Note 5')
+
+    def test_document_edit_save_and_retry(self):
+        from server.routes_chat import _document_html
+
+        saved = []
+
+        def document_route(route):
+            if route.request.method == 'GET':
+                return route.fulfill(body=_document_html('Example', '# Original'), content_type='text/html')
+            saved.append(route.request.post_data_json['content'])
+            if len(saved) == 1:
+                return route.fulfill(status=500)
+            return route.fulfill(json={'html': '<h1>Edited</h1>'})
+
+        self.page.route('**/documents/example.md', document_route)
+        self.page.goto('http://localhost/documents/example.md')
+        self.page.get_by_role('button', name='Edit document').click()
+        editor = self.page.get_by_role('textbox', name='Markdown document')
+        self.assertEqual(editor.input_value(), '# Original')
+        editor.fill('# Edited')
+        self.page.get_by_role('button', name='Save document').click()
+        self.page.locator('#document-error').wait_for(state='visible')
+        self.assertEqual(editor.input_value(), '# Edited')
+        self.page.get_by_role('button', name='Save document').click()
+        self.page.locator('#document-content').wait_for(state='visible')
+        self.assertEqual(self.page.locator('#document-content h1').inner_text(), 'Edited')
+        self.assertEqual(saved, ['# Edited', '# Edited'])
+        self.page.get_by_role('button', name='Edit document').click()
+        self.assertEqual(editor.input_value(), '# Edited')
 
     def test_satellite_replay_capture_cancel_and_teardown(self):
         self.open_chat()
@@ -277,6 +342,21 @@ class BrowserModules(unittest.TestCase):
         self.page.locator("#save-cfg").click()
         self.page.wait_for_timeout(50)
         self.assertTrue(any(path == "/config" and 'other' in (body or '') for path, _, body in self.requests))
+
+    def test_settings_uses_runtime_defaults_not_first_gpu_dropdown_option(self):
+        self.schema["variant"] = "gpu"
+        self.schema["backends"]["asr"] = [
+            {"backend": "parakeet", "offerable": True, "display_name": "Parakeet"},
+            {"backend": "qwen", "offerable": True, "display_name": "Qwen"},
+        ]
+        self.schema["backends"]["tts"] = [
+            {"backend": "higgs-gguf", "offerable": True, "display_name": "Higgs"},
+            {"backend": "qwen", "offerable": True, "display_name": "Qwen"},
+        ]
+        self.page.goto("http://localhost/setup")
+
+        self.assertEqual(self.page.locator("#sm-asr").input_value(), "qwen")
+        self.assertEqual(self.page.locator("#sm-tts").input_value(), "qwen")
 
     def test_all_artifact_dispatches_and_safe_text_links(self):
         self.open_chat()

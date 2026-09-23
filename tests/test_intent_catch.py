@@ -14,6 +14,7 @@ from utils.intent_catch import (
     catchAll,
     extract_after_play,
     extract_area_light_state,
+    extract_cancel_timer,
     extract_color,
     extract_compound_actions,
     extract_cover,
@@ -216,6 +217,22 @@ class TestExtractTimer:
         # Anchored like play: a passing mention of setting a timer must not fire.
         assert extract_timer("remind me later that i need to set a timer for the eggs") is None
 
+    def test_compound_duration_is_preserved(self):
+        assert extract_timer("set a timer for one minute and thirty-five seconds") == (
+            "one minute and thirty-five seconds"
+        )
+
+
+class TestCancelTimer:
+    def test_cancel_the_timer_without_an_id(self):
+        assert extract_cancel_timer("atticus stops timer") == (None,)
+        assert catchAll("stop timer") == {"actions": [{"intent": "cancel_timer", "args": []}]}
+
+    def test_cancel_timer_with_dashboard_id(self):
+        assert catchAll("cancel timer timer_611747521574") == {
+            "actions": [{"intent": "cancel_timer", "args": ["timer_611747521574"]}]
+        }
+
 
 class TestListTimers:
     """Tests for list timers command."""
@@ -283,6 +300,7 @@ class TestDimBrighten:
             ("dim the downstairs office lights", "downstairs office lights", 30),
             ("brighten the kitchen", "kitchen", 100),
             ("brighten the bedroom lamp", "bedroom lamp", 100),
+            ("brighton the bedroom lamp", "bedroom lamp", 100),  # common ASR homophone
             ("please dim the lounge", "lounge", 30),
         ],
     )

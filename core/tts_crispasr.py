@@ -1,9 +1,8 @@
-"""CrispASR-hosted Qwen3 or Pocket TTS GGUF voice-clone TTS via ggml.
+"""CrispASR-hosted Qwen3, Pocket, or Breeze TTS GGUF voice-clone TTS via ggml.
 
-Uses CrispASR's direct Qwen3-TTS C ABI in a persistent worker. Unlike the
-unified `crispasr.Session.synthesize()` API, this ABI emits PCM while codec
-frames are generated, so browser playback starts before the full clause is
-complete.
+Qwen3-TTS and Breeze use their native CrispASR C ABIs in a persistent worker.
+Qwen emits PCM while codec frames are generated; Breeze needs its native API
+to support voice cloning and returns one PCM buffer per bounded request.
 
 GPU runs in a persistent isolated subprocess. This prevents CrispASR's bundled
 ggml libraries from colliding with other CUDA model runtimes
@@ -32,6 +31,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from .breeze_controls import sanitize_for_breeze
 from .crispasr_worker import CrispASRWorker
 from .inference_safety import TTS_JOB_QUEUE_MAXSIZE, submit_tts_job
 from .text_utils import split_clauses, split_sentences
@@ -43,9 +43,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL_DIR = "./data/models/qwen3-tts-crispasr-gguf"
 DEFAULT_MODEL_DIR_0_6B = "./data/models/qwen3-tts-crispasr-0.6b-gguf"
 DEFAULT_MODEL_DIR_POCKET = "./data/models/pocket-tts-gguf"
+DEFAULT_MODEL_DIR_BREEZE = "./data/models/breeze-tts-2-q4"
 DEFAULT_LIB_DIR = "./data/models/crispasr-python"
 DEFAULT_LIB_DIR_GPU = "/opt/crispasr-python-cuda"
 CODEC_FILE = "qwen3-tts-tokenizer-12hz.gguf"
+BREEZE_MODEL_FILE = "breeze-tts-2-q4_k.gguf"
 
 # Talker filenames accepted by the direct Qwen3-TTS ABI.
 # The codec (12Hz tokenizer) is shared, fixed at f16, across both sizes —
@@ -67,6 +69,7 @@ _worker_config = None
 _voice_prompt = None
 _worker_stream_count = 0
 _pocket_tts = False
+_breeze_tts = False
 
 # CrispASR's native Qwen TTS graph allocation grows with a single input span.
 # Keep long note/news replies bounded so a full 16 GB GPU stack retains room for
@@ -121,7 +124,7 @@ def load_tts(
     backend: Optional[str] = None,
     **_opts,
 ):
-    """Load a CrispASR Qwen3 or Pocket TTS GGUF model, warm.
+    """Load a CrispASR Qwen3, Pocket, or Breeze TTS GGUF model, warm.
 
     Both `lib_dir` (the extracted `crispasr` Python package + its .so's) and
     `model_id` (a directory holding one known talker GGUF + the codec GGUF)
@@ -132,7 +135,7 @@ def load_tts(
 
     `gpu=True` starts the CUDA session in an isolated worker process.
     """
-    global _session, _worker_config, _voice_prompt, _worker_stream_count, _pocket_tts
+    global _session, _worker_config, _voice_prompt, _worker_stream_count, _pocket_tts, _breeze_tts
 
     if lib_dir is None:
         lib_dir = DEFAULT_LIB_DIR_GPU if gpu else DEFAULT_LIB_DIR
@@ -147,6 +150,7 @@ def load_tts(
         )
     root = Path(model_id)
     _pocket_tts = backend == "pocket-tts"
+    _breeze_tts = backend == "bt2-tts"
     if _pocket_tts:
         model_path = root / "pocket-tts-english-q8_0.gguf" if root.is_dir() else root
         if not model_path.is_file():
@@ -174,6 +178,36 @@ def load_tts(
                 str(model_path), backend=backend, n_threads=int(num_threads)
             )
         logger.info("CrispASR Pocket TTS ready in %.1fs", time.monotonic() - t0)
+        return _session
+
+    if _breeze_tts:
+        model_path = root / BREEZE_MODEL_FILE if root.is_dir() else root
+        codec_path = model_path.parent / CODEC_FILE
+        if not model_path.is_file() or not codec_path.is_file():
+            raise FileNotFoundError(
+                f"Breeze TTS 2 GGUF and codec pair not found in {root} — rerun setup to download them."
+            )
+        logger.info("Loading CrispASR Breeze TTS 2 GGUF (%s) …", model_path.name)
+        t0 = time.monotonic()
+        if gpu:
+            _worker_config = {
+                "model_path": model_path,
+                "lib_dir": lib_root,
+                "codec_path": codec_path,
+                "num_threads": num_threads,
+                "direct_breeze_tts": True,
+            }
+            _voice_prompt = None
+            _worker_stream_count = 0
+            _session = CrispASRWorker(**_worker_config)
+        else:
+            if str(lib_root) not in sys.path:
+                sys.path.insert(0, str(lib_root))
+            # This backend is GPU-only. The direct worker path is required for
+            # cloning because CrispASR's generic Session ABI only supports
+            # Breeze plain TTS in the targeted runtime release.
+            raise RuntimeError("Breeze TTS 2 requires gpu=True")
+        logger.info("CrispASR Breeze TTS 2 ready in %.1fs", time.monotonic() - t0)
         return _session
 
     talker_path = backend_name = None
@@ -275,6 +309,13 @@ def _synth_stream(text: str):
         if prepared:
             yield _synth(prepared)
         return
+    if _breeze_tts:
+        # Breeze's documented English audio tags are part of its text input.
+        # The model otherwise uses the generic complete-buffer CrispASR API.
+        prepared = sanitize_for_breeze(text)
+        if prepared:
+            yield _synth(prepared)
+        return
     if isinstance(_session, CrispASRWorker):
         yield from _session.stream("synthesize_stream", text=text)
         return
@@ -359,6 +400,7 @@ def _recycle_worker_if_needed() -> None:
     """Bound retained direct-Qwen CUDA scheduler buffers between streams."""
     if (
         not _pocket_tts
+        and not _breeze_tts
         and isinstance(_session, CrispASRWorker)
         and _worker_stream_count >= _MAX_STREAMS_PER_WORKER
     ):
@@ -398,7 +440,7 @@ def _worker_loop() -> None:
         try:
             fragments = (
                 _pocket_synthesis_fragments(job.text)
-                if _pocket_tts
+                if _pocket_tts or _breeze_tts
                 else _synthesis_fragments(job.text)
             )
             for fragment in fragments:
@@ -466,6 +508,8 @@ def _drain_queue_nowait(q: "queue.Queue") -> None:
 
 def synthesize(text: str, prompt=None):
     """Run TTS to completion; return (chunks, sample_rate)."""
+    if _breeze_tts:
+        text = sanitize_for_breeze(text)
     out = _submit(text, TtsSession(), maxsize=0)
     chunks = []
     while True:
@@ -538,6 +582,8 @@ def speak_stream(
     session.active = True
 
     t_submit = time.monotonic()
+    if _breeze_tts:
+        text = sanitize_for_breeze(text)
     out = _submit(text, session, maxsize=8)
     try:
         first = out.get()

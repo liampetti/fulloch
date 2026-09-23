@@ -70,6 +70,12 @@ _TIMER_RE = re.compile(
     r"(?:start|set)\s+(?:(?:a|the)\s+)?(?:timer|time)\s+(?:(?:for|to)\s+)?(.+?)(?:\s+please)?$",
     re.IGNORECASE,
 )
+_CANCEL_TIMER_RE = re.compile(
+    r"^\s*(?:atticus\s+)?(?:please\s+)?(?:cancel|stop|stops|end)\s+"
+    r"(?:(?:the|a)\s+)?(?:active\s+)?(?:timer|countdown)"
+    r"(?:\s+(?P<timer_id>timer_\d+))?\s*(?:now|please)?\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
 _SATELLITE_MESSAGE_RE = re.compile(
     r"^\s*(?:please\s+)?(?:tell|announce(?:\s+to)?|send\s+(?:a\s+)?message\s+to)\s+"
     r"(?P<target>.+?)\s+(?:that|saying)\s+(?P<message>.+?)\s*[.!?]*\s*$",
@@ -110,6 +116,12 @@ def has_default_weather_forecast(command: str) -> Optional[bool]:
 def extract_timer(command: str) -> Optional[str]:
     m = _match("Timer", _TIMER_RE, command)
     return m.group(1).strip() if m else None
+
+
+def extract_cancel_timer(command: str) -> Optional[tuple[Optional[str]]]:
+    """Extract a direct timer cancellation, optionally with its dashboard ID."""
+    m = _match("Cancel timer", _CANCEL_TIMER_RE, command)
+    return (m.group("timer_id"),) if m else None
 
 
 def list_timers(command: str) -> Optional[bool]:
@@ -317,14 +329,14 @@ _TOGGLE_RE = re.compile(
 # so "dim the lights in the downstairs office" → entity "downstairs office".
 _DIM_RE = re.compile(
     r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*"
-    r"(dim|brighten)\b(.*)$",
+    r"(dim|brighten|brighton)\b(.*)$",
     re.IGNORECASE,
 )
 _DIM_FILLER_RE = re.compile(
     r"^(?:the\s+)?(?:lights?\s+|lamps?\s+)?(?:in\s+(?:the\s+)?)?",
     re.IGNORECASE,
 )
-_DIM_LEVELS = {"dim": 30, "brighten": 100}
+_DIM_LEVELS = {"dim": 30, "brighten": 100, "brighton": 100}
 
 
 def extract_light_brightness(command: str) -> Optional[tuple]:
@@ -700,6 +712,7 @@ _INTENT_RULES = [
     (extract_skip, lambda _: {"intent": "skip", "args": []}),
     (extract_resume, lambda _: {"intent": "resume", "args": []}),
     (extract_timer, lambda v: {"intent": "start_countdown", "args": [v]}),
+    (extract_cancel_timer, lambda v: {"intent": "cancel_timer", "args": [v[0]] if v[0] else []}),
     (list_timers, lambda _: {"intent": "get_timer_status", "args": []}),
     (extract_deep_think, lambda v: {"intent": "deep_think", "args": [v]}),
 ]

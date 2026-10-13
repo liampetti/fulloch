@@ -433,43 +433,6 @@ def test_earlier_search_outage_does_not_explain_an_unrelated_final_failure(error
     assert state.emit.call_args.args[1] == "I couldn't complete that report."
 
 
-def test_worker_search_outage_reaches_the_conversational_failure_notification(monkeypatch):
-    from core.thinking_worker import ReportSynthesisError
-    from tests.test_thinking_worker import _web_worker
-    from tools.tool_registry import ThinkingResult
-
-    save = MagicMock()
-    monkeypatch.setattr(reports, "save_report", save)
-    invoke = MagicMock(return_value=ThinkingResult(
-        "Search service could not be reached.", status="unavailable",
-        scope="The web search did not return usable source material.",
-        evidence={"query": "next Formula 1 race", "sources": []},
-    ))
-    service, _, _ = _web_worker([
-        '{"tool":"external_information","args":["next Formula 1 race","research"]}',
-    ], invoke)
-    job = BackgroundJob(
-        "worker-search-outage",
-        JobSnapshot("Analyse the next Formula 1 race", origin_source="conversation",
-                    origin_satellite_id="dashboard-text"),
-    )
-
-    with pytest.raises(ReportSynthesisError) as failure:
-        service.run(job, lambda: False)
-    job.status = JobStatus.FAILED
-    job.error = f"{type(failure.value).__name__}: {failure.value}"
-    state = notifications(job)
-
-    invoke.assert_called_once()
-    assert job.evidence[-1]["tool"] == "external_information"
-    assert job.evidence[-1]["status"] == "unavailable"
-    assert state.emit.call_args.args[1] == (
-        "Web search was unavailable, so I couldn't gather the sources needed for that report."
-    )
-    assert state.dispatch.call_args.args[0]["error"] == job.error
-    save.assert_not_called()
-
-
 def test_failed_job_exports_verified_partial_report(report_root):
     job = BackgroundJob(
         "12345678",

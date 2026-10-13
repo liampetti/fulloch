@@ -7,7 +7,11 @@ import json
 import logging
 from typing import Optional
 
-from core.satellite_context import current_satellite_id, get_current_assistant
+from core.satellite_context import (
+    current_satellite_ha_area,
+    current_satellite_id,
+    get_current_assistant,
+)
 from utils.value_parsing import parse_percentage
 
 from . import ha_client as client
@@ -64,6 +68,11 @@ def _is_bare_light_phrase(key: str) -> bool:
 def _current_satellite_ha_area() -> Optional[str]:
     """The calling satellite's configured `ha_area`, or None if there isn't
     a live assistant, the satellite has disconnected, or no area is set."""
+    # AgentLoop sets the area directly for this turn. Prefer that explicit
+    # context over looking the session up through the global assistant registry.
+    area = current_satellite_ha_area.get()
+    if area is not None:
+        return area or None
     assistant = get_current_assistant()
     if assistant is None:
         return None
@@ -76,13 +85,12 @@ def _current_satellite_ha_area() -> Optional[str]:
     return session.ha_area
 
 
-def _bare_light_area_entities(entity: str) -> Optional[tuple[list, str]]:
+def _bare_light_area_entities(entity: str) -> Optional[tuple[list, str] | str]:
     """If `entity` is a bare lights phrase and the calling satellite has a
-    configured `ha_area` containing at least one (non-denylisted) light
-    entity, return `(light_entity_ids, area_display_name)`. Returns None
-    when the fallback doesn't apply — no satellite area configured, HA
-    unreachable, or the area has no lights — so the caller falls through to
-    the pre-existing single-entity resolution instead.
+    configured `ha_area`, return `(light_entity_ids, area_display_name)` or
+    a failure message. Returns None only when the area default doesn't apply.
+    A configured but unavailable/empty room must not fall through to a fuzzy
+    match for an unrelated light elsewhere in the house.
     """
     key = entity.lower().strip()
     for filler in client._LEADING_FILLERS:
@@ -95,17 +103,25 @@ def _bare_light_area_entities(entity: str) -> Optional[tuple[list, str]]:
     ha_area = _current_satellite_ha_area()
     if not ha_area:
         return None
-    area_id = client._resolve_area(ha_area)
-    if area_id is None:
-        return None
+    # Browser satellites send a selected HA area_id from /ha/areas. Accept
+    # that trusted ID directly when the local area-name cache isn't available;
+    # malformed/stale IDs simply produce no entities from HA's template API.
+    area_id = client._resolve_area(ha_area) or ha_area
+    if client._AREA_MAP and area_id not in client._AREA_MAP:
+        logger.debug("Satellite HA area %r is not in the loaded HA area map", ha_area)
+        return "I couldn't find the selected room. No command was sent. Please select the room again."
 
     raw = client._render_template(f"{{{{ area_entities({area_id!r}) | list | tojson }}}}")
     if raw is None:
-        return None
+        logger.debug("Could not list HA entities for satellite area %r", area_id)
+        return "I couldn't look up the lights in the selected room. No command was sent."
     try:
         entity_ids = json.loads(raw)
     except (ValueError, TypeError):
-        return None
+        logger.debug("Could not parse HA area entities for satellite area %r: %r", area_id, raw)
+        return "I couldn't read the lights in the selected room. No command was sent."
+    if not isinstance(entity_ids, list) or not all(isinstance(eid, str) for eid in entity_ids):
+        return "I couldn't read the lights in the selected room. No command was sent."
 
     lights = [
         eid
@@ -113,7 +129,8 @@ def _bare_light_area_entities(entity: str) -> Optional[tuple[list, str]]:
         if client._domain_of(eid) == "light" and eid not in client._DENIED_ENTITIES
     ]
     if not lights:
-        return None
+        logger.debug("Satellite HA area %r has no controllable lights", area_id)
+        return "I couldn't find any lights available for control in the selected room. No command was sent."
     area_name = client._AREA_MAP.get(area_id, ha_area)
     return lights, area_name
 
@@ -131,6 +148,8 @@ def turn_on(entity: str, brightness: Optional[int] = None) -> str:
         brightness: Optional brightness percentage (0-100) for lights
     """
     area_lights = _bare_light_area_entities(entity)
+    if isinstance(area_lights, str):
+        return area_lights
     if area_lights is not None:
         light_ids, area_name = area_lights
         data = {}
@@ -138,7 +157,9 @@ def turn_on(entity: str, brightness: Optional[int] = None) -> str:
         if brightness is not None:
             data["brightness"] = int((brightness / 100) * 255)
             success = f"Lights on in {area_name} at {brightness} percent"
-        return client._call_service("light", "turn_on", light_ids, data if data else None, success)
+        return client._call_service(
+            "light", "turn_on", light_ids, data if data else None, success,
+        )
 
     entity_id = client._resolve_entity(entity, domain="light")
     domain = client._domain_of(entity_id)
@@ -165,10 +186,12 @@ def turn_off(entity: str) -> str:
         entity: Entity name or ID (e.g., 'living room lights', 'light.living_room')
     """
     area_lights = _bare_light_area_entities(entity)
+    if isinstance(area_lights, str):
+        return area_lights
     if area_lights is not None:
         light_ids, area_name = area_lights
         return client._call_service(
-            "light", "turn_off", light_ids, success_message=f"Lights off in {area_name}"
+            "light", "turn_off", light_ids, success_message=f"Lights off in {area_name}",
         )
 
     entity_id = client._resolve_entity(entity)
@@ -190,10 +213,12 @@ def toggle(entity: str) -> str:
         entity: Entity name or ID (e.g., 'living room lights', 'light.living_room')
     """
     area_lights = _bare_light_area_entities(entity)
+    if isinstance(area_lights, str):
+        return area_lights
     if area_lights is not None:
         light_ids, area_name = area_lights
         return client._call_service(
-            "light", "toggle", light_ids, success_message=f"Toggled the lights in {area_name}"
+            "light", "toggle", light_ids, success_message=f"Toggled the lights in {area_name}",
         )
 
     entity_id = client._resolve_entity(entity)
@@ -222,6 +247,8 @@ def set_ha_brightness(entity: str, brightness: int | str) -> str:
     brightness_255 = int((brightness / 100) * 255)
 
     area_lights = _bare_light_area_entities(entity)
+    if isinstance(area_lights, str):
+        return area_lights
     if area_lights is not None:
         light_ids, area_name = area_lights
         return client._call_service(

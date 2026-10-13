@@ -46,6 +46,24 @@ class TestTokensPerSec:
         s = TurnStats(llm_output_tokens=40, llm_gen_seconds=2.0)
         assert s.tokens_per_sec() == 20.0
 
+    def test_prompt_components_are_reported_as_estimates(self):
+        stats = TurnStats()
+        stats.llm_calls = 1
+        stats.record_prompt_components(
+            system_prompt="tools schema", history=[{"role": "user", "content": "Earlier"}],
+            user_prompt="Current request",
+        )
+
+        components = stats.to_payload()["llm"]["prompt_component_tokens_estimated"]
+        assert set(components) == {"system_and_tool_schema", "conversation_history", "current_user"}
+        assert all(value > 0 for value in components.values())
+
+    def test_current_user_is_not_counted_as_prior_history(self):
+        stats = TurnStats()
+        stats.record_prompt_components(system_prompt="rules", history=[{"role": "user", "content": "Hello"}])
+        assert stats.prompt_component_tokens["conversation_history"] == 0
+        assert stats.prompt_component_tokens["current_user"] > 0
+
 
 class TestAnswerSeconds:
     def test_includes_stt(self):
@@ -68,8 +86,10 @@ class TestToPayloadAdaptive:
         assert "llm" not in payload
         assert "tts" not in payload
 
-    def test_text_turn_shape(self):
+    def test_text_turn_shape(self, monkeypatch):
+        monkeypatch.setattr("core.turn_stats.time.monotonic", lambda: 10.0)
         s = TurnStats(
+            t_start=0,
             llm_calls=2,
             tool_dispatches=1,
             llm_ttft=0.12,
@@ -87,7 +107,8 @@ class TestToPayloadAdaptive:
         assert llm["prompt_tokens"] == 35
         assert llm["output_tokens"] == 40
         assert llm["ttft"] == 0.12
-        assert llm["tps"] == round(40 / 0.95, 1)
+        assert llm["tps"] == 4.0  # end-to-end rate, including non-generation turn time
+        assert llm["decode_tps"] is None
 
     def test_voice_turn_includes_stt_and_retrieval(self):
         s = TurnStats(

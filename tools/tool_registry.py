@@ -49,12 +49,22 @@ class ThinkingResult(ArtifactText):
         scope: str = "",
         next_actions: tuple[str, ...] = (),
         artifact: Optional[dict] = None,
+        recovery: Optional[dict] = None,
+        record_identity: Optional[dict] = None,
+        provenance: Optional[dict] = None,
+        temporal: Optional[dict] = None,
+        qualifications: Optional[dict] = None,
     ):
         value = super().__new__(cls, text, artifact=artifact)
         value.thinking_status = status
         value.evidence = {} if evidence is None else evidence
         value.scope = scope
         value.next_actions = next_actions
+        value.recovery = {} if recovery is None else recovery
+        value.record_identity = {} if record_identity is None else record_identity
+        value.provenance = {} if provenance is None else provenance
+        value.temporal = {} if temporal is None else temporal
+        value.qualifications = {} if qualifications is None else qualifications
         return value
 
 
@@ -65,7 +75,7 @@ def thinking_result_error(result: ThinkingResult) -> str | None:
     share it. The controller turns an invalid result into a safe failure rather
     than allowing untrusted tool metadata into its evidence ledger.
     """
-    if result.thinking_status not in THINKING_OUTCOME_STATUSES:
+    if not isinstance(result.thinking_status, str) or result.thinking_status not in THINKING_OUTCOME_STATUSES:
         return f"unknown status {result.thinking_status!r}"
     if not isinstance(result.scope, str) or not result.scope.strip():
         return "scope must be a non-empty string"
@@ -77,6 +87,11 @@ def thinking_result_error(result: ThinkingResult) -> str | None:
         return "next_actions must be a tuple of non-empty names"
     if result.artifact is not None and not isinstance(result.artifact, dict):
         return "artifact must be a mapping or None"
+    if not isinstance(result.recovery, dict):
+        return "recovery must be a mapping"
+    if any(not isinstance(getattr(result, name), dict) for name in
+           ("record_identity", "provenance", "temporal", "qualifications")):
+        return "evidence metadata must be mappings"
     return None
 
 
@@ -222,18 +237,35 @@ class ToolRegistry:
         result = func(*(args or []), **(kwargs or {}))
         return result if result is not None else ""
 
-    def describe_tools(self) -> str:
+    def describe_tools(self, names: set[str] | None = None, *, foreground: bool = False) -> str:
         """Render the registered tools as a human-readable block for the intent prompt.
 
         Each line is `- name: description` followed by the argument signature
         derived from the function (`Args: a, b (optional, default: ...)`), so
         the agent sees exact arg names/order without each tool author having to
         restate them in the description.
+
+        `names` filters the selected canonical capabilities. `foreground` uses
+        compact signatures and handoff labels for worker-only capabilities;
+        normal background callers retain full definitions.
         """
         lines = []
         for schema in self._schemas.values():
+            if names is not None and schema.name not in names:
+                continue
             available = self._availability.get(schema.name)
             if available is not None and not available():
+                continue
+            if foreground and schema.deep_think_only:
+                # Foreground cannot execute these argument contracts: the
+                # controller hands them off to a separately scoped worker.
+                lines.append(f"- {schema.name}: background-only capability; request it through deep_think.")
+                continue
+            if foreground:
+                params = ", ".join(
+                    p.name if p.required else f"{p.name}={p.default!r}" for p in schema.params
+                )
+                lines.append(f"- {schema.name}({params}): {' '.join(schema.description.split())}")
                 continue
             parts = []
             for p in schema.params:

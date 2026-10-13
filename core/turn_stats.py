@@ -13,7 +13,9 @@ renders what it's given). They mirror the real identifiers in `core/asr.py`
 """
 
 import logging
+import math
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -43,6 +45,33 @@ class TurnStats:
     """Timings + counters for a single turn. All durations in seconds."""
 
     t_start: float = field(default_factory=time.monotonic)
+    turn_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    prompt_component_tokens: dict[str, int] = field(default_factory=dict)
+    prompt_profile: Optional[str] = None
+
+    def record_prompt_components(self, *, system_prompt="", history=None, user_prompt=None) -> None:
+        """Accumulate explicitly approximate prompt sizes by controller-owned component."""
+        def estimate(value):
+            return math.ceil(len(str(value or "").encode("utf-8")) / 2.5)
+
+        prior_history = list(history or ())
+        if user_prompt is None:
+            current_index = next(
+                (i for i in range(len(prior_history) - 1, -1, -1)
+                 if prior_history[i].get("role") == "user"), None,
+            )
+            if current_index is not None:
+                user_prompt = prior_history.pop(current_index).get("content")
+        components = {
+            "system_and_tool_schema": estimate(system_prompt),
+            "conversation_history": sum(
+                estimate(item.get("content")) + 12
+                for item in prior_history if isinstance(item, dict)
+            ),
+            "current_user": estimate(user_prompt),
+        }
+        for name, count in components.items():
+            self.prompt_component_tokens[name] = self.prompt_component_tokens.get(name, 0) + count
 
     # Audio input (voice turns only).
     stt_seconds: Optional[float] = None
@@ -142,7 +171,7 @@ class TurnStats:
         the UI can render adaptive rows."""
         total = round(self.answer_seconds(), 2)
         self._emitted_total = total
-        payload: dict = {"total": total}
+        payload: dict = {"total": total, "turn_id": self.turn_id}
 
         if self.stt_seconds is not None:
             payload["stt"] = {
@@ -170,16 +199,24 @@ class TurnStats:
             }
 
         if self.llm_calls > 0:
-            tps = self.tokens_per_sec()
+            end_to_end_tps = (
+                self.llm_output_tokens / total
+                if total > 0 and self.llm_output_tokens > 0
+                else None
+            )
             payload["llm"] = {
                 "seconds": round(self.llm_gen_seconds, 2),
                 "model": _LABELS["llm"],
                 "ttft": round(self.llm_ttft, 2) if self.llm_ttft is not None else None,
-                "tps": round(tps, 1) if tps is not None else None,
+                "tps": round(end_to_end_tps, 1) if end_to_end_tps is not None else None,
+                # No backend currently exposes a decode-only duration reliably.
+                "decode_tps": None,
                 "prompt_tokens": self.llm_prompt_tokens,
                 "output_tokens": self.llm_output_tokens,
                 "calls": self.llm_calls,
                 "tools": self.tool_dispatches,
+                "prompt_component_tokens_estimated": dict(self.prompt_component_tokens),
+                "prompt_profile": self.prompt_profile,
             }
 
         if self.tts_seconds is not None:

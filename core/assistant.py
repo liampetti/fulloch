@@ -4,9 +4,11 @@ Main assistant orchestration module.
 Handles wakeword detection, intent processing, and response generation.
 """
 
+import hashlib
 import inspect
 import json
 import logging
+import os
 import queue
 import random
 import re
@@ -26,8 +28,10 @@ from utils.intent_catch import catchAll
 from utils.prompts import (
     CACHE_PRIMING_USER_PROMPT,
     get_agent_system_prompt,
+    get_conversation_summary_context,
     get_greeting_system_prompt,
     get_greeting_user_prompt,
+    get_idle_conversation_summary_prompt,
     get_web_summary_system_prompt,
 )
 
@@ -42,6 +46,13 @@ from .background_jobs import BackgroundJob, BackgroundJobManager
 from .breeze_controls import apply_delivery as apply_breeze_delivery
 from .breeze_controls import extract_delivery_request as extract_breeze_delivery_request
 from .higgs_controls import apply_delivery, extract_delivery_request
+from .idle_summaries import IdleSummaryQueue
+from .research_task import (
+    is_unresolved_task_reference,
+    match_research_task,
+    resolve_research_task,
+    task_status_intent,
+)
 from .satellite import SatelliteSession
 from .satellite_context import current_satellite_id as _current_satellite_id
 from .slm import RemoteUnreachable, generate_slm, load_slm
@@ -67,6 +78,12 @@ from .turn_history import (
 from .turn_stats import TurnStats, set_model_labels
 
 logger = logging.getLogger(__name__)
+
+
+def _active_conversation_history(assistant) -> list:
+    """Use per-thread history when initialized; retain lightweight test/legacy hosts."""
+    history_for = getattr(assistant, "_history_for", None)
+    return history_for(None) if callable(history_for) else assistant._history
 
 
 class ConversationModeUnavailable(RuntimeError):
@@ -473,22 +490,26 @@ class Assistant:
         # result may only commit a turn at the dispatch gate — never trigger the
         # follow-up/stand-down/baseline side effects — and is ignored mid-turn.
         self._asr_provisional: dict = {"flag": False}
+        # Optional recorder identity shared by snapshots and live rolling ASR.
+        self._asr_capture_id: dict = {"value": None}
         # Written by the ASR stream generator: the raw audio buffer currently
         # being transcribed, kept so a bare wakeword can be re-transcribed
         # without the context bias to confirm it isn't a bias-prompt echo (see
         # `_verify_bare_wakeword`).
         self._asr_audio: dict = {"buf": None}
 
-        # Unified conversation memory — every user / assistant / tool entry
-        # for the agent's view of the session. Foreground turns and terminal
-        # background report callbacks mutate it under `_turn_lock`; history
-        # policy helpers never acquire that non-reentrant lock themselves.
-        # Shared across every satellite ("one assistant
-        # mind heard from multiple rooms") — see `_history_for`.
+        # Dashboard text keeps the legacy history list; connected satellites
+        # have independent histories to prevent cross-thread task/report drift.
+        # Foreground turns and terminal background callbacks mutate them under
+        # `_turn_lock`; history policy helpers never acquire that lock themselves.
         # Each entry: {"role": "user"|"assistant"|"tool", "content": str,
         #              "name": <intent>?}  (assistant content is raw agent
         # JSON; tool content is the tool's return string).
         self._history: list = []
+        self._satellite_histories: dict[str, list] = {}
+        self._backend_status_events: dict[str, dict] = {}
+        self._idle_summary_queue = IdleSummaryQueue()
+        self.idle_summaries_enabled = os.getenv("FULLOCH_IDLE_SUMMARIES", "").casefold() in {"1", "true", "yes"}
         # Laya is not a conversational model. Keep only the last confirmed
         # operation as bounded context for a pronoun follow-up after a regex miss.
         self._laya_context: Optional[dict] = None
@@ -513,6 +534,7 @@ class Assistant:
         self.verify_asr_wakeword = True
         thinking = thinking or {}
         self.thinking_enabled = True
+        self.thinking_fact_card_synthesis = bool(thinking.get("fact_card_synthesis", True))
         try:
             requested_slots = int(thinking.get("server_slots", 1))
         except (TypeError, ValueError):
@@ -529,6 +551,7 @@ class Assistant:
             self._run_background_thinking_job,
             self._on_thinking_job_status,
             self._background_job_admitted,
+            task_ledger_path=thinking.get("task_ledger_path", "data/research-tasks.json"),
         )
         self.llm_enabled = self._models[LLM]["backend"] not in {"none", "laya"}
         self.laya_enabled = self._models[LLM]["backend"] == "laya"
@@ -654,6 +677,7 @@ class Assistant:
         self._asr_wake_generation: dict = {"value": None}
         self._asr_kws_early_verification: dict = {"flag": False}
         self._asr_kws_capture_id: dict = {"value": None}
+        self._asr_candidate_expiration: dict = {"value": None}
         self.wakeword_metrics = {"accepted": 0, "rejected": 0, "status": "asr"}
         # A2: the last completed turn's stats payload (`TurnStats.to_payload()`),
         # for `GET /status` to expose without the caller needing to scrape SSE
@@ -966,6 +990,10 @@ class Assistant:
                 self.grammar, self.slm_model = load_openai(
                     model=llm_cfg["model"], **llm_cfg["opts"]
                 )
+                # External endpoints have no portable context-discovery API;
+                # use an explicit configured per-call limit or the safe local
+                # default. Two slots never multiply this allowance.
+                self.slm_model.context_tokens = int(llm_cfg.get("n_context") or 12288)
             else:  # local llama.cpp (default)
                 load_kwargs = {
                     "model_path": llm_cfg["model"],
@@ -1127,6 +1155,7 @@ class Assistant:
                             higgs_tts=self._tts_backend == "higgs-gguf",
                             breeze_tts=self._tts_backend == "breeze-tts-2-gguf",
                             obsidian_edit_enabled=notes._obsidian_edit_allowed(),
+                            context_tokens=getattr(self.slm_model, "context_tokens", None),
                         ),
                     )
                 except RemoteUnreachable:
@@ -1261,11 +1290,17 @@ class Assistant:
         t = threading.Thread(target=self._reminder_poll_loop, daemon=True)
         t.start()
 
-    def _maybe_reset_session(self) -> None:
-        """Reset shared history under the caller-owned turn lock."""
-        had_history = bool(self._history)
-        turn_history.reset_session(self._history, self.satellites, CHAT_SESSION_TIMEOUT_S)
-        if had_history and not self._history:
+    def _maybe_reset_session(self, satellite_id: str | None = None) -> None:
+        """Reset only the originating conversation after its idle timeout."""
+        satellite_id = satellite_id or _current_satellite_id.get() or "dashboard-text"
+        history = self._history_for_id(satellite_id)
+        satellite = self.satellites.get(satellite_id)
+        last_turn_end = getattr(satellite, "last_turn_end", 0.0)
+        if history and last_turn_end and time.monotonic() - last_turn_end > CHAT_SESSION_TIMEOUT_S:
+            history.clear()
+            if satellite is not None:
+                satellite.skip_followup_self_echo = False
+        if satellite_id == "dashboard-text" and not history:
             self._laya_context = None
 
     def _record_laya_action(self, request: str, action: dict, result: str) -> None:
@@ -1290,38 +1325,146 @@ class Assistant:
         }
 
     def _history_for(self, session: Optional[SatelliteSession]) -> list:
-        """The conversation history a turn's prompt should be built from.
+        """Return the history for one satellite, or dashboard text by default."""
+        satellite_id = session.id if session is not None else (
+            _current_satellite_id.get() or "dashboard-text"
+        )
+        return self._history_for_id(satellite_id)
 
-        Returns the one shared `_history` today regardless of `session` —
-        per-satellite history is out of scope for this refactor (see the
-        plan's "Out of scope" list). The indirection lands now so a future
-        per-satellite history would be a one-method change here instead of
-        touching every prompt-building call site in `agent_loop.py` again.
-        """
-        return self._history
+    def _history_for_id(self, satellite_id: str | None) -> list:
+        if not satellite_id or satellite_id == "dashboard-text":
+            return self._history
+        histories = getattr(self, "_satellite_histories", None)
+        if histories is None:
+            self._satellite_histories = histories = {}
+        return histories.setdefault(satellite_id, [])
 
     def _trim_history(self) -> None:
-        """Cap shared history under the caller-owned turn lock."""
-        turn_history.trim(self._history, HISTORY_MAX_MESSAGES)
+        """Cap the current conversation under the caller-owned turn lock."""
+        turn_history.trim(_active_conversation_history(self), HISTORY_MAX_MESSAGES)
 
     def _compact_completed_turns(self) -> None:
         """Compact completed turns under the caller-owned turn lock."""
-        turn_history.compact(self._history, COMPACTED_TOOL_TRACE_MAX_CHARS)
+        turn_history.compact(_active_conversation_history(self), COMPACTED_TOOL_TRACE_MAX_CHARS)
 
     def _shed_oldest_history(self) -> bool:
         """Shed context under the caller-owned turn lock."""
-        return turn_history.shed_oldest(self._history, CONTEXT_TRIM_KEEP_MIN)
+        return turn_history.shed_oldest(_active_conversation_history(self), CONTEXT_TRIM_KEEP_MIN)
 
     def _generate_with_context_recovery(self, **kwargs) -> str:
         """Generate/recover under the caller-owned foreground turn lock."""
         thinking_jobs = getattr(self, "thinking_jobs", None)
+        satellite_id = _current_satellite_id.get() or "dashboard-text"
+        status_event = getattr(self, "_backend_status_events", {}).get(satellite_id)
+        backend_state = getattr(self.slm_model, "_fulloch_backend_state", "READY")
+        if status_event and status_event.get("state") == "OUTAGE" and backend_state == "READY":
+            generation = getattr(self.slm_model, "_fulloch_process_generation", 0)
+            if generation >= status_event.get("generation", 0):
+                status_event.update(state="RESOLVED", resolved_at=time.time(), resolved_generation=generation)
+                self._emit_turn_event(
+                    "assistant", "The AI server is back online", "proactive", satellite_id=satellite_id,
+                )
+        status = {
+            "READY": "The AI server is currently available.",
+            "RECOVERING": "The AI server is recovering; requests may be temporarily unavailable.",
+            "FAILED": "The AI server is currently unavailable.",
+        }.get(backend_state, "")
+        if status:
+            kwargs["system_prompt"] = (str(kwargs.get("system_prompt") or "")
+                                       + "\n\nCurrent backend status (authoritative): " + status)
+        context_tokens = getattr(self.slm_model, "context_tokens", None)
+        if isinstance(context_tokens, int) and context_tokens > 0:
+            output_reserve = min(int(kwargs.get("max_new_tokens") or 1024), 1024)
+            kwargs["max_new_tokens"] = output_reserve
+            turn_history.fit_prompt_history(
+                kwargs.setdefault("history", _active_conversation_history(self)),
+                system_prompt=str(kwargs.get("system_prompt") or ""),
+                user_prompt=kwargs.get("user_prompt"),
+                context_tokens=context_tokens,
+                output_reserve=output_reserve,
+                margin=max(256, int(context_tokens * 0.08)),
+                allow_estimated_overflow=True,
+            )
+        stats = kwargs.get("stats")
+        record_components = getattr(stats, "record_prompt_components", None)
+        if callable(record_components):
+            record_components(
+                system_prompt=kwargs.get("system_prompt"),
+                history=kwargs.get("history"),
+                user_prompt=kwargs.get("user_prompt"),
+            )
         return turn_history.generate_with_recovery(
             self.slm_model,
-            conversation=self._history,
+            conversation=kwargs.get("history") or _active_conversation_history(self),
             generate=generate_slm,
             keep_minimum=CONTEXT_TRIM_KEEP_MIN,
             background_active=thinking_jobs is not None and thinking_jobs.active() is not None,
             **kwargs,
+        )
+
+    def _queue_idle_history_summary(self, satellite_id: str | None = None) -> None:
+        """Optionally compact old chat turns during a genuinely idle interval."""
+        if not getattr(self, "idle_summaries_enabled", False):
+            return
+        context_tokens = getattr(self.slm_model, "context_tokens", 0)
+        if not isinstance(context_tokens, int) or context_tokens < 1024:
+            return
+        history = self._history_for_id(satellite_id) if satellite_id else self._history_for(None)
+        snapshot = json.dumps(history, ensure_ascii=True, sort_keys=True)
+        if len(snapshot.encode("utf-8")) < context_tokens * 1.5:
+            return
+
+        def fingerprint(history):
+            value = json.dumps({
+                "history": history,
+                "backend_status": self._backend_status_events,
+                "backend_state": getattr(self.slm_model, "_fulloch_backend_state", "READY"),
+                "process_generation": getattr(self.slm_model, "_fulloch_process_generation", 0),
+            }, ensure_ascii=True, sort_keys=True)
+            return hashlib.sha256(value.encode()).hexdigest()
+
+        version = fingerprint(history)
+
+        def current_version():
+            return fingerprint(history)
+
+        def idle():
+            return (
+                getattr(self, "_turn_arbiter", None) is not None
+                and self._turn_arbiter.owner is None
+                and not any(session.turn_active for session in self.satellites.values())
+                and (self.thinking_jobs is None or self.thinking_jobs.active() is None)
+            )
+
+        def summarize():
+            with self._turn_lock:
+                if not idle():
+                    return None
+                response = generate_slm(
+                    self.slm_model,
+                    user_prompt=snapshot,
+                    system_prompt=get_idle_conversation_summary_prompt(),
+                    max_new_tokens=256,
+                )
+            try:
+                return json.loads(response)
+            except (TypeError, ValueError):
+                return None
+
+        def apply(summary):
+            with self._turn_lock:
+                if current_version() != version:
+                    return
+                recent = history[-4:]
+                history[:] = [
+                    {"role": "system", "content": get_conversation_summary_context(summary)},
+                    *recent,
+                ]
+                self._trim_history()
+
+        self._idle_summary_queue.submit(
+            "conversation", version, summarize=summarize, current_version=current_version,
+            apply=apply, valid_source_refs=set(), is_idle=idle,
         )
 
     def register_turn_listener(self, callback) -> None:
@@ -1458,6 +1601,7 @@ class Assistant:
         task: str,
         origin_satellite_id: str | None = None,
         origin_source: str = "integration",
+        handoff: dict | None = None,
     ) -> dict:
         """Queue a bounded, non-speaking thinking task from the integration API."""
         if self.thinking_jobs is None:
@@ -1468,17 +1612,161 @@ class Assistant:
             else None
         )
         if pending_task:
-            task = f"{pending_task}\n\nAdditional user detail: {task}"
+            job_id = pending_task.get("job_id") if isinstance(pending_task, dict) else None
+            if job_id and self.thinking_jobs.resume_with_input(
+                job_id, task, **({"handoff": handoff} if handoff is not None else {})
+            ):
+                self._pending_thinking_tasks.pop(origin_satellite_id, None)
+                return self.thinking_jobs.status(job_id) or {"id": job_id}
+            prior_task = pending_task.get("task", "") if isinstance(pending_task, dict) else pending_task
+            task = f"{prior_task}\n\nAdditional user detail: {task}"
+        prior_job = (
+            self.thinking_jobs.latest_for_thread(origin_satellite_id)
+            if origin_source == "conversation" and origin_satellite_id is not None
+            else None
+        )
+        if origin_source == "conversation" and origin_satellite_id is not None and self.thinking_jobs:
+            candidates = self.thinking_jobs.jobs_for_thread(origin_satellite_id)
+            # Keep retries/refinements attached to the uniquely matching task,
+            # not simply whichever concurrent task was submitted last.
+            unique_candidates = {}
+            for candidate in candidates:
+                task_id = str(candidate.snapshot.task_record.get("task_id") or candidate.id)
+                unique_candidates.setdefault(task_id, candidate)
+            matched, ambiguous = match_research_task(task, list(unique_candidates.values()))
+            if ambiguous:
+                raise RuntimeError("Several research tasks could match. Please specify the task topic or ID.")
+            if matched is not None:
+                prior_job = matched
+            elif is_unresolved_task_reference(task) and len(unique_candidates) > 1:
+                raise RuntimeError("Several research tasks are available. Please specify the topic or task ID.")
+        if (origin_source == "conversation" and prior_job is None
+                and is_unresolved_task_reference(task)):
+            raise RuntimeError("I need the research topic this refers to before I can continue.")
+        task_record = None
+        retry_handoff = None
+        origin_turn_id = getattr(getattr(self, "_turn_local", None), "turn_id", None)
+        if not pending_task and origin_source == "conversation":
+            task, task_record = resolve_research_task(task, prior_job)
+            if origin_turn_id:
+                task_record.setdefault("source_turn_ids", []).append(origin_turn_id)
+                for amendment in reversed(task_record.get("amendments", [])):
+                    if isinstance(amendment, dict) and not amendment.get("source_turn_id"):
+                        amendment["source_turn_id"] = origin_turn_id
+                        break
+            if (prior_job is not None
+                    and prior_job.status.value in {"QUEUED", "RUNNING", "PAUSED"}
+                    and task == prior_job.snapshot.task):
+                return self.thinking_jobs.status(prior_job.id) or {"id": prior_job.id}
+            if prior_job is not None and task_record.get("parent_job_id") == prior_job.id:
+                retry_handoff = self._retained_evidence_handoff(prior_job)
+        if handoff is not None or retry_handoff:
+            combined = dict(handoff or {})
+            for key, value in (retry_handoff or {}).items():
+                if key != "observations":
+                    combined.setdefault(key, value)
+            observations = [
+                item for item in (combined.get("observations") or []) if isinstance(item, dict)
+            ]
+            observations.extend((retry_handoff or {}).get("observations", []))
+            combined["observations"] = observations[:32]
+            handoff = combined
         job_id = self.thinking_jobs.submit(
             task,
-            conversation=self._history_for(None),
+            conversation=self._history_for_id(origin_satellite_id),
             notes=notes.recall_facts(),
             origin_satellite_id=origin_satellite_id,
             origin_source=origin_source,
+            origin_turn_id=origin_turn_id,
+            **({"task_record": task_record} if task_record is not None else {}),
+            **({"handoff": handoff} if handoff is not None else {}),
         )
         if pending_task:
             self._pending_thinking_tasks.pop(origin_satellite_id, None)
         return self.thinking_jobs.status(job_id) or {"id": job_id}
+
+    @staticmethod
+    def _retained_evidence_handoff(job: BackgroundJob) -> dict:
+        """Carry original evidence into a linked retry for independent revalidation."""
+        observations = []
+        for entry in job.evidence:
+            evidence = entry.get("evidence")
+            if entry.get("status") != "evidence" or not isinstance(evidence, dict):
+                continue
+            artifact_record = job.artifacts.get(entry.get("artifact_id"), {})
+            artifact = artifact_record.get("data") if isinstance(artifact_record, dict) else None
+            observations.append({
+                "tool": entry.get("tool"), "status": "evidence", "scope": entry.get("scope"),
+                "evidence": evidence, "artifact": artifact,
+                "retrieved_at": entry.get("retrieved_at"),
+                "metadata": entry.get("metadata") or {},
+                "text": "Retained original evidence from linked predecessor; revalidate against current requirements.",
+            })
+            if len(observations) >= 16:
+                break
+        return {"version": 1, "source_job_id": job.id, "observations": observations}
+
+    def research_task_follow_up(self, satellite_id: str | None, user_prompt: str) -> str | None:
+        """Answer task-status complaints from the task record; never queue them."""
+        intent = task_status_intent(user_prompt)
+        if intent is None:
+            return None
+        jobs = self.thinking_jobs.jobs_for_thread(satellite_id) if self.thinking_jobs else []
+        selector_match = re.search(r"\b(?:about|for|regarding)\s+(.+?)[?.!]*$", user_prompt, re.I)
+        if selector_match and jobs:
+            job, ambiguous = match_research_task(selector_match.group(1), jobs)
+            if ambiguous:
+                return "I found multiple research tasks that could match. Please identify the task by its topic or task ID."
+            if job is None:
+                return "I couldn't match that topic to a research task in this conversation. Please give the task topic or ID."
+        else:
+            unique = {str(item.snapshot.task_record.get("task_id") or item.id): item for item in jobs}
+            if len(unique) > 1:
+                return "There are multiple research tasks in this conversation. Which topic or task ID do you mean?"
+            job = next(iter(unique.values()), None)
+        if job is None:
+            return "I don't have a research job linked to this conversation, so I can't confirm that work started. What topic should I investigate?"
+        status = job.status.value
+        if intent == "why_not":
+            failure_reason = str(job.snapshot.task_record.get("failure_reason") or job.error or "")
+            failure_stage = str(job.snapshot.task_record.get("failure_stage") or job.stage)
+            partial_link = str(job.snapshot.task_record.get("partial_artifact_link") or "")
+            if failure_reason:
+                reason = f"The last attempt stopped during {failure_stage}: {failure_reason}"
+                if partial_link:
+                    reason += f" Saved partial work: {partial_link}."
+            elif status == "NEEDS_INPUT":
+                reason = "The investigation is waiting for your clarification."
+            elif status == "FAILED":
+                reason = f"The last attempt stopped during {job.stage}."
+            elif status in {"QUEUED", "RUNNING", "PAUSED"}:
+                reason = f"The job is {status.lower()} at stage: {job.stage}."
+            else:
+                reason = f"The last job is {status.lower()} at stage: {job.stage}."
+            return f"For '{job.snapshot.task}': {reason}"
+        if status in {"QUEUED", "RUNNING", "PAUSED", "NEEDS_INPUT"}:
+            return f"I did queue '{job.snapshot.task}'. Its status is {status.lower()}; current stage: {job.stage}."
+        if status == "FAILED":
+            reason = job.error or f"The attempt stopped during {job.stage}."
+            return f"The last attempt for '{job.snapshot.task}' failed: {reason}"
+        if status == "READY":
+            return f"The job for '{job.snapshot.task}' is ready. I haven't started a separate search for this follow-up."
+        return f"The last job for '{job.snapshot.task}' is {status.lower()}."
+
+    def resume_pending_thinking_task(self, satellite_id: str | None, user_input: str) -> bool:
+        """Resume a pending deep-think clarification on an unambiguous confirmation."""
+        if satellite_id is None or self.thinking_jobs is None:
+            return False
+        pending = self._pending_thinking_tasks.get(satellite_id)
+        if not isinstance(pending, dict):
+            return False
+        if not re.fullmatch(r"\s*(?:yes|yeah|yep|yes please|please do|go ahead)\s*[.!]?\s*", user_input, re.I):
+            return False
+        job_id = pending.get("job_id")
+        if not isinstance(job_id, str) or not self.thinking_jobs.resume_with_input(job_id, user_input):
+            return False
+        self._pending_thinking_tasks.pop(satellite_id, None)
+        return True
 
     def thinking_task_status(self, job_id: str) -> dict | None:
         return self.thinking_jobs.status(job_id) if self.thinking_jobs is not None else None
@@ -1536,6 +1824,10 @@ class Assistant:
         self, job: BackgroundJob, cancelled: Callable[[], bool]
     ) -> tuple[str, str]:
         """Bind current model/services for the job-manager callback."""
+        job.synthesis_state.setdefault("idle_summaries_enabled", getattr(self, "idle_summaries_enabled", False))
+        generation = getattr(self.slm_model, "_fulloch_process_generation", None)
+        if generation is not None:
+            job.synthesis_state.setdefault("process_generation", generation)
         return ThinkingWorker(
             model=self.slm_model,
             grammar=self.grammar,
@@ -1546,6 +1838,8 @@ class Assistant:
             summarise_search=self._summarise_search_result,
             model_lock=self._turn_lock,
             server_slots=self.thinking_server_slots,
+            fact_card_synthesis=getattr(self, "thinking_fact_card_synthesis", True),
+            context_tokens=getattr(self.slm_model, "context_tokens", None),
         ).run(job, cancelled)
 
     def _on_thinking_job_status(self, job: BackgroundJob) -> None:
@@ -1554,17 +1848,20 @@ class Assistant:
             job,
             pending_tasks=self._pending_thinking_tasks,
             completed_reports=self._completed_thinking_reports,
-            record_history=self._record_thinking_history,
+            record_history=lambda message: self._record_thinking_history(
+                message, job.snapshot.origin_satellite_id,
+            ),
             dispatch_event=self._dispatch_event,
             emit_turn_event=self._emit_turn_event,
             speak_proactive=self.speak_proactive,
         )
 
-    def _record_thinking_history(self, message: dict) -> None:
-        """Serialize terminal background evidence with foreground history edits."""
+    def _record_thinking_history(self, message: dict, satellite_id: str | None = None) -> None:
+        """Serialize terminal background evidence into its originating history."""
         with self._turn_lock:
-            self._history.append(message)
-            self._trim_history()
+            history = self._history_for_id(satellite_id)
+            history.append(message)
+            turn_history.trim(history, HISTORY_MAX_MESSAGES)
 
     def _thinking_report_artifact(self, job: BackgroundJob) -> dict | None:
         """Build a compact, domain-specific card for a completed thinking job."""
@@ -2250,7 +2547,7 @@ class Assistant:
                 logger.warning("Hot-apply of %s failed: %s", path, e)
         return applied
 
-    def handle_text_turn(self, text: str) -> str:
+    def handle_text_turn(self, text: str, *, ha_area: Optional[str] = None) -> str:
         """Run a typed input through the full intent/SLM/tool pipeline.
 
         Same routing as a voice turn — wakeword strip + regex catch +
@@ -2260,6 +2557,10 @@ class Assistant:
 
         Waits for models to finish loading and serialises against
         in-flight voice turns via `_turn_lock`.
+
+        `ha_area` is the browser's selected room for this request only. Never
+        store it on the shared dashboard-text session: other browsers and
+        integration callers may have a different room (or none).
         """
         prompt = (text or "").strip()
         if not prompt:
@@ -2299,7 +2600,8 @@ class Assistant:
             self._maybe_reset_session()
             stats = TurnStats()  # text turns have no ASR/TTS
             answer = self._handle_wakeword(
-                prompt, session=session, source="text", stats=stats, satellite_id="dashboard-text"
+                prompt, session=session, source="text", stats=stats, satellite_id="dashboard-text",
+                ha_area=ha_area or "",
             )
             if session.cancelled:
                 # Stopped from the dashboard — stand down silently, no bubble.
@@ -2324,6 +2626,7 @@ class Assistant:
             # active text chatting alone couldn't keep the shared history alive.
             text_session.last_turn_end = time.monotonic()
             self._turn_arbiter.release("dashboard-text")
+            self._queue_idle_history_summary("dashboard-text")
 
     def _record_spoken(self, spoken: str) -> None:
         """Replace the most recent assistant entry with one whose `reply` is
@@ -2334,7 +2637,7 @@ class Assistant:
         """
         if not spoken:
             return
-        self._history.append(
+        self._history_for(None).append(
             {
                 "role": "assistant",
                 "content": json.dumps({"reply": spoken}),
@@ -2433,7 +2736,11 @@ class Assistant:
         the pre-rendered clip and returns "" so the caller doesn't double-speak.
         """
         phrase = LLM_ERROR_PHRASES[0]
-        self._record_spoken(phrase)
+        thread_id = satellite_id or _current_satellite_id.get() or "dashboard-text"
+        self._backend_status_events[thread_id] = {
+            "state": "OUTAGE", "occurred_at": time.time(),
+            "generation": getattr(self.slm_model, "_fulloch_process_generation", 0),
+        }
         if source == "voice" and self.llm_error_cache:
             self._emit_turn_event("assistant", phrase, "voice", satellite_id=satellite_id)
             chunks, sr = self.llm_error_cache[0]
@@ -2488,7 +2795,7 @@ class Assistant:
 
     def _context_exhausted_reply(self) -> str:
         """Clear irrecoverable context under the caller-owned turn lock."""
-        return turn_history.exhausted_reply(self._history)
+        return turn_history.exhausted_reply(_active_conversation_history(self))
 
     def _handle_wakeword(
         self,
@@ -2498,6 +2805,7 @@ class Assistant:
         on_slm_start: Optional[Callable[[], None]] = None,
         stats: Optional[TurnStats] = None,
         satellite_id: Optional[str] = None,
+        ha_area: Optional[str] = None,
     ) -> str:
         """Run a user prompt through the unified agent loop.
 
@@ -2520,20 +2828,33 @@ class Assistant:
         the calling satellite's identity via the `_current_satellite_id`
         contextvar (only HA's per-satellite area default, #14, uses this so far).
 
+        `ha_area` overrides the satellite's room for this turn only. Typed
+        browser requests supply their selected area; voice callers use the
+        satellite default. An empty string explicitly means no room selected.
+
         Serialised under `_turn_lock` so local model turns and history remain ordered
         and dashboard text turns share this method with voice turns.
         """
         self._yield_background_for_foreground()
         with self._turn_lock:
-            return AgentLoop(
-                self,
-                session=session,
-                source=source,
-                stats=stats,
-                on_slm_start=on_slm_start,
-                satellite_id=satellite_id,
-                satellite=self.satellites.get(satellite_id),
-            ).run(user_prompt)
+            previous_turn_id = getattr(self._turn_local, "turn_id", None)
+            self._turn_local.turn_id = getattr(stats, "turn_id", uuid.uuid4().hex)
+            try:
+                return AgentLoop(
+                    self,
+                    session=session,
+                    source=source,
+                    stats=stats,
+                    on_slm_start=on_slm_start,
+                    satellite_id=satellite_id,
+                    satellite=self.satellites.get(satellite_id),
+                    ha_area=ha_area,
+                ).run(user_prompt)
+            finally:
+                if previous_turn_id is None:
+                    self._turn_local.__dict__.pop("turn_id", None)
+                else:
+                    self._turn_local.turn_id = previous_turn_id
 
     def _run_half_duplex(
         self,
@@ -2569,7 +2890,7 @@ class Assistant:
         # A real turn is starting — close the prior follow-up window; it's
         # re-armed at the end of this method via `_mark_turn_end`.
         self.audio_capture.clear_follow_up(sat)
-        self._maybe_reset_session()
+        self._maybe_reset_session(satellite_id)
         self._emit_turn_event("user", user_prompt, "voice", satellite_id=satellite_id)
         agent_prompt = self._prepare_delivery_request(user_prompt, sat)
         self._turn_local.tts_gain = sat.tts_gain
@@ -2672,6 +2993,7 @@ class Assistant:
             self._turn_local.tts_active_event = None
             self._turn_local.tts_gain = 1.0
             self._turn_arbiter.release(satellite_id)
+            self._queue_idle_history_summary(satellite_id)
         # A stop stands down without a follow-up window.
         if not session.cancelled:
             self._mark_turn_end(satellite_id, playback_end)
@@ -2795,7 +3117,7 @@ class Assistant:
         self._turn_local.sink = _safe_sink(sat.tts_sink)
         self._turn_local.tts_active_event = sat.tts_active
         try:
-            self._maybe_reset_session()
+            self._maybe_reset_session(satellite_id)
             self._emit_turn_event("user", user_prompt, "voice", satellite_id=satellite_id)
             agent_prompt = self._prepare_delivery_request(user_prompt, sat)
             self._turn_local.tts_gain = sat.tts_gain
@@ -2903,6 +3225,7 @@ class Assistant:
             self._turn_local.tts_active_event = None
             self._turn_local.tts_gain = 1.0
             self._turn_arbiter.release(satellite_id)
+            self._queue_idle_history_summary(satellite_id)
 
     def _cancel_turn(self, satellite_id: str) -> None:
         """Signal `satellite_id`'s active turn to abort and wait briefly for
@@ -3320,6 +3643,8 @@ class Assistant:
             if hasattr(event, "error"):
                 self._note_runtime_error(event.error)
                 return
+            if not worker.is_current_result(event.item[4], event.result):
+                continue
             item = list(event.item)
             item[0] = event.result
             item[3] = not event.final
@@ -3330,6 +3655,30 @@ class Assistant:
                 candidate=bool(item[7]) if len(item) > 7 else False,
                 _live_result=True,
             )
+
+    def _is_asr_candidate_current(
+        self, satellite_id, generation, expires_at, wav_path, capture_id, early_verification
+    ) -> bool:
+        """Reject stale or expired wake work before it enters the ASR model."""
+        sat = self.satellites.get(satellite_id)
+        if sat is None or generation != sat.protocol_state_generation:
+            self.audio_capture.mark_wakeword_wav(wav_path, accepted=False)
+            telemetry_event(
+                "asr_candidate_stale", satellite_id=satellite_id, capture_id=capture_id,
+                reason="generation_changed",
+            )
+            return False
+        if not isinstance(expires_at, (int, float)) or time.monotonic() >= expires_at:
+            self.audio_capture.mark_wakeword_wav(wav_path, accepted=False)
+            self.wakeword_metrics["rejected"] += 1
+            telemetry_event(
+                "asr_candidate_expired", satellite_id=satellite_id, capture_id=capture_id,
+                reason="expired_before_inference",
+            )
+            kind = "wake_verification" if early_verification else "wake_candidate"
+            self._on_asr_work_dropped(satellite_id, kind, True, "expired")
+            return False
+        return True
 
     def _run_transcriber_loop(self):
         """Drain the ASR pipeline, routing each utterance through a turn."""
@@ -3360,6 +3709,14 @@ class Assistant:
             stream_kwargs["kws_early_verification_sink"] = self._asr_kws_early_verification
         if "kws_capture_id_sink" in stream_params:
             stream_kwargs["kws_capture_id_sink"] = self._asr_kws_capture_id
+        if "capture_id_sink" in stream_params:
+            stream_kwargs["capture_id_sink"] = self._asr_capture_id
+        if "candidate_expiration_sink" in stream_params:
+            stream_kwargs["candidate_expiration_sink"] = self._asr_candidate_expiration
+        if "candidate_is_current" in stream_params:
+            stream_kwargs["candidate_is_current"] = self._is_asr_candidate_current
+        else:
+            self._asr_capture_id["value"] = None
         for result in self.asr_pipe(
             self.asr_stream_generator(*stream_args, **stream_kwargs),
             batch_size=1,
@@ -3382,11 +3739,45 @@ class Assistant:
                         self._asr_kws_wav_path.get("path"), accepted=False
                     )
                     logger.debug(
-                        "Dropping ASR result for disconnected satellite %s: %r",
+                        "Dropping ASR result for disconnected satellite %s",
                         turn_satellite_id,
-                        text,
                     )
                     continue
+
+                provisional = self._asr_provisional.get("flag", False)
+                wake_probe = self._asr_wake_probe.get("flag", False)
+                kws_early_verification = self._asr_kws_early_verification.get("flag", False)
+                capture_id = self._asr_capture_id.get("value")
+                audio = self._asr_audio.get("buf")
+                audio_duration = round(float(audio.size) / 16000, 3) if isinstance(audio, np.ndarray) else None
+                live_worker = self.audio_capture.live_asr_backend
+                if getattr(audio, "generation", None) is not None and live_worker is not None:
+                    if not live_worker.is_current_result(turn_satellite_id, audio):
+                        logger.debug("Dropping retired live ASR result (%s)", turn_satellite_id)
+                        continue
+
+                # Capture identity, not rolling onset/text, makes execution
+                # one-shot. Check before empty-text/noise/wake/cancel gates so a
+                # filtered or missing final cannot leave the next command stuck.
+                if capture_id is not None:
+                    if capture_id <= sat.committed_capture_id:
+                        logger.debug("Dropping committed capture %s (%s)", capture_id, turn_satellite_id)
+                        continue
+                elif sat.provisional_committed_onset > 0 and not (wake_probe or kws_early_verification):
+                    # Compatibility for external ASR streams without identity.
+                    onset = self._asr_onset.get("t", 0.0)
+                    same_onset = abs(onset - sat.provisional_committed_onset) < 0.5
+                    hard_text = re.sub(r"[^\w\s]", "", text.lower()).strip()
+                    same_text = bool(
+                        sat.provisional_committed_text
+                        and hard_text.endswith(sat.provisional_committed_text)
+                    )
+                    if not provisional:
+                        sat.provisional_committed_onset = 0.0
+                        sat.provisional_committed_text = ""
+                    if same_onset or (not provisional and same_text):
+                        logger.debug("Dropping duplicate of committed soft endpoint capture=%s", capture_id)
+                        continue
 
                 wake_generation = self._asr_wake_generation.get("value")
                 if wake_generation is not None and wake_generation != sat.protocol_state_generation:
@@ -3398,16 +3789,27 @@ class Assistant:
                     )
                     continue
 
-                provisional = self._asr_provisional.get("flag", False)
-                wake_probe = self._asr_wake_probe.get("flag", False)
                 kws_candidate = self._asr_kws_candidate.get("flag", False)
-                kws_early_verification = self._asr_kws_early_verification.get("flag", False)
                 kws_capture_id = self._asr_kws_capture_id.get("value")
                 kws_wav_path = self._asr_kws_wav_path.get("path")
-                audio = self._asr_audio.get("buf")
+                candidate_expiration = self._asr_candidate_expiration.get("value")
+                if (kws_candidate and isinstance(candidate_expiration, (int, float))
+                        and time.monotonic() >= candidate_expiration):
+                    self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=False)
+                    self.wakeword_metrics["rejected"] += 1
+                    telemetry_event(
+                        "asr_candidate_result_expired", satellite_id=turn_satellite_id,
+                        capture_id=kws_capture_id, reason="expired_before_acceptance",
+                    )
+                    kind = "wake_verification" if kws_early_verification else "wake_candidate"
+                    self._on_asr_work_dropped(turn_satellite_id, kind, True, "expired")
+                    continue
                 telemetry_event(
                     "asr_complete",
                     satellite_id=turn_satellite_id,
+                    turn_id=sat.protocol_turn_id,
+                    process_generation=getattr(self.slm_model, "_fulloch_process_generation", None),
+                    capture_id=capture_id,
                     seconds=getattr(self.asr_pipe, "last_transcribe_seconds", None),
                     audio_seconds=round(float(audio.size) / 16000, 3)
                     if isinstance(audio, np.ndarray)
@@ -3422,9 +3824,7 @@ class Assistant:
                     if accepted and isinstance(kws_capture_id, int):
                         self.audio_capture.resolve_wakeword_candidate(sat, kws_capture_id, accepted)
                     if not accepted:
-                        logger.info(
-                            "Early wake verification inconclusive; awaiting final audio: %r", text
-                        )
+                        logger.info("Early wake verification inconclusive; awaiting final audio")
                     continue
                 if not text:
                     if kws_candidate:
@@ -3441,16 +3841,22 @@ class Assistant:
                     if self.verify_asr_wakeword and self._wakeword_re.search(text.lower()) is None:
                         self.wakeword_metrics["rejected"] += 1
                         self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=False)
-                        logger.info("openWakeWord activation rejected by ASR: %r", text)
-                        telemetry_event("wakeword_rejected", satellite_id=turn_satellite_id)
+                        logger.info("openWakeWord activation rejected by ASR")
+                        telemetry_event(
+                            "wakeword_rejected", satellite_id=turn_satellite_id,
+                            turn_id=sat.protocol_turn_id, capture_id=capture_id,
+                        )
                         self._reject_pending_satellite_wake(sat)
                         continue
                     self.wakeword_metrics["accepted"] += 1
                     self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=True)
-                    telemetry_event("wakeword_accepted", satellite_id=turn_satellite_id)
+                    telemetry_event(
+                        "wakeword_accepted", satellite_id=turn_satellite_id,
+                        turn_id=sat.protocol_turn_id, capture_id=capture_id,
+                    )
 
                 if time.monotonic() < sat.drop_results_until:
-                    logger.debug(f"Dropping post-cancel ASR result: {text}")
+                    logger.debug("Dropping post-cancel ASR result")
                     continue
 
                 # Drop known ASR noise hallucinations before any routing.
@@ -3468,7 +3874,7 @@ class Assistant:
                 if _text_bare in _ASR_NOISE_TOKENS and not conversation_ack_after_tts:
                     if not provisional:
                         self._reject_pending_satellite_wake(sat)
-                    logger.debug(f"Dropped noise token: {text!r}")
+                    logger.debug("Dropped ASR noise token duration=%s capture=%s", audio_duration, capture_id)
                     continue
 
                 # Context-prompt echo: the decoder occasionally regurgitates the
@@ -3480,7 +3886,7 @@ class Assistant:
                 if self._context_prompt_marker and self._context_prompt_marker in text.lower():
                     if not provisional:
                         self._reject_pending_satellite_wake(sat)
-                    logger.debug(f"Dropped context-prompt echo: {text!r}")
+                    logger.debug("Dropped context-prompt echo duration=%s capture=%s", audio_duration, capture_id)
                     continue
 
                 if wake_probe:
@@ -3521,32 +3927,9 @@ class Assistant:
                         or (sat.conversation_mode and _BARGE_STOP_RE.search(text) is None)
                     )
                 ):
-                    logger.debug(f"Ignoring provisional during active turn: {text!r}")
+                    logger.debug("Ignoring provisional ASR during active turn duration=%s capture=%s",
+                                 audio_duration, capture_id)
                     continue
-
-                # Drop the hard VAD endpoint when it's the same utterance as a
-                # soft endpoint we already committed. The soft endpoint fires
-                # ~200ms before the hard endpoint, and flush()+drop_results_until
-                # (0.5s) doesn't cover the ~1.5-2s ASR processing time of the
-                # hard endpoint's audio. Without this guard the duplicate
-                # transcription matches the wakeword and is treated as a
-                # self-barge-in, cancelling the turn that just started.
-                if not provisional and sat.provisional_committed_onset > 0:
-                    onset = self._asr_onset.get("t", 0.0)
-                    hard_text = re.sub(r"[^\w\s]", "", text.lower()).strip()
-                    same_committed_text = (
-                        sat.provisional_committed_text
-                        and hard_text.endswith(sat.provisional_committed_text)
-                    )
-                    if abs(onset - sat.provisional_committed_onset) < 0.5 or same_committed_text:
-                        logger.debug(
-                            f"Dropping hard endpoint (duplicate of committed soft endpoint): {text!r}"
-                        )
-                        sat.provisional_committed_onset = 0.0
-                        sat.provisional_committed_text = ""
-                        continue
-                    sat.provisional_committed_onset = 0.0
-                    sat.provisional_committed_text = ""
 
                 text_lower = text.lower()
                 wakeword_matches = list(self._wakeword_re.finditer(text_lower))
@@ -3582,7 +3965,8 @@ class Assistant:
                     # they're echo of our own voice (or cross-talk during SLM
                     # thinking) and must be ignored.
                     if not self._check_barge_in(turn_satellite_id, text_lower):
-                        logger.debug(f"Suppressed (mid-turn, no barge-in match): {text!r}")
+                        logger.debug("Suppressed mid-turn ASR without barge-in match duration=%s capture=%s",
+                                     audio_duration, capture_id)
                         continue
 
                     if not self._verify_strict_barge_wakeword(text_lower, loudness_db, baseline_db):
@@ -3608,7 +3992,8 @@ class Assistant:
                     # capture-scoped turn; ignore tail-only snapshots until the
                     # full endpoint can verify or reject that wakeword.
                     if provisional and sat.protocol_wake_pending:
-                        logger.debug("Holding live ASR tail after pending wake: %r", text)
+                        logger.debug("Holding live ASR tail after pending wake duration=%s capture=%s",
+                                     audio_duration, capture_id)
                         continue
                     # Follow-up window: a brief grace period after TTS ends
                     # during which wakeword-free input is treated as a reply
@@ -3657,7 +4042,8 @@ class Assistant:
                         # 1–3 word fragments). Longer utterances are user
                         # speech — even if the words overlap the assistant's
                         # reply (e.g. user picks an option Atticus just offered).
-                        logger.debug(f"Suppressed (echo in follow-up window): {text!r}")
+                        logger.debug("Suppressed follow-up echo duration=%s capture=%s",
+                                     audio_duration, capture_id)
                         continue
                     logger.info(f"FOLLOW-UP: {text}")
 
@@ -3733,7 +4119,8 @@ class Assistant:
                 if wakeword_present and self._is_context_echo(user_prompt):
                     if not provisional:
                         self._reject_pending_satellite_wake(sat)
-                    logger.debug(f"Suppressed (context-bias echo, likely non-speech): {text!r}")
+                    logger.debug("Suppressed likely context-bias echo duration=%s capture=%s",
+                                 audio_duration, capture_id)
                     continue
 
                 # A soft endpoint is an in-progress transcript, not a turn
@@ -3798,17 +4185,22 @@ class Assistant:
                     if not should_commit_provisional(user_prompt, catchAll(user_prompt)):
                         logger.debug(f"Provisional held (awaiting hard endpoint): {user_prompt!r}")
                         continue
-                    # Commit: drop the in-progress buffer and drain the queue so
-                    # the hard endpoint's duplicate of this same utterance (still
-                    # accumulating) is discarded, and briefly guard any in-flight
-                    # result on the contaminated tail.
-                    self.audio_capture.flush(turn_satellite_id)
-                    sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
-                    sat.provisional_committed_onset = self._asr_onset.get("t", 0.0)
-                    sat.provisional_committed_text = re.sub(
-                        r"[^\w\s]", "", user_prompt.lower()
-                    ).strip()
+                    if capture_id is None:
+                        self.audio_capture.flush(turn_satellite_id)
+                        sat.drop_results_until = time.monotonic() + DROP_AFTER_CANCEL_S
+                        sat.provisional_committed_onset = self._asr_onset.get("t", 0.0)
+                        sat.provisional_committed_text = re.sub(
+                            r"[^\w\s]", "", user_prompt.lower()
+                        ).strip()
                     logger.info(f"Committing early on soft endpoint: {user_prompt!r}")
+
+                if capture_id is not None:
+                    # No satellite-wide flush/drop window: newer speech may
+                    # already be queued and must remain eligible immediately.
+                    # Retire hard commits too: a prioritised candidate final can
+                    # overtake an older live partial still in the routing queue.
+                    sat.committed_capture_id = max(sat.committed_capture_id, capture_id)
+                    self.audio_capture.commit_capture(sat, capture_id)
 
                 # Snapshot the ASR latency of the utterance that triggered this
                 # turn before later (echo/cross-talk) transcriptions overwrite it.

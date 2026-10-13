@@ -2,6 +2,7 @@
 
 import queue
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional
@@ -15,13 +16,16 @@ class AsrWorkItem:
     satellite_id: str
     kind: str
     candidate: bool = False
+    expires_at: float | None = None
 
 
 class AsrWorkQueue:
     """Bounded single-consumer ASR scheduler with protected wake verification."""
 
-    def __init__(self, maxsize: int):
+    def __init__(self, maxsize: int, *, candidate_ttl_s: float = 10.0, on_expired=None):
         self.maxsize = maxsize
+        self.candidate_ttl_s = max(0.1, float(candidate_ttl_s))
+        self.on_expired = on_expired
         self._candidates: deque[AsrWorkItem] = deque()
         self._ordinary: deque[AsrWorkItem] = deque()
         self._candidate_keys: set[tuple[str, str]] = set()
@@ -31,6 +35,8 @@ class AsrWorkQueue:
     def offer(self, item: AsrWorkItem) -> tuple[bool, list[AsrWorkItem]]:
         """Admit work without blocking, evicting only older ordinary work for a candidate."""
         with self._condition:
+            if item.candidate and item.expires_at is None:
+                item.expires_at = time.monotonic() + self.candidate_ttl_s
             key = (item.satellite_id, item.kind)
             if self._closed or (item.candidate and key in self._candidate_keys):
                 return False, []
@@ -49,35 +55,60 @@ class AsrWorkQueue:
 
     def get(self):
         with self._condition:
-            while not self._closed and not self._candidates and not self._ordinary:
-                self._condition.wait()
-            if self._candidates:
-                item = self._candidates.popleft()
-                self._candidate_keys.remove((item.satellite_id, item.kind))
-                return item.payload
-            if self._ordinary:
-                return self._ordinary.popleft().payload
-            return None
+            while True:
+                while not self._closed and not self._candidates and not self._ordinary:
+                    self._condition.wait()
+                if self._candidates:
+                    item = self._candidates.popleft()
+                    self._candidate_keys.remove((item.satellite_id, item.kind))
+                elif self._ordinary:
+                    item = self._ordinary.popleft()
+                else:
+                    return None
+                if self._expired(item):
+                    continue
+                return self._payload(item)
 
     def get_nowait(self):
         with self._condition:
-            if self._candidates:
-                item = self._candidates.popleft()
-                self._candidate_keys.remove((item.satellite_id, item.kind))
-                return item.payload
-            if self._ordinary:
-                return self._ordinary.popleft().payload
+            while self._candidates or self._ordinary:
+                if self._candidates:
+                    item = self._candidates.popleft()
+                    self._candidate_keys.remove((item.satellite_id, item.kind))
+                else:
+                    item = self._ordinary.popleft()
+                if self._expired(item):
+                    continue
+                return self._payload(item)
             raise queue.Empty
 
-    def discard(self, satellite_id: Optional[str] = None) -> list[AsrWorkItem]:
-        """Discard queued work, optionally only for one satellite."""
+    @staticmethod
+    def _payload(item: AsrWorkItem) -> tuple:
+        return (*item.payload, item.expires_at) if item.candidate else item.payload
+
+    def _expired(self, item: AsrWorkItem) -> bool:
+        if item.expires_at is None or time.monotonic() < item.expires_at:
+            return False
+        if self.on_expired is not None:
+            self.on_expired(item)
+        return True
+
+    def discard(
+        self, satellite_id: Optional[str] = None, *, capture_id: Optional[int] = None
+    ) -> list[AsrWorkItem]:
+        """Discard one satellite's work, optionally only through a retired capture ID."""
         with self._condition:
             discarded: list[AsrWorkItem] = []
             for items in (self._candidates, self._ordinary):
                 retained = deque()
                 while items:
                     item = items.popleft()
-                    if satellite_id is None or item.satellite_id == satellite_id:
+                    matches_capture = capture_id is None or (
+                        len(item.payload) > 12
+                        and item.payload[12] is not None
+                        and item.payload[12] <= capture_id
+                    )
+                    if (satellite_id is None or item.satellite_id == satellite_id) and matches_capture:
                         discarded.append(item)
                         if item.candidate:
                             self._candidate_keys.discard((item.satellite_id, item.kind))

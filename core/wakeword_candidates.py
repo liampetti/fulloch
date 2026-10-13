@@ -106,54 +106,97 @@ class WakewordCandidates:
             self.wakeword_metrics["backend_errors"] += 1
             return False
         if result.matched:
-            session.kws_candidate = True
-            session.kws_capture_id += 1
-            session.kws_verified = False
-            session.kws_pending_final = None
-            session.kws_score = result.score
-            session.kws_detected_at = result.detected_at
-            self.wakeword_metrics["candidates"] += 1
-            self.wakeword_metrics["last_score"] = round(result.score, 3)
-            logger.info("openWakeWord activated: score=%.3f (%s)", result.score, session.id)
-            telemetry_event(
-                "wakeword_candidate", satellite_id=session.id, score=round(result.score, 3)
-            )
-            if self.wakeword_detected_callback is not None:
-                self.wakeword_detected_callback(session.id)
-            if not self.verify_asr_wakeword:
-                # The acoustic model is authoritative for this activation. The
-                # final endpoint still goes through ASR to obtain the command.
-                session.kws_verified = True
-                return True
-            # This is feedback-only verification. The regular endpointed
-            # candidate below still owns command dispatch and final acceptance.
             verification_pcm = np.concatenate(session.kws_verification_pre_roll)[
                 -int(self.sample_rate * KWS_EARLY_VERIFICATION_MS / 1000) :
             ]
-            session.kws_wav_path = self._save_wakeword_wav(
-                session.id, verification_pcm, session.kws_score, stage="early"
-            )
-            self.put_utterance(
-                (
-                    verification_pcm,
-                    time.monotonic() - verification_pcm.size / self.sample_rate,
-                    rms_to_dbfs(_buf_rms(verification_pcm)),
-                    False,
-                    session.id,
-                    time.monotonic(),
-                    False,
-                    True,
-                    session.kws_wav_path,
-                    session.protocol_state_generation,
-                    True,
-                    session.kws_capture_id,
-                ),
-                satellite_id=session.id,
-                kind="wake_verification",
-                candidate=True,
-            )
-            return True
+            return self._activate_candidate(session, result, verification_pcm)
         return False
+
+    def _activate_candidate(self, session: SatelliteSession, result, verification_pcm: np.ndarray) -> bool:
+        """Record a KWS match and optionally submit its short ASR verification."""
+        session.kws_candidate = True
+        session.kws_capture_id += 1
+        session.kws_verified = False
+        session.kws_pending_final = None
+        session.kws_score = result.score
+        session.kws_detected_at = result.detected_at
+        session.kws_post_candidate_tail.clear()
+        self.wakeword_metrics["candidates"] += 1
+        self.wakeword_metrics["last_score"] = round(result.score, 3)
+        logger.info("openWakeWord activated: score=%.3f (%s)", result.score, session.id)
+        telemetry_event("wakeword_candidate", satellite_id=session.id, score=round(result.score, 3))
+        if self.wakeword_detected_callback is not None:
+            self.wakeword_detected_callback(session.id)
+        if not self.verify_asr_wakeword:
+            # The acoustic model is authoritative for this activation. The
+            # final endpoint still goes through ASR to obtain the command.
+            session.kws_verified = True
+            return True
+        # This is feedback-only verification. The regular endpointed candidate
+        # below still owns command dispatch and final acceptance.
+        session.kws_wav_path = self._save_wakeword_wav(
+            session.id, verification_pcm, session.kws_score, stage="early"
+        )
+        self.put_utterance(
+            (
+                verification_pcm,
+                time.monotonic() - verification_pcm.size / self.sample_rate,
+                rms_to_dbfs(_buf_rms(verification_pcm)),
+                False,
+                session.id,
+                time.monotonic(),
+                False,
+                True,
+                session.kws_wav_path,
+                session.protocol_state_generation,
+                True,
+                session.kws_capture_id,
+                session.audio_capture_id or None,
+            ),
+            satellite_id=session.id,
+            kind="wake_verification",
+            candidate=True,
+        )
+        return True
+
+    def retain_post_candidate_audio(self, session: SatelliteSession, pcm: np.ndarray) -> None:
+        """Keep a short post-trigger tail while an ASR verdict is pending."""
+        if not session.kws_candidate:
+            return
+        session.kws_post_candidate_tail.append(pcm)
+        limit = int(self.sample_rate * KWS_EARLY_VERIFICATION_MS / 1000)
+        total = sum(chunk.size for chunk in session.kws_post_candidate_tail)
+        while total > limit and session.kws_post_candidate_tail:
+            oldest = session.kws_post_candidate_tail[0]
+            excess = total - limit
+            if oldest.size <= excess:
+                total -= oldest.size
+                session.kws_post_candidate_tail.pop(0)
+            else:
+                session.kws_post_candidate_tail[0] = oldest[excess:]
+                total -= excess
+
+    def rearm_after_rejection(self, session: SatelliteSession, tail: list[np.ndarray]) -> bool:
+        """Replay post-trigger audio through a reset KWS gate after rejection."""
+        if self.wakeword_backend is None or not tail:
+            return False
+        pcm = np.concatenate(tail)[-int(self.sample_rate * KWS_EARLY_VERIFICATION_MS / 1000) :]
+        if not pcm.size:
+            return False
+        try:
+            self.wakeword_backend.reset(session.id)
+            result = self.wakeword_backend.feed_pcm(session.id, pcm)
+        except Exception as exc:
+            logger.warning("Wakeword gate replay failed; falling back to ASR-only: %s", exc)
+            self.wakeword_backend = None
+            self.wakeword_metrics["backend_errors"] += 1
+            return False
+        if not result.matched:
+            return False
+        session.kws_pre_roll[:] = [pcm[-self.sample_rate :]]
+        session.kws_verification_pre_roll[:] = [pcm]
+        session.kws_speech_active = True
+        return self._activate_candidate(session, result, pcm)
 
     def resolve_wakeword_candidate(
         self, session: SatelliteSession, capture_id: int, accepted: bool
@@ -222,6 +265,7 @@ class WakewordCandidates:
         session.kws_score = 0.0
         session.kws_detected_at = 0.0
         session.kws_wav_path = None
+        session.kws_post_candidate_tail.clear()
         session.kws_speech_active = False
         session.kws_pre_roll.clear()
         session.kws_verification_pre_roll.clear()
@@ -244,6 +288,10 @@ class WakewordCandidates:
         wake_probe=False,
         diagnostic_pcm=None,
     ):
+        if session.audio_capture_id and session.audio_capture_id <= session.committed_capture_id:
+            # Continue recorder endpoint/reset bookkeeping, but do not transcribe
+            # a capture whose safe partial has already dispatched the command.
+            return
         gated = self._wakeword_gate_active(session)
         if gated and not session.kws_candidate:
             return
@@ -280,6 +328,7 @@ class WakewordCandidates:
                     session.protocol_state_generation,
                     False,
                     session.kws_capture_id,
+                    session.audio_capture_id or None,
                 ),
                 satellite_id=session.id,
                 kind="wake_candidate",
@@ -297,13 +346,19 @@ class WakewordCandidates:
                 self.wakeword_backend.reset(session.id)
         elif wake_probe:
             self.put_utterance(
-                (buf, onset, loudness_db, provisional, session.id, endpoint_t, True),
+                (
+                    buf, onset, loudness_db, provisional, session.id, endpoint_t,
+                    True, False, None, None, False, None, session.audio_capture_id or None,
+                ),
                 satellite_id=session.id,
                 kind="wake_probe",
             )
         else:
             self.put_utterance(
-                (buf, onset, loudness_db, provisional, session.id, endpoint_t),
+                (
+                    buf, onset, loudness_db, provisional, session.id, endpoint_t,
+                    False, False, None, None, False, None, session.audio_capture_id or None,
+                ),
                 satellite_id=session.id,
                 kind="provisional" if provisional else "final",
             )

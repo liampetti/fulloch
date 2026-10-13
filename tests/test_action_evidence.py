@@ -5,7 +5,12 @@ from unittest.mock import Mock
 
 import pytest
 
-from core.action_evidence import FALLBACK, ActionEvidence, claims_execution
+from core.action_evidence import (
+    FALLBACK,
+    ActionEvidence,
+    claims_execution,
+    claims_research_execution,
+)
 from tests.test_agent_loop_route import _host
 from utils.intents import classify_step
 
@@ -15,9 +20,16 @@ from utils.intents import classify_step
     "The lamp has been switched on.", "Done!", "Opened the blind.",
     "I saved that to your notes.", "We have already set the timer.",
     "Done, the living room lamp is on.", "The Living Room Lamp is now on.",
+    "I've searched and cross-checked the information.",
+    "I verified the release date against a primary source.",
 ])
 def test_detects_completion_claims(text):
     assert claims_execution(text)
+
+
+def test_research_claim_classifier_is_separate_from_operation_claims():
+    assert claims_research_execution("I've searched and cross-checked the information.")
+    assert not claims_research_execution("I turned the kitchen lamp on.")
 
 
 @pytest.mark.parametrize("text", [
@@ -131,6 +143,32 @@ def test_unrelated_lookup_cannot_authorize_bundled_action_claim(monkeypatch):
     }], ["It is noon."])
     assert loop.run("What time is it?") == "It is noon."
     assert dispatch.call_count == 1
+
+
+def test_unrelated_lookup_cannot_authorize_web_verification_claim(monkeypatch):
+    loop, generate, dispatch, history = make_loop(monkeypatch, [
+        {"actions": [{"intent": "get_current_time", "args": []}],
+         "reply": "I've searched and cross-checked the information."},
+        {"reply": "I've searched and cross-checked the information."},
+    ], ["It is noon."])
+
+    assert loop.run("What time is it?") == "It is noon."
+    assert generate.call_count == 1
+    assert dispatch.call_count == 1
+    assert not any("searched and cross-checked" in entry["content"] for entry in history)
+
+
+def test_web_search_outcome_authorizes_only_its_grounded_result(monkeypatch):
+    loop, generate, dispatch, _ = make_loop(monkeypatch, [{
+        "actions": [{"intent": "external_information", "args": ["release date"]}],
+        "reply": "I've searched and cross-checked the information.",
+    }], ["The official release page gives the date as 2026-10-01."])
+
+    result = loop.run("Search for the release date")
+
+    assert result == "The official release page gives the date as 2026-10-01."
+    assert generate.call_count == 1
+    dispatch.assert_called_once()
 
 
 def test_mixed_action_and_lookup_keeps_both_results(monkeypatch):

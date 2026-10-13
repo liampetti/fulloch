@@ -60,9 +60,93 @@ def compact(history: list, trace_limit: int) -> None:
             except (TypeError, ValueError):
                 emission = None
             if isinstance(emission, dict) and "reply" not in emission and "actions" in emission:
-                continue
+                # Keep the compact on/off action record alongside its tool
+                # observation: a later "turn them back on" must be able to
+                # resolve its target after completed-turn compaction.
+                has_reversible_device_action = any(
+                    isinstance(action, dict)
+                    and action.get("intent") in {"turn_on", "turn_off"}
+                    for action in emission.get("actions", [])
+                )
+                if not has_reversible_device_action:
+                    continue
         kept.append(message)
     history[:] = kept
+
+
+def fit_prompt_history(
+    history: list, *, system_prompt: str, user_prompt: str | None,
+    context_tokens: int, output_reserve: int, margin: int,
+    allow_estimated_overflow: bool = False,
+) -> int:
+    """Deterministically shrink prior context before sending an overfull prompt."""
+    def estimate(text: str) -> int:
+        return max(1, (len(text.encode("utf-8")) + 2) // 3)
+
+    def input_size() -> int:
+        return estimate(system_prompt) + sum(
+            estimate(str(message.get("content") or "")) + 8 for message in history
+        ) + (estimate(user_prompt) + 8 if user_prompt else 0) + 32
+
+    allowance = context_tokens - output_reserve - margin
+    if input_size() <= allowance:
+        return input_size()
+
+    compact(history, COMPACTED_TOOL_TRACE_MAX_CHARS)
+    # Repeated identical tool outcomes add no new evidence. Keep their latest
+    # occurrence and preserve all user/assistant decisions and execution results.
+    seen_tools = set()
+    kept = []
+    for message in reversed(history):
+        if message.get("role") == "tool":
+            key = (message.get("name"), message.get("content"))
+            if key in seen_tools:
+                continue
+            seen_tools.add(key)
+        kept.append(message)
+    history[:] = reversed(kept)
+    latest_user = max(
+        (index for index, message in enumerate(history) if message.get("role") == "user"),
+        default=-1,
+    )
+    protected = {
+        id(message) for index, message in enumerate(history)
+        if index >= latest_user
+        or message.get("role") == "tool"
+        or message.get("name") == "plan_progress"
+        or any(term in str(message.get("content") or "").casefold()
+               for term in ("decision:", "open task:", "pending task:", "execution outcome:"))
+    }
+    while input_size() > allowance:
+        removable = next(
+            (index for index, message in enumerate(history)
+             if id(message) not in protected and index < latest_user),
+            None,
+        )
+        if removable is None:
+            break
+        del history[removable]
+        latest_user = max(
+            (index for index, message in enumerate(history) if message.get("role") == "user"),
+            default=-1,
+        )
+    size = input_size()
+    if size > allowance:
+        if allow_estimated_overflow:
+            # Byte-based estimates are useful for shedding old context, but
+            # are not the model's tokenizer. A fixed prompt must not be refused
+            # solely on this heuristic; let the server decide actual fit.
+            logger.warning(
+                "Estimated prompt budget exceeded: input=%d output=%d margin=%d capacity=%d; "
+                "deferring fixed-prompt admission to model tokenizer",
+                size, output_reserve, margin, context_tokens,
+            )
+            return size
+        raise ContextExhaustedError(
+            f"Fixed prompt requires approximately {size + output_reserve + margin} tokens; "
+            f"context capacity is {context_tokens}."
+        )
+    return size
 
 
 def shed_oldest(history: list, keep_minimum: int) -> bool:
@@ -92,7 +176,9 @@ def generate_with_recovery(
     floor, then its ContextExhaustedError is allowed to reach the caller.
     """
     kwargs.setdefault("recover_on_failure", not background_active)
-    history = conversation
+    history = kwargs.get("history")
+    if history is None:
+        history = conversation
     cleared_history = False
     while True:
         try:

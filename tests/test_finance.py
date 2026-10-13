@@ -188,7 +188,7 @@ def test_quote_uses_unambiguous_watchlist_exchange_mapping(monkeypatch):
     assert calls[0]["q"] == "TSLA:NASDAQ"
 
 
-def test_quote_prefers_watchlist_exchange_over_planner_suffix(monkeypatch):
+def test_quote_preserves_an_explicit_exchange_over_watchlist_default(monkeypatch):
     finance = _module(monkeypatch)
     monkeypatch.setitem(finance.config, "finance", {"watchlist": ["NYSE:TSLA"]})
     calls = []
@@ -197,30 +197,32 @@ def test_quote_prefers_watchlist_exchange_over_planner_suffix(monkeypatch):
         "get",
         lambda _url, params, timeout: (
             calls.append(params)
-            or _Response({**_quote_payload(), "summary": {**_quote_payload()["summary"], "exchange": "NYSE"}})
+            or _Response({**_quote_payload(), "summary": {**_quote_payload()["summary"], "exchange": "LSE"}})
         ),
     )
 
     result = finance.get_finance_quote("TSLA:LSE")
 
     assert result.thinking_status == "evidence"
-    assert calls[0]["q"] == "TSLA:NYSE"
+    assert calls[0]["q"] == "TSLA:LSE"
 
 
-def test_quote_defaults_unconfigured_symbol_to_nasdaq_even_with_a_suffix(monkeypatch):
+def test_quote_preserves_an_explicit_exchange_without_a_watchlist(monkeypatch):
     finance = _module(monkeypatch)
     monkeypatch.setitem(finance.config, "finance", {"watchlist": []})
     calls = []
     monkeypatch.setattr(
         finance.requests,
         "get",
-        lambda _url, params, timeout: calls.append(params) or _Response(_quote_payload()),
+        lambda _url, params, timeout: calls.append(params) or _Response(
+            {**_quote_payload(), "summary": {**_quote_payload()["summary"], "exchange": "LSE"}}
+        ),
     )
 
     result = finance.get_finance_quote("TSLA:LSE")
 
     assert result.thinking_status == "evidence"
-    assert calls[0]["q"] == "TSLA:NASDAQ"
+    assert calls[0]["q"] == "TSLA:LSE"
 
 
 def test_quote_listing_identity_check_rejects_a_mismatched_exchange(monkeypatch):
@@ -398,6 +400,7 @@ def test_quote_provider_no_result_has_a_clear_stock_not_found_message(monkeypatc
 
     assert result.thinking_status == "rejected"
     assert str(result) == "I couldn't find information on that stock."
+    assert result.recovery["suggested_actions"] == ["external_information", "get_finance_quote"]
 
 
 def test_environment_key_takes_precedence_over_credentials(monkeypatch):
@@ -441,6 +444,23 @@ def test_exchange_rate_converts_an_amount_without_deep_think(monkeypatch):
     assert native_requires_deep_think("get_exchange_rate") is False
 
 
+def test_exchange_rate_preserves_currency_pair_in_provider_query(monkeypatch):
+    finance = _module(monkeypatch)
+    payload = _quote_payload()
+    payload["summary"].update({"stock": "AUD-EUR", "price": "0.6", "extracted_price": 0.6})
+    calls = []
+    monkeypatch.setattr(
+        finance.requests,
+        "get",
+        lambda _url, params, timeout: calls.append(params) or _Response(payload),
+    )
+
+    result = finance.get_exchange_rate("AUD", "EUR", 7500)
+
+    assert calls[0]["q"] == "AUD-EUR"
+    assert "7500 AUD is approximately 4500 EUR" in result
+
+
 def test_exchange_rate_rejects_invalid_codes_and_amount_without_network(monkeypatch):
     finance = _module(monkeypatch)
     monkeypatch.setattr(
@@ -471,6 +491,7 @@ def test_provider_symbol_accepts_exchange_first_and_serpapi_order(monkeypatch):
 
     assert finance._provider_symbol("NASDAQ:TSLA") == "TSLA:NASDAQ"
     assert finance._provider_symbol("TSLA:NASDAQ") == "TSLA:NASDAQ"
+    assert finance._configured_symbol("TSLA:NYSE") == "TSLA:NYSE"
 
 
 def test_finance_playbook_matches_stocks_but_not_unrelated_requests(monkeypatch):

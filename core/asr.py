@@ -2,7 +2,7 @@
 
 import logging
 import time
-from typing import Generator, Optional, Union
+from typing import Callable, Generator, Optional, Union
 
 import numpy as np
 import torch
@@ -133,12 +133,17 @@ def stream_generator(
     wake_generation_sink: Optional[dict] = None,
     kws_early_verification_sink: Optional[dict] = None,
     kws_capture_id_sink: Optional[dict] = None,
+    capture_id_sink: Optional[dict] = None,
+    candidate_expiration_sink: Optional[dict] = None,
+    candidate_is_current: Optional[
+        Callable[[str, int | None, float | None, Optional[str], Optional[int], bool], bool]
+    ] = None,
 ) -> Generator:
     """Yield audio buffers from a queue until a None sentinel.
 
     Queue items are
     `(buf, speech_onset_monotonic, loudness_dbfs[, provisional[, satellite_id[,
-    endpoint_monotonic[, wake_probe[, kws_candidate[, kws_wav_path[, wake_generation[, kws_early_verification[, kws_capture_id]]]]]]]]])` tuples (everything past `buf`/`onset`
+    endpoint_monotonic[, wake_probe[, kws_candidate[, kws_wav_path[, wake_generation[, kws_early_verification[, kws_capture_id[, capture_id]]]]]]]]]])` tuples (everything past `buf`/`onset`
     is optional
     for backward compatibility). When `onset_sink` / `loudness_sink` /
     `provisional_sink` / `audio_sink` / `satellite_id_sink` / `endpoint_wait_sink`
@@ -169,6 +174,14 @@ def stream_generator(
         wake_generation = item[9] if len(item) > 9 else None
         kws_early_verification = item[10] if len(item) > 10 else False
         kws_capture_id = item[11] if len(item) > 11 else None
+        capture_id = item[12] if len(item) > 12 else None
+        candidate_expires_at = item[13] if len(item) > 13 else None
+        if kws_candidate and candidate_is_current is not None:
+            if not candidate_is_current(
+                satellite_id, wake_generation, candidate_expires_at, kws_wav_path,
+                kws_capture_id, kws_early_verification,
+            ):
+                continue
         if onset_sink is not None:
             onset_sink["t"] = onset_t
         if loudness_sink is not None:
@@ -193,4 +206,8 @@ def stream_generator(
             kws_early_verification_sink["flag"] = kws_early_verification
         if kws_capture_id_sink is not None:
             kws_capture_id_sink["value"] = kws_capture_id
+        if capture_id_sink is not None:
+            capture_id_sink["value"] = capture_id
+        if candidate_expiration_sink is not None:
+            candidate_expiration_sink["value"] = candidate_expires_at
         yield AsrInput(buf, verification_context) if kws_candidate else buf

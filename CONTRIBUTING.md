@@ -155,6 +155,31 @@ agent's replan loop (see the "Unified Agent Loop" section of `CLAUDE.md`). Keep
 tool bodies blocking and simple — for I/O use `requests`/file calls directly; the
 orchestrator already runs each turn on its own worker thread.
 
+## Changing core functionality
+
+Some code paths are load-bearing for the entire agentic flow — the token-budget
+admission logic, the thinking/research worker stages, the model client's request
+path, evidence coverage and selection. A change to one of these can regress every
+downstream stage at once, and the regression is often silent (e.g. a token counter
+that undercounts admits packets that then overflow).
+
+Before changing such a path:
+
+- Confirm the change is driven by a concrete bug or requirement, not a perceived
+  mismatch with a test or doc. If code, tests and docs disagree, that is a
+  review finding — fix the disagreement, don't silently pick a new design.
+- Prefer the smallest change that fixes the stated problem. Do not rewrite a
+  working core mechanism (its request path, its caching, its fallback) to swap in
+  a "cleaner" alternative without an explicit, reviewed decision.
+- Preserve the existing request path, error handling and fallbacks. Raw or
+  alternative transport that bypasses the shared client loses recovery, timeouts
+  and retry behaviour that the rest of the flow depends on.
+- Add or update tests that exercise the *real* integration path, not just a
+  mocked seam, and run the full suite plus `ruff check .` before committing.
+
+When in doubt, leave the core path alone and record the concern as a finding to
+review, rather than changing behaviour.
+
 ## Pull Request Process
 
 1. Create a feature branch from `main`:

@@ -95,6 +95,12 @@ class SatelliteSession:
     # The recorder starts live Parakeet/Orukeet snapshots only after VAD detects
     # speech; idle browser PCM must never enter the live model buffer.
     live_asr_speech_active: bool = False
+    # Recorder-owned, monotonically increasing identity of the buffered utterance.
+    # Unlike a rolling partial's onset, this survives pauses and window trimming.
+    audio_capture_id: int = 0
+    # Transcriber-owned watermark. Retired captures stay retired even when their
+    # final is empty, filtered, flushed, or never queued. New captures are larger.
+    committed_capture_id: int = 0
     # Idle openWakeWord gate state. Recorder-thread owned and reset on disconnect
     # or when an endpoint completes.
     kws_pre_roll: list = field(default_factory=list)
@@ -108,9 +114,14 @@ class SatelliteSession:
     kws_score: float = 0.0
     kws_detected_at: float = 0.0
     kws_wav_path: Optional[str] = None
+    # Audio received after an acoustic match while its short ASR verification is
+    # pending. On rejection the recorder replays this bounded tail through KWS,
+    # so a later real wakeword is not lost with the rejected capture.
+    kws_post_candidate_tail: list = field(default_factory=list)
     # The acoustic gate only evaluates active VAD speech. This keeps room audio
     # from repeatedly triggering expensive ASR verification while idle.
     kws_speech_active: bool = False
+    # Legacy fallback for ASR integrations without capture metadata.
     # Onset timestamp of a soft-endpoint provisional that was committed early.
     # The hard VAD endpoint fires ~200ms later for the same speech; without this
     # guard the duplicate transcription is treated as a barge-in and cancels the

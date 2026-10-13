@@ -109,3 +109,81 @@ def test_noop_when_already_clean():
     ]
     out, _ = _compact(history)
     assert out == history
+
+
+def test_proactive_fit_compacts_tool_payloads_before_shedding_turns():
+    a = _import_assistant_module()
+    history = [
+        {"role": "user", "content": "remember decision"},
+        {"role": "tool", "name": "search", "content": "evidence " * 2000},
+        {"role": "assistant", "content": '{"reply":"decision: choose option A"}'},
+        {"role": "user", "content": "current question"},
+    ]
+
+    size = a.turn_history.fit_prompt_history(
+        history, system_prompt="system", user_prompt=None, context_tokens=4096,
+        output_reserve=512, margin=256,
+    )
+
+    assert size <= 4096 - 512 - 256
+    assert history[0]["content"] == "remember decision"
+    assert len(next(item["content"] for item in history if item["role"] == "tool")) <= 161
+    assert history[-1]["content"] == "current question"
+
+
+def test_oversized_fixed_context_fails_explicitly():
+    a = _import_assistant_module()
+    try:
+        a.turn_history.fit_prompt_history(
+            [], system_prompt="fixed" * 1000, user_prompt="question",
+            context_tokens=1024, output_reserve=512, margin=256,
+        )
+    except a.turn_history.ContextExhaustedError as exc:
+        assert "Fixed prompt requires" in str(exc)
+    else:
+        raise AssertionError("oversized fixed input should not trigger an unbounded retry")
+
+
+def test_heuristic_overflow_does_not_reject_fresh_foreground_request_or_lose_outcome():
+    a = _import_assistant_module()
+    history = [
+        {"role": "user", "content": "Research my Home Assistant history and Spotify activity."},
+        {"role": "tool", "name": "plan_progress", "content": "Execution outcome: entity history fetched."},
+        {"role": "user", "content": "Current constraints: use the latest week; compare with Spotify."},
+    ]
+
+    size = a.turn_history.fit_prompt_history(
+        history, system_prompt="fixed request material " * 1200,
+        user_prompt="Answer using the latest-week constraint and fetched outcome.",
+        context_tokens=1024, output_reserve=256, margin=128,
+        allow_estimated_overflow=True,
+    )
+
+    contents = [item["content"] for item in history]
+    assert size > 1024 - 256 - 128
+    assert "Current constraints: use the latest week; compare with Spotify." in contents
+    assert "Execution outcome: entity history fetched." in contents
+
+
+def test_pre_call_shedding_preserves_decisions_open_tasks_and_execution_outcomes():
+    a = _import_assistant_module()
+    history = [
+        {"role": "user", "content": "old request " * 100},
+        {"role": "assistant", "content": "unrelated completed detail " * 100},
+        {"role": "assistant", "content": "Decision: choose option A"},
+        {"role": "tool", "name": "plan_progress", "content": "Open task: verify timing"},
+        {"role": "tool", "name": "lookup", "content": "Execution outcome: source lookup completed"},
+        {"role": "user", "content": "current question"},
+    ]
+
+    a.turn_history.fit_prompt_history(
+        history, system_prompt="system", user_prompt=None, context_tokens=1024,
+        output_reserve=256, margin=128,
+    )
+
+    contents = [message["content"] for message in history]
+    assert "Decision: choose option A" in contents
+    assert "Open task: verify timing" in contents
+    assert "Execution outcome: source lookup completed" in contents
+    assert "current question" in contents
+    assert "unrelated completed detail " * 100 not in contents

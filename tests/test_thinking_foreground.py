@@ -11,6 +11,7 @@ import pytest
 from core import assistant as assistant_module
 from core.assistant import Assistant
 from core.background_jobs import BackgroundJob, JobSnapshot, JobStatus
+from core.thinking_worker import ReportSynthesisError
 from tools import thinking
 
 
@@ -24,6 +25,15 @@ def test_queues_conversational_job(monkeypatch):
     assert "look into" in result
     assert assistant.run_thinking_task.call_args.args == ("research new models",)
     assert assistant.run_thinking_task.call_args.kwargs["origin_source"] == "conversation"
+
+
+def test_started_job_is_not_mistaken_for_an_earlier_job(monkeypatch):
+    assistant = SimpleNamespace(
+        run_thinking_task=lambda *args, **kwargs: {"id": "job-1", "status": "QUEUED"},
+        active_thinking_task=lambda: {"id": "job-1", "status": "RUNNING"},
+    )
+    monkeypatch.setattr(thinking, "get_current_assistant", lambda: assistant)
+    assert thinking.deep_think("Investigate") == "I'll look into that and let you know when I'm done."
 
 
 def test_is_exposed_without_a_thinking_config_block():
@@ -53,7 +63,205 @@ def test_planning_worker_receives_saved_facts_as_job_context(monkeypatch):
         notes="I live in Sydney.",
         origin_satellite_id=None,
         origin_source="integration",
+        origin_turn_id=None,
     )
+
+
+def test_thinking_clarification_resumes_existing_job_instead_of_submitting(monkeypatch):
+    assistant = Assistant.__new__(Assistant)
+    assistant._pending_thinking_tasks = {
+        "satellite": {"job_id": "job-1", "task": "Find flights", "question": "Did you mean 2027?"}
+    }
+    assistant.thinking_jobs = MagicMock()
+    assistant.thinking_jobs.resume_with_input.return_value = True
+    assistant.thinking_jobs.status.return_value = {"id": "job-1", "status": "QUEUED"}
+
+    assert assistant.run_thinking_task("yes", origin_satellite_id="satellite", origin_source="conversation") == {
+        "id": "job-1", "status": "QUEUED"
+    }
+    assistant.thinking_jobs.resume_with_input.assert_called_once_with("job-1", "yes")
+    assistant.thinking_jobs.submit.assert_not_called()
+    assert assistant._pending_thinking_tasks == {}
+
+
+def test_conversation_retry_keeps_task_identity_and_links_failed_predecessor(monkeypatch):
+    from core.background_jobs import BackgroundJobManager, JobStatus
+
+    monkeypatch.setattr(assistant_module.notes, "recall_facts", lambda: "")
+    assistant = Assistant.__new__(Assistant)
+    assistant._history = []
+    assistant._satellite_histories = {
+        "thread-a": [{"role": "user", "content": "Thread A only"}],
+        "thread-b": [{"role": "user", "content": "Thread B secret context"}],
+    }
+    assistant._pending_thinking_tasks = {}
+    assistant.thinking_jobs = BackgroundJobManager(lambda *_: ("", ""), admission_check=lambda: False)
+
+    initial = assistant.run_thinking_task(
+        "Research latest local models with 9B parameters; keep sources recent",
+        origin_satellite_id="thread-a", origin_source="conversation",
+    )
+    first_job = assistant.thinking_jobs._jobs[initial["id"]]
+    assert list(first_job.snapshot.conversation) == [
+        {"role": "user", "content": "Thread A only"},
+    ]
+    first_job.record_outcome(
+        "external_information", "evidence", "One original model-card source.",
+        {"sources": [{"url": "https://models.example.test/model-9b", "text": "Model X has 9B parameters."}]},
+        (), {"type": "web_research", "sources": [
+            {"url": "https://models.example.test/model-9b", "source_text": "Model X has 9B parameters."},
+        ]},
+    )
+    first_job.status = JobStatus.FAILED
+
+    retry = assistant.run_thinking_task(
+        "just do it", origin_satellite_id="thread-a", origin_source="conversation",
+    )
+    retry_job = assistant.thinking_jobs._jobs[retry["id"]]
+
+    assert retry["id"] != initial["id"]
+    assert retry_job.snapshot.task == first_job.snapshot.task
+    assert retry_job.snapshot.task_record["task_id"] == first_job.snapshot.task_record["task_id"]
+    assert retry_job.snapshot.task_record["parent_job_id"] == initial["id"]
+    assert retry_job.snapshot.task_record["attempt"] == 2
+    [retained] = retry_job.snapshot.handoff["observations"]
+    from core.thinking_source_store import load_document
+
+    artifact_source = retained["artifact"]["sources"][0]
+    evidence_source = retained["evidence"]["sources"][0]
+    assert load_document(artifact_source["source_ref"])["text"] == "Model X has 9B parameters."
+    assert load_document(evidence_source["source_ref"])["text"] == "Model X has 9B parameters."
+    assert retry_job.snapshot.handoff["source_job_id"] == initial["id"]
+    assert "9B parameters" in retry_job.snapshot.task
+    assert "sources recent" in retry_job.snapshot.task
+    assistant.thinking_jobs.cancel(retry["id"])
+
+
+def test_conversation_retry_reuses_same_thread_active_job(monkeypatch):
+    from core.background_jobs import BackgroundJobManager
+
+    monkeypatch.setattr(assistant_module.notes, "recall_facts", lambda: "")
+    assistant = Assistant.__new__(Assistant)
+    assistant._history = []
+    assistant._pending_thinking_tasks = {}
+    assistant.thinking_jobs = BackgroundJobManager(lambda *_: ("", ""), admission_check=lambda: False)
+    initial = assistant.run_thinking_task(
+        "Research current local models", origin_satellite_id="thread-a", origin_source="conversation",
+    )
+
+    repeated = assistant.run_thinking_task(
+        "just do it", origin_satellite_id="thread-a", origin_source="conversation",
+    )
+
+    assert repeated["id"] == initial["id"]
+    assert len(assistant.thinking_jobs._jobs) == 1
+    assistant.thinking_jobs.cancel(initial["id"])
+
+
+def test_topicless_followup_without_thread_task_is_rejected(monkeypatch):
+    from core.background_jobs import BackgroundJobManager
+
+    monkeypatch.setattr(assistant_module.notes, "recall_facts", lambda: "")
+    assistant = Assistant.__new__(Assistant)
+    assistant._history = []
+    assistant._pending_thinking_tasks = {}
+    assistant.thinking_jobs = BackgroundJobManager(lambda *_: ("", ""), admission_check=lambda: False)
+
+    with pytest.raises(RuntimeError, match="research topic"):
+        assistant.run_thinking_task(
+            "just do it", origin_satellite_id="thread-empty", origin_source="conversation",
+        )
+    assert not assistant.thinking_jobs._jobs
+
+
+def test_complaint_and_why_not_are_answered_from_thread_job_without_new_submission():
+    from core.background_jobs import BackgroundJobManager, JobStatus
+
+    assistant = Assistant.__new__(Assistant)
+    assistant.thinking_jobs = BackgroundJobManager(lambda *_: ("", ""), admission_check=lambda: False)
+    job_id = assistant.thinking_jobs.submit(
+        "Research recent 9B local models", origin_source="conversation",
+        origin_satellite_id="thread-status",
+    )
+    job = assistant.thinking_jobs._jobs[job_id]
+    job.status = JobStatus.FAILED
+    job.stage = "primary-source verification"
+    job.error = "Lookup provider returned no eligible sources."
+    job.snapshot.task_record.update({
+        "failure_stage": "primary-source verification",
+        "failure_reason": job.error,
+        "partial_artifact_link": "/reports/partial-job",
+    })
+
+    complaint = assistant.research_task_follow_up("thread-status", "you didn't do anything")
+    explanation = assistant.research_task_follow_up("thread-status", "why not?")
+
+    assert "last attempt" in complaint
+    assert "failed" in complaint
+    assert "Lookup provider returned no eligible sources" in explanation
+    assert "primary-source verification" in explanation
+    assert "/reports/partial-job" in explanation
+    assert len(assistant.thinking_jobs._jobs) == 1
+    assistant.thinking_jobs.cancel(job_id)
+
+
+def test_status_question_without_prior_thread_job_requests_a_topic():
+    from core.background_jobs import BackgroundJobManager
+
+    assistant = Assistant.__new__(Assistant)
+    assistant.thinking_jobs = BackgroundJobManager(lambda *_: ("", ""), admission_check=lambda: False)
+
+    reply = assistant.research_task_follow_up("empty-thread", "you didn't do anything")
+
+    assert "What topic should I investigate?" in reply
+    assert not assistant.thinking_jobs._jobs
+
+
+def test_refinement_records_source_turn_on_versioned_amendment(monkeypatch):
+    from types import SimpleNamespace
+
+    from core.background_jobs import BackgroundJobManager, JobStatus
+
+    monkeypatch.setattr(assistant_module.notes, "recall_facts", lambda: "")
+    assistant = Assistant.__new__(Assistant)
+    assistant._history = []
+    assistant._pending_thinking_tasks = {}
+    assistant._turn_local = SimpleNamespace(turn_id="turn-refinement")
+    assistant.thinking_jobs = BackgroundJobManager(lambda *_: ("", ""), admission_check=lambda: False)
+    original = assistant.thinking_jobs.submit(
+        "Research the latest local AI trends for running capable models at home",
+        origin_source="conversation", origin_satellite_id="thread-refinement",
+        task_record={
+            "task_id": "task-refinement", "objective": "Research the latest local AI trends for running capable models at home",
+            "constraints": [], "amendments": [],
+        },
+    )
+    assistant.thinking_jobs._jobs[original].status = JobStatus.FAILED
+
+    refined = assistant.run_thinking_task(
+        "can you find latest info on trending local models with 9B parameters? Keep sources recent",
+        origin_satellite_id="thread-refinement", origin_source="conversation",
+    )
+    record = assistant.thinking_jobs._jobs[refined["id"]].snapshot.task_record
+
+    assert record["revision"] == 2
+    assert "turn-refinement" in record["source_turn_ids"]
+    assert record["amendments"][0]["source_turn_id"] == "turn-refinement"
+    assert "9B parameters" in assistant.thinking_jobs._jobs[refined["id"]].snapshot.task
+    assistant.thinking_jobs.cancel(refined["id"])
+
+
+def test_bare_confirmation_resumes_pending_thinking_before_report_routing():
+    from core.agent_loop import AgentLoop
+
+    host = SimpleNamespace(resume_pending_thinking_task=MagicMock(return_value=True))
+    loop = AgentLoop.__new__(AgentLoop)
+    loop.satellite_id = "satellite"
+
+    assert loop._run(host, None, "voice", None, None, None, "yes") == (
+        "Thanks, I'll continue that investigation with the proposed correction."
+    )
+    host.resume_pending_thinking_task.assert_called_once_with("satellite", "yes")
 
 
 def test_deep_think_action_stops_bundled_foreground_actions(monkeypatch):
@@ -83,10 +291,11 @@ def test_deep_think_action_stops_bundled_foreground_actions(monkeypatch):
         _record_spoken=MagicMock(),
         _generate_with_context_recovery=MagicMock(),
     )
-    assert al.AgentLoop(host, source="text").run(prompt) == "I'll investigate that."
+    expected = "I'll investigate that. Not completed: append to today."
+    assert al.AgentLoop(host, source="text").run(prompt) == expected
     dispatch.assert_called_once_with({"intent": "deep_think", "args": [prompt]})
     host._generate_with_context_recovery.assert_not_called()
-    host._record_spoken.assert_called_once_with("I'll investigate that.")
+    host._record_spoken.assert_called_once_with(expected)
 
 
 @pytest.mark.parametrize(
@@ -200,13 +409,16 @@ def test_worker_callback_binds_current_model_and_services(monkeypatch):
     callback = assistant._run_background_thinking_job
     replacement = object()
     assistant.slm_model = replacement
-    generate = MagicMock(side_effect=['{"reply":"sufficient findings collected"}', "Report."])
+    generate = MagicMock(side_effect=['{"reply":"sufficient findings collected"}'])
     monkeypatch.setattr(assistant_module, "generate_slm", generate)
     monkeypatch.setattr(assistant_module, "native_capabilities", lambda: {})
     job = BackgroundJob("job", JobSnapshot("Investigate"))
-    assert callback(job, lambda: False)[0] == "Report."
+    with pytest.raises(ReportSynthesisError, match="No verified evidence"):
+        callback(job, lambda: False)
     assert all(call.args == (replacement,) for call in generate.call_args_list)
-    assert assistant.thinking_jobs.update_stage.call_args.args == (job, "Synthesising report")
+    assistant.thinking_jobs.update_stage.assert_called_once_with(job, "Planning research")
+    assert job.planning_complete is True
+    assert job.synthesis_state["chapter_planning"] == "deterministic_fallback"
 
 
 def test_terminal_job_callback_serializes_history_and_forwards_report_card():

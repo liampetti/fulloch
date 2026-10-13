@@ -4,6 +4,8 @@ import importlib
 import sys
 import types
 
+import pytest
+
 
 def _module(monkeypatch):
     fake_arxiv = types.SimpleNamespace(Client=lambda **_kwargs: None, Search=lambda **_kwargs: None)
@@ -91,3 +93,102 @@ def test_paper_search_reports_provider_outage_as_unavailable(monkeypatch):
     result = research.search_papers("attention")
 
     assert result.thinking_status == "unavailable"
+
+
+def test_empty_paper_search_exposes_refinement_and_web_discovery_recovery(monkeypatch):
+    research = _module(monkeypatch)
+    monkeypatch.setattr(research, "_semantic_scholar", lambda *_args: [])
+    monkeypatch.setattr(research, "_arxiv", lambda *_args: [])
+    monkeypatch.setattr(research, "_openalex", lambda *_args: [])
+
+    result = research.search_papers("unknown shorthand")
+
+    assert result.thinking_status == "rejected"
+    assert result.recovery == {
+        "kind": "query_refinement",
+        "requires_user": False,
+        "suggested_actions": ["external_information", "search_papers"],
+    }
+
+
+def test_arxiv_uses_one_timed_atom_request_and_preserves_record_scope(monkeypatch):
+    research = _module(monkeypatch)
+    calls = []
+
+    class Response:
+        content = b'''<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+          <entry><id>https://arxiv.org/abs/2609.12345v2</id><title> Efficient inference </title>
+          <published>2026-09-01T00:00:00Z</published><updated>2026-09-20T00:00:00Z</updated>
+          <summary>The method reduces memory, but requires calibration.</summary><arxiv:doi>10.1234/example</arxiv:doi>
+          </entry></feed>'''
+
+        def raise_for_status(self):
+            pass
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
+
+    monkeypatch.setattr(research.requests, "get", get)
+    papers = research._arxiv("efficient inference", 5)
+
+    assert len(calls) == 1
+    assert calls[0][1]["timeout"] == research.TIMEOUT_S
+    assert papers[0]["version"] == "v2"
+    assert papers[0]["published_at"] == "2026-09-01T00:00:00Z"
+    assert papers[0]["updated_at"] == "2026-09-20T00:00:00Z"
+    assert papers[0]["doi"] == "10.1234/example"
+    assert papers[0]["digest"].endswith("requires calibration.")
+
+
+def test_arxiv_rate_limit_is_not_retried_and_falls_back_to_another_provider(monkeypatch):
+    research = _module(monkeypatch)
+    requests = []
+
+    def get(*args, **kwargs):
+        requests.append((args, kwargs))
+        raise research.requests.HTTPError("429 too many requests")
+
+    monkeypatch.setattr(research.requests, "get", get)
+    monkeypatch.setattr(research, "_semantic_scholar", lambda *_args: [])
+    monkeypatch.setattr(research, "_openalex", lambda *_args: [])
+
+    result = research.search_papers("efficient inference")
+
+    assert result.thinking_status == "rejected"
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("task,allowed", [
+    ("a deep analysis of the upcoming Bathurst 1000 race", False),
+    ("Research the best budget espresso machines", False),
+    ("Research and compare private photo backup services", False),
+    ("Compare recent arXiv papers on inference and product news", True),
+    ("Investigate scientific studies on efficient inference", True),
+])
+def test_paper_capabilities_require_academic_intent_not_generic_research(task, allowed, monkeypatch):
+    _module(monkeypatch)
+    from tools.thinking_playbooks import scoped_capabilities
+
+    selected = scoped_capabilities(task, {"search_papers", "get_paper_detail", "external_information", "new_read_tool"})
+
+    assert ("search_papers" in selected) is allowed
+    assert ("get_paper_detail" in selected) is allowed
+    assert {"external_information", "new_read_tool"} <= selected
+
+
+def test_arxiv_atom_error_entry_is_not_promoted_to_a_paper(monkeypatch):
+    research = _module(monkeypatch)
+
+    class Response:
+        content = b'''<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+        <id>http://arxiv.org/api/errors#incorrect_query</id><title>Error</title><summary>Invalid query</summary>
+        </entry></feed>'''
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(research.requests, "get", lambda *_args, **_kwargs: Response())
+
+    with pytest.raises(ValueError, match="error or malformed"):
+        research._arxiv("invalid query", 5)

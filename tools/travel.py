@@ -19,13 +19,38 @@ from server.credentials_store import get_credential
 from utils.local_time import today as local_today
 from utils.locale import household_locale
 
-from .thinking_context import get_artifact
+from .thinking_context import get_artifact, get_artifacts
 from .thinking_playbooks import thinking_playbook
 from .tool_registry import ThinkingResult, tool
 
 API_URL = "https://serpapi.com/search.json"
 TIMEOUT_S = 10
 MAX_OFFERS = 5
+_MONTHS = {
+    name: index
+    for index, name in enumerate(
+        (
+            "january",
+            "february",
+            "march",
+            "april",
+            "may",
+            "june",
+            "july",
+            "august",
+            "september",
+            "october",
+            "november",
+            "december",
+        ),
+        1,
+    )
+}
+_NAMED_DATE_RE = re.compile(
+    r"\b(?P<day>\d{1,2})(?:st|nd|rd|th)?\s*(?:of\s+)?"
+    r"(?P<month>" + "|".join(_MONTHS) + r")(?:\s+(?P<year>20\d{2}))?\b",
+    re.IGNORECASE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +154,44 @@ def _future_departure_date(value: object) -> str | None:
         requested = date.fromisoformat(value.strip())
     except ValueError:
         return None
-    return max(requested, local_today() + timedelta(days=1)).isoformat()
+    return requested.isoformat()
+
+
+def _next_year_same_day(value: date, years: int) -> date:
+    """Keep the requested month/day where possible; 29 February becomes 28."""
+    target_year = value.year + years
+    try:
+        return value.replace(year=target_year)
+    except ValueError:
+        return value.replace(year=target_year, day=28)
+
+
+def _future_trip_suggestion(departure: str, return_date: str | None) -> tuple[str, str | None]:
+    """Propose the closest same-calendar future trip without silently using it."""
+    depart = date.fromisoformat(departure)
+    returning = date.fromisoformat(return_date) if return_date else None
+    years = 1
+    while True:
+        suggested_depart = _next_year_same_day(depart, years)
+        suggested_return = (
+            _next_year_same_day(returning, years) if returning is not None else None
+        )
+        if suggested_return is not None and suggested_return <= suggested_depart:
+            suggested_return = _next_year_same_day(returning, years + 1)
+        if suggested_depart > local_today():
+            return suggested_depart.isoformat(), suggested_return.isoformat() if suggested_return else None
+        years += 1
+
+
+def _split_compound_route(origin: object, destination: object) -> tuple[object, object]:
+    """Accept a common `Hamburg-Sydney` route form without guessing place names."""
+    if not isinstance(origin, str) or str(destination or "").strip():
+        return origin, destination
+    match = re.fullmatch(r"\s*(.+?)\s*(?:->|—|–|-)\s*([A-Za-z][A-Za-z .'-]+)\s*", origin)
+    if not match:
+        return origin, destination
+    left, right = match.group(1).strip(), match.group(2).strip()
+    return (left, right) if _resolve_airport(left, "origin") and _resolve_airport(right, "destination") else (origin, destination)
 
 
 @lru_cache(maxsize=1)
@@ -183,6 +245,55 @@ def _representative_departure_date(request: str) -> str:
     return (today + timedelta(days=14)).isoformat()
 
 
+def _request_trip_dates(request: str) -> tuple[str, str | None] | None:
+    """Resolve a bounded natural-language flight-date range without an LLM guess.
+
+    A trailing relative qualifier applies to an entire date range: "17 January
+    to 3 March next year" therefore means 2027 for both dates, rather than a
+    past January followed by a future March.
+    """
+    matches = list(_NAMED_DATE_RE.finditer(request))
+    iso_dates = re.findall(r"\b20\d{2}-\d{2}-\d{2}\b", request)
+    if iso_dates:
+        try:
+            dates = [date.fromisoformat(value) for value in iso_dates[:2]]
+        except ValueError:
+            return None
+    elif matches:
+        today = local_today()
+        if re.search(r"\bnext year\b", request, re.IGNORECASE):
+            default_year = today.year + 1
+        elif re.search(r"\bthis year\b", request, re.IGNORECASE):
+            default_year = today.year
+        else:
+            default_year = today.year
+        dates = []
+        for match in matches[:2]:
+            try:
+                dates.append(
+                    date(
+                        int(match.group("year") or default_year),
+                        _MONTHS[match.group("month").lower()],
+                        int(match.group("day")),
+                    )
+                )
+            except ValueError:
+                return None
+        # With no stated year, use the next occurrence of the requested range.
+        while dates and dates[0] <= today:
+            dates[0] = _next_year_same_day(dates[0], 1)
+    else:
+        return None
+    if not dates:
+        return None
+    departure = dates[0]
+    returning = dates[1] if len(dates) > 1 else None
+    if returning is not None:
+        while returning <= departure:
+            returning = _next_year_same_day(returning, 1)
+    return departure.isoformat(), returning.isoformat() if returning else None
+
+
 def _is_travel_request(request: str) -> bool:
     if re.search(
         r"\b(flight|plane|travel|trip|itinerary|airport|layover|stopover|hotel|holiday|vacation)\b",
@@ -200,16 +311,7 @@ def _is_travel_request(request: str) -> bool:
 thinking_playbook(
     name="travel planning",
     triggers=(),
-    capabilities=("plan_travel", "search_flights", "assess_itinerary", "search_hotels"),
-    solve_path=(
-        "For a natural-language trip or route-planning request, start with plan_travel.",
-        "For a one-way specific flight search, call search_flights with exactly origin, destination, and a future ISO departure date. Do not pass return_date unless the user asked for a return journey.",
-        "After plan_travel returns an Artifact reference, call assess_itinerary with that reference. It evaluates the retrieved schedules directly; never serialize schedule JSON into an action.",
-        "A failed itinerary assessment rejects only that candidate. Check other returned schedule combinations, then use a materially different date, route, or flight search when it could change feasibility before concluding no option works.",
-        "Use hotel search only after transport feasibility is established or when accommodation is independently requested.",
-    ),
-    completion_rule="A feasible candidate is deterministically evaluated, or every retrieved candidate combination and materially different available search path is accounted for with its scope stated.",
-    prohibited_shortcuts=("Do not infer transport feasibility from timezone or calendar arithmetic alone.",),
+    capabilities=("plan_travel", "search_flights_for_request", "search_flights", "assess_itinerary", "search_hotels"),
     matcher=_is_travel_request,
     fallback_capability="plan_travel",
 )
@@ -472,6 +574,124 @@ def _flight_artifact(item: dict, params: dict, departure_date: str, return_date:
     }
 
 
+def _offer_matches_request(item: object, departure_id: str, arrival_id: str, departure_date: str) -> bool:
+    """Require provider schedules to match the requested leg before reporting them."""
+    if not isinstance(item, dict):
+        return False
+    legs = [leg for leg in item.get("flights") or [] if isinstance(leg, dict)]
+    if not legs:
+        return False
+    first, last = legs[0], legs[-1]
+    departure = first.get("departure_airport")
+    arrival = last.get("arrival_airport")
+    if not isinstance(departure, dict) or not isinstance(arrival, dict):
+        return False
+    if str(departure.get("id") or "").upper() != departure_id.upper():
+        return False
+    if str(arrival.get("id") or "").upper() != arrival_id.upper():
+        return False
+    return str(departure.get("time") or "")[:10] == departure_date
+
+
+def _round_trip_offer(outbound: dict, inbound: dict, params: dict) -> dict:
+    """Pair provider-selected outbound and inbound legs into one priced option."""
+    outbound_offer = _flight_artifact(outbound, params, "", None)["offer"]
+    inbound_offer = _flight_artifact(inbound, params, "", None)["offer"]
+    return {
+        # Google Flights supplies the fare after an outbound selection. Preserve
+        # it as provider-quoted rather than deriving a sum of independent legs.
+        "price": inbound.get("price") if isinstance(inbound.get("price"), (int, float, str)) else None,
+        "outbound": outbound_offer,
+        "inbound": inbound_offer,
+    }
+
+
+def _round_trip_summary(offer: dict) -> str:
+    outbound = offer.get("outbound") if isinstance(offer.get("outbound"), dict) else {}
+    inbound = offer.get("inbound") if isinstance(offer.get("inbound"), dict) else {}
+    outbound_departure = outbound.get("departure") if isinstance(outbound.get("departure"), dict) else {}
+    outbound_arrival = outbound.get("arrival") if isinstance(outbound.get("arrival"), dict) else {}
+    inbound_departure = inbound.get("departure") if isinstance(inbound.get("departure"), dict) else {}
+    inbound_arrival = inbound.get("arrival") if isinstance(inbound.get("arrival"), dict) else {}
+    carriers = []
+    for leg in (outbound, inbound):
+        for airline in leg.get("airlines") or []:
+            if str(airline) not in carriers:
+                carriers.append(str(airline))
+    return (
+        f"{', '.join(carriers) or 'carrier unavailable'}; outbound "
+        f"{_schedule_text(outbound_departure)} to {_schedule_text(outbound_arrival)}; return "
+        f"{_schedule_text(inbound_departure)} to {_schedule_text(inbound_arrival)}; "
+        f"provider-quoted fare {offer.get('price', 'unavailable')}"
+    )
+
+
+def _already_retrieved_flight_search(
+    origin: str,
+    destination: str,
+    departure_date: str,
+    return_date: str | None,
+    travellers: int,
+    cabin: str,
+) -> bool:
+    """Avoid spending a second provider call on equivalent resolved constraints."""
+    journey_type = "round_trip" if return_date is not None else "one_way"
+    for record in get_artifacts():
+        data = record.get("data")
+        if not isinstance(data, dict) or data.get("type") != "flight_search":
+            continue
+        route = data.get("route")
+        if (
+            isinstance(route, dict)
+            and route.get("origin") == origin
+            and route.get("destination") == destination
+            and data.get("departure_date") == departure_date
+            and data.get("return_date") == return_date
+            and data.get("travellers") == travellers
+            and data.get("cabin") == cabin
+            and data.get("journey_type", "one_way") == journey_type
+        ):
+            return True
+    return False
+
+
+@tool(
+    name="search_flights_for_request",
+    description=(
+        "Planning-worker-only flight search for a natural-language fixed-date request. "
+        "It resolves a city pair and relative date range deterministically before retrieving "
+        "read-only Google Flights results."
+    ),
+    available=_available,
+    deep_think_only=True,
+    thinking_outcome=True,
+)
+def search_flights_for_request(request: str) -> str:
+    """Resolve a simple natural-language flight request before its typed search."""
+    if not isinstance(request, str) or not request.strip():
+        return ThinkingResult(
+            "Describe the origin, destination, and travel dates.",
+            status="needs_input",
+            scope="A natural-language flight request is required.",
+        )
+    locations = _locations_in_request(request)
+    dates = _request_trip_dates(request)
+    if len(locations) < 2:
+        return ThinkingResult(
+            "Name both the origin and destination city or airport.",
+            status="needs_input",
+            scope="Both flight endpoints are required.",
+        )
+    if dates is None:
+        return ThinkingResult(
+            "State the departure date in a form such as 17 January 2027.",
+            status="needs_input",
+            scope="The requested flight dates could not be resolved.",
+        )
+    departure, returning = dates
+    return search_flights(locations[0][0], locations[1][0], departure, returning)
+
+
 @tool(
     name="search_flights",
     description=(
@@ -507,6 +727,7 @@ def search_flights(
     ) = _normalise_labeled_flight_args(
         origin, destination, departure_date, return_date, adults, children, cabin_class, max_stops
     )
+    origin, destination = _split_compound_route(origin, destination)
     locale = household_locale()
     home_city = _home_city()
     home_airport = _home_airport()
@@ -528,7 +749,17 @@ def search_flights(
     resolved_origin = _resolve_airport(origin, "origin")
     resolved_destination = _resolve_airport(destination, "destination")
     if resolved_origin is None or resolved_destination is None:
-        return ThinkingResult("Use a real origin and destination city or IATA airport code.", status="needs_input", scope="At least one flight endpoint could not be resolved.")
+        return ThinkingResult(
+            "Use a real origin and destination city or IATA airport code.",
+            status="needs_input",
+            scope="At least one flight endpoint could not be resolved.",
+            recovery={
+                "kind": "identifier_resolution",
+                "fields": [field for field, value in (("origin", resolved_origin), ("destination", resolved_destination)) if value is None],
+                "requires_user": False,
+                "suggested_actions": ["external_information", "plan_travel"],
+            },
+        )
     depart = _future_departure_date(departure_date)
     if depart is None:
         return ThinkingResult("departure_date must use YYYY-MM-DD; use a future date for flight schedules.", status="needs_input", scope="A future ISO departure date is required.")
@@ -537,8 +768,27 @@ def search_flights(
         adults, children = _positive(adults, "adults"), _positive(children, "children")
     except ValueError as exc:
         return ThinkingResult(str(exc), status="needs_input", scope="The requested flight dates or passenger counts are invalid.")
-    if returning is not None and returning < local_today().isoformat():
-        returning = (local_today() + timedelta(days=2)).isoformat()
+    if depart <= local_today().isoformat() or (returning is not None and returning <= local_today().isoformat()):
+        suggested_depart, suggested_return = _future_trip_suggestion(depart, returning)
+        date_text = (
+            f"{suggested_depart} to {suggested_return}"
+            if suggested_return is not None
+            else suggested_depart
+        )
+        return ThinkingResult(
+            f"Those flight dates are in the past. Did you mean {date_text}?",
+            status="needs_input",
+            scope="The requested fixed flight dates have already passed.",
+            recovery={
+                "kind": "confirmation",
+                "requires_user": True,
+                "proposal": {"departure_date": suggested_depart, "return_date": suggested_return},
+                "resume_action": {
+                    "intent": "search_flights",
+                    "args": [origin, destination, suggested_depart, suggested_return, adults, children, cabin_class, max_stops],
+                },
+            },
+        )
     if returning is not None and returning <= depart:
         return ThinkingResult("return_date must be after departure_date.", status="needs_input", scope="The requested return date is invalid.")
     if adults < 1:
@@ -548,6 +798,21 @@ def search_flights(
         stops = min(max(int(max_stops), 0), 2) + 1
     except (KeyError, TypeError, ValueError):
         return ThinkingResult("cabin_class must be economy, premium_economy, business, or first; max_stops must be 0, 1, or 2.", status="needs_input", scope="The requested cabin class or stop limit is invalid.")
+    canonical_origin = (
+        home_airport if inferred_home_endpoint and origin == home_city and home_airport else resolved_origin[0]
+    )
+    canonical_destination = (
+        home_airport if inferred_home_endpoint and destination == home_city and home_airport else resolved_destination[0]
+    )
+    cabin = {1: "Economy", 2: "Premium economy", 3: "Business", 4: "First"}[travel_class]
+    if _already_retrieved_flight_search(
+        canonical_origin, canonical_destination, depart, returning, adults + children, cabin
+    ):
+        return ThinkingResult(
+            "Equivalent flight constraints were already retrieved for this investigation.",
+            status="rejected",
+            scope="The same resolved route, dates, travellers, and cabin already have retrieved flight evidence.",
+        )
     params = {
         "engine": "google_flights",
         "departure_id": origin if inferred_home_endpoint and origin == home_city else resolved_origin[0],
@@ -576,42 +841,101 @@ def search_flights(
     departures = first.get("best_flights") or first.get("other_flights") or []
     if not departures:
         return ThinkingResult("No flight offers matched those constraints.", status="rejected", scope="No retrieved offer matched the requested flight constraints.", next_actions=("search_flights",))
-    token = departures[0].get("departure_token") if isinstance(departures[0], dict) else None
-    result = (
-        _search(
-            {
-                **params,
-                "departure_token": token,
-            }
+    selected_outbound = next((item for item in departures if isinstance(item, dict)), None)
+    if selected_outbound is None:
+        return ThinkingResult("No flight offers matched those constraints.", status="rejected", scope="No retrieved offer matched the requested flight constraints.", next_actions=("search_flights",))
+    if not _offer_matches_request(
+        selected_outbound, canonical_origin, canonical_destination, depart
+    ):
+        return ThinkingResult(
+            "The flight provider returned an outbound schedule that did not match the requested route or date.",
+            status="unavailable",
+            scope="The provider's outbound schedule could not be verified against the requested flight leg.",
         )
-        if token and returning is not None
-        else first
-    )
+    token = selected_outbound.get("departure_token")
+    if returning is not None and not isinstance(token, str):
+        return ThinkingResult(
+            "The flight provider did not return a selectable outbound itinerary for the requested return journey.",
+            status="unavailable",
+            scope="A complete round-trip fare could not be retrieved from the provider response.",
+        )
+    result = _search({**params, "departure_token": token}) if returning is not None else first
     if result.get("error"):
         return ThinkingResult(str(result["error"]), status="unavailable", scope="The flight provider did not return schedule evidence.")
     offers = (result.get("best_flights") or result.get("other_flights") or [])[:MAX_OFFERS]
     if not offers:
         return ThinkingResult("No flight offers matched those constraints.", status="rejected", scope="No retrieved offer matched the requested flight constraints.", next_actions=("search_flights",))
-    text = "Google Flights results (prices can change):\n" + "\n".join(
-        f"{index}. {_flight_summary(item)}"
-        for index, item in enumerate(offers, 1)
-        if isinstance(item, dict)
+    if returning is not None:
+        evidence_offers = [
+            _round_trip_offer(selected_outbound, item, params)
+            for item in offers
+            if _offer_matches_request(item, canonical_destination, canonical_origin, returning)
+        ]
+        if not evidence_offers:
+            return ThinkingResult(
+                "The flight provider returned return-leg schedules that did not match the requested route or date.",
+                status="unavailable",
+                scope="A complete round-trip fare could not be verified against both requested flight legs.",
+            )
+        text = "Google Flights round-trip results (prices can change):\n" + "\n".join(
+            f"{index}. {_round_trip_summary(offer)}"
+            for index, offer in enumerate(evidence_offers, 1)
+        )
+    else:
+        evidence_offers = [
+            _flight_artifact(item, params, depart, None)["offer"]
+            for item in offers
+            if _offer_matches_request(item, canonical_origin, canonical_destination, depart)
+        ]
+        if not evidence_offers:
+            return ThinkingResult(
+                "The flight provider returned schedules that did not match the requested route or date.",
+                status="unavailable",
+                scope="The provider's flight schedules could not be verified against the requested leg.",
+            )
+        text = "Google Flights results (prices can change):\n" + "\n".join(
+            f"{index}. {_flight_summary(item)}"
+            for index, item in enumerate(offers, 1)
+            if isinstance(item, dict) and _offer_matches_request(item, canonical_origin, canonical_destination, depart)
+        )
+    artifact = {
+        "type": "flight_search",
+        "journey_type": "round_trip" if returning is not None else "one_way",
+        "route": {"origin": canonical_origin, "destination": canonical_destination},
+        "departure_date": depart,
+        "return_date": returning,
+        "travellers": params["adults"] + params["children"],
+        "cabin": cabin,
+        "currency": params["currency"],
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "offers": evidence_offers,
+        # Retain the old single-offer shape for existing report-card consumers.
+        "offer": evidence_offers[0],
+    }
+    route_origin_name = home_city if inferred_home_endpoint and origin == home_city else resolved_origin[1]
+    route_destination_name = (
+        home_city if inferred_home_endpoint and destination == home_city else resolved_destination[1]
     )
-    first_offer = next((item for item in offers if isinstance(item, dict)), None)
-    artifact = _flight_artifact(first_offer, params, depart, returning) if first_offer is not None else None
-    evidence_offers = [
-        _flight_artifact(item, params, depart, returning)["offer"]
-        for item in offers
-        if isinstance(item, dict)
-    ]
     return ThinkingResult(
         (
             f"Representative future date: {depart}. "
-            f"Resolved route: {resolved_origin[1]} ({resolved_origin[0]}) to "
-            f"{resolved_destination[1]} ({resolved_destination[0]}).\n{text}"
+            f"Resolved route: {route_origin_name} ({canonical_origin}) to "
+            f"{route_destination_name} ({canonical_destination}).\n{text}"
         ),
-        evidence={"route": {"origin": resolved_origin[0], "destination": resolved_destination[0]}, "date": depart, "offers": evidence_offers},
-        scope=f"Up to {len(evidence_offers)} retrieved offers for {resolved_origin[0]} to {resolved_destination[0]} on {depart}.",
+        evidence={
+            "journey_type": artifact["journey_type"],
+            "route": {"origin": canonical_origin, "destination": canonical_destination},
+            "departure_date": depart,
+            "return_date": returning,
+            "currency": params["currency"],
+            "travellers": artifact["travellers"],
+            "cabin": artifact["cabin"],
+            "offers": evidence_offers,
+        },
+        scope=(
+            f"Up to {len(evidence_offers)} retrieved {'round-trip' if returning is not None else 'one-way'} offers "
+            f"for {canonical_origin} to {canonical_destination} on {depart}."
+        ),
         next_actions=("search_flights", "plan_travel"),
         artifact=artifact,
     )
@@ -646,6 +970,7 @@ def plan_travel(request: str) -> str:
     results = []
     legs = []
     leg_offers = []
+    leg_contexts = []
     artifact = None
     for index, ((origin, _location), (destination, _next_location)) in enumerate(
         zip(stops, stops[1:], strict=False), 1
@@ -666,6 +991,12 @@ def plan_travel(request: str) -> str:
         if not isinstance(offers, list) or not offers:
             return ThinkingResult("The travel provider returned no usable flight offers.", status="unavailable", scope="At least one itinerary leg had no bounded offer list.")
         leg_offers.append(offers)
+        leg_contexts.append(
+            {
+                key: flight_artifact.get(key)
+                for key in ("route", "departure_date", "currency", "retrieved_at")
+            }
+        )
         results.append(f"Leg {index}: {result}")
         artifact = artifact or flight_artifact
 
@@ -674,7 +1005,14 @@ def plan_travel(request: str) -> str:
         + "\n".join(results)
         + "\n\nSchedule evidence retrieved. Use assess_itinerary with the returned Artifact reference to check the retrieved flight chronology."
     )
-    plan_artifact = {"type": "travel_plan", "request": request, "legs": legs, "leg_offers": leg_offers, "representative": artifact}
+    plan_artifact = {
+        "type": "travel_plan",
+        "request": request,
+        "legs": legs,
+        "leg_offers": leg_offers,
+        "leg_contexts": leg_contexts,
+        "representative": artifact,
+    }
     return ThinkingResult(
         text,
         evidence={"departure_date": departure_date, "legs": legs, "offers_per_leg": [len(items) for items in leg_offers]},

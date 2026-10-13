@@ -35,6 +35,16 @@ def test_logo_is_fulloch_for_local_llm(monkeypatch):
     assert r.content == (ROOT / "fulloch.png").read_bytes()
 
 
+def test_animation_sheet_is_served_without_loading_models(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "test-password-hash")
+    client = TestClient(create_app())
+    r = client.get("/fulloch_animate.png")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert r.headers["cache-control"] == "no-cache"
+    assert r.content == (ROOT / "utils" / "fulloch_animate.png").read_bytes()
+
+
 def test_logo_swaps_to_parloch_for_remote_llm(monkeypatch):
     a = _assistant()
     a.llm_backend = "openai"  # off-device — Parloch

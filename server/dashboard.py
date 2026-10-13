@@ -68,7 +68,7 @@ _STATIC_DIR = Path(__file__).resolve().parent / "static"
 # retain their own authentication checks.
 _AUTH_EXEMPT_PATHS = frozenset({
     "/login", "/auth/login", "/auth/logout",
-    "/logo.png", "/parloch.png", "/favicon.ico",
+    "/logo.png", "/parloch.png", "/fulloch_animate.png", "/favicon.ico",
     "/ready",
 })
 

@@ -47,6 +47,15 @@ class TestIsBareLightPhrase:
 
 
 class TestCurrentSatelliteHaArea:
+    def test_turn_context_area_is_available_without_global_assistant_lookup(self):
+        from core.satellite_context import current_satellite_ha_area
+
+        token = current_satellite_ha_area.set("downstairs_office")
+        try:
+            assert devices._current_satellite_ha_area() == "downstairs_office"
+        finally:
+            current_satellite_ha_area.reset(token)
+
     def test_no_live_assistant_returns_none(self):
         from core.satellite_context import set_current_assistant
 
@@ -117,6 +126,19 @@ class TestBareLightAreaEntities:
         assert light_ids == ["light.kitchen_ceiling"]  # lamp denied, switch not a light
         assert area_name == "Kitchen"
 
+    def test_selected_area_id_works_when_area_name_cache_is_empty(self, satellite_with_area):
+        with (
+            patch.object(client, "_AREA_MAP", {}),
+            patch.object(client, "_DENIED_ENTITIES", set()),
+            patch.object(
+                client, "_render_template", return_value=json.dumps(["light.kitchen_ceiling"])
+            ) as render,
+        ):
+            result = devices._bare_light_area_entities("lights")
+
+        assert result == (["light.kitchen_ceiling"], "kitchen")
+        assert "area_entities('kitchen')" in render.call_args.args[0]
+
     def test_filler_words_are_stripped_before_matching(self, satellite_with_area):
 
         with (
@@ -146,21 +168,21 @@ class TestBareLightAreaEntities:
         set_current_assistant(None)
         assert devices._bare_light_area_entities("lights") is None
 
-    def test_area_with_no_lights_returns_none(self, satellite_with_area):
+    def test_area_with_no_lights_returns_failure(self, satellite_with_area):
 
         with (
             patch.object(client, "_AREA_MAP", {"kitchen": "Kitchen"}),
             patch.object(client, "_render_template", return_value=json.dumps(["switch.kettle"])),
         ):
-            assert devices._bare_light_area_entities("lights") is None
+            assert "No command was sent" in devices._bare_light_area_entities("lights")
 
-    def test_ha_unreachable_returns_none(self, satellite_with_area):
+    def test_ha_unreachable_returns_failure(self, satellite_with_area):
 
         with (
             patch.object(client, "_AREA_MAP", {"kitchen": "Kitchen"}),
             patch.object(client, "_render_template", return_value=None),
         ):
-            assert devices._bare_light_area_entities("lights") is None
+            assert "No command was sent" in devices._bare_light_area_entities("lights")
 
 
 class TestToolsUseAreaDefault:

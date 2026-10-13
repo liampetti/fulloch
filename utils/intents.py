@@ -7,7 +7,14 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from tools.tool_registry import UnknownToolError, tool_registry
+from tools.tool_registry import (
+    ThinkingResult,
+    UnknownToolError,
+    thinking_result_error,
+    tool_registry,
+)
+
+from .prompts import get_unavailable_tool_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -109,10 +116,14 @@ class StepResult:
     text: str
     in_output: bool
     artifact: Optional[dict] = None
+    outcome: Optional[dict] = None
+    raw_text: Optional[str] = None  # original tool observation, never a generated summary
 
     @property
     def should_replan(self) -> bool:
-        return self.kind in _REPLAN_KINDS
+        return self.kind in _REPLAN_KINDS or (
+            self.outcome is not None and self.outcome["status"] != "evidence"
+        )
 
 
 def classify_step(raw: Optional[object]) -> StepResult:
@@ -123,6 +134,14 @@ def classify_step(raw: Optional[object]) -> StepResult:
     that isn't spoken; a string is matched against the sentinel prefixes (after
     `lstrip`, so leading whitespace doesn't hide one) and otherwise `NORMAL`.
     """
+    outcome = None
+    if isinstance(raw, ThinkingResult):
+        error = thinking_result_error(raw)
+        if error:
+            return StepResult(StepKind.ERROR, f"Invalid tool outcome: {error}", in_output=False)
+        outcome = {"status": raw.thinking_status, "scope": raw.scope,
+                   "evidence": raw.evidence, "next_actions": list(raw.next_actions),
+                   "artifact": raw.artifact, "recovery": raw.recovery}
     if raw is None:
         return StepResult(StepKind.ERROR, "<error>", in_output=False)
     if not isinstance(raw, str):
@@ -130,8 +149,8 @@ def classify_step(raw: Optional[object]) -> StepResult:
     stripped = raw.lstrip()
     for prefix, kind in _SENTINEL_KINDS:
         if stripped.startswith(prefix):
-            return StepResult(kind, raw, in_output=True, artifact=getattr(raw, "artifact", None))
-    return StepResult(StepKind.NORMAL, raw, in_output=True, artifact=getattr(raw, "artifact", None))
+            return StepResult(kind, raw, in_output=True, artifact=getattr(raw, "artifact", None), outcome=outcome)
+    return StepResult(StepKind.NORMAL, raw, in_output=True, artifact=getattr(raw, "artifact", None), outcome=outcome)
 
 
 # Sentences in a reactive message that instruct the (absent) agent rather than
@@ -249,10 +268,7 @@ def handle_action(action: Dict[str, Any]) -> Optional[str]:
         return tool_registry.execute_tool(name, args=args, kwargs=kwargs)
     except UnknownToolError as e:
         logger.warning(f"Agent picked unknown tool: {e}")
-        return (
-            f"Reactive question: The tool {name!r} is not available. "
-            f"Use one of the tools listed in the system prompt."
-        )
+        return get_unavailable_tool_prompt(name)
     except Exception as e:
         logger.exception(f"Error executing action {name}: {e}")
         return None

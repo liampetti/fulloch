@@ -173,21 +173,10 @@ thinking_playbook(
         "get_entity_history",
         "list_entities_in_area",
     ),
-    solve_path=(
-        "Retrieve the relevant Home Assistant state or records before describing the home.",
-        "Use a narrower follow-up lookup only when the first result leaves a material ambiguity.",
-        "Report observed state separately from recommendations or inference.",
-    ),
-    completion_rule="Home-status claims are supported by a retrieved Home Assistant observation.",
 )
 
 thinking_playbook(
     name="conversation history",
     triggers=(r"\b(previous|earlier|conversation|chat history|what did (?:i|we) say)\b",),
     capabilities=("get_conversation_history",),
-    solve_path=(
-        "Retrieve the relevant conversation history before recalling prior wording or decisions.",
-        "Quote or summarize only the retrieved entries relevant to the request.",
-    ),
-    completion_rule="Claims about prior conversation are supported by retrieved history.",
 )

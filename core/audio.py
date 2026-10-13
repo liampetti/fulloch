@@ -28,6 +28,7 @@ from .audio_pcm import (
 from .satellite import SatelliteSession
 from .satellite_recorder import FLUSH as FLUSH
 from .satellite_recorder import SatelliteRecorder
+from .telemetry import event as telemetry_event
 from .wakeword_candidates import KWS_EARLY_VERIFICATION_MS as KWS_EARLY_VERIFICATION_MS
 from .wakeword_candidates import WAKE_VERDICT as WAKE_VERDICT
 from .wakeword_candidates import WakewordCandidates
@@ -250,7 +251,9 @@ class AudioCapture:
         # (utterance-end) — diffed against ASR dequeue time by
         # `core.asr.stream_generator`'s `endpoint_wait_sink` for the A2
         # endpoint-wait turn stat. None is the stop pill.
-        self.audio_queue: "AsrWorkQueue | queue.Queue" = AsrWorkQueue(AUDIO_QUEUE_MAX_ITEMS)
+        self.audio_queue: "AsrWorkQueue | queue.Queue" = AsrWorkQueue(
+            AUDIO_QUEUE_MAX_ITEMS, on_expired=self._on_asr_item_expired,
+        )
         self.running = True
         # Genuinely global, HA-switch-facing "don't listen anywhere" override
         # (see `server/dashboard.py`'s `POST /mic` / the HACS mic switch
@@ -341,6 +344,19 @@ class AudioCapture:
         """Set the callback used when bounded ASR work cannot be retained."""
         self.asr_work_dropped_callback = callback
 
+    def _on_asr_item_expired(self, item: AsrWorkItem) -> None:
+        """Reject stale queued wake work without exposing its transcript/audio."""
+        self.asr_queue_metrics["dropped"] += 1
+        capture_id = item.payload[11] if len(item.payload) > 11 else None
+        wav_path = item.payload[8] if len(item.payload) > 8 else None
+        self.wake_candidates.mark_wakeword_wav(wav_path, accepted=False)
+        telemetry_event(
+            "asr_candidate_expired", satellite_id=item.satellite_id,
+            kind=item.kind, capture_id=capture_id, reason="queue_ttl",
+        )
+        if self.asr_work_dropped_callback is not None:
+            self.asr_work_dropped_callback(item.satellite_id, item.kind, item.candidate, "expired")
+
     def set_live_asr_backend(self, backend) -> None:
         """Install an optional backend that receives recorder frames live."""
         self.live_asr_backend = backend
@@ -348,17 +364,26 @@ class AudioCapture:
     def forward_live_asr_frame(self, session: SatelliteSession, pcm) -> None:
         """Forward one frame without blocking, only when a backend opts in."""
         if self.live_asr_backend is not None:
-            self.live_asr_backend.feed_frame(session.id, pcm)
+            self.live_asr_backend.feed_frame(session.id, pcm, capture_id=session.audio_capture_id or None)
 
     def start_live_asr_capture(self, session: SatelliteSession, pcm) -> None:
         """Start a VAD-confirmed live capture with its bounded speech pre-roll."""
         if self.live_asr_backend is not None and hasattr(self.live_asr_backend, "start"):
-            self.live_asr_backend.start(session.id, pcm)
+            self.live_asr_backend.start(session.id, pcm, capture_id=session.audio_capture_id or None)
 
     def reset_live_asr_capture(self, session: SatelliteSession) -> None:
         """Discard partial state without flushing endpointed ASR work."""
         if self.live_asr_backend is not None and hasattr(self.live_asr_backend, "discard"):
             self.live_asr_backend.discard(session.id)
+
+    def commit_capture(self, session: SatelliteSession, capture_id: int) -> None:
+        """Retire only committed audio; never flush a newer command or add a cooldown."""
+        session.committed_capture_id = max(session.committed_capture_id, capture_id)
+        if self.live_asr_backend is not None:
+            self.live_asr_backend.discard_capture(session.id, capture_id)
+        if isinstance(self.audio_queue, AsrWorkQueue):
+            # This work was accepted, not rejected: no dropped-wake callback.
+            self.audio_queue.discard(session.id, capture_id=capture_id)
 
     def _put_utterance(
         self, item, *, satellite_id: str = "", kind: str = "final", candidate: bool = False,

@@ -12,6 +12,7 @@ instance built with `__new__`.
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -98,3 +99,63 @@ def test_note_runtime_error_escalates_only_fatal():
 
     inst._note_runtime_error(RuntimeError("CUDA error: out of memory"))
     assert inst.lifecycle.phase == "ERROR"  # fatal -> bounce to setup
+
+
+def test_recovery_status_resolves_once_and_enters_current_prompt(monkeypatch):
+    import core.assistant as assistant
+
+    inst = _bare_assistant()
+    inst._history = []
+    inst.thinking_jobs = None
+    inst.slm_model = SimpleNamespace(_fulloch_backend_state="READY", _fulloch_process_generation=2)
+    inst._backend_status_events = {
+        "dashboard-text": {"state": "OUTAGE", "generation": 1, "occurred_at": 1.0}
+    }
+    events = []
+    prompts = []
+    inst._emit_turn_event = lambda *args, **kwargs: events.append((args, kwargs))
+    monkeypatch.setattr(
+        assistant.turn_history,
+        "generate_with_recovery",
+        lambda _model, **kwargs: prompts.append(kwargs["system_prompt"]) or "ok",
+    )
+
+    assert inst._generate_with_context_recovery(system_prompt="agent prompt") == "ok"
+    assert "currently available" in prompts[0]
+    assert inst._backend_status_events["dashboard-text"]["state"] == "RESOLVED"
+    assert len(events) == 1
+    assert events[0][0][1] == "The AI server is back online"
+
+    inst._generate_with_context_recovery(system_prompt="next prompt")
+    assert len(events) == 1
+
+
+def test_old_backend_generation_cannot_resolve_newer_outage_callback(monkeypatch):
+    import core.assistant as assistant
+
+    inst = _bare_assistant()
+    inst._history = []
+    inst.thinking_jobs = None
+    inst.slm_model = SimpleNamespace(_fulloch_backend_state="READY", _fulloch_process_generation=3)
+    event = {"state": "OUTAGE", "generation": 4, "occurred_at": 1.0}
+    inst._backend_status_events = {"dashboard-text": event}
+    announced = []
+    prompts = []
+    inst._emit_turn_event = lambda *args, **kwargs: announced.append(args)
+    monkeypatch.setattr(
+        assistant.turn_history, "generate_with_recovery",
+        lambda _model, **kwargs: prompts.append(kwargs["system_prompt"]) or "greeting",
+    )
+
+    assert inst._generate_with_context_recovery(system_prompt="Greeting") == "greeting"
+    assert event["state"] == "OUTAGE"
+    assert announced == []
+
+    inst.slm_model._fulloch_process_generation = 4
+    assert inst._generate_with_context_recovery(system_prompt="Greeting") == "greeting"
+    assert event["state"] == "RESOLVED"
+    assert len(announced) == 1
+    assert "currently available" in prompts[-1]
+
+    inst._generate_with_context_recovery(system_prompt="Next greeting")
+    assert len(announced) == 1

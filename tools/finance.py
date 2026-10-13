@@ -21,6 +21,7 @@ MAX_NEWS_ITEMS = 3
 MAX_GRAPH_POINTS = 48
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*(?::[A-Za-z0-9][A-Za-z0-9.-]*)?$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+_CURRENCY_PAIR_RE = re.compile(r"^[A-Z]{3}-[A-Z]{3}$")
 _EXCHANGE_CODES = frozenset({"AMEX", "ASX", "HKEX", "LSE", "NASDAQ", "NYSE", "NZX", "SSE", "TSX"})
 _CURRENCY_NAMES = {
     "AUD": "Australian dollars",
@@ -62,7 +63,11 @@ def _provider_symbol(symbol: str) -> str:
 
 
 def _configured_symbol(symbol: str) -> str:
-    """Trust configured exchanges; otherwise use NASDAQ rather than an inferred suffix."""
+    """Prefer the user's explicit exchange, then a unique watchlist mapping."""
+    if _CURRENCY_PAIR_RE.fullmatch(symbol):
+        return symbol
+    if ":" in symbol:
+        return symbol
     left = symbol.partition(":")[0]
     matches = [candidate for candidate in _watchlist() if candidate.partition(":")[0] == left]
     if len(matches) == 1:
@@ -387,6 +392,11 @@ def _get_quote(symbol: str, window: str, fresh: bool) -> ThinkingResult:
             "Ask for a stock symbol such as NASDAQ:TSLA.",
             status="needs_input",
             scope="A valid stock symbol is required; company names can be ambiguous.",
+            recovery={
+                "kind": "identifier_resolution",
+                "requires_user": False,
+                "suggested_actions": ["external_information", "get_finance_quote"],
+            },
         )
     if window not in {"1D", "5D", "1M", "6M", "YTD", "1Y", "5Y", "MAX"}:
         return ThinkingResult(
@@ -409,6 +419,11 @@ def _get_quote(symbol: str, window: str, fresh: bool) -> ThinkingResult:
                 "I couldn't find information on that stock.",
                 status="rejected",
                 scope="The finance provider returned no matching listing.",
+                recovery={
+                    "kind": "identifier_resolution",
+                    "requires_user": False,
+                    "suggested_actions": ["external_information", "get_finance_quote"],
+                },
             )
         return ThinkingResult(
             error,
@@ -421,12 +436,22 @@ def _get_quote(symbol: str, window: str, fresh: bool) -> ThinkingResult:
             f"I couldn't verify an instrument for {symbol}.",
             status="rejected",
             scope="The finance provider returned no identifiable quote.",
+            recovery={
+                "kind": "identifier_resolution",
+                "requires_user": False,
+                "suggested_actions": ["external_information", "get_finance_quote"],
+            },
         )
     if not _matches_requested_symbol(symbol, quote):
         return ThinkingResult(
             f"I couldn't verify that the returned listing matches {symbol}.",
             status="rejected",
             scope="The provider returned a different or incomplete instrument identity.",
+            recovery={
+                "kind": "identifier_resolution",
+                "requires_user": False,
+                "suggested_actions": ["external_information", "get_finance_quote"],
+            },
         )
     return ThinkingResult(
         _format_quote(quote),
@@ -629,13 +654,9 @@ def get_market_brief(fresh: bool = False) -> str:
 
 
 def _is_finance_request(request: str) -> bool:
-    return bool(
-        re.search(
-            r"\b(stock|stocks|shares|market|markets|finance|financial|ticker|portfolio|watchlist|invest)\b",
-            request,
-            re.IGNORECASE,
-        )
-    )
+    from utils.prompts import is_finance_research_task
+
+    return is_finance_research_task(request)
 
 
 thinking_playbook(
@@ -646,19 +667,6 @@ thinking_playbook(
         "get_exchange_rate",
         "get_watchlist_brief",
         "get_market_brief",
-    ),
-    solve_path=(
-        "For a configured-stocks or portfolio update, start with get_watchlist_brief.",
-        "For one named stock, retrieve an exact symbol with get_finance_quote; ask a clarification rather than guessing an ambiguous listing.",
-        "For a broad finance-news or market summary, start with get_watchlist_brief using a 5D window when a watchlist is configured, then call get_market_brief for market context.",
-        "For a live currency conversion, call get_exchange_rate with ISO base and quote currency codes; explain that it excludes bank spreads and fees.",
-        "Pass fresh=true when the user explicitly asks for today, now, current, or latest data; otherwise use the default cache-allowed mode.",
-        "Separate reported facts from possible catalysts and data gaps; state quote timing, exchange, currency, and any available source links.",
-    ),
-    completion_rule="The response is limited to retrieved market evidence, clearly identifies its freshness limits, and does not make a personalised investment recommendation.",
-    prohibited_shortcuts=(
-        "Do not claim a news item caused a price move without two independent sources.",
-        "Do not give buy, sell, hold, allocation, tax, legal, margin, options, or trade-execution advice.",
     ),
     matcher=_is_finance_request,
     fallback_capability="get_market_brief",

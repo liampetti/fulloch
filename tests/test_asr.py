@@ -127,6 +127,36 @@ def test_endpoint_wait_sink_none_without_endpoint_time():
     assert sink["s"] is None
 
 
+def test_capture_id_sink_is_optional_and_cleared_for_legacy_items():
+    q = queue.Queue()
+    q.put((_buf(), 1.0, -20, True, "sat-a", 2.0, False, False, None, None, False, None, 7))
+    q.put((_buf(), 3.0))
+    q.put(None)
+    capture = {"value": None}
+    gen = stream_generator(q, capture_id_sink=capture)
+    next(gen)
+    assert capture["value"] == 7
+    next(gen)
+    assert capture["value"] is None
+
+
+def test_stale_wake_candidate_is_filtered_before_asr_input_is_yielded():
+    import time
+
+    q = queue.Queue()
+    q.put((_buf(), 1.0, -20, False, "sat-a", 2.0, False, True,
+           "wake.wav", 4, False, 9, 7, time.monotonic() + 30))
+    q.put(None)
+    checked = []
+
+    def current(satellite_id, generation, expires_at, wav_path, capture_id, early_verification):
+        checked.append((satellite_id, generation, wav_path, capture_id, early_verification))
+        return False
+
+    assert list(stream_generator(q, candidate_is_current=current)) == []
+    assert checked == [("sat-a", 4, "wake.wav", 9, False)]
+
+
 def test_qwen_wrapper_returns_a_list_for_one_shot_transcription():
     from core.asr import QwenASRPipelineWrapper
 

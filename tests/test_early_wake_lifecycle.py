@@ -27,6 +27,11 @@ def _run_transcripts(
     wake_probe_indexes=(),
     kws_candidate_indexes=(),
     early_verification_indexes=(),
+    capture_ids=None,
+    provisional_indexes=None,
+    satellite_ids=None,
+    before_each=None,
+    audio_values=None,
 ):
     items = iter(transcripts)
 
@@ -41,19 +46,28 @@ def _run_transcripts(
         wake_probe_sink,
         kws_candidate_sink=None,
         kws_early_verification_sink=None,
+        capture_id_sink=None,
     ):
         for index, _text in enumerate(transcripts):
+            if before_each is not None:
+                before_each(index)
             onset_sink["t"] = onsets[index] if onsets is not None else 10.0
             loudness_sink["db"] = -20.0
-            provisional_sink["flag"] = index < len(transcripts) - 1
-            audio_sink["buf"] = object()
-            satellite_id_sink["id"] = "sat-a"
+            provisional_sink["flag"] = (
+                index < len(transcripts) - 1
+                if provisional_indexes is None
+                else index in provisional_indexes
+            )
+            audio_sink["buf"] = audio_values[index] if audio_values is not None else object()
+            satellite_id_sink["id"] = satellite_ids[index] if satellite_ids is not None else "sat-a"
             endpoint_wait_sink["s"] = 0.0
             wake_probe_sink["flag"] = index in wake_probe_indexes
             if kws_candidate_sink is not None:
                 kws_candidate_sink["flag"] = index in kws_candidate_indexes
             if kws_early_verification_sink is not None:
                 kws_early_verification_sink["flag"] = index in early_verification_indexes
+            if capture_id_sink is not None:
+                capture_id_sink["value"] = capture_ids[index] if capture_ids is not None else None
             yield object()
 
     def asr_pipe(stream, **_kwargs):
@@ -66,6 +80,135 @@ def _run_transcripts(
     assistant.asr_stream_generator = stream_generator
     assistant.asr_pipe = asr_pipe
     assistant._run_transcriber_loop()
+
+
+def test_committed_capture_drops_repeated_partials_despite_rolling_onset_drift(assistant):
+    command = "atticus turn on kitchen lights"
+    _run_transcripts(
+        assistant, [command, command, command], capture_ids=[1, 1, 1], onsets=[10, 20, 30],
+    )
+    assistant._start_turn.assert_called_once()
+    assert assistant.satellites["sat-a"].committed_capture_id == 1
+    assistant.audio_capture.flush.assert_not_called()
+
+
+def test_prioritised_hard_final_retires_older_queued_live_partial(assistant):
+    command = "atticus turn on kitchen lights"
+    _run_transcripts(
+        assistant, [command, command], capture_ids=[1, 1], provisional_indexes={1},
+        onsets=[10.0, 12.0],
+    )
+    assistant._start_turn.assert_called_once()
+    assert assistant.satellites["sat-a"].committed_capture_id == 1
+
+
+def test_new_identical_capture_commits_immediately_without_cooldown(assistant):
+    command = "atticus turn on kitchen lights"
+
+    def check_first_commit(index):
+        if index == 1:
+            assistant._start_turn.assert_called_once()
+            assert assistant.satellites["sat-a"].drop_results_until == 0
+
+    _run_transcripts(
+        assistant, [command, command, command], capture_ids=[1, 2, 2],
+        onsets=[10, 10.1, 20], before_each=check_first_commit,
+    )
+    assert assistant._start_turn.call_count == 2
+    assert assistant.satellites["sat-a"].committed_capture_id == 2
+
+
+@pytest.mark.parametrize("final", ["", "yeah", "television noise", "atticus turn on kitchen lights"])
+def test_empty_or_filtered_committed_final_cannot_suppress_next_command(assistant, final):
+    command = "atticus turn on kitchen lights"
+    _run_transcripts(assistant, [command, final], capture_ids=[1, 1])
+    _run_transcripts(assistant, [command], capture_ids=[2], onsets=[10.1])
+    assert assistant._start_turn.call_count == 2
+    assert assistant.satellites["sat-a"].provisional_committed_onset == 0
+
+
+def test_missing_final_does_not_block_next_safe_partial(assistant):
+    command = "atticus turn on kitchen lights"
+    for capture_id in (1, 2):
+        _run_transcripts(assistant, [command], capture_ids=[capture_id], provisional_indexes={0})
+    assert assistant._start_turn.call_count == 2
+
+
+def test_retired_capture_stays_retired_after_a_new_capture_commits(assistant):
+    command = "atticus turn on kitchen lights"
+    _run_transcripts(assistant, [command, command, command], capture_ids=[1, 2, 1])
+    assert assistant._start_turn.call_count == 2
+
+
+@pytest.mark.parametrize("conversation_mode", [False, True])
+def test_new_capture_stop_can_barge_in_after_early_commit(assistant, conversation_mode):
+    sat = assistant.satellites["sat-a"]
+    sat.conversation_mode = conversation_mode
+    assistant._cancel_turn = MagicMock()
+    # Conversation turns use a settle timer; replace only their dispatch seam.
+    assistant._queue_conversation_turn = MagicMock()
+
+    def speaking_after_commit(index):
+        if index == 1:
+            sat.turn_active = True
+            assistant._is_speaking = MagicMock(return_value=True)
+
+    _run_transcripts(
+        assistant, ["atticus turn on kitchen lights", "atticus stop"],
+        capture_ids=[1, 2], before_each=speaking_after_commit,
+    )
+    assistant._cancel_turn.assert_called_once_with("sat-a")
+    assert sat.last_turn_end == 0
+
+
+def test_capture_identity_is_per_satellite(assistant):
+    assistant.satellites["sat-b"] = SatelliteSession(id="sat-b")
+    command = "atticus turn on kitchen lights"
+    _run_transcripts(
+        assistant, [command, command], capture_ids=[1, 1], satellite_ids=["sat-a", "sat-b"],
+    )
+    assert assistant._start_turn.call_count == 2
+
+
+def test_fresh_wakeword_free_follow_up_is_not_flushed_by_early_commit(assistant):
+    def open_follow_up(index):
+        if index == 1:
+            assistant.satellites["sat-a"].last_turn_end = 10.0
+            assistant.follow_up_seconds = 5.0
+
+    _run_transcripts(
+        assistant, ["atticus turn on kitchen lights", "turn off kitchen lights"],
+        capture_ids=[1, 2], onsets=[10.0, 10.1], before_each=open_follow_up,
+    )
+    assert assistant._start_turn.call_count == 2
+    assert assistant._start_turn.call_args.args[0] == "turn off kitchen lights"
+
+
+def test_legacy_empty_final_clears_fallback_before_text_filtering(assistant):
+    command = "atticus turn on kitchen lights"
+    _run_transcripts(assistant, [command, ""])
+    assert assistant.satellites["sat-a"].provisional_committed_onset == 0
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_transcriber_rechecks_live_result_cancelled_after_queueing(assistant, scoped):
+    import numpy as np
+
+    from core.asr_parakeet import LiveAsrResult, ParakeetLiveWorker
+
+    worker = ParakeetLiveWorker(object())  # no inference should run
+    assistant.audio_capture.live_asr_backend = worker
+    command = "atticus turn on kitchen lights"
+    result = LiveAsrResult(command, np.zeros(4), generation=0, capture_id=1)
+    try:
+        if scoped:
+            worker.discard_capture("sat-a", 1)
+        else:
+            worker.discard("sat-a")
+        _run_transcripts(assistant, [command], capture_ids=[1], audio_values=[result])
+        assistant._start_turn.assert_not_called()
+    finally:
+        worker.close()
 
 
 def test_soft_wake_is_emitted_before_final_transcript(assistant):

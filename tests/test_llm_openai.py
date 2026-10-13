@@ -1,5 +1,6 @@
 """OpenAI-compatible remote LLM backend and graceful degradation."""
 
+import json
 import sys
 import types
 from pathlib import Path
@@ -72,6 +73,187 @@ def test_json_mode_sends_gbnf_grammar():
     assert "root ::=" in comp.last_kwargs["extra_body"]["grammar"]
 
 
+def test_response_schema_uses_schema_mode_without_changing_agent_grammar():
+    c, comp = _make_client(lambda _kwargs: iter([_chunk('{"actions":[]}')]))
+    schema = {"type": "object", "properties": {"actions": {"type": "array"}},
+              "required": ["actions"], "additionalProperties": False}
+    out = c.generate(user_prompt="plan", response_schema=schema, output_policy="research")
+    assert out == '{"actions":[]}'
+    assert comp.last_kwargs["response_format"]["type"] == "json_schema"
+    assert comp.last_kwargs["response_format"]["json_schema"]["schema"] == schema
+    assert "grammar" not in comp.last_kwargs["extra_body"]
+
+
+def test_response_schema_falls_back_once_to_json_object(monkeypatch):
+    from openai import BadRequestError
+
+    calls = []
+
+    def behavior(kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise BadRequestError("unsupported schema",
+                                   response=httpx.Response(400, request=httpx.Request("POST", "http://x")),
+                                   body={})
+        return iter([_chunk('{"ok":true}')])
+
+    client, completions = _make_client(behavior)
+    response = client.generate(user_prompt="verify", response_schema={"type": "object"})
+    assert response == '{"ok":true}'
+    assert len(calls) == 2
+    assert calls[1]["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.parametrize("emission,finish,expected", [
+    ('{"answers":[]', "stop", '{"answers":[]'),
+    ('{"answers":oops}', "stop", '{"answers":oops}'),
+    ('{"answers":[]}', "length", ""),
+    ('{"answers":[]', "length", ""),
+])
+def test_research_sdk_never_repairs_or_closes_emissions(emission, finish, expected):
+    from openai import OpenAI
+
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        chunk = {"id": "fixture", "object": "chat.completion.chunk", "created": 0,
+                 "model": "fixture-model", "choices": [{"index": 0,
+                 "delta": {"content": emission}, "finish_reason": finish}],
+                 "usage": {"prompt_tokens": 32, "completion_tokens": 12, "total_tokens": 44}}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+    c = llm_openai.OpenAIClient("fixture-model", "http://fixture/v1", "fixture-key")
+    c._client = OpenAI(base_url=c.base_url, api_key="fixture-key", max_retries=0,
+                       http_client=httpx.Client(transport=httpx.MockTransport(handle)))
+    restarted = []
+    c._fulloch_restart_local_server = restarted.append
+    schema = {"type": "object", "required": ["answers"]}
+    diagnostics = {}
+    try:
+        assert c.generate(user_prompt="fixture", response_schema=schema,
+                          output_policy="research", thinking_mode=False, read_timeout=17,
+                          generation_timeout=19, recover_on_failure=False,
+                          diagnostics=diagnostics) == expected
+        assert len(requests) == 1
+        body = json.loads(requests[0].content)
+        assert body["response_format"]["json_schema"]["schema"] == schema
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
+        assert requests[0].extensions["timeout"]["read"] == 17
+        assert diagnostics["finish_reason"] == finish
+        assert diagnostics["completion_tokens"] == 12
+        assert restarted == []
+    finally:
+        c._client.close()
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_research_sdk_timeout_and_cancellation_never_restart_or_repair(cancelled):
+    from openai import OpenAI
+
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        if not cancelled:
+            raise httpx.ReadTimeout("controlled fixture timeout", request=request)
+        chunk = {"id": "fixture", "object": "chat.completion.chunk", "created": 0,
+                 "model": "fixture-model", "choices": [{"index": 0,
+                 "delta": {"content": '{"answers":oops}'}, "finish_reason": "stop"}]}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+    c = llm_openai.OpenAIClient("fixture-model", "http://fixture/v1", "fixture-key")
+    c._client = OpenAI(base_url=c.base_url, api_key="fixture-key", max_retries=0,
+                       http_client=httpx.Client(transport=httpx.MockTransport(handle)))
+    restarted = []
+    c._fulloch_restart_local_server = restarted.append
+    c._fulloch_local_process = types.SimpleNamespace(poll=lambda: None)
+    diagnostics = {}
+    try:
+        kwargs = {"user_prompt": "fixture", "response_schema": {"type": "object"},
+                  "output_policy": "research", "cancel_check": lambda: cancelled,
+                  "recover_on_failure": False, "diagnostics": diagnostics}
+        if cancelled:
+            assert c.generate(**kwargs) == ""
+        else:
+            with pytest.raises(RemoteUnreachable):
+                c.generate(**kwargs)
+        assert len(calls) == 1
+        assert diagnostics["termination"] == ("cancelled" if cancelled else "timed_out")
+        assert restarted == []
+    finally:
+        c._client.close()
+
+
+@pytest.mark.parametrize("dead,recover,expected_restart", [(False, True, False), (True, False, False), (True, True, True)])
+def test_sdk_original_repair_timeout_chain_retains_separate_usage_and_recovery(dead, recover, expected_restart):
+    from openai import OpenAI
+
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        if len(calls) == 2:
+            raise httpx.ReadTimeout("controlled repair timeout", request=request)
+        chunk = {"id": "fixture", "object": "chat.completion.chunk", "created": 0,
+                 "model": "reported-fixture", "system_fingerprint": "fixture-build",
+                 "choices": [{"index": 0, "delta": {"content": '{"reply":oops}'}, "finish_reason": "stop"}],
+                 "usage": {"prompt_tokens": 32, "completion_tokens": 12, "total_tokens": 44}}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+    c = llm_openai.OpenAIClient("requested-fixture", "http://fixture/v1", "fixture-key")
+    c._client = OpenAI(base_url=c.base_url, api_key="fixture-key", max_retries=0,
+                       http_client=httpx.Client(transport=httpx.MockTransport(handle)))
+    c.context_tokens = 2048
+    c._fulloch_local_process = types.SimpleNamespace(poll=lambda: -9 if dead else None, _fulloch_build="fixture-binary")
+    restarted = []
+    c._fulloch_restart_local_server = restarted.append
+    diagnostics = {}
+    stats = TurnStats()
+    try:
+        with pytest.raises(RemoteUnreachable):
+            c.generate(user_prompt="private request omitted from diagnostics", grammar=llm_openai.AGENT_JSON_SENTINEL,
+                       recover_on_failure=recover, diagnostics=diagnostics, stats=stats)
+        original, repair = diagnostics["transport_requests"]
+        assert original["completion_tokens"] == 12 and original["finish_reason"] == "stop"
+        assert repair["kind"] == "client_format_repair" and repair["termination"] == "timed_out"
+        assert repair["error_category"] == "APITimeoutError"
+        assert isinstance(original["elapsed_ms"], int) and isinstance(repair["elapsed_ms"], int)
+        assert diagnostics["reported_model"] == "reported-fixture"
+        assert diagnostics["server_build"] == "fixture-build"
+        assert diagnostics["local_build"] == "fixture-binary" and diagnostics["context_tokens"] == 2048
+        assert bool(restarted) is expected_restart
+        assert bool(repair.get("restarted")) is expected_restart
+        assert stats.llm_calls == 2 and stats.llm_output_tokens == 12 and stats.llm_prompt_tokens == 32
+        assert "private request" not in str(diagnostics) and "fixture-key" not in str(diagnostics)
+    finally:
+        c._client.close()
+
+
+def test_failure_emission_capture_is_explicit_bounded_and_never_contains_request_text(caplog):
+    emission = '{"fixture_failure":' + "x" * 9000
+    c, _ = _make_client(lambda _kwargs: iter([_chunk(emission)]))
+    captures = []
+    diagnostics = {}
+    kwargs = {"user_prompt": "private household request", "output_policy": "research",
+              "response_schema": {"type": "object"}, "diagnostics": diagnostics}
+    assert c.generate(**kwargs) == emission
+    assert "fixture_failure" not in str(diagnostics)
+    assert c.generate(**kwargs, failure_capture=captures.append) == emission
+    assert len(captures) == 1 and len(captures[0]["emission"]) == 8192
+    assert captures[0]["capture_clipped"] is True
+    assert "private household" not in str(captures) and "fixture_failure" not in caplog.text
+    # Capture failures must neither crash the job nor disclose the sink exception.
+    def broken_sink(_capture):
+        raise RuntimeError("private sink detail")
+
+    assert c.generate(**kwargs, failure_capture=broken_sink) == emission
+    assert "private sink detail" not in caplog.text
+
+
 def test_json_mode_falls_back_to_response_format_without_grammar_file(monkeypatch):
     monkeypatch.setattr(llm_openai, "_load_gbnf", lambda: None)
     c, comp = _make_client(lambda k: iter([_chunk('{"reply":"hi"}')]))
@@ -108,16 +290,29 @@ def test_cancelled_stream_is_closed_immediately():
     assert stream.closed is True
 
 
-def test_local_generation_deadline_restarts_the_server():
+def test_local_generation_deadline_does_not_restart_a_healthy_server():
     c, _ = _make_client(lambda k: iter([_chunk("too late")]))
     c._generation_timeout = 0
     restarted = []
     c._fulloch_restart_local_server = restarted.append
 
+    with pytest.raises(RemoteUnreachable, match="deadline"):
+        c.generate(user_prompt="hi")
+
+    assert restarted == []
+
+
+def test_local_generation_deadline_restarts_a_dead_child():
+    c, _ = _make_client(lambda _kwargs: iter([_chunk("too late")]))
+    c._generation_timeout = 0
+    restarted = []
+    c._fulloch_restart_local_server = restarted.append
+    c._fulloch_local_process = types.SimpleNamespace(poll=lambda: -9)
+
     with pytest.raises(RemoteUnreachable, match="timed out and was restarted"):
         c.generate(user_prompt="hi")
 
-    assert restarted and "deadline" in restarted[0]
+    assert len(restarted) == 1
 
 
 def test_generation_deadline_can_preserve_a_shared_local_server():
@@ -169,6 +364,37 @@ def test_smaller_caller_request_is_honoured():
     c, comp = _make_client(lambda k: iter([_chunk("x")]))
     c.generate(user_prompt="hi", max_new_tokens=256)
     assert comp.last_kwargs["max_tokens"] == 256
+
+
+def test_research_output_is_independent_of_reasoning_mode():
+    c, comp = _make_client(lambda k: iter([_chunk("visible")]))
+    diagnostics = {}
+    assert c.generate(user_prompt="write", max_new_tokens=4096, thinking_mode=False,
+                      output_policy="research", diagnostics=diagnostics) == "visible"
+    assert comp.last_kwargs["max_tokens"] == diagnostics["effective_output_tokens"] == 4096
+    assert diagnostics["termination"] == "completed"
+
+
+def test_reasoning_only_truncation_records_counts_not_hidden_text():
+    usage = types.SimpleNamespace(completion_tokens=2048, prompt_tokens=20,
+                                  completion_tokens_details=types.SimpleNamespace(reasoning_tokens=2048))
+    chunk = types.SimpleNamespace(choices=[types.SimpleNamespace(
+        finish_reason="length", delta=types.SimpleNamespace(content=None, reasoning_content="secret"))], usage=usage)
+    c, _ = _make_client(lambda k: iter([chunk]))
+    diagnostics = {}
+    assert c.generate(user_prompt="write", thinking_mode=True, diagnostics=diagnostics) == ""
+    assert diagnostics["termination"] == "truncated"
+    assert diagnostics["reasoning_tokens"] == 2048
+    assert "secret" not in str(diagnostics)
+
+
+def test_failed_generation_still_returns_diagnostics():
+    c, _ = _make_client(lambda k: (_ for _ in ()).throw(RuntimeError("broken")))
+    diagnostics = {}
+    with pytest.raises(RemoteUnreachable):
+        c.generate(diagnostics=diagnostics)
+    assert diagnostics["termination"] == "failed"
+    assert diagnostics["error_category"] == "RuntimeError"
 
 
 def test_thinking_controlled_via_chat_template_kwarg():
@@ -293,6 +519,26 @@ def test_local_json_repair_5xx_records_and_restarts():
         c.generate(user_prompt="hi", grammar=llm_openai.AGENT_JSON_SENTINEL)
 
     assert restarted == ["JSON repair _ServerError: decode worker stopped"]
+
+
+def test_llama_loading_503_does_not_trigger_another_restart():
+    class _Loading(RuntimeError):
+        status_code = 503
+
+    def behavior(_):
+        def stream():
+            raise _Loading("Loading model")
+            yield
+        return stream()
+
+    c, _ = _make_client(behavior)
+    restarted = []
+    c._fulloch_restart_local_server = restarted.append
+
+    with pytest.raises(RemoteUnreachable, match="still loading"):
+        c.generate(user_prompt="hi")
+
+    assert restarted == []
 
 
 def test_is_context_error_mapping():
@@ -482,3 +728,68 @@ def test_remote_outage_voice_notice_is_once_per_outage_episode():
     assert assistant._remote_llm_retry_blocked() is False
     assistant._note_llm_remote_status(False, "connection refused")
     assert assistant._remote_llm_unavailable_fallback(None, "voice") == "REMOTE UNAVAILABLE"
+
+
+# --- token counting and server GPU metrics -----------------------------------
+
+
+def _client_with_probe(behavior):
+    """A client whose chat completions answer the max_tokens=1 count probe."""
+    c = llm_openai.OpenAIClient(model="m", base_url="http://x/v1", api_key="k")
+    comp = _FakeCompletions(behavior)
+    inner = types.SimpleNamespace(chat=types.SimpleNamespace(completions=comp))
+    inner.with_options = lambda **_kw: inner
+    c._client = inner
+    return c, comp
+
+
+def test_count_message_tokens_uses_a_one_token_probe_and_reads_usage():
+    calls = []
+
+    def behavior(kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(
+            usage=types.SimpleNamespace(prompt_tokens=42, completion_tokens=1))
+
+    c, comp = _client_with_probe(behavior)
+    messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+    assert c.count_message_tokens(messages) == 42
+    assert c.count_message_tokens(messages, thinking_mode=True) == 42
+    # The probe must be a real completion so the server applies its chat
+    # template, clamped to a single output token.
+    for call in calls:
+        assert call["max_tokens"] == 1
+        assert call["temperature"] == 0.0
+        assert call["messages"] == messages
+    assert calls[0]["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert calls[1]["extra_body"]["chat_template_kwargs"] == {"enable_thinking": True}
+    # An endpoint that does not report usage raises so the budget's conservative
+    # estimator stays the fallback instead of a silent undercount.
+    c, _ = _client_with_probe(lambda k: types.SimpleNamespace(usage=None))
+    with pytest.raises(ValueError):
+        c.count_message_tokens(messages)
+    with pytest.raises(ValueError):
+        c.count_message_tokens([])
+
+
+def test_server_gpu_memory_metrics_relay_only_the_bounded_counters(monkeypatch):
+    c, _ = _make_client(lambda k: None)
+    # Without the bundled-server flag nothing is fetched at all.
+    assert c.server_gpu_memory_metrics() == {}
+    c._fulloch_local_server = True
+
+    c._fulloch_local_process = types.SimpleNamespace(pid=123, poll=lambda: None)
+
+    def run(command, **kwargs):
+        assert command[0] == "nvidia-smi"
+        assert kwargs["timeout"] == 1.0
+        return types.SimpleNamespace(stdout="123, 100\n456, 9000\n123, 200\n")
+
+    monkeypatch.setattr(llm_openai.subprocess, "run", run)
+    assert c.server_gpu_memory_metrics() == {"gpu_allocated_bytes": 300 * 1024 * 1024}
+
+    def unavailable(*args, **kwargs):
+        raise FileNotFoundError("nvidia-smi")
+
+    monkeypatch.setattr(llm_openai.subprocess, "run", unavailable)
+    assert c.server_gpu_memory_metrics() == {}

@@ -17,6 +17,25 @@ from tools.tool_registry import (  # noqa: E402
 
 
 class TestRegistration:
+    def test_foreground_schema_omits_background_argument_contracts(self, mock_tool_registry):
+        def lookup(query, window="today"):
+            return "evidence"
+
+        mock_tool_registry.register_tool(lookup, name="lookup", description="Long research contract", deep_think_only=True)
+        foreground = mock_tool_registry.describe_tools(foreground=True)
+        background = mock_tool_registry.describe_tools()
+        assert "lookup" in foreground and "through deep_think" in foreground
+        assert "Long research contract" not in foreground and "Args:" not in foreground
+        assert "Long research contract" in background and "window" in background
+
+    def test_selected_schema_retains_full_signatures_and_respects_availability(self, mock_tool_registry):
+        mock_tool_registry.register_tool(lambda query: "", name="search", description="Search")
+        mock_tool_registry.register_tool(lambda: "", name="off", available=lambda: False)
+        mock_tool_registry.register_tool(lambda: "", name="unrelated")
+        selected = mock_tool_registry.describe_tools(names={"search", "off"})
+        assert "Args: query" in selected
+        assert "off" not in selected and "unrelated" not in selected
+
     def test_register_simple_function(self, mock_tool_registry):
         @mock_tool_registry.register_tool
         def test_func():
@@ -149,6 +168,42 @@ class TestThinkingResult:
         )
 
         assert thinking_result_error(result) is None
+
+    def test_standard_metadata_survives_arbitrary_adapter_to_fact_cards(self):
+        from core.background_jobs import BackgroundJob, JobSnapshot
+        from core.thinking_fact_cards import build_fact_cards
+
+        result = ThinkingResult(
+            "A synthetic adapter returned one observation.", scope="One synthetic record.",
+            evidence={"type": "structured", "records": [{"label": "sample", "value": "12"}]},
+            artifact={"type": "structured", "records": [{"label": "sample", "value": "12"}]},
+            record_identity={"id": "record-12", "version": "v2"},
+            provenance={"source_id": "fixture", "record_path": "/records/0",
+                        "publisher_role": "primary_publisher"},
+            temporal={"observed_at": "2026-10-01T00:00:00Z", "effective_at": "2026-09-01"},
+            qualifications={"unit": "items", "scope": "fixture-only"},
+        )
+        job = BackgroundJob("synthetic", JobSnapshot("Analyze sample records"))
+        artifact_id = job.record_outcome("synthetic_adapter", result.thinking_status, result.scope,
+            result.evidence, result.next_actions, result.artifact, result.recovery, metadata={
+                "record_identity": result.record_identity, "provenance": result.provenance,
+                "temporal": result.temporal, "qualifications": result.qualifications,
+            })
+        cards = build_fact_cards(job.evidence, job.artifacts, job.snapshot.task)
+
+        assert artifact_id
+        assert cards
+        assert cards[0]["record_identity"] == {"id": "record-12", "version": "v2"}
+        assert cards[0]["context"]["effective_at"] == "2026-09-01"
+        assert cards[0]["qualifications"]["unit"] == "items"
+        original_key = cards[0]["record_key"]
+        assert '"fixture"' in original_key
+        job.evidence[0]["metadata"]["record_identity"]["id"] = "record-13"
+        changed = build_fact_cards(job.evidence, job.artifacts, job.snapshot.task)
+        assert changed[0]["record_key"] != original_key
+        job.evidence[0]["metadata"]["record_identity"] = {"version": "v2", "id": "record-12"}
+        reordered = build_fact_cards(job.evidence, job.artifacts, job.snapshot.task)
+        assert reordered[0]["record_key"] == original_key
 
     @pytest.mark.parametrize(
         ("kwargs", "error"),

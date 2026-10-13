@@ -20,7 +20,12 @@ reply-obj ::= "{" ws "\"reply\"" ws ":" ws string "}" ws
 # SLM cannot emit a four-step plan even if its prompt drifts.
 actions-array ::= "[" ws (action ("," ws action){0,2})? "]" ws
 
-action ::= "{" ws "\"intent\"" ws ":" ws string "," ws "\"args\"" ws ":" ws args "}" ws
+action ::= "{" ws "\"intent\"" ws ":" ws string "," ws "\"args\"" ws ":" ws args ("," ws "\"step_id\"" ws ":" ws step-id)? ("," ws "\"depends_on\"" ws ":" ws dependencies)? "}" ws
+
+step-id ::= [1-9] [0-9]? ws
+
+# Earlier action indices in this emission; [] explicitly declares independence.
+dependencies ::= "[" ws ([0-2] ws ("," ws [0-2] ws){0,1})? "]" ws
 
 # Args are primitive values only — no nested arrays or objects in v1.
 args ::= "[" ws (arg-value ("," ws arg-value)*)? "]" ws

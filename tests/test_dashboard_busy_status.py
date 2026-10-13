@@ -131,3 +131,50 @@ def test_text_turn_holding_the_arbiter_reports_as_owner_with_no_label():
     assert body["satellite_count"] == 1
     assert body["active_owner_id"] == "dashboard-text"
     assert body["active_owner_label"] is None
+
+
+def test_status_polling_retains_live_research_progress_and_final_report_link(tmp_path, monkeypatch):
+    from core.background_jobs import BackgroundJob, BackgroundJobManager, JobSnapshot, JobStatus
+    from core.thinking_evidence import research_progress
+
+    monkeypatch.setattr("core.background_jobs.time.time", lambda: 120.0)
+    a = _assistant()
+    manager = BackgroundJobManager(lambda *_: ("", ""), checkpoint_dir=tmp_path)
+    a.thinking_jobs = manager
+    job = BackgroundJob(
+        "progress", JobSnapshot("Research F1 with additional constraints", task_record={
+            "objective": "Research F1", "started_at": 110.0,
+        }), status=JobStatus.RUNNING, created_at=100.0, stage="Planning research",
+    )
+    job.artifacts = {"web": {"data": {"sources": [{"url": "https://example.com/race", "eligible": True}]}}}
+    job.fact_cards = [{"source_url": "https://example.com/race", "compatibility": "compatible"}]
+    job.evidence_requirements = [{"identifier": "timing", "state": "open"}]
+    manager._jobs[job.id] = job
+    client = _client(a)
+
+    first = client.get("/status").json()["thinking_job"]
+
+    assert first["objective"] == "Research F1"
+    assert first["stage"] == "Planning research"
+    assert first["job_duration_seconds"] == 10.0 and first["elapsed_seconds"] == 20.0
+    assert first["progress"] == research_progress(job)
+    assert first["progress"]["processed_unique_documents"] == 1
+    assert first["progress"]["unresolved_obligations"] == ["timing"]
+
+    job.stage = "Writing chapters"
+    job.chapter_plan = [{"id": "timing", "body": "Verified race timing.", "analysis_state": "complete"}]
+    job.evidence_requirements[0]["state"] = "resolved"
+    second = client.get("/status").json()["thinking_job"]
+
+    assert second["stage"] == "Writing chapters"
+    assert second["progress"]["saved_sections"] == 1
+    assert second["progress"]["unresolved_obligations"] == []
+
+    job.status = JobStatus.READY
+    job.note_id = "fulloch-reports/f1"
+    job.snapshot.task_record["finished_at"] = 120.0
+    assert client.get("/status").json()["thinking_job"] is None
+    final = client.get(f"/thinking/{job.id}").json()
+    assert final["status"] == "READY"
+    assert final["partial_artifact_link"] == "/reports/fulloch-reports/f1"
+    assert final["progress"]["saved_sections"] == 1

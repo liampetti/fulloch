@@ -2,14 +2,22 @@ import { escapeHtml } from './browser-utils.js';
 import { createLifetime } from './browser-lifetime.js';
 import { createChatUI } from './chat-ui.js';
 import { createBrowserSatellite } from './browser-satellite.js';
+import { createBrandLogo } from './brand-logo.js';
 
 const lifetime = createLifetime();
+const brandLogo = createBrandLogo(document.getElementById('brand-logo'));
 const chatUI = createChatUI({
   connectSpeaker: () => satellite.connect(true),
-  onThinking: ev => { renderThinkingJob({ ...thinkingJob, ...ev }); pollStatus(); },
+  getChatContext: () => satellite.chatContext,
+  onThinking: ev => {
+    const id = ev.job_id || ev.id;
+    renderThinkingJob({ ...(thinkingJob?.id === id ? thinkingJob : {}), ...ev, id });
+    pollStatus();
+  },
 });
 const satellite = createBrowserSatellite({
   clearEmpty: chatUI.clearEmpty, scrollEnd: chatUI.scrollEnd,
+  onPlaybackChange: brandLogo.setTalking,
 });
   // Session cookie auth — the browser sends the cookie automatically on every
   // fetch and WebSocket upgrade. On 401 (session expired after server restart)
@@ -19,24 +27,103 @@ const satellite = createBrowserSatellite({
     if (r.status === 401) location.href = '/login';
     return r;
   });
-  // Busy-status banner: another satellite (or the dashboard's own text chat)
-  // is mid-turn. Only shown when it's genuinely *another* satellite — this
-  // tab's own turn already has its own "thinking/speaking" indicator via
-  // voiceBusy, and showing both would be redundant and confusing.
+  // Busy-status banner: another satellite or browser session is mid-turn.
+  // Typed chat shares the server's ``dashboard-text`` pseudo-session, while
+  // this tab only has a satellite ID after Voice mode connects. Treat this
+  // tab's in-flight typed request as local too; otherwise its own request is
+  // incorrectly presented as work happening in another room.
   const busyBanner = document.getElementById('busy-banner');
   const busyBannerText = document.getElementById('busy-banner-text');
   const thinkingJobCard = document.getElementById('thinking-job-card');
   const thinkingJobTask = document.getElementById('thinking-job-task');
   const thinkingJobStage = document.getElementById('thinking-job-stage');
+  const thinkingJobOutcome = document.getElementById('thinking-job-outcome');
+  const thinkingJobReport = document.getElementById('thinking-job-report');
   const thinkingJobCancel = document.getElementById('thinking-job-cancel');
+  const thinkingJobDetails = document.getElementById('thinking-job-details');
+  const thinkingJobDiagnostics = document.getElementById('thinking-job-diagnostics');
   let thinkingJob = null;
+  let thinkingReceivedAt = 0;
+  let thinkingOutcomeTimer = null;
+  const terminalThinkingJob = job => ['READY', 'FAILED', 'CANCELLED'].includes(job?.status);
+  const renderThinkingOutcome = () => {
+    if (!thinkingJob || !thinkingJobOutcome) return;
+    const terminal = terminalThinkingJob(thinkingJob);
+    const rawDuration = thinkingJob.job_duration_seconds ?? thinkingJob.elapsed_seconds;
+    const duration = rawDuration == null ? NaN : Number(rawDuration);
+    const extra = thinkingJob.status === 'RUNNING' ? (Date.now() - thinkingReceivedAt) / 1000 : 0;
+    const seconds = Math.floor(Math.max(0, duration + extra));
+    const durationText = Number.isFinite(duration)
+      ? `${terminal ? 'Duration' : 'Elapsed'}: ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : '';
+    const progress = thinkingJob.progress || {};
+    const processed = Number(progress.processed_unique_documents) || 0;
+    const fetched = Number(progress.fetched_documents) || 0;
+    const saved = Number(progress.saved_sections) || 0;
+    const sources = processed || fetched;
+    const sourceText = sources ? `${sources} source${sources === 1 ? '' : 's'} ${processed ? 'reviewed' : 'collected'}` : '';
+    const sectionText = saved ? `${saved} section${saved === 1 ? '' : 's'} saved` : '';
+    thinkingJobOutcome.textContent = [durationText, sourceText, sectionText].filter(Boolean).join(' · ');
+    thinkingJobOutcome.hidden = !thinkingJobOutcome.textContent;
+  };
   const renderThinkingJob = (job) => {
+    const changedJob = thinkingJob?.id !== job?.id;
     thinkingJob = job || null;
+    thinkingReceivedAt = Date.now();
+    if (thinkingJob?.status === 'RUNNING' && thinkingOutcomeTimer === null) {
+      thinkingOutcomeTimer = lifetime.setInterval(renderThinkingOutcome, 1000);
+    } else if (thinkingJob?.status !== 'RUNNING' && thinkingOutcomeTimer !== null) {
+      lifetime.clearInterval(thinkingOutcomeTimer);
+      thinkingOutcomeTimer = null;
+    }
     if (!thinkingJobCard) return;
     thinkingJobCard.hidden = !thinkingJob;
     if (!thinkingJob) return;
-    if (thinkingJobTask) thinkingJobTask.textContent = thinkingJob.task || 'Deliberate work';
-    if (thinkingJobStage) thinkingJobStage.textContent = thinkingJob.stage || thinkingJob.status || 'Working';
+    thinkingJobCard.dataset.status = thinkingJob.status || '';
+    if (changedJob && thinkingJobDetails) thinkingJobDetails.open = false;
+    if (thinkingJobTask) thinkingJobTask.textContent = thinkingJob.objective || thinkingJob.task || 'Deliberate work';
+    const statusLabels = { QUEUED: 'Queued', PAUSED: 'Paused', NEEDS_INPUT: 'Waiting for your answer',
+      FAILED: 'Couldn’t complete the report', CANCELLED: 'Cancelled' };
+    if (thinkingJobStage) thinkingJobStage.textContent = statusLabels[thinkingJob.status]
+      || thinkingJob.stage || (thinkingJob.status === 'READY' ? 'Report ready' : 'Working');
+    renderThinkingOutcome();
+    if (thinkingJobDiagnostics) {
+      const terminal = terminalThinkingJob(thinkingJob);
+      const duration = Number(thinkingJob.elapsed_seconds);
+      const durationText = Number.isFinite(duration)
+        ? `${terminal ? 'Research duration' : 'Elapsed'}: ${duration.toFixed(1)}s` : '';
+      const reason = terminal && !['completed', 'complete', 'ready'].includes(thinkingJob.terminal_reason)
+        ? String(thinkingJob.terminal_reason || '') : '';
+      const progress = thinkingJob.progress && typeof thinkingJob.progress === 'object'
+        ? thinkingJob.progress : {};
+      const count = (key) => Number.isFinite(Number(progress[key])) ? Number(progress[key]) : 0;
+      const progressText = [
+        `${count('processed_unique_documents')} processed · ${count('fetched_documents')} fetched · ${count('discovered_documents')} discovered`,
+        `${count('cited_documents')} cited`,
+        `${count('saved_sections')} sections saved`,
+        `${Array.isArray(progress.unresolved_obligations) ? progress.unresolved_obligations.length : 0} open questions`,
+      ].join(' · ');
+      const ack = thinkingJob.acknowledgement_seconds == null ? NaN : Number(thinkingJob.acknowledgement_seconds);
+      const jobDuration = Number(thinkingJob.job_duration_seconds);
+      const lifecycleText = Number.isFinite(ack)
+        ? `Acknowledged in ${ack.toFixed(3)}s · job ${Number.isFinite(jobDuration) ? jobDuration.toFixed(1) : '0.0'}s` : durationText;
+      const requests = Array.isArray(thinkingJob.request_metrics) ? thinkingJob.request_metrics : [];
+      const latest = requests.length ? requests[requests.length - 1] : null;
+      const requestText = latest
+        ? `Request ${latest.input_tokens} in / ${latest.output_reservation} reserved out${latest.measured_prefill_seconds != null || latest.measured_decode_seconds != null
+          ? ` · prefill ${latest.measured_prefill_seconds ?? 'n/a'}s / decode ${latest.measured_decode_seconds ?? 'n/a'}s`
+          : ' · prefill/decode timing unavailable'}`
+        : '';
+      const error = thinkingJob.error || reason;
+      thinkingJobDiagnostics.textContent = [thinkingJob.task, lifecycleText, progressText, requestText, error]
+        .filter(Boolean).join('\n');
+    }
+    if (thinkingJobReport) {
+      const link = String(thinkingJob.partial_artifact_link || '');
+      const valid = link.startsWith('/reports/') && !link.startsWith('//');
+      thinkingJobReport.hidden = !valid;
+      if (valid) thinkingJobReport.href = link;
+      else thinkingJobReport.removeAttribute('href');
+    }
     if (thinkingJobCancel) thinkingJobCancel.hidden = ['READY', 'FAILED', 'CANCELLED'].includes(thinkingJob.status);
   };
   thinkingJobCancel?.addEventListener('click', async () => {
@@ -50,10 +137,13 @@ const satellite = createBrowserSatellite({
     }
   });
   const setSatelliteBusy = (ownerId, ownerLabel) => {
-    const showBusy = !!ownerId && ownerId !== satellite.id;
+    const ownTextTurn = ownerId === 'dashboard-text' && chatUI.isTextTurnActive();
+    const showBusy = !!ownerId && ownerId !== satellite.id && !ownTextTurn;
     if (busyBanner) busyBanner.hidden = !showBusy;
     if (showBusy && busyBannerText) {
-      busyBannerText.textContent = ownerLabel
+      busyBannerText.textContent = ownerId === 'dashboard-text'
+        ? 'Busy — another browser is chatting'
+        : ownerLabel
         ? `Busy — talking to ${ownerLabel}`
         : 'Busy — talking to another room';
     }
@@ -763,11 +853,14 @@ const satellite = createBrowserSatellite({
   // Poll the agent's state so the stop button appears for voice turns (and any
   // work this page didn't start), and clears once playback finishes. Text turns
   // this page started are tracked locally via `waiting` for snappier feedback.
+  let statusPollSequence = 0;
   const pollStatus = async () => {
+    const sequence = ++statusPollSequence;
     try {
       const r = await fetch('/status');
       if (!r.ok) return;
       const s = await r.json();
+      if (sequence !== statusPollSequence || lifetime.destroyed) return;
       // The dashboard is only usable once the assistant is READY (models loaded
       // + greeting done). A restart can return it to setup mode while this page
       // remains open, so force a fresh document request for the wizard.
@@ -778,13 +871,24 @@ const satellite = createBrowserSatellite({
       applyBranding(!!s.remote_llm);
       setLlmUnreachable(!!s.llm_unreachable);
       setSatelliteBusy(s.active_owner_id, s.active_owner_label);
-      renderThinkingJob(s.thinking_job);
+      if (s.thinking_job) renderThinkingJob(s.thinking_job);
+      else if (thinkingJob?.id && (!terminalThinkingJob(thinkingJob)
+        || (thinkingJob.status === 'READY' && !thinkingJob.partial_artifact_link))) {
+        // Active jobs disappear from /status when they finish. Fetch the last
+        // job directly so missed SSE events cannot leave a stale running card.
+        const id = thinkingJob.id;
+        const result = await fetch(`/thinking/${encodeURIComponent(id)}`);
+        const job = result.ok ? await result.json() : null;
+        if (sequence !== statusPollSequence || lifetime.destroyed || thinkingJob?.id !== id) return;
+        if (job) renderThinkingJob(job);
+        else if (result.status === 404) renderThinkingJob(null);
+      }
     } catch (e) { /* transient; next tick retries */ }
   };
 
   // Remote-LLM mode: when the LLM runs off-device (remote OpenAI endpoint) the
-  // assistant isn't fully local — swap the character/favicon (server-side at
-  // /logo.png) and update the tagline, but keep the Fulloch name throughout.
+  // assistant isn't fully local — update the tagline. Static characters and
+  // favicons still use /logo.png; the header uses Fulloch's animated sprite.
   let brandRemote = null;
   const applyBranding = (remote) => {
     if (remote === brandRemote) return;
@@ -860,9 +964,9 @@ const satellite = createBrowserSatellite({
 chatUI.start().then(() => {
   if (!lifetime.destroyed) satellite.showAreaPicker();
 });
-pollStatus();
 window.addEventListener('pagehide', () => {
   lifetime.destroy();
+  brandLogo.destroy();
   chatUI.destroy();
   satellite.destroy();
 }, { once: true });

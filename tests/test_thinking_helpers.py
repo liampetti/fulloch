@@ -32,7 +32,8 @@ def test_foreground_history_is_copied_and_bounded():
     compact = assemble_foreground_history(history)
     assert len(compact) == FOREGROUND_HISTORY_MESSAGES
     assert compact[0] is not history[1]
-    assert len(compact[-1]["content"]) < 1000
+    assert len(compact[0]["content"]) < 1000
+    assert compact[-1]["content"] == history[-1]["content"]
 
 
 def test_thinking_worker_prompt_excludes_foreground_personality_and_includes_inputs():
@@ -56,6 +57,7 @@ def test_thinking_worker_prompt_uses_generic_progress_guardrails():
         "materially different",
         "runtime rejects duplicates",
         "sufficient findings collected",
+        "non-empty typed `evidence` outcome",
         "useful preliminary report",
         "single source",
         "materially different available option",
@@ -157,6 +159,8 @@ def test_thinking_report_prompt_requires_a_direct_evidence_scoped_summary():
         "exactly two or three short sentences",
         "central question",
         "beyond the retrieved evidence",
+        "Never convert a currency or unit",
+        "resolution",
     ):
         assert instruction in prompt
 
@@ -169,6 +173,25 @@ def test_report_answer_prompt_is_grounded_to_one_completed_report():
         "only the completed report",
         '"The report does not answer that."',
         "The installed price is $4,000.",
-        "artifact-001",
     ):
         assert instruction in prompt
+    assert "artifact-001" not in prompt
+
+
+@pytest.mark.parametrize("fence", ["", "```json\n{}\n```", "```\n{}\n```", "```JSON\n{}\n```"])
+def test_structured_stage_json_accepts_complete_fenced_objects(fence):
+    value = '{"body":"The source supports backup.","digest":"Backup is supported."}'
+    response = fence.replace("{}", value) if fence else value
+    assert worker._parse_direct_json(response) == {
+        "body": "The source supports backup.", "digest": "Backup is supported.",
+    }
+
+
+@pytest.mark.parametrize("response", [
+    '```json\n{"body":"truncated"\n```',
+    'Here is the result: {"body":"text"}',
+    '{"body":"first"} {"body":"second"}',
+    '```json\n["not an object"]\n```',
+])
+def test_structured_stage_json_still_rejects_truncation_or_surrounding_prose(response):
+    assert worker._parse_direct_json(response) is None

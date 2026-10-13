@@ -4,6 +4,7 @@ Pytest configuration and fixtures for Fulloch tests.
 
 import importlib
 import importlib.machinery
+import json
 import os
 import sys
 import tempfile
@@ -20,6 +21,9 @@ os.environ.setdefault("FULLOCH_HA_ALIAS_RETRIES", "0")
 # Runtime config/credential writes are sandboxed by each test's path or chdir.
 _REPO_ROOT = Path(__file__).parent.parent
 os.environ.setdefault("FULLOCH_CONFIG_PATH", str(_REPO_ROOT / "data" / "config.example.yml"))
+os.environ["THINKING_SOURCE_STORE_DIR"] = str(
+    Path(tempfile.gettempdir()) / "fulloch_test_thinking_sources",
+)
 
 # Isolate persisted login sessions before AppContext is imported.
 os.environ.setdefault(
@@ -62,6 +66,44 @@ _HEAVY_MODULES = (
 #: Tests that need the genuine library (not a mock) skip when their dependency
 #: is listed here.
 STUBBED_MODULES: set[str] = set()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_thinking_checkpoints(tmp_path, monkeypatch):
+    """Prevent durable test checkpoints from leaking between test cases."""
+    monkeypatch.setenv("FULLOCH_THINKING_CHECKPOINT_DIR", str(tmp_path / "thinking-checkpoints"))
+
+
+@pytest.fixture
+def synthetic_source_reviewer(monkeypatch):
+    """Extend scripted writer/auditor models with a source-review stage.
+
+    These fixtures test orchestration, not semantic model quality. Their synthetic
+    reviewer deliberately selects supplied originals; dedicated source-review
+    regressions and the real-model offline replays exercise relevance decisions.
+    All other stage calls still pass through the production generator/client.
+    """
+    from core import thinking_worker
+
+    original = thinking_worker._budgeted_generate
+
+    def generate(worker, budget, stage, **kwargs):
+        if stage != "source_review":
+            return original(worker, budget, stage, **kwargs)
+        prompt = kwargs["system_prompt"]
+        pages = json.loads(prompt.split("Original pages: ", 1)[1])
+        questions = json.loads(prompt.split("Questions: ", 1)[1].split("\nOriginal pages: ", 1)[0])
+        _, started = budget.begin(stage, system_prompt=prompt, user_prompt=kwargs["user_prompt"])
+        response = json.dumps({"pages": [{
+            "source": page["source"], "summary": "Scripted original-source review.",
+            "findings": [{"summary": "Supplied original findings.",
+                          "questions": [question["id"] for question in questions],
+                          "blocks": list(page["blocks"])}],
+        } for page in pages]})
+        budget.finish(stage, started, response)
+        return response
+
+    monkeypatch.setattr(thinking_worker, "_budgeted_generate", generate)
 
 # Probes that should return False on the stub (so call sites like
 # `torch.cuda.is_available()` take the "no GPU" / "not available" branch

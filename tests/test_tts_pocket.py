@@ -37,6 +37,13 @@ def test_load_tts_uses_numeric_default_temperature(monkeypatch):
     assert calls == {"language": "english_2026-04", "temp": 0.7, "lsd_decode_steps": 1}
 
 
+def test_unsupported_speed_is_ignored_with_explicit_warning(caplog):
+    tts.set_speed(1.4)
+
+    assert "has no speed control" in caplog.text
+    assert "ignored" in caplog.text
+
+
 def test_pocket_rollover_keeps_first_sentence_early(monkeypatch):
     monkeypatch.setattr(tts, "_MAX_SYNTHESIS_CHARS", 80)
 

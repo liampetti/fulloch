@@ -98,6 +98,8 @@ class SatelliteRecorder:
                 session.live_asr_speech_active = False
 
         def start_or_feed_live_capture() -> None:
+            if capture_committed():
+                return
             if not session.live_asr_speech_active:
                 pcm = _utterance_mono(self.sat_buf)
                 pre_roll_samples = int(LIVE_ASR_PRE_ROLL_SECONDS * self.config.sample_rate)
@@ -105,6 +107,42 @@ class SatelliteRecorder:
                 session.live_asr_speech_active = True
             else:
                 self.config.forward_live_asr_frame(session, _endpoint_mono(chunk))
+
+        def capture_committed() -> bool:
+            return (
+                0 < session.audio_capture_id <= session.committed_capture_id
+                or session.provisional_committed_onset > 0
+            )
+
+        def apply_pending_wake_verdict() -> bool:
+            """Reject stale live ASR immediately and rearm KWS over its short tail."""
+            tail = list(session.kws_post_candidate_tail)
+            if not self.candidates.apply_verdict(session):
+                return False
+            self.sat_buf.clear()
+            self.silence_counter = 0
+            self.speech_onset_t = None
+            endpointer = session.vad_endpointer
+            if endpointer is not None:
+                endpointer.reset()
+            reset_live_capture()
+
+            # A real wakeword can follow a false acoustic match before its ASR
+            # verdict arrives. Replay only that post-trigger tail through the
+            # lightweight KWS gate; never retain its stale Parakeet partials.
+            session.audio_capture_id += 1
+            if not self.candidates.rearm_after_rejection(session, tail):
+                return True
+            self.sat_buf = deque(session.kws_pre_roll)
+            if endpointer is not None:
+                endpointer.reset()
+                for pre_roll_chunk in self.sat_buf:
+                    endpointer.process(_endpoint_mono(pre_roll_chunk))
+            session.soft_probe_emitted = False
+            session.early_wake_probe_started_at = time.monotonic()
+            session.early_wake_probe_emitted = False
+            start_or_feed_live_capture()
+            return True
 
         try:
             while True:
@@ -119,22 +157,16 @@ class SatelliteRecorder:
                     break
 
                 if chunk is WAKE_VERDICT:
-                    if self.candidates.apply_verdict(session):
-                        self.sat_buf.clear()
-                        self.silence_counter = 0
-                        self.speech_onset_t = None
-                        if session.vad_endpointer is not None:
-                            session.vad_endpointer.reset()
-                        reset_live_capture()
+                    # Accepted or stale verdicts are control messages too, not
+                    # PCM frames. Only a rejection resets the capture state.
+                    apply_pending_wake_verdict()
                     continue
 
-                if self.candidates.apply_verdict(session):
-                    self.sat_buf.clear()
-                    self.silence_counter = 0
-                    self.speech_onset_t = None
-                    if session.vad_endpointer is not None:
-                        session.vad_endpointer.reset()
-                    reset_live_capture()
+                apply_pending_wake_verdict()
+
+                if chunk is not FLUSH and not self.sat_buf:
+                    session.audio_capture_id += 1
+                    session.soft_probe_emitted = False
 
                 wakeword_matched = False
                 if (
@@ -200,6 +232,8 @@ class SatelliteRecorder:
                 # subsequent candidate frames mono too, so VAD snapshots never
                 # concatenate that pre-roll with raw stereo client frames.
                 self.sat_buf.append(_endpoint_mono(chunk) if session.kws_candidate else chunk)
+                if session.kws_candidate and not wakeword_matched:
+                    self.candidates.retain_post_candidate_audio(session, _endpoint_mono(chunk))
 
                 if (
                     not self.config.mic_globally_enabled
@@ -215,6 +249,7 @@ class SatelliteRecorder:
                     session.early_wake_probe_emitted = False
                     if session.vad_endpointer is not None:
                         session.vad_endpointer.reset()
+                    reset_live_capture()
                     continue
 
                 tts_active = session.tts_active.is_set()
@@ -265,7 +300,12 @@ class SatelliteRecorder:
                     if endpointer.speech_started and session.early_wake_probe_started_at == 0.0:
                         session.early_wake_probe_started_at = time.monotonic()
 
-                    if endpointer.speech_started:
+                    # Idle audio is owned by openWakeWord. Parakeet's rolling
+                    # snapshots begin only for ASR-only/follow-up paths or once
+                    # the acoustic gate has actually produced a candidate.
+                    if endpointer.speech_started and (
+                        not self.candidates._wakeword_gate_active(session) or session.kws_candidate
+                    ):
                         start_or_feed_live_capture()
 
                     # Do not make command decisions from this incomplete audio.
@@ -274,6 +314,7 @@ class SatelliteRecorder:
                     if (
                         endpointer.speech_started
                         and not session.early_wake_probe_emitted
+                        and not capture_committed()
                         and not self.candidates._wakeword_gate_active(session)
                         and time.monotonic() - session.early_wake_probe_started_at
                         >= self.config.early_wake_probe_seconds
@@ -309,6 +350,11 @@ class SatelliteRecorder:
                         # segment. Keep the hard endpoint for verification, but
                         # do not queue another provisional ASR request.
                         and not session.early_wake_probe_emitted
+                        # Once a provisional has committed, the recorder may
+                        # observe resumed speech (including speaker residue)
+                        # before the matching hard endpoint is transcribed. Do
+                        # not let a newly re-armed soft probe dispatch it again.
+                        and not capture_committed()
                     ):
                         if not session.soft_probe_emitted:
                             # A wake phrase is commonly shorter than the normal
@@ -342,7 +388,7 @@ class SatelliteRecorder:
                         # Speaker residue can otherwise look like resumed speech
                         # and re-arm the soft probe, dispatching the same request
                         # repeatedly before that hard endpoint arrives.
-                        if session.provisional_committed_onset == 0:
+                        if not capture_committed():
                             session.soft_probe_emitted = False
 
                     hit_silence = endpointer.endpointed

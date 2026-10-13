@@ -193,6 +193,28 @@ def test_rejected_verification_rearms_the_wakeword_gate():
     assert detected == [1, 2]
 
 
+def test_rejected_verification_replays_post_trigger_tail():
+    class Backend:
+        def feed_pcm(self, _satellite_id, pcm):
+            return WakewordResult(bool(np.all(pcm == 2.0)), 0.9)
+
+        def reset(self, _satellite_id):
+            pass
+
+    capture = AudioCapture(use_vad=False)
+    capture.set_wakeword_backend(Backend())
+    session = SatelliteSession("satellite")
+
+    assert capture.wake_candidates.rearm_after_rejection(
+        session, [np.full(3200, 2.0, dtype=np.float32)]
+    )
+    assert session.kws_candidate is True
+    assert session.kws_capture_id == 1
+    verification = capture.audio_queue.get_nowait()
+    assert verification[7] is True
+    assert verification[10] is True
+
+
 def test_stereo_capture_stays_mono_after_wakeword_preroll():
     class Backend:
         def feed_pcm(self, _satellite_id, _pcm):

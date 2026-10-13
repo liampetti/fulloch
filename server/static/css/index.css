@@ -129,10 +129,13 @@ body::after {
 .app {
   display: flex;
   flex-direction: column;
+  width: 100%;
+  min-width: 0;
   height: 100vh;
   height: 100dvh;
   max-width: 760px;
   margin: 0 auto;
+  overflow: hidden;
   background: transparent;
 }
 
@@ -162,6 +165,7 @@ body::after {
 header {
   display: flex;
   align-items: center;
+  min-width: 0;
   gap: 12px;
   padding: 14px 18px;
   padding-top: calc(14px + env(safe-area-inset-top));
@@ -174,17 +178,17 @@ header {
 }
 
 header .logo {
-  width: 40px;
-  height: 40px;
+  width: 80px;
+  height: 80px;
   display: grid;
   place-items: center;
   flex-shrink: 0;
 }
 
-header .logo img {
+header .logo canvas {
+  display: block;
   width: 100%;
   height: 100%;
-  object-fit: contain;
 }
 
 /* header's own brand block — deliberately NOT ".meta" (that class is also
@@ -274,10 +278,12 @@ main {
   flex: 1;
   display: flex;
   min-height: 0;
+  min-width: 0;
 }
 
 .view {
   flex: 1;
+  min-width: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 16px;
@@ -298,8 +304,15 @@ nav.tabs {
   -webkit-backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
 }
+nav.tabs::-webkit-scrollbar { display: none; }
 .tab {
+  flex: 0 0 auto;
   padding: 6px 14px;
   border-radius: 8px;
   border: 0;
@@ -404,7 +417,14 @@ nav.tabs {
 .thinking-job-copy { min-width: 0; display: grid; gap: 0.1rem; flex: 1; }
 .thinking-job-kicker { color: var(--primary); font-size: 0.65rem; font-weight: 700; letter-spacing: 0.12em; }
 .thinking-job-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.88rem; }
-.thinking-job-copy span:last-child { color: var(--muted); font-size: 0.76rem; }
+#thinking-job-outcome, #thinking-job-details { color: var(--muted); font-size: 0.76rem; }
+#thinking-job-details summary { cursor: pointer; width: fit-content; }
+#thinking-job-diagnostics { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.4rem 0; font: inherit; }
+.thinking-job-card[data-status="READY"] .thinking-orbit,
+.thinking-job-card[data-status="FAILED"] .thinking-orbit,
+.thinking-job-card[data-status="CANCELLED"] .thinking-orbit,
+.thinking-job-card[data-status="PAUSED"] .thinking-orbit,
+.thinking-job-card[data-status="NEEDS_INPUT"] .thinking-orbit { animation: none; }
 #thinking-job-cancel { border: 1px solid var(--border); border-radius: 7px; padding: 0.35rem 0.55rem; background: transparent; color: var(--muted); font: inherit; font-size: 0.75rem; cursor: pointer; }
 #thinking-job-cancel:hover { color: var(--text); border-color: var(--primary); }
 @keyframes thinking-orbit { to { transform: rotate(360deg); } }
@@ -1040,6 +1060,7 @@ nav.tabs {
 .msg {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   max-width: 80%;
   animation: bubbleIn 0.22s ease-out;
 }
@@ -1053,9 +1074,12 @@ nav.tabs {
 .msg.user      { align-self: flex-end;   align-items: flex-end; }
 .msg.assistant { align-self: flex-start; align-items: flex-start; }
 .msg.assistant.has-artifacts {
-  width: min(92vw, 440px);
-  max-width: min(92vw, 440px);
-  min-width: min(92vw, 320px);
+  /* Size cards from the padded chat pane, not the viewport. Viewport-based
+     widths overflowed this pane on narrow iPhones and widened the entire app,
+     hiding the header controls and tab strip off-screen. */
+  width: 100%;
+  max-width: 440px;
+  min-width: 0;
 }
 
 .bubble {
@@ -1142,6 +1166,8 @@ nav.tabs {
 
 .artifact {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   margin-top: 8px;
   border: 1px solid var(--glass-border);
   border-radius: 14px;

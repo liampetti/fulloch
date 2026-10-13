@@ -140,7 +140,10 @@ def extract_satellite_message(command: str) -> Optional[tuple[str, str]]:
 
 _CONTEXTUAL_WEB_SEARCH_RE = re.compile(
     r"^\s*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?"
-    r"(?:search\s+(?:the\s+)?(?:web|internet|online)|look\s+(?:it|that)\s+up)"
+    r"(?:search\s+(?:the\s+)?(?:web|internet|online)(?:\s+and\s+cross[- ]?check\s+(?:it|that|your information))?|"
+    r"look\s+(?:it|that)\s+up|double[- ]?check(?:\s+(?:it|that|your information))?|"
+    r"cross[- ]?check(?:\s+(?:it|that|your information))?|"
+    r"do\s+a\s+new\s+search(?:\s+and\s+check)?)"
     r"\s*[?.!]*\s*$",
     re.IGNORECASE,
 )
@@ -597,6 +600,32 @@ def extract_volume_down_target(command: str) -> Optional[str]:
     return m.group(1).strip() if m else None
 
 
+_CURRENCY_ALIASES = {
+    "aud": "AUD", "australian dollar": "AUD", "australian dollars": "AUD",
+    "eur": "EUR", "euro": "EUR", "euros": "EUR",
+    "usd": "USD", "us dollar": "USD", "us dollars": "USD", "dollar": "USD", "dollars": "USD",
+    "gbp": "GBP", "pound": "GBP", "pounds": "GBP", "british pound": "GBP", "british pounds": "GBP",
+    "jpy": "JPY", "yen": "JPY",
+}
+_CURRENCY_CONVERSION_RE = re.compile(
+    r"^\s*(?:convert\s+)?(?:(\d+(?:\.\d+)?)\s+)?(.+?)\s+(?:to|in|into)\s+(.+?)\s*[.?!]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def extract_currency_conversion(command: str) -> Optional[tuple[str, str, float | None]]:
+    """Route simple spoken FX conversions before a numeric amount looks like a ticker."""
+    match = _match("Currency conversion", _CURRENCY_CONVERSION_RE, command)
+    if not match:
+        return None
+    amount, base, quote = match.groups()
+    base_code = _CURRENCY_ALIASES.get(base.strip().lower())
+    quote_code = _CURRENCY_ALIASES.get(quote.strip().lower())
+    if base_code is None or quote_code is None:
+        return None
+    return base_code, quote_code, float(amount) if amount is not None else None
+
+
 # Match explicit asks for deeper thought, not casual uses like "I think it's
 # raining". Anchored to start of utterance and requires the topic preposition
 # (about/on/over/through) so "consider" alone won't catch "consider it done".
@@ -711,6 +740,10 @@ _INTENT_RULES = [
     (has_default_weather_forecast, lambda _: {"intent": "get_weather_forecast", "args": []}),
     (extract_skip, lambda _: {"intent": "skip", "args": []}),
     (extract_resume, lambda _: {"intent": "resume", "args": []}),
+    (
+        extract_currency_conversion,
+        lambda v: {"intent": "get_exchange_rate", "args": [v[0], v[1], v[2]]},
+    ),
     (extract_timer, lambda v: {"intent": "start_countdown", "args": [v]}),
     (extract_cancel_timer, lambda v: {"intent": "cancel_timer", "args": [v[0]] if v[0] else []}),
     (list_timers, lambda _: {"intent": "get_timer_status", "args": []}),

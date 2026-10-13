@@ -201,3 +201,40 @@ def test_recovery_reraises_when_empty_context_overflows(monkeypatch):
     monkeypatch.setattr(a, "generate_slm", always_overflow)
     with pytest.raises(ContextExhaustedError):
         a.Assistant._generate_with_context_recovery(fake, history=fake._history)
+
+
+def test_fresh_research_request_reaches_server_despite_high_fixed_prompt_estimate(monkeypatch):
+    a = _import_assistant_module()
+    question = "Research the latest local AI trends for running capable models at home"
+    history = [{"role": "user", "content": question}]
+    fake = SimpleNamespace(slm_model=SimpleNamespace(context_tokens=12288), _history=history)
+    generate = Mock(return_value='{"actions":[{"intent":"deep_think","args":["local AI trends"]}]}')
+    monkeypatch.setattr(a, "generate_slm", generate)
+
+    response = a.Assistant._generate_with_context_recovery(
+        fake, system_prompt="instruction " * 4000, history=history.copy(), user_prompt=None,
+    )
+
+    assert "deep_think" in response
+    generate.assert_called_once()
+    assert generate.call_args.kwargs["history"] == history
+    assert fake._history == [{"role": "user", "content": question}]
+
+
+def test_recovery_sheds_the_detached_history_actually_sent_to_model(monkeypatch):
+    a = _import_assistant_module()
+    conversation = [{"role": "user", "content": f"m{i}"} for i in range(8)]
+    request_history = [item.copy() for item in conversation]
+    fake = SimpleNamespace(slm_model=object(), _history=conversation)
+    observed_lengths = []
+
+    def generate(_model, **kwargs):
+        observed_lengths.append(len(kwargs["history"]))
+        if len(kwargs["history"]) == 8:
+            raise ContextExhaustedError("too big")
+        return "ok"
+
+    monkeypatch.setattr(a, "generate_slm", generate)
+    assert a.Assistant._generate_with_context_recovery(fake, history=request_history) == "ok"
+    assert observed_lengths[0] == 8 and observed_lengths[1] < 8
+    assert len(conversation) == 8  # canonical history is not the request copy

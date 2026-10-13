@@ -25,7 +25,7 @@
 <body>
 <div class="app">
   <header>
-    <div class="logo"><img id="brand-logo" src="/logo.png" alt=""></div>
+    <div class="logo"><canvas id="brand-logo" width="80" height="80" aria-hidden="true"></canvas></div>
     <div class="brand">
       <div class="name" id="brand-name">Fulloch</div>
       <div class="sub" id="brand-sub">fully-local home assistant</div>
@@ -58,6 +58,12 @@
       <span class="thinking-job-kicker">DEEP THINK</span>
       <strong id="thinking-job-task"></strong>
       <span id="thinking-job-stage"></span>
+      <span id="thinking-job-outcome" aria-live="off" hidden></span>
+      <a id="thinking-job-report" hidden>Open saved report</a>
+      <details id="thinking-job-details">
+        <summary>Details</summary>
+        <pre id="thinking-job-diagnostics"></pre>
+      </details>
     </div>
     <button id="thinking-job-cancel" type="button" title="Cancel deep-think task">Cancel</button>
   </section>

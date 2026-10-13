@@ -37,6 +37,9 @@ htmlcov/
 .nox/
 archives/
 ha_test/
+data/thinking-jobs
+data/thinking-sources
+data/research-tasks.json
 
 # =============================================================================
 # IDE and Editors

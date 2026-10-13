@@ -1,8 +1,9 @@
 """Bounded, source-aware paper search with keyless provider fallbacks."""
 
 import os
+import re
+import xml.etree.ElementTree as ET
 
-import arxiv
 import requests
 
 from utils.local_time import now
@@ -22,14 +23,9 @@ _SOURCE_QUALITY = {
 }
 thinking_playbook(
     name="academic research",
-    triggers=(r"\b(papers?|research|study|studies|academic|literature|evidence)\b",),
+    triggers=(r"\b(papers?|arxiv|study|studies|academic|literature|scientific|experiments?|clinical trials?)\b|peer[- ]review",),
     capabilities=("search_papers", "get_paper_detail"),
-    solve_path=(
-        "Search for primary papers using the precise research topic.",
-        "Inspect a specific paper only when its returned record is insufficient; pass the search Artifact reference and its ordinal.",
-        "Compare methods, dates, and limitations before drawing a conclusion.",
-    ),
-    completion_rule="Claims about research are tied to the retrieved paper records.",
+    task_scoped=True,
 )
 
 
@@ -43,7 +39,7 @@ def _semantic_scholar(query: str, limit: int) -> list[dict]:
         headers["x-api-key"] = key
     response = requests.get(
         "https://api.semanticscholar.org/graph/v1/paper/search",
-        params={"query": query, "limit": limit, "fields": "title,year,citationCount,abstract,tldr,externalIds,openAccessPdf,url"},
+        params={"query": query, "limit": limit, "fields": "title,year,publicationDate,citationCount,abstract,tldr,externalIds,openAccessPdf,url"},
         headers=headers,
         timeout=TIMEOUT_S,
     )
@@ -52,6 +48,8 @@ def _semantic_scholar(query: str, limit: int) -> list[dict]:
         {
             "title": item.get("title") or "Untitled",
             "year": item.get("year"),
+            "published_at": item.get("publicationDate") or "",
+            "updated_at": "",
             "citations": item.get("citationCount"),
             "digest": (item.get("tldr") or {}).get("text") or item.get("abstract") or "No abstract supplied.",
             "doi": (item.get("externalIds") or {}).get("DOI", ""),
@@ -64,19 +62,43 @@ def _semantic_scholar(query: str, limit: int) -> list[dict]:
 
 
 def _arxiv(query: str, limit: int) -> list[dict]:
-    return [
-        {
-            "title": result.title,
-            "year": result.published.year,
-            "citations": None,
-            "digest": " ".join(result.summary.split()),
-            "doi": result.doi or "",
-            "id": result.entry_id.rsplit("/", 1)[-1],
-            "url": result.entry_id,
-            "source": "arXiv",
-        }
-        for result in arxiv.Client(page_size=limit).results(arxiv.Search(query=query, max_results=limit))
-    ]
+    # The arxiv SDK retries by default and does not put a timeout on its HTTP
+    # requests. One timed Atom request gives this provider the same bounded
+    # contract as the other providers, including on 429/503 responses.
+    response = requests.get(
+        "https://export.arxiv.org/api/query",
+        params={"search_query": query, "start": 0, "max_results": limit}, timeout=TIMEOUT_S,
+    )
+    response.raise_for_status()
+    feed = ET.fromstring(response.content)
+    namespaces = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+    papers = []
+    for entry in feed.findall("atom:entry", namespaces)[:limit]:
+        def text(path, entry=entry):
+            return (entry.findtext(path, default="", namespaces=namespaces) or "").strip()
+
+        url = text("atom:id")
+        paper_id = url.rsplit("/", 1)[-1]
+        if not re.match(r"https?://(?:www\.)?arxiv\.org/abs/", url) or not text("atom:title"):
+            raise ValueError("arXiv returned an error or malformed record")
+        published = text("atom:published")
+        version = re.search(r"(v\d+)$", paper_id, re.I)
+        papers.append(
+            {
+                "title": " ".join(text("atom:title").split()),
+                "year": int(published[:4]) if published[:4].isdigit() else None,
+                "published_at": published,
+                "updated_at": text("atom:updated"),
+                "version": version.group(1) if version else "",
+                "citations": None,
+                "digest": " ".join(text("atom:summary").split()),
+                "doi": text("arxiv:doi"),
+                "id": paper_id,
+                "url": url,
+                "source": "arXiv",
+            }
+        )
+    return papers
 
 
 def _openalex(query: str, limit: int) -> list[dict]:
@@ -91,7 +113,9 @@ def _openalex(query: str, limit: int) -> list[dict]:
         papers.append(
             {
                 "title": item.get("title") or "Untitled",
-                "year": item.get("publication_year"),
+            "year": item.get("publication_year"),
+            "published_at": item.get("publication_date") or "",
+            "updated_at": "",
                 "citations": item.get("cited_by_count"),
                 "digest": " ".join(word for _position, word in words) or "No abstract supplied.",
                 "doi": item.get("doi", "").removeprefix("https://doi.org/"),
@@ -187,6 +211,11 @@ def search_papers(query: str, source: str = "auto", max_results: int = MAX_RESUL
         status="rejected",
         scope="No configured paper provider returned a record for this query.",
         next_actions=("search_papers",),
+        recovery={
+            "kind": "query_refinement",
+            "requires_user": False,
+            "suggested_actions": ["external_information", "search_papers"],
+        },
     )
 
 

@@ -42,13 +42,6 @@ thinking_playbook(
     name="calculation",
     triggers=(r"\b(calculate|convert|percentage|how many|how much|difference between)\b",),
     capabilities=("calculate", "convert_units", "days_between"),
-    solve_path=(
-        "Retrieve any external or ambiguous inputs before calculating.",
-        "Use the narrowest calculation capability that exactly matches the requested operation.",
-        "Report the computed result with the inputs used.",
-    ),
-    completion_rule="Every numeric conclusion is computed from supplied or retrieved values.",
-    prohibited_shortcuts=("Do not use arithmetic to infer facts that require another capability.",),
 )
 
 

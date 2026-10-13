@@ -7,6 +7,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+def test_unsupported_speed_is_ignored_with_explicit_warning(caplog):
+    import core.tts_pocket_onnx as tts
+
+    tts.set_speed(1.4)
+
+    assert "has no speed control" in caplog.text
+    assert "ignored" in caplog.text
+
+
 def test_loads_bundle_local_wrapper_and_uses_voice_wav(tmp_path, monkeypatch):
     import core.tts_pocket_onnx as tts
 

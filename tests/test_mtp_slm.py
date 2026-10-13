@@ -24,6 +24,17 @@ def test_mtp_server_command_enables_native_speculation(monkeypatch):
     assert command[command.index("--ctx-size") + 1] == "12288"
 
 
+def test_server_command_uses_configured_port_and_loopback_only(monkeypatch):
+    monkeypatch.setattr(slm, "_local_server_binary", lambda: "/opt/llama-cpp/llama-server")
+    monkeypatch.setenv("FULLOCH_LOCAL_LLM_PORT", "9911")
+
+    command = slm._local_server_command("model.gguf", 12288, 4, 512)
+
+    assert command[command.index("--host") + 1] == "127.0.0.1"
+    assert command[command.index("--port") + 1] == "9911"
+    assert "0.0.0.0" not in command
+
+
 def test_two_slot_server_command_doubles_total_context(monkeypatch):
     monkeypatch.setattr(slm, "_local_server_binary", lambda: "/opt/llama-cpp/llama-server")
 
@@ -84,6 +95,18 @@ def test_server_failure_detail_classifies_cuda_memory_fault(monkeypatch, tmp_pat
     assert str(log) in detail
 
 
+def test_server_failure_detail_does_not_guess_oom_for_unknown_process_exit(monkeypatch, tmp_path):
+    log = tmp_path / "llama-server.log"
+    log.write_text("worker exited without a diagnostic\n")
+    monkeypatch.setattr(slm, "SERVER_LOG_PATH", log)
+
+    detail = slm._server_failure_detail(-9)
+
+    assert "exited with code -9" in detail
+    assert "out of memory" not in detail.lower()
+    assert "GPU memory fault" not in detail
+
+
 def test_failure_capture_is_timestamped_and_appended(monkeypatch, tmp_path):
     events = tmp_path / "llama-server-events.log"
     server_log = tmp_path / "llama-server.log"
@@ -94,6 +117,9 @@ def test_failure_capture_is_timestamped_and_appended(monkeypatch, tmp_path):
 
     class _Process:
         pid = 42
+        _fulloch_generation = 7
+        _fulloch_build = "llama-server-test-build"
+        args = ["llama-server", "--host", "127.0.0.1"]
 
         @staticmethod
         def poll():
@@ -105,6 +131,9 @@ def test_failure_capture_is_timestamped_and_appended(monkeypatch, tmp_path):
     text = events.read_text()
     assert text.count("local llama-server recovery") == 2
     assert "reason: deadline exceeded" in text
+    assert "pid: 42; generation: 7" in text
+    assert "build: llama-server-test-build" in text
+    assert "host_memory:" in text and "cgroup_memory:" in text
     assert "llama-server log tail:\nstalled decode" in text
 
 

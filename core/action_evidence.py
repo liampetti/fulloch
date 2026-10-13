@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 
 from utils.intents import StepKind, reactive_to_speech
+from utils.prompts import ACTION_EXECUTION_REPAIR_PROMPT
 
 OPERATION_TOOLS = frozenset({
     "turn_on", "turn_off", "toggle", "ha_set_brightness", "ha_set_color",
@@ -22,12 +23,14 @@ OPERATION_TOOLS = frozenset({
     "send_satellite_message", "insert_at_obsidian_cursor", "rename_active_obsidian_note",
     "delete_active_obsidian_note", "replace_selected_obsidian_text",
 })
+RESEARCH_TOOLS = frozenset({"external_information", "search_web"})
 
 _PAST = (
     r"turned|switched|opened|closed|locked|unlocked|set|adjusted|dimmed|brightened|"
     r"activated|deactivated|started|stopped|paused|resumed|skipped|played|saved|"
     r"added|deleted|removed|updated|created|sent|scheduled|cancelled|canceled|"
-    r"extended|muted|unmuted|toggled|renamed"
+    r"extended|muted|unmuted|toggled|renamed|searched|checked|cross-checked|"
+    r"verified|researched"
 )
 _CLAIM = re.compile(
     rf"\b(?:I|we)\s+(?:(?:have|'ve|’ve)\s+)?(?:just\s+|already\s+|successfully\s+)*"
@@ -40,6 +43,11 @@ _CLAIM = re.compile(
     r"(?:on|off|open|closed|locked|unlocked|set|playing|paused)\b",
     re.I,
 )
+_RESEARCH_CLAIM = re.compile(
+    r"\b(?:I|we)(?:\s+have|['’]ve)?\s+(?:just\s+|already\s+|successfully\s+)*"
+    r"(?:searched|checked|cross-checked|verified|researched)\b",
+    re.I,
+)
 
 
 def claims_execution(text: str) -> bool:
@@ -47,23 +55,32 @@ def claims_execution(text: str) -> bool:
     return bool(_CLAIM.search(text.strip()))
 
 
+def claims_research_execution(text: str) -> bool:
+    """Detect a claim that a search or verification actually occurred."""
+    return bool(_RESEARCH_CLAIM.search(text.strip()))
+
+
+def without_execution_claims(text: str) -> str:
+    """Keep factual answers/questions when replacing untrusted confirmations."""
+    return " ".join(sentence for sentence in re.split(r"(?<=[.!?])\s+", text.strip())
+                    if sentence and not claims_execution(sentence))
+
+
 FALLBACK = "I couldn't confirm that the requested action was completed."
-REPAIR = (
-    "The proposed reply was withheld: it claims an action without a matching "
-    "recorded execution outcome. Previous conversation text and unrelated or failed "
-    "tool calls are not proof. If the user requested an action that has not run, "
-    "call the appropriate tool. Do not repeat an already completed operation. "
-    "Otherwise explain that it was not completed, or answer without claiming execution."
-)
+REPAIR = ACTION_EXECUTION_REPAIR_PROMPT
 
 
 @dataclass
 class ActionEvidence:
     # Actual dispatch records only, scoped to one run, never reconstructed from history.
     records: list = field(default_factory=list)
+    research_records: list = field(default_factory=list)
     repairs: int = 0
 
     def record(self, action, step) -> bool:
+        if action.get("intent") in RESEARCH_TOOLS:
+            self.research_records.append((dict(action), step))
+            return True
         if action.get("intent") in OPERATION_TOOLS:
             self.records.append((dict(action), step))
             return True
@@ -76,6 +93,19 @@ class ActionEvidence:
                 text = reactive_to_speech(step.text)
             elif step.kind is StepKind.ERROR or not step.in_output:
                 text = f"I couldn't confirm the result of {action['intent'].replace('_', ' ')}."
+            else:
+                text = step.text.strip()
+            if text and text not in parts:
+                parts.append(text)
+        return " ".join(parts) or FALLBACK
+
+    def research_response(self) -> str:
+        parts = []
+        for _action, step in self.research_records:
+            if step.kind is StepKind.REACTIVE:
+                text = reactive_to_speech(step.text)
+            elif step.kind is StepKind.ERROR or not step.in_output:
+                text = "I couldn't confirm that the requested web check completed."
             else:
                 text = step.text.strip()
             if text and text not in parts:

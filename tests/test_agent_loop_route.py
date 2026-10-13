@@ -199,6 +199,76 @@ def test_follow_up_is_routed_to_agent_when_no_report_is_available(monkeypatch):
     assert generate.call_args.kwargs["history"] == [{"role": "user", "content": "yes"}]
 
 
+def test_turn_them_back_on_uses_last_successful_off_target():
+    import json
+
+    from core.agent_loop import _contextual_turn_onoff
+    from core.turn_history import compact
+
+    history = [
+        {"role": "user", "content": "turn off downstairs office lights"},
+        {"role": "assistant", "content": json.dumps({
+            "actions": [{"intent": "turn_off", "args": ["downstairs office lights"]}],
+        })},
+        {"role": "tool", "name": "turn_off", "content": "downstairs office off"},
+        {"role": "user", "content": "turn them back on"},
+    ]
+    compact(history, 160)
+
+    assert _contextual_turn_onoff("turn them back on", history) == {
+        "actions": [{"intent": "turn_on", "args": ["downstairs office lights"]}],
+    }
+
+
+def test_turn_them_back_on_does_not_reuse_failed_or_wrong_direction_action():
+    import json
+
+    from core.agent_loop import _contextual_turn_onoff
+
+    def history(intent, result):
+        return [
+            {"role": "user", "content": "previous command"},
+            {"role": "assistant", "content": json.dumps({
+                "actions": [{"intent": intent, "args": ["office lights"]}],
+            })},
+            {"role": "tool", "name": intent, "content": result},
+            {"role": "user", "content": "turn them back on"},
+        ]
+
+    assert _contextual_turn_onoff(
+        "turn them back on", history("turn_off", "Reactive question: couldn't find it"),
+    ) is None
+    assert _contextual_turn_onoff(
+        "turn them back on", history("turn_on", "office lights on"),
+    ) is None
+    assert _contextual_turn_onoff(
+        "turn them back on", history("turn_off", "office lights off"),
+    ) == {"actions": [{"intent": "turn_on", "args": ["office lights"]}]}
+
+
+def test_pronoun_fast_path_rejects_ambiguous_empty_or_denied_observations():
+    import json
+
+    from core.agent_loop import _contextual_turn_onoff
+
+    history = [
+        {"role": "user", "content": "turn off lights"},
+        {"role": "assistant", "content": json.dumps({
+            "actions": [{"intent": "turn_off", "args": {"entity": "lights"}}],
+        })},
+        {"role": "tool", "name": "turn_off", "content": "Lights off in Office", "ha_area": "office"},
+        {"role": "user", "content": "turn them back on"},
+    ]
+    assert _contextual_turn_onoff("turn them back on", history, ha_area="office") is not None
+    assert _contextual_turn_onoff("turn them back on", history, ha_area="kitchen") is None
+    for result in ("", "Sorry, those lights aren't available for voice control."):
+        history[2]["content"] = result
+        assert _contextual_turn_onoff("turn them back on", history, ha_area="office") is None
+    history[2]["content"] = "Lights off in Office"
+    history.insert(3, {"role": "tool", "name": "turn_off", "content": "Kitchen off"})
+    assert _contextual_turn_onoff("turn them back on", history, ha_area="office") is None
+
+
 def test_topicless_web_search_reuses_prior_question(monkeypatch):
     import core.agent_loop as al
 
@@ -225,6 +295,39 @@ def test_topicless_web_search_reuses_prior_question(monkeypatch):
             }
         ]
     }
+
+
+def test_challenged_assistant_claim_is_explicitly_disputed_in_next_prompt(monkeypatch):
+    import json
+
+    import core.agent_loop as al
+
+    monkeypatch.setattr(al, "catchAll", lambda _prompt: None)
+    history = [{
+        "role": "assistant",
+        "content": "The green C means the current leader.",
+    }]
+    captured = {}
+
+    def generate(**kwargs):
+        captured.update(kwargs)
+        return json.dumps({"reply": "I'll verify that against current sources."})
+
+    host = _host(
+        grammar=None, wakeword_name="Fulloch", tts_session=None,
+        replan_stall_cache=[], play_chunks=Mock(), _note_llm_remote_status=Mock(),
+        _generate_with_context_recovery=generate, _record_spoken=Mock(),
+        _history_for=lambda _session: history,
+    )
+
+    assert al.AgentLoop(host, source="text").run(
+        "check web for answer rather than making things up",
+    ) == "I'll verify that against current sources."
+    prompt_history = captured["history"]
+    marker = next(item for item in prompt_history if item.get("role") == "system")
+    assert "DISPUTED PRIOR ASSISTANT CLAIM" in marker["content"]
+    assert "do not use it as evidence" in marker["content"]
+    assert "green C means the current leader" in marker["content"]
 
 
 def test_route_is_agent_once_slm_call_starts(monkeypatch):
@@ -267,7 +370,7 @@ def test_replan_ack_finishes_before_the_final_reply_returns(monkeypatch):
     )
     monkeypatch.setattr(al.intents, "handle_action", lambda _action: "ignored")
     emissions = iter([
-        '{"actions": [{"intent": "lookup", "args": []}]}',
+        '{"actions": [{"intent": "get_entity_state", "args": ["lamp"]}]}',
         '{"reply": "The final answer."}',
     ])
     ack_finished = []

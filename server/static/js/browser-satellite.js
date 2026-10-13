@@ -1,6 +1,6 @@
 import { createLifetime } from './browser-lifetime.js';
 
-export function createBrowserSatellite({ clearEmpty, scrollEnd }) {
+export function createBrowserSatellite({ clearEmpty, scrollEnd, onPlaybackChange = () => {} }) {
   // ---- Browser satellite (push-to-talk via WebSocket) ---------------------
   // satellite-btn:    toggle the mic+speaker link.
   // conversation-mode-toggle: enable/disable exclusive full-duplex Conversation
@@ -36,6 +36,7 @@ export function createBrowserSatellite({ clearEmpty, scrollEnd }) {
   let satTtsSr = 24000;     // sample rate announced by server in tts_start
   let satTtsActive = false; // false after cancel/end, so stale PCM is ignored
   let satScheduledSources = [];  // AudioBufferSourceNodes pending/playing, so tts_cancel can stop them
+  let satSpeaking = false;
   let satPendingPcm = [];
   let satPendingSamples = 0;
   const SAT_PLAYBACK_BATCH_SECONDS = 0.24;
@@ -115,6 +116,15 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     conversationModeOverride = enabled ? '1' : '0';
   };
 
+  // Drive the character from scheduled audio, not tts_start/tts_end: generation
+  // can start before any PCM arrives and end while queued audio is still playing.
+  const satSyncPlaybackState = () => {
+    const speaking = !!satAudioCtx && satAudioCtx.state === 'running' && satScheduledSources.length > 0;
+    if (speaking === satSpeaking) return;
+    satSpeaking = speaking;
+    onPlaybackChange(speaking);
+  };
+
   const satSchedulePendingPcm = () => {
     if (!satAudioCtx || !satPendingSamples) return;
     const buf = satAudioCtx.createBuffer(1, satPendingSamples, satTtsSr);
@@ -134,10 +144,12 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     src.onended = () => {
       const i = satScheduledSources.indexOf(src);
       if (i !== -1) satScheduledSources.splice(i, 1);
+      satSyncPlaybackState();
     };
     satScheduledSources.push(src);
     src.start(start);
     satPlayAt = start + buf.duration;
+    satSyncPlaybackState();
   };
 
   const satScheduleChunk = (f32) => {
@@ -168,6 +180,7 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     satPendingSamples = 0;
     satTtsActive = false;
     satPlayAt = satAudioCtx ? satAudioCtx.currentTime : 0;
+    satSyncPlaybackState();
   };
 
   const satMuteMicForPlayback = () => {
@@ -209,7 +222,11 @@ registerProcessor('fulloch-resample', ResampleTo16k);
     }
     if (satMicStream) { satMicStream.getTracks().forEach(t => t.stop()); satMicStream = null; }
     if (satWs) { try { satWs.close(); } catch(_) {} satWs = null; }
-    if (satAudioCtx) { try { satAudioCtx.close(); } catch(_) {} satAudioCtx = null; }
+    if (satAudioCtx) {
+      satAudioCtx.onstatechange = null;
+      try { satAudioCtx.close(); } catch(_) {}
+      satAudioCtx = null;
+    }
     satPlayAt = 0;
     satScheduledSources = [];
     satPendingPcm = [];
@@ -270,6 +287,7 @@ registerProcessor('fulloch-resample', ResampleTo16k);
       // permission prompt, otherwise iOS can leave audio suspended or routed to
       // its call/earpiece path until a later interaction.
       satAudioCtx = new AudioContext({ latencyHint: 'interactive' });
+      satAudioCtx.onstatechange = satSyncPlaybackState;
       const resumeAudio = satAudioCtx.resume().catch(() => {});
       try {
         // Pin the mic stream to mono and 16 kHz. Conversation mode enables the
@@ -309,6 +327,7 @@ registerProcessor('fulloch-resample', ResampleTo16k);
       if (!current()) return false;
     } else {
       satAudioCtx = new AudioContext({ latencyHint: 'interactive' });
+      satAudioCtx.onstatechange = satSyncPlaybackState;
       // Replay is also user-initiated; unlock playback before opening the socket.
       await satAudioCtx.resume().catch(() => {});
       if (!current()) return false;
@@ -562,5 +581,8 @@ registerProcessor('fulloch-resample', ResampleTo16k);
 
   syncSatAreaPill();
 
-  return { connect: satConnect, disconnect: satDisconnect, showAreaPicker: maybeShowAreaPicker, get id() { return mySatelliteId; }, destroy() { lifetime.destroy(); satDisconnect(); } };
+  return { connect: satConnect, disconnect: satDisconnect, showAreaPicker: maybeShowAreaPicker,
+    get id() { return mySatelliteId; },
+    get chatContext() { return { ha_area: satHaArea || null }; },
+    destroy() { lifetime.destroy(); satDisconnect(); } };
 }

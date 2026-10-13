@@ -60,7 +60,8 @@ def test_hard_endpoint_queues_final_before_delayed_wake_verdict(accepted):
     np.testing.assert_array_equal(final[0], np.concatenate([chunk, chunk]))
     assert final[3] is False
     assert final[7] is True
-    assert final[10:] == (False, 7)
+    assert final[10:13] == (False, 7, 1)
+    assert isinstance(final[13], float)
     assert capture.audio_queue.empty()
 
 
@@ -96,7 +97,7 @@ class TestServerVadHook:
 
         pushed = ac.audio_queue.get_nowait()
         assert ac.audio_queue.empty()  # exactly one utterance, not two
-        buf, _onset, _dbfs, _provisional, satellite_id, _endpoint_t = pushed
+        buf, _onset, _dbfs, _provisional, satellite_id, _endpoint_t = pushed[:6]
         assert len(buf) == len(chunk1) + len(chunk2)  # both chunks concatenated
         assert satellite_id == "sat-a"
 
@@ -237,6 +238,128 @@ class TestVadEndpointing:
 
         assert [r[3] for r in results] == [True, False]  # one provisional, one final
         assert results[0][4] == results[1][4] == "sat-a"
+        assert results[0][12] == results[1][12] == 1
+
+    def test_committed_provisional_does_not_rearm_before_hard_endpoint(self):
+        ac = AudioCapture(use_vad=False, min_utterance_ms=100, max_utterance_ms=10000)
+        ac._use_vad_enabled = True
+        ac.vad_min_speech_samples = 100
+        script = [
+            {"speech_started": True, "soft_endpointed": True},
+            {"soft_endpointed": False},  # residue/resumed speech re-arms the debounce
+            {"soft_endpointed": True},  # but the already committed turn must not repeat
+            {"endpointed": True, "last_speech_samples": 5000},
+        ]
+        ac._build_endpointer = lambda: _ScriptedEndpointer(script)
+
+        chunk_q: "queue.Queue" = queue.Queue()
+        session = SatelliteSession(
+            id="sat-a",
+            chunk_q=chunk_q,
+            provisional_committed_onset=time.monotonic(),
+        )
+        chunk = np.zeros(2000, dtype=np.float32)
+        for _ in range(len(script)):
+            chunk_q.put(chunk)
+        chunk_q.put(None)
+
+        ac.satellite_recorder_thread(session)
+
+        results = []
+        while not ac.audio_queue.empty():
+            results.append(ac.audio_queue.get_nowait())
+
+        assert [result[3] for result in results] == [False]  # authoritative endpoint only
+
+    def test_committed_capture_resets_at_endpoint_and_next_soft_probe_is_immediate(self):
+        ac = AudioCapture(use_vad=False, min_utterance_ms=100, max_utterance_ms=10000)
+        ac._use_vad_enabled = True
+        ac.vad_min_speech_samples = 100
+        ac._build_endpointer = lambda: _ScriptedEndpointer([
+            {"speech_started": True, "soft_endpointed": True},
+            {"soft_endpointed": False},
+            {"soft_endpointed": True},
+            {"endpointed": True, "last_speech_samples": 5000},
+            {"speech_started": True, "soft_endpointed": True},
+            {"endpointed": True, "last_speech_samples": 5000},
+        ])
+
+        class CommitAfterFirstProbe(queue.Queue):
+            reads = 0
+
+            def get(self, *args, **kwargs):
+                self.reads += 1
+                if self.reads == 2:
+                    first = ac.audio_queue.get_nowait()
+                    assert first[3] and first[12] == 1
+                    ac.commit_capture(session, first[12])
+                return super().get(*args, **kwargs)
+
+        session = SatelliteSession(id="sat-a", chunk_q=CommitAfterFirstProbe())
+        for _ in range(6):
+            session.chunk_q.put(np.zeros(2000, dtype=np.float32))
+        session.chunk_q.put(None)
+        ac.satellite_recorder_thread(session)
+        new_soft = ac.audio_queue.get_nowait()
+        new_final = ac.audio_queue.get_nowait()
+        assert new_soft[3] is True and new_final[3] is False
+        assert new_soft[12] == new_final[12] == 2
+        assert ac.audio_queue.empty()
+        assert session.vad_endpointer.reset_calls == 2
+
+    def test_live_frames_stop_for_committed_capture_but_next_capture_starts(self):
+        ac = AudioCapture(use_vad=False, min_utterance_ms=100, max_utterance_ms=10000)
+        ac._use_vad_enabled = True
+        ac.vad_min_speech_samples = 100
+        ac._build_endpointer = lambda: _ScriptedEndpointer([
+            {"speech_started": True}, {}, {"soft_endpointed": False},
+            {"endpointed": True, "last_speech_samples": 5000},
+            {"speech_started": True},
+            {"endpointed": True, "last_speech_samples": 5000},
+        ])
+
+        class Worker:
+            starts = []
+            frames = []
+            finals = []
+            retired = []
+
+            def start(self, _sid, _pcm, *, capture_id):
+                self.starts.append(capture_id)
+
+            def feed_frame(self, _sid, _pcm, *, capture_id):
+                self.frames.append(capture_id)
+
+            def finish(self, item):
+                self.finals.append(item[12])
+                return True
+
+            def discard_capture(self, _sid, capture_id):
+                self.retired.append(capture_id)
+
+            def discard(self, _sid):
+                pass
+
+        class CommitAfterLivePartial(queue.Queue):
+            reads = 0
+
+            def get(self, *args, **kwargs):
+                self.reads += 1
+                if self.reads == 3:
+                    ac.commit_capture(session, session.audio_capture_id)
+                return super().get(*args, **kwargs)
+
+        worker = Worker()
+        ac.set_live_asr_backend(worker)
+        session = SatelliteSession(id="sat-a", chunk_q=CommitAfterLivePartial())
+        for _ in range(6):
+            session.chunk_q.put(np.zeros(2000, dtype=np.float32))
+        session.chunk_q.put(None)
+        ac.satellite_recorder_thread(session)
+        assert worker.starts == [1, 2]
+        assert worker.frames == [1, 2]
+        assert worker.finals == [2]
+        assert worker.retired == [1]
 
     def test_live_asr_only_receives_vad_confirmed_speech(self):
         ac = AudioCapture(use_vad=False, min_utterance_ms=100, max_utterance_ms=10000)
@@ -252,10 +375,10 @@ class TestVadEndpointing:
                 self.frames = []
                 self.finals = []
 
-            def start(self, satellite_id, pcm):
+            def start(self, satellite_id, pcm, *, capture_id=None):
                 self.starts.append((satellite_id, pcm.copy()))
 
-            def feed_frame(self, satellite_id, pcm):
+            def feed_frame(self, satellite_id, pcm, *, capture_id=None):
                 self.frames.append((satellite_id, pcm.copy()))
 
             def finish(self, item):
@@ -279,6 +402,55 @@ class TestVadEndpointing:
         assert len(worker.starts) == 1
         assert len(worker.frames) == 1
         assert len(worker.finals) == 1
+
+    def test_live_asr_waits_for_an_idle_wakeword_match(self):
+        ac = AudioCapture(use_vad=False, min_utterance_ms=100, max_utterance_ms=10000)
+        ac._use_vad_enabled = True
+        ac.vad_min_speech_samples = 100
+        ac._build_endpointer = lambda: _ScriptedEndpointer(
+            [{"speech_started": True}, {}, {"endpointed": True, "last_speech_samples": 5000}]
+        )
+
+        class WakewordBackend:
+            def feed_pcm(self, _satellite_id, _pcm):
+                return WakewordResult(False, 0.0)
+
+            def reset(self, _satellite_id):
+                pass
+
+        class LiveWorker:
+            def __init__(self):
+                self.starts = []
+                self.frames = []
+                self.finals = []
+
+            def start(self, satellite_id, pcm, *, capture_id=None):
+                self.starts.append((satellite_id, pcm.copy()))
+
+            def feed_frame(self, satellite_id, pcm, *, capture_id=None):
+                self.frames.append((satellite_id, pcm.copy()))
+
+            def finish(self, item):
+                self.finals.append(item)
+                return True
+
+            def discard(self, _satellite_id):
+                pass
+
+        worker = LiveWorker()
+        ac.set_live_asr_backend(worker)
+        ac.set_wakeword_backend(WakewordBackend())
+        session = SatelliteSession(id="sat-a", chunk_q=queue.Queue())
+        chunk = np.ones(2000, dtype=np.float32) * 0.1
+        for _ in range(3):
+            session.chunk_q.put(chunk)
+        session.chunk_q.put(None)
+
+        ac.satellite_recorder_thread(session)
+
+        assert worker.starts == []
+        assert worker.frames == []
+        assert worker.finals == []
 
     def test_stereo_utterance_selects_one_best_channel_after_endpointing(self):
         ac = AudioCapture(use_vad=False, min_utterance_ms=100, max_utterance_ms=10000)
@@ -541,7 +713,7 @@ class TestVadEndpointing:
 
         by_sat: dict = {}
         while not ac.audio_queue.empty():
-            buf, onset, db, provisional, sid, endpoint_t = ac.audio_queue.get_nowait()
+            buf, onset, db, provisional, sid, endpoint_t = ac.audio_queue.get_nowait()[:6]
             by_sat.setdefault(sid, []).append(provisional)
 
         assert by_sat["sat-a"] == [False]  # hard endpoint only

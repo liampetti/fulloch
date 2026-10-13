@@ -118,6 +118,48 @@ def test_search_stall_precedes_dispatch_and_summary_is_in_history_before_replan(
     assert turn.stats.tool_dispatches == 1
 
 
+def test_current_research_acknowledgement_is_replaced_with_real_deep_think_dispatch(turn):
+    query = "can you find latest info on trending local models with 9B parameters? Keep sources recent"
+    queued = Mock(return_value="Research queued.")
+    al.tool_registry.register_tool(queued, name="deep_think")
+    _emissions(turn, {"reply": "I'll look into that and let you know when I'm done."})
+
+    result = turn.loop.run(query)
+
+    assert result == "Research queued."
+    queued.assert_called_once_with(query)
+    assert turn.stats.tool_dispatches == 1
+
+
+@pytest.mark.parametrize("prompt", [
+    "search web and cross check your information",
+    "do a new search and check",
+    "double check that",
+])
+def test_contextual_cross_check_request_dispatches_fresh_web_search(turn, prompt):
+    topic = "what does the green C mean on the Bathurst Supercars timing screen?"
+    turn.history.append({"role": "user", "content": topic})
+    turn.host._generate_with_context_recovery.return_value = '{"reply":"Cross-checked results."}'
+
+    assert turn.loop.run(prompt) == "Grounded findings."
+
+    turn.search.assert_called_once_with(topic)
+    assert turn.stats.tool_dispatches == 1
+
+
+def test_unchanged_search_plan_stops_after_one_no_progress_correction(turn):
+    repeated = {"actions": [_search("Bathurst green C Supercars timing") ]}
+    _emissions(turn, *([repeated] * 8))
+
+    result = turn.loop.run("Search web and cross-check the Bathurst green C meaning")
+
+    assert turn.search.call_count == 1
+    assert turn.host._generate_with_context_recovery.call_count < 6
+    assert "Grounded findings." in result
+    assert "repeated without a new result" in result
+    assert turn.host._emit_agent_event.call_args_list[-1].args[1]["intent"] == "plan_guard"
+
+
 def test_search_summary_survives_a_follow_up_note_write(turn):
     turn.catch.return_value = {"actions": [_search()]}
     _emissions(turn, {"actions": [{"intent": "append_to_today", "args": ["Grounded findings."]}]})
@@ -143,15 +185,18 @@ def test_search_summary_preserves_failed_note_write_on_reply_replan(turn):
     assert json.loads(turn.history[-1]["content"]) == {"reply": expected}
 
 
-def test_search_discards_bundled_actions_and_replans_from_findings(turn):
+def test_search_preserves_bundled_goals_but_never_executes_stale_arguments(turn):
     turn.catch.return_value = {"actions": [
         _search(), {"intent": "append_to_today", "args": ["Unresearched guess"]},
     ]}
-    _emissions(turn, {"reply": "Done"})
+    turn.host._generate_with_context_recovery.return_value = '{"reply": "Done"}'
 
-    assert turn.loop.run("Find the news") == "Grounded findings."
+    answer = turn.loop.run("Find the news and save it")
+    assert "Grounded findings." in answer
+    assert "Not completed: append to today." in answer
     turn.save.assert_not_called()
-    turn.host._generate_with_context_recovery.assert_called_once()
+    assert turn.host._generate_with_context_recovery.call_count == al.MAX_AGENT_CALLS_PER_TURN - 1
+    assert '"needs_revision": true' in turn.host._generate_with_context_recovery.call_args.kwargs["history"][-1]["content"]
 
 
 @pytest.mark.parametrize("query,dispatches", [(" Latest  NEWS! ", 1), ("weather tomorrow", 2)])
@@ -205,7 +250,7 @@ def test_cancellation_during_summary_does_not_publish_findings_or_replan(turn):
     assert turn.active_watchdogs == []
 
 
-def test_search_call_cap_returns_latest_distinct_grounded_summary(turn):
+def test_search_call_cap_preserves_all_distinct_findings(turn):
     turn.catch.return_value = {"actions": [_search("first query")]}
     turn.host._summarise_search_result.side_effect = ["First findings.", "Latest findings."]
     _emissions(turn, *[
@@ -213,10 +258,12 @@ def test_search_call_cap_returns_latest_distinct_grounded_summary(turn):
         for _ in range(al.MAX_AGENT_CALLS_PER_TURN - 1)
     ])
 
-    assert turn.loop.run("Research the news") == "Latest findings."
+    result = turn.loop.run("Research the news")
+    assert result.startswith("First findings. Latest findings.")
+    assert "repeated without a new result" in result
     assert turn.search.call_count == 2
     assert turn.host._summarise_search_result.call_count == 2
-    turn.host._record_spoken.assert_called_once_with("Latest findings.")
+    turn.host._record_spoken.assert_called_once_with(result)
 
 
 def test_agent_generation_runs_inside_progress_watchdog(turn):
@@ -267,7 +314,9 @@ def test_unknown_tool_blocks_entire_batch_before_side_effects(turn, unknown_firs
     ]
     _emissions(turn, {"actions": list(reversed(actions)) if unknown_first else actions})
 
-    assert turn.loop.run("Do these tasks") == "Tool unavailable."
+    answer = turn.loop.run("Do these tasks")
+    assert answer.startswith("Tool unavailable.")
+    assert "Not completed:" in answer
     turn.save.assert_not_called()
     turn.search.assert_not_called()
     turn.host._speak_tool_unavailable_fallback.assert_called_once_with(

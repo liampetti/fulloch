@@ -38,7 +38,24 @@ def test_flights_follow_round_trip_token_and_redact_key(monkeypatch):
     def get(_url, params, timeout):
         calls.append((params, timeout))
         if "departure_token" not in params:
-            return _Response({"best_flights": [{"departure_token": "outbound-token"}]})
+            return _Response(
+                {
+                    "best_flights": [
+                        {
+                            "departure_token": "outbound-token",
+                            "price": 1200,
+                            "total_duration": 780,
+                            "flights": [
+                                {
+                                    "airline": "Example Air",
+                                    "departure_airport": {"id": "ZZZ", "time": "2026-04-07T10:00:00+10:00"},
+                                    "arrival_airport": {"id": "ZZY", "time": "2026-04-08T08:00:00+04:00"},
+                                }
+                            ],
+                        }
+                    ]
+                }
+            )
         return _Response(
             {
                 "best_flights": [
@@ -48,8 +65,8 @@ def test_flights_follow_round_trip_token_and_redact_key(monkeypatch):
                         "flights": [
                             {
                                 "airline": "Example Air",
-                                "departure_airport": {"id": "ZZZ", "time": "2026-04-07T10:00:00+10:00"},
-                                "arrival_airport": {"id": "ZZY", "time": "2026-04-08T08:00:00+04:00"},
+                                "departure_airport": {"id": "ZZY", "time": "2026-04-14T10:00:00+04:00"},
+                                "arrival_airport": {"id": "ZZZ", "time": "2026-04-14T18:00:00+10:00"},
                             }
                         ],
                     }
@@ -67,35 +84,15 @@ def test_flights_follow_round_trip_token_and_redact_key(monkeypatch):
     assert calls[1][0]["arrival_id"] == "ZZY"
     assert calls[1][0]["outbound_date"] == "2026-04-07"
     assert calls[1][0]["return_date"] == "2026-04-14"
-    assert "Example Air" in result and "quoted price 1200" in result
+    assert "Example Air" in result and "provider-quoted fare 1200" in result
     assert "test-key" not in result
-    assert result.artifact == {
-        "type": "flight_search",
-        "route": {"origin": "ZZZ", "destination": "ZZY"},
-        "departure_date": "2026-04-07",
-        "return_date": "2026-04-14",
-        "travellers": 1,
-        "cabin": "Economy",
-        "currency": "USD",
-        "retrieved_at": result.artifact["retrieved_at"],
-        "offer": {
-            "price": 1200,
-            "duration_minutes": 780,
-            "stops": 0,
-            "airlines": ["Example Air"],
-            "departure": {"id": "ZZZ", "name": "ZZZ", "time": "2026-04-07T10:00:00+10:00", "timezone": None, "timezone_offset": "+10:00", "utc_time": "2026-04-07T00:00:00+00:00"},
-            "arrival": {"id": "ZZY", "name": "ZZY", "time": "2026-04-08T08:00:00+04:00", "timezone": None, "timezone_offset": "+04:00", "utc_time": "2026-04-08T04:00:00+00:00"},
-            "segments": [
-                {
-                    "airline": "Example Air",
-                    "flight_number": "",
-                    "departure": {"id": "ZZZ", "name": "ZZZ", "time": "2026-04-07T10:00:00+10:00", "timezone": None, "timezone_offset": "+10:00", "utc_time": "2026-04-07T00:00:00+00:00"},
-                    "arrival": {"id": "ZZY", "name": "ZZY", "time": "2026-04-08T08:00:00+04:00", "timezone": None, "timezone_offset": "+04:00", "utc_time": "2026-04-08T04:00:00+00:00"},
-                    "duration_minutes": None,
-                }
-            ],
-        },
-    }
+    assert result.artifact["journey_type"] == "round_trip"
+    assert result.artifact["route"] == {"origin": "ZZZ", "destination": "ZZY"}
+    assert result.artifact["currency"] == "USD"
+    assert result.artifact["offers"] == [result.artifact["offer"]]
+    assert result.artifact["offer"]["price"] == 1200
+    assert result.artifact["offer"]["outbound"]["departure"]["id"] == "ZZZ"
+    assert result.artifact["offer"]["inbound"]["departure"]["id"] == "ZZY"
 
 
 def test_one_way_flights_use_provider_type_two_without_return_token(monkeypatch):
@@ -113,8 +110,8 @@ def test_one_way_flights_use_provider_type_two_without_return_token(monkeypatch)
                         "flights": [
                             {
                                 "airline": "Example Air",
-                                "departure_airport": {"time": "2026-04-07 10:00"},
-                                "arrival_airport": {"time": "2026-04-07 11:30"},
+                                "departure_airport": {"id": "AAA", "time": "2026-04-07 10:00"},
+                                "arrival_airport": {"id": "BBB", "time": "2026-04-07 11:30"},
                             }
                         ],
                     }
@@ -144,7 +141,21 @@ def test_flights_default_one_missing_endpoint_and_currency_from_timezone(monkeyp
         calls.append(params)
         if params["departure_id"] == "Chicago":
             return _Response({"best_flights": []})
-        return _Response({"best_flights": [{"price": 123, "flights": []}]})
+        return _Response(
+            {
+                "best_flights": [
+                    {
+                        "price": 123,
+                        "flights": [
+                            {
+                                "departure_airport": {"id": "ORD", "time": "2026-04-07 10:00"},
+                                "arrival_airport": {"id": "CDG", "time": "2026-04-08 11:30"},
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
 
     monkeypatch.setattr(travel.requests, "get", get)
     result = travel.search_flights("", "Paris", "2026-04-07")
@@ -181,7 +192,21 @@ def test_plan_travel_uses_home_airport_for_a_lone_destination(monkeypatch):
 
     def get(_url, params, timeout):
         calls.append(params)
-        return _Response({"best_flights": [{"price": 123, "flights": []}]})
+        return _Response(
+            {
+                "best_flights": [
+                    {
+                        "price": 123,
+                        "flights": [
+                            {
+                                "departure_airport": {"id": "SYD", "time": "2026-04-15 10:00"},
+                                "arrival_airport": {"id": "CDG", "time": "2026-04-15 11:30"},
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
 
     monkeypatch.setattr(travel.requests, "get", get)
     result = travel.plan_travel("Plan a trip to Paris")
@@ -197,7 +222,21 @@ def test_flights_recover_labeled_positional_worker_arguments(monkeypatch):
 
     def get(_url, params, timeout):
         calls.append(params)
-        return _Response({"best_flights": [{"price": 123, "flights": []}]})
+        return _Response(
+            {
+                "best_flights": [
+                    {
+                        "price": 123,
+                        "flights": [
+                            {
+                                "departure_airport": {"id": "HND", "time": "2026-09-11 10:00"},
+                                "arrival_airport": {"id": "DXB", "time": "2026-09-11 11:30"},
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
 
     monkeypatch.setattr(travel.requests, "get", get)
     result = travel.search_flights(
@@ -210,7 +249,7 @@ def test_flights_recover_labeled_positional_worker_arguments(monkeypatch):
     assert "quoted price 123" in result
 
 
-def test_flights_resolve_city_names_and_replace_a_past_date(monkeypatch):
+def test_flights_resolve_city_names(monkeypatch):
     travel = _module(monkeypatch)
     monkeypatch.setattr(travel, "local_today", lambda: date(2026, 8, 31))
     calls = []
@@ -236,12 +275,156 @@ def test_flights_resolve_city_names_and_replace_a_past_date(monkeypatch):
         )
 
     monkeypatch.setattr(travel.requests, "get", get)
-    result = travel.search_flights("Paris", "Rome", "2026-08-27")
+    result = travel.search_flights("Paris", "Rome", "2026-09-01")
 
     assert calls[0]["departure_id"] == "CDG"
     assert calls[0]["arrival_id"] == "FCO"
     assert calls[0]["outbound_date"] == "2026-09-01"
     assert "Resolved route: Paris (CDG) to Rome (FCO)." in result
+
+
+def test_past_round_trip_requires_confirmation_without_provider_call(monkeypatch):
+    travel = _module(monkeypatch)
+    called = False
+
+    def get(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(travel.requests, "get", get)
+    result = travel.search_flights("Hamburg-Sydney", "", "2026-01-17", "2026-03-03")
+
+    assert result.thinking_status == "needs_input"
+    assert str(result) == "Those flight dates are in the past. Did you mean 2027-01-17 to 2027-03-03?"
+    assert result.recovery["requires_user"] is True
+    assert result.recovery["resume_action"]["args"][:4] == [
+        "Hamburg", "Sydney", "2027-01-17", "2027-03-03"
+    ]
+    assert called is False
+
+
+def test_natural_language_return_dates_apply_next_year_to_the_whole_range(monkeypatch):
+    travel = _module(monkeypatch)
+    calls = []
+
+    def get(_url, params, timeout):
+        calls.append(params)
+        if "departure_token" not in params:
+            return _Response(
+                {
+                    "best_flights": [
+                        {
+                            "departure_token": "outbound-token",
+                            "flights": [
+                                {
+                                    "airline": "Example Air",
+                                    "departure_airport": {"id": "HAM", "time": "2027-01-17 10:00"},
+                                    "arrival_airport": {"id": "SYD", "time": "2027-01-18 08:00"},
+                                }
+                            ],
+                        }
+                    ]
+                }
+            )
+        return _Response(
+            {
+                "best_flights": [
+                    {
+                        "price": 2443,
+                        "flights": [
+                            {
+                                "airline": "Example Air",
+                                "departure_airport": {"id": "SYD", "time": "2027-03-03 21:45"},
+                                "arrival_airport": {"id": "HAM", "time": "2027-03-04 19:05"},
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(travel.requests, "get", get)
+    result = travel.search_flights_for_request(
+        "cheapest flights hamburg to sydney return from 17th january till 3rd of march next year"
+    )
+
+    assert calls[0]["outbound_date"] == "2027-01-17"
+    assert calls[0]["return_date"] == "2027-03-03"
+    assert result.thinking_status == "evidence"
+    assert result.evidence["currency"] == "USD"
+    assert result.evidence["offers"][0]["outbound"]["departure"]["id"] == "HAM"
+    assert result.evidence["offers"][0]["inbound"]["arrival"]["id"] == "HAM"
+
+
+def test_round_trip_rejects_a_return_leg_in_the_wrong_direction(monkeypatch):
+    travel = _module(monkeypatch)
+
+    def get(_url, params, timeout):
+        if "departure_token" not in params:
+            return _Response(
+                {
+                    "best_flights": [
+                        {
+                            "departure_token": "outbound-token",
+                            "flights": [
+                                {
+                                    "departure_airport": {"id": "HAM", "time": "2027-01-17 10:00"},
+                                    "arrival_airport": {"id": "SYD", "time": "2027-01-18 08:00"},
+                                }
+                            ],
+                        }
+                    ]
+                }
+            )
+        return _Response(
+            {
+                "best_flights": [
+                    {
+                        "price": 2443,
+                        "flights": [
+                            {
+                                "departure_airport": {"id": "HAM", "time": "2027-03-03 21:45"},
+                                "arrival_airport": {"id": "SYD", "time": "2027-03-04 19:05"},
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(travel.requests, "get", get)
+    result = travel.search_flights("HAM", "SYD", "2027-01-17", "2027-03-03")
+
+    assert result.thinking_status == "unavailable"
+    assert "complete round-trip fare" in result.scope
+
+
+def test_equivalent_flight_search_uses_prior_job_artifact_without_provider_call(monkeypatch):
+    travel = _module(monkeypatch)
+    from tools.thinking_context import reset_artifacts, set_artifacts
+
+    token = set_artifacts(
+        {
+            "artifact-001": {
+                "data": {
+                    "type": "flight_search",
+                    "journey_type": "round_trip",
+                    "route": {"origin": "HAM", "destination": "SYD"},
+                    "departure_date": "2027-01-17",
+                    "return_date": "2027-03-03",
+                    "travellers": 1,
+                    "cabin": "Economy",
+                }
+            }
+        }
+    )
+    try:
+        result = travel.search_flights("Hamburg", "Sydney", "2027-01-17", "2027-03-03")
+    finally:
+        reset_artifacts(token)
+
+    assert result.thinking_status == "rejected"
+    assert "already have retrieved" in result.scope
 
 
 def test_flights_reject_placeholder_arguments_without_provider_request(monkeypatch):
@@ -411,10 +594,12 @@ def test_travel_capabilities_are_read_only(monkeypatch):
 
     assert travel._available() is True
     assert native_access_class("search_flights") == "read"
+    assert native_access_class("search_flights_for_request") == "read"
     assert native_access_class("search_hotels") == "read"
     assert native_access_class("assess_itinerary") == "read"
     assert native_access_class("plan_travel") == "read"
     assert native_requires_deep_think("plan_travel") is True
+    assert native_requires_deep_think("search_flights_for_request") is True
 
 
 def test_assess_itinerary_reads_the_plan_artifact_without_schedule_json(monkeypatch):

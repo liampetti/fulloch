@@ -4,7 +4,7 @@ import { createArtifactCards } from './artifact-cards.js';
 
 const BREEZE_AUDIO_TAG_RE = /\((?:laughs|chuckles|giggles|crying|sobs|whimpers|groans|moans|sighs|gasps|inhales|exhales|breathing heavily|whispers|shouts|screams|singing|humming|stutters|pause|clears throat|coughs|sniffs|smacks lips|clicks tongue|yawns|sneezes|hiccups|burps|gulps|gags|grunts|scoffs|snorts)\)/gi;
 
-export function createChatUI({ connectSpeaker, onThinking }) {
+export function createChatUI({ connectSpeaker, onThinking, getChatContext = () => ({}) }) {
   const lifetime = createLifetime();
   let stream = null;
   const cards = createArtifactCards({ submitCommand });
@@ -320,9 +320,15 @@ export function createChatUI({ connectSpeaker, onThinking }) {
     if (s.llm) {
       const m = s.llm;
       L.push(`↳ LLM Generation    : ${fmtSecs(m.seconds)} (${m.model})`);
+      if (m.prompt_profile) L.push(`  ├─ Prompt profile : ${m.prompt_profile}`);
       L.push(`  ├─ TTFT           : ${fmtSecs(m.ttft)}`);
-      L.push(`  ├─ Tokens / sec   : ${m.tps != null ? m.tps.toFixed(1) + ' t/s' : '—'}`);
+      L.push(`  ├─ End-to-end output tokens/sec : ${m.tps != null ? m.tps.toFixed(1) + ' t/s' : '—'}`);
+      if (m.decode_tps != null) L.push(`  ├─ Decode rate     : ${m.decode_tps.toFixed(1)} t/s`);
       L.push(`  ├─ Token Count    : ${m.prompt_tokens} prompt | ${m.output_tokens} output`);
+      if (m.prompt_component_tokens_estimated) {
+        const p = m.prompt_component_tokens_estimated;
+        L.push(`  ├─ Prompt tokens (est.) : system/schema ${p.system_and_tool_schema ?? 0} | history ${p.conversation_history ?? 0} | user ${p.current_user ?? 0}`);
+      }
       L.push(`  └─ Agent Loop     : ${m.calls} call${m.calls === 1 ? '' : 's'} | ${m.tools} tool${m.tools === 1 ? '' : 's'}`);
     }
     if (s.laya)
@@ -571,6 +577,17 @@ export function createChatUI({ connectSpeaker, onThinking }) {
     }
   });
 
+  const postChat = async (text) => {
+    const response = await fetch('/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, ...getChatContext() }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(typeof body.detail === 'string' ? body.detail : 'Could not send your message.');
+    }
+  };
+
   lifetime.listen(form, 'submit', async (e) => {
     e.preventDefault();
     // While working, the button is a stop button (and Enter stops too).
@@ -583,13 +600,10 @@ export function createChatUI({ connectSpeaker, onThinking }) {
     autosize();
     showTyping();
     try {
-      await fetch('/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
+      await postChat(text);
     } catch (err) {
       console.error(err);
+      appendMessage({ role: 'assistant', content: err.message, source: 'text', ts: Date.now() / 1000 });
       removeTyping();
       waiting = false;
       syncButton();
@@ -611,12 +625,10 @@ export function createChatUI({ connectSpeaker, onThinking }) {
     syncButton();
     showTyping();
     try {
-      await fetch('/chat', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
+      await postChat(text);
     } catch (err) {
       console.error(err);
+      appendMessage({ role: 'assistant', content: err.message, source: 'text', ts: Date.now() / 1000 });
       removeTyping();
       waiting = false;
       syncButton();
@@ -643,5 +655,12 @@ export function createChatUI({ connectSpeaker, onThinking }) {
     if (busy !== voiceBusy) { voiceBusy = busy; syncButton(); }
   };
 
-  return { start, destroy, setVoiceBusy, clearEmpty, scrollEnd };
+  return {
+    start,
+    destroy,
+    setVoiceBusy,
+    isTextTurnActive: () => waiting,
+    clearEmpty,
+    scrollEnd,
+  };
 }

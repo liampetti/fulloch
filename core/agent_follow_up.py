@@ -3,6 +3,8 @@
 import re
 from dataclasses import dataclass
 
+from utils.prompts import get_disputed_answer_note
+
 _REPORT_FOLLOW_UP_RE = re.compile(
     r"\b(?:report|summary|findings|conclusion|recommendation|what did (?:it|the report) say|"
     r"does (?:it|the report) (?:say|show)|is (?:it|that) (?:feasible|possible|worth it|safe)|"
@@ -19,11 +21,34 @@ _STARTUP_GREETING_FOLLOW_UP_RE = re.compile(
     r"(?:(?:that|it)(?:\s+(?:topic|fact))?|the\s+(?:topic|fact))"
     r"\s*(?:please)?[.!?]*\s*\Z", re.I,
 )
+_ANSWER_CHALLENGE_RE = re.compile(
+    r"\b(?:can't all|cannot all|rather than making things up|that's not right|"
+    r"that is not right|you made that up|are you sure|double[- ]?check|"
+    r"cross[- ]?check|check web|check the web|verify that|not what I asked)\b",
+    re.I,
+)
 
 
 def startup_greeting_follow_up(response: str | None, user_prompt: str) -> str | None:
     """Select referential context; the caller consumes the one-shot greeting."""
     return response if response and _STARTUP_GREETING_FOLLOW_UP_RE.fullmatch(user_prompt) else None
+
+
+def disputed_answer_note(history: list[dict], user_prompt: str) -> dict | None:
+    """Mark the latest assistant assertion as disputed before adding a challenge."""
+    if not _ANSWER_CHALLENGE_RE.search(user_prompt):
+        return None
+    prior_answer = next((
+        str(item.get("content") or "").strip()
+        for item in reversed(history)
+        if item.get("role") == "assistant" and str(item.get("content") or "").strip()
+    ), "")
+    if not prior_answer:
+        return None
+    return {
+        "role": "system",
+        "content": get_disputed_answer_note(prior_answer),
+    }
 
 
 @dataclass(frozen=True)

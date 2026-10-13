@@ -279,6 +279,7 @@ def test_model_docs_and_settings_cover_the_registry():
     # by /settings is selectable without a second hard-coded menu.
     assert "optsFor('asr'" in settings
     assert "optsFor('tts'" in settings
+    assert "currentBackend('tts') !== 'kokoro-onnx'" in settings
     for domain in (b.ASR, b.TTS):
         for spec in b.list_backends(domain):
             assert spec.backend in example
@@ -371,8 +372,8 @@ def test_asr_and_tts_options_have_stable_user_facing_order():
             "Reactive question: Couldn't find that room. Ask the user which room.",
             "Couldn't find that room.",
         ),
-        ("User question: raw search data", "Basic commands only."),
-        (None, "Basic commands only."),
+        ("User question: raw search data", "Basic commands only. Not completed: example tool."),
+        (None, "Basic commands only. Not completed: example tool."),
     ],
 )
 def test_regex_only_dispatch_never_calls_model(monkeypatch, result, expected):

@@ -52,6 +52,7 @@ _NATIVE_ACCESS: dict[str, AccessClass] = {
     "search_papers": "read",
     "get_paper_detail": "read",
     "search_flights": "read",
+    "search_flights_for_request": "read",
     "search_hotels": "read",
     "whats_on": "read",
     "deep_think": "propose",

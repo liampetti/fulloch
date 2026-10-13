@@ -22,8 +22,16 @@ STATIC = ROOT / "server/static"
 BOUNDARIES = """
 window.FULLOCH_DASHBOARD_PREFS = {theme: 'auto', show_turn_details: false};
 window.boundary = {streams: [], sockets: [], contexts: [], tracks: [], nodes: [],
-  sources: [], previews: [], revoked: [], intervals: new Set(), micDelay: false};
+  sources: [], previews: [], revoked: [], logoFrames: [], intervals: new Set(), micDelay: false};
 const b = window.boundary;
+const drawImage = CanvasRenderingContext2D.prototype.drawImage;
+CanvasRenderingContext2D.prototype.drawImage = function(...args) {
+  if (this.canvas.id === 'brand-logo') {
+    b.logoSheet = args[0];
+    b.logoFrames.push(args[2] / 314 * 4 + args[1] / 314);
+  }
+  return drawImage.apply(this, args);
+};
 const interval = window.setInterval.bind(window), clear = window.clearInterval.bind(window);
 window.setInterval = (...args) => { const id = interval(...args); b.intervals.add(id); return id; };
 window.clearInterval = id => { b.intervals.delete(id); clear(id); };
@@ -46,12 +54,13 @@ window.WebSocket = class {
 };
 window.AudioContext = class {
   constructor() {
-    this.currentTime = 0; this.destination = {}; b.contexts.push(this);
+    this.currentTime = 0; this.state = 'suspended'; this.destination = {}; b.contexts.push(this);
     this.audioWorklet = {addModule: async () => {
       if (b.workletFails) throw new Error('worklet failure');
     }};
   }
-  resume() { return Promise.resolve(); }
+  resume() { this.state = 'running'; this.onstatechange?.(); return Promise.resolve(); }
+  suspend() { this.state = 'suspended'; this.onstatechange?.(); return Promise.resolve(); }
   close() { this.closed = true; return Promise.resolve(); }
   createMediaStreamSource() { return {connect() {}}; }
   createBuffer(channels, length, rate) {
@@ -142,6 +151,8 @@ class BrowserModules(unittest.TestCase):
             return route.fulfill(path=file, content_type=mime)
         if path == "/logo.png":
             return route.fulfill(status=204)
+        if path == "/fulloch_animate.png":
+            return route.fulfill(path=ROOT / "utils/fulloch_animate.png", content_type="image/png")
         self.requests.append((path, route.request.method, route.request.post_data))
         data = {
             "/status": self.status, "/history": self.history,
@@ -163,8 +174,102 @@ class BrowserModules(unittest.TestCase):
     def emit(self, event):
         self.page.evaluate("ev => boundary.streams.at(-1).emit(ev)", event)
 
+    def test_logo_idle_blinks_glances_and_teardown(self):
+        self.page.clock.install()
+        self.page.add_init_script("Math.random = () => 0.5;")
+        self.open_chat()
+        self.page.wait_for_function("boundary.logoFrames.length > 0")
+        self.assertEqual(self.page.locator("header .logo").evaluate(
+            "el => [el.clientWidth, el.clientHeight]"), [80, 80])
+        self.assertEqual(self.page.locator("#brand-logo").evaluate("el => el.tagName"), "CANVAS")
+        self.assertEqual(self.page.evaluate("boundary.logoFrames[0]"), 0)
+        self.page.clock.run_for(4600)
+        self.assertEqual(self.page.evaluate("boundary.logoFrames.slice(-4)"), [1, 2, 1, 0])
+        self.page.evaluate("Math.random = () => 0.1")
+        self.page.clock.run_for(6000)
+        self.assertIn(4, self.page.evaluate("boundary.logoFrames"))
+        self.page.evaluate("window.dispatchEvent(new Event('pagehide'))")
+        draws = self.page.evaluate("boundary.logoFrames.length")
+        self.page.clock.run_for(10000)
+        self.assertEqual(self.page.evaluate("boundary.logoFrames.length"), draws)
+
+    def test_logo_body_pixels_remain_identical_in_every_frame(self):
+        self.open_chat()
+        self.page.wait_for_function("boundary.logoFrames.length > 0")
+        changes = self.page.evaluate("""() => {
+          const context = boundary.logoSheet.getContext('2d');
+          const idle = context.getImageData(0, 0, 314, 314).data;
+          const faceRegions = [[120, 94, 170, 144], [215, 94, 263, 144], [163, 120, 222, 171]];
+          return Array.from({length: 16}, (_, frame) => {
+            const pixels = context.getImageData(frame % 4 * 314, Math.floor(frame / 4) * 314, 314, 314).data;
+            let body = 0, face = 0;
+            for (let y = 0; y < 314; y++) {
+              for (let x = 0; x < 314; x++) {
+                const i = (y * 314 + x) * 4;
+                if (!pixels.subarray(i, i + 4).some((value, channel) => value !== idle[i + channel])) continue;
+                if (faceRegions.some(([left, top, right, bottom]) =>
+                    x >= left && x < right && y >= top && y < bottom)) face++;
+                else body++;
+              }
+            }
+            return {body, face};
+          });
+        }""")
+        self.assertTrue(all(frame["body"] == 0 for frame in changes), changes)
+        self.assertTrue(all(changes[frame]["face"] > 0 for frame in [1, 2, 4, 5, 6, 7, *range(8, 16)]))
+
+    def test_logo_talking_tracks_playback_not_generation(self):
+        self.open_chat()
+        self.page.wait_for_function("boundary.logoFrames.length > 0")
+        self.page.locator(".msg-play").click()
+        self.page.wait_for_function("boundary.sockets.length === 1")
+        self.page.evaluate("boundary.sockets[0].emit({type: 'tts_start', sr: 24000})")
+        self.assertEqual(self.page.evaluate("boundary.logoFrames.at(-1)"), 0)
+        self.page.evaluate("boundary.sockets[0].emit(new Float32Array(6000).buffer)")
+        self.assertGreaterEqual(self.page.evaluate("boundary.logoFrames.at(-1)"), 8)
+        self.page.evaluate("boundary.sockets[0].emit({type: 'tts_end'})")
+        self.assertGreaterEqual(self.page.evaluate("boundary.logoFrames.at(-1)"), 8)
+        self.page.evaluate("boundary.contexts[0].suspend()")
+        self.assertEqual(self.page.evaluate("boundary.logoFrames.at(-1)"), 0)
+        self.page.evaluate("boundary.contexts[0].resume()")
+        self.assertGreaterEqual(self.page.evaluate("boundary.logoFrames.at(-1)"), 8)
+        self.page.evaluate("boundary.sources[0].onended()")
+        self.assertEqual(self.page.evaluate("boundary.logoFrames.at(-1)"), 0)
+        self.page.evaluate("""() => {
+          boundary.sockets[0].emit({type: 'tts_start'});
+          boundary.sockets[0].emit(new Float32Array(6000).buffer);
+          boundary.sockets[0].emit({type: 'tts_cancel'});
+        }""")
+        self.assertEqual(self.page.evaluate("boundary.logoFrames.at(-1)"), 0)
+        self.assertTrue(self.page.evaluate("boundary.sources[1].stopped"))
+
+    def test_logo_respects_reduced_motion_and_hidden_tabs(self):
+        self.page.emulate_media(reduced_motion="reduce")
+        self.open_chat()
+        self.page.wait_for_function("boundary.logoFrames.length > 0")
+        self.page.locator(".msg-play").click()
+        self.page.wait_for_function("boundary.sockets.length === 1")
+        self.page.evaluate("""() => {
+          boundary.sockets[0].emit({type: 'tts_start'});
+          boundary.sockets[0].emit(new Float32Array(6000).buffer);
+        }""")
+        self.assertEqual(self.page.evaluate("boundary.logoFrames.at(-1)"), 0)
+        self.page.emulate_media(reduced_motion="no-preference")
+        self.page.wait_for_function("boundary.logoFrames.at(-1) >= 8")
+        self.page.evaluate("""() => {
+          Object.defineProperty(document, 'hidden', {configurable: true, value: true});
+          document.dispatchEvent(new Event('visibilitychange'));
+        }""")
+        self.assertEqual(self.page.evaluate("boundary.logoFrames.at(-1)"), 0)
+        self.page.evaluate("""() => {
+          Object.defineProperty(document, 'hidden', {configurable: true, value: false});
+          document.dispatchEvent(new Event('visibilitychange'));
+        }""")
+        self.assertGreaterEqual(self.page.evaluate("boundary.logoFrames.at(-1)"), 8)
+
     def test_chat_history_trace_cards_stats_commands_and_reset(self):
         self.open_chat()
+        self.page.get_by_role("button", name="Kitchen", exact=True).click()
         self.assertEqual(self.page.locator(".msg.assistant .bubble").first.inner_text(), "Hello")
         self.page.locator("#input").fill("What is playing?")
         self.page.locator("#input").press("Enter")
@@ -183,6 +288,12 @@ class BrowserModules(unittest.TestCase):
         self.page.wait_for_timeout(30)
         self.assertTrue(any(path == "/chat" and 'pause Kitchen' in (body or '')
                             for path, _, body in self.requests))
+        chat_bodies = [json.loads(body) for path, _, body in self.requests if path == "/chat"]
+        self.assertEqual(chat_bodies, [
+            {"text": "What is playing?", "ha_area": "kitchen"},
+            {"text": "pause Kitchen", "ha_area": "kitchen"},
+        ])
+        self.assertEqual(self.page.evaluate("boundary.sockets.length"), 0)
         self.emit({"role": "stopped"})
         self.assertEqual(self.page.locator("#send").get_attribute("title"), "Send")
         timers = {"type": "timers", "timers": [{"id": "t1", "duration": 60, "ends_at": 9999999999}]}
@@ -196,6 +307,144 @@ class BrowserModules(unittest.TestCase):
         self.page.evaluate("window.dispatchEvent(new Event('pagehide'))")
         self.assertTrue(self.page.evaluate("boundary.streams.every(s => s.closed) && boundary.intervals.size === 0"))
 
+    def test_thinking_card_is_concise_and_polling_recovers_final_report_without_sse(self):
+        self.page.clock.install()
+        job = {
+            "id": "research-1", "task": "Research F1\n\nAdditional user constraints: Official schedules",
+            "objective": "Research F1", "status": "RUNNING", "stage": "Planning research",
+            "job_duration_seconds": 9.8, "acknowledgement_seconds": 0.003,
+            "progress": {}, "request_metrics": [{"input_tokens": 2252, "output_reservation": 2048}],
+        }
+        self.status["thinking_job"] = job
+        self.open_chat()
+        self.page.wait_for_function("document.querySelector('#thinking-job-stage').textContent === 'Planning research'")
+        self.assertEqual(self.page.locator("#thinking-job-task").inner_text(), "Research F1")
+        self.assertEqual(self.page.locator("#thinking-job-outcome").inner_text(), "Elapsed: 0:09")
+        self.assertFalse(self.page.locator("#thinking-job-details").evaluate("el => el.open"))
+        visible = self.page.locator("#thinking-job-card").inner_text()
+        self.assertNotIn("reserved", visible)
+        self.assertNotIn("0 processed", visible)
+        self.assertNotIn("Additional user constraints", visible)
+        self.page.clock.run_for(1100)
+        self.assertEqual(self.page.locator("#thinking-job-outcome").inner_text(), "Elapsed: 0:10")
+        self.page.locator("#thinking-job-details summary").click()
+        self.assertIn("2252 in / 2048 reserved out", self.page.locator("#thinking-job-diagnostics").inner_text())
+
+        self.status["thinking_job"] = {
+            **job, "stage": "Writing chapters", "job_duration_seconds": 15,
+            "progress": {"processed_unique_documents": 3, "fetched_documents": 4, "saved_sections": 1},
+        }
+        self.page.clock.run_for(5000)
+        self.page.wait_for_function("document.querySelector('#thinking-job-stage').textContent === 'Writing chapters'")
+        self.assertIn("3 sources reviewed · 1 section saved", self.page.locator("#thinking-job-outcome").inner_text())
+        self.assertTrue(self.page.locator("#thinking-job-details").evaluate("el => el.open"))
+
+        final = {**self.status["thinking_job"], "status": "READY", "stage": "Report ready",
+                 "job_duration_seconds": 20, "partial_artifact_link": "/reports/Fulloch/f1.md"}
+        self.page.route("**/thinking/research-1", lambda route: route.fulfill(json=final))
+        self.status["thinking_job"] = None
+        self.page.clock.run_for(5000)
+        self.page.wait_for_function("document.querySelector('#thinking-job-stage').textContent === 'Report ready'")
+        self.assertEqual(self.page.locator("#thinking-job-report").get_attribute("href"), "/reports/Fulloch/f1.md")
+        self.assertFalse(self.page.locator("#thinking-job-cancel").is_visible())
+        self.assertEqual(self.page.locator(".thinking-orbit").evaluate("el => getComputedStyle(el).animationName"), "none")
+        self.page.clock.run_for(10000)
+        self.assertEqual(self.page.locator("#thinking-job-outcome").inner_text(),
+                         "Duration: 0:20 · 3 sources reviewed · 1 section saved")
+        self.page.evaluate("window.dispatchEvent(new Event('pagehide'))")
+        self.assertEqual(self.page.evaluate("boundary.intervals.size"), 0)
+
+    def test_thinking_sse_tracks_job_identity_and_keeps_failure_diagnostics_in_details(self):
+        self.page.clock.install()
+        self.status["thinking_job"] = {
+            "id": "old", "task": "Old request", "status": "RUNNING", "stage": "Writing chapters",
+            "job_duration_seconds": 100, "progress": {"processed_unique_documents": 8},
+            "partial_artifact_link": "/reports/old.md",
+        }
+        self.open_chat()
+        self.page.wait_for_function("document.querySelector('#thinking-job-task').textContent === 'Old request'")
+        self.page.locator("#thinking-job-details summary").click()
+        job = {"job_id": "new", "task": "New request", "status": "RUNNING", "stage": "Planning research",
+               "job_duration_seconds": 2, "progress": {}}
+        self.status["thinking_job"] = {**job, "id": "new"}
+        with self.page.expect_response("**/status"):
+            self.emit({"role": "thinking", **job})
+        self.page.wait_for_timeout(30)
+        self.page.wait_for_function("document.querySelector('#thinking-job-task').textContent === 'New request'")
+        self.assertEqual(self.page.locator("#thinking-job-outcome").inner_text(), "Elapsed: 0:02")
+        self.assertFalse(self.page.locator("#thinking-job-details").evaluate("el => el.open"))
+        self.assertFalse(self.page.locator("#thinking-job-report").is_visible())
+        self.page.clock.run_for(2100)
+        self.assertRegex(self.page.locator("#thinking-job-outcome").inner_text(), r"Elapsed: 0:0[34]")
+
+        self.status["thinking_job"] = None
+        self.emit({"role": "thinking", "job_id": "new", "status": "FAILED",
+                   "stage": "Research failed during planning", "job_duration_seconds": 4,
+                   "error": "ReportSynthesisError: internal details"})
+        self.assertEqual(self.page.locator("#thinking-job-stage").inner_text(), "Couldn’t complete the report")
+        self.assertNotIn("ReportSynthesisError", self.page.locator("#thinking-job-card").inner_text())
+        self.page.locator("#thinking-job-details summary").click()
+        self.assertIn("ReportSynthesisError", self.page.locator("#thinking-job-diagnostics").inner_text())
+        self.page.clock.run_for(5000)
+        self.assertEqual(self.page.locator("#thinking-job-outcome").inner_text(), "Duration: 0:04")
+
+    def test_thinking_stale_status_response_cannot_overwrite_newer_sse_progress(self):
+        self.page.clock.install()
+        initial = {"id": "research-1", "task": "Research F1", "status": "RUNNING", "stage": "Planning research",
+                   "job_duration_seconds": 1, "progress": {}}
+        self.status["thinking_job"] = initial
+        self.open_chat()
+        self.page.wait_for_function("document.querySelector('#thinking-job-stage').textContent === 'Planning research'")
+        held = []
+        self.page.route("**/status", lambda route: held.append(route))
+        self.page.clock.run_for(5000)
+        self.page.wait_for_timeout(30)
+        older_requests = list(held)
+        self.assertGreaterEqual(len(older_requests), 1)
+        newer = {**initial, "stage": "Reading sources", "job_duration_seconds": 6,
+                 "progress": {"processed_unique_documents": 2}}
+        self.emit({"role": "thinking", **newer, "job_id": newer["id"]})
+        self.page.wait_for_timeout(30)
+        self.assertGreater(len(held), len(older_requests))
+        for route in held[len(older_requests):]:
+            route.fulfill(json={**self.status, "thinking_job": newer})
+        self.page.wait_for_function("document.querySelector('#thinking-job-outcome').textContent.includes('2 sources reviewed')")
+        for route in older_requests:
+            route.fulfill(json={**self.status, "thinking_job": initial})
+        self.page.wait_for_timeout(30)
+        self.assertEqual(self.page.locator("#thinking-job-stage").inner_text(), "Reading sources")
+        self.assertIn("2 sources reviewed", self.page.locator("#thinking-job-outcome").inner_text())
+
+    def test_typed_room_context_uses_persisted_choice_and_clears_when_skipped(self):
+        self.page.add_init_script("localStorage.setItem('sat_ha_area', 'kitchen'); "
+                                  "localStorage.setItem('sat_ha_area_decided', '1');")
+        self.open_chat()
+        self.page.locator("#input").fill("turn off lights")
+        self.page.locator("#input").press("Enter")
+        self.page.wait_for_timeout(30)
+        bodies = [json.loads(body) for path, _, body in self.requests if path == "/chat"]
+        self.assertEqual(bodies, [{"text": "turn off lights", "ha_area": "kitchen"}])
+        self.emit({"role": "stopped"})
+        self.page.locator("#sat-area-pill").click()
+        self.page.get_by_role("button", name="Skip", exact=True).click()
+        self.page.locator("#input").fill("turn on lights")
+        self.page.locator("#input").press("Enter")
+        self.page.wait_for_timeout(30)
+        bodies = [json.loads(body) for path, _, body in self.requests if path == "/chat"]
+        self.assertEqual(bodies[-1], {"text": "turn on lights", "ha_area": None})
+        self.assertEqual(self.page.evaluate("boundary.sockets.length"), 0)
+
+    def test_invalid_typed_room_shows_error_and_releases_send_button(self):
+        self.page.route("**/chat", lambda route: route.fulfill(
+            status=400, content_type="application/json",
+            body=json.dumps({"detail": "Please select the room again; no command was sent."}),
+        ))
+        self.open_chat()
+        self.page.locator("#input").fill("turn off lights")
+        self.page.locator("#input").press("Enter")
+        self.page.get_by_text("Please select the room again; no command was sent.", exact=True).wait_for()
+        self.assertEqual(self.page.locator("#send").get_attribute("title"), "Send")
+
     def test_documents_tab_lists_markdown_documents_in_new_tabs(self):
         self.open_chat()
         self.page.get_by_role("tab", name="Documents", exact=True).click()
@@ -205,6 +454,33 @@ class BrowserModules(unittest.TestCase):
         self.assertEqual(document.inner_text(), "example report")
         self.assertEqual(document.get_attribute("href"), "/documents/Fulloch/example-report.md")
         self.assertEqual(document.get_attribute("target"), "_blank")
+
+    def test_report_card_keeps_mobile_navigation_reachable(self):
+        self.page.set_viewport_size({"width": 375, "height": 667})
+        self.open_chat()
+        self.emit({
+            "role": "assistant", "source": "text", "ts": 2, "content": "Report ready",
+            "artifact": {
+                "type": "generated_report", "title": "A detailed report",
+                "summary": "A concise summary of the generated report.",
+                "created_at": 1_700_000_000,
+                "report_url": "/reports/fulloch-reports/2026-09-24-deadbeef",
+            },
+        })
+        metrics = self.page.evaluate("""() => ({
+          documentWidth: document.documentElement.scrollWidth,
+          viewportWidth: document.documentElement.clientWidth,
+          chatWidth: document.querySelector('#chat').clientWidth,
+          cardWidth: document.querySelector('.generated-report-card').getBoundingClientRect().width,
+          settingsRight: document.querySelector('#settings-btn').getBoundingClientRect().right,
+          tabsScrollable: document.querySelector('nav.tabs').scrollWidth > document.querySelector('nav.tabs').clientWidth,
+        })""")
+        self.assertLessEqual(metrics["documentWidth"], metrics["viewportWidth"])
+        self.assertLessEqual(metrics["cardWidth"], metrics["chatWidth"])
+        self.assertLessEqual(metrics["settingsRight"], metrics["viewportWidth"])
+        self.assertTrue(metrics["tabsScrollable"])
+        self.page.get_by_role("tab", name="Satellites", exact=True).click()
+        self.assertFalse(self.page.locator("#satellites").is_hidden())
 
     def test_document_sorting_and_folder_pagination(self):
         self.documents = {"documents": [

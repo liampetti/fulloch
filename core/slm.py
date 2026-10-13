@@ -15,6 +15,7 @@ from urllib.request import urlopen
 
 import torch
 
+from .telemetry import event as telemetry_event
 from .turn_stats import TurnStats
 
 logger = logging.getLogger(__name__)
@@ -211,12 +212,39 @@ def _capture_local_server_failure(
         ).stdout.strip()
     except Exception as exc:  # noqa: BLE001 - diagnostics must not block recovery
         process_info = f"process inspection unavailable: {type(exc).__name__}: {exc}"
+    try:
+        cgroup_root = Path("/sys/fs/cgroup")
+        cgroup = "\n".join(
+            f"{name}: {(cgroup_root / name).read_text().strip()}"
+            for name in ("memory.max", "memory.current", "memory.events", "memory.events.local")
+            if (cgroup_root / name).is_file()
+        ) or "cgroup memory counters unavailable"
+    except OSError as exc:
+        cgroup = f"cgroup memory counters unavailable: {type(exc).__name__}: {exc}"
+    try:
+        host_memory = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(process.pid)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5,
+        ).stdout.strip()
+        host_memory = f"RSS_KB: {host_memory}" if host_memory else "RSS unavailable (process exited)"
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not block recovery
+        host_memory = f"RSS unavailable: {type(exc).__name__}: {exc}"
     with SERVER_EVENT_LOG_PATH.open("a", encoding="utf-8") as event_log:
+        deployment = {
+            key: os.environ.get(key, "unavailable")
+            for key in ("FULLOCH_VERSION", "FULLOCH_BUILD", "FULLOCH_DEPLOYMENT")
+        }
         event_log.write(
             f"\n--- {timestamp} local llama-server recovery ---\n"
             f"reason: {reason}\n"
-            f"pid: {process.pid}; returncode: {process.poll()}\n"
+            f"pid: {process.pid}; generation: {getattr(process, '_fulloch_generation', 'unknown')}; "
+            f"returncode: {process.poll()}\n"
+            f"build: {getattr(process, '_fulloch_build', _local_server_binary()) or 'unknown'}\n"
+            f"deployment: {deployment}\n"
+            f"command: {getattr(process, 'args', 'unknown')}\n"
             f"process:\n{process_info}\n"
+            f"host_memory:\n{host_memory}\n"
+            f"cgroup_memory:\n{cgroup}\n"
             f"gpu:\n{gpu}\n"
             f"llama-server log tail:\n{_server_log_tail()}\n"
         )
@@ -247,11 +275,12 @@ def _record_local_server_request_failure(
 
 
 def _start_local_server(
-    command: list[str], port: int, persistent_logging_enabled: bool
+    command: list[str], port: int, persistent_logging_enabled: bool, generation: int = 1,
 ) -> subprocess.Popen:
     """Launch a server while retaining all prior server output in one log."""
     if not persistent_logging_enabled:
         process = subprocess.Popen(command)
+        process._fulloch_generation = generation
         try:
             _wait_for_local_server(process, port)
         except Exception:
@@ -262,9 +291,22 @@ def _start_local_server(
     _rotate_diagnostic_log(SERVER_LOG_PATH)
     timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     with SERVER_LOG_PATH.open("a", encoding="utf-8") as server_log:
-        server_log.write(f"\n--- {timestamp} llama-server starting ---\n")
+        server_log.write(
+            f"\n--- {timestamp} llama-server starting ---\n"
+            f"pid: pending; generation: {generation}\n"
+            f"build: {command[0] if command else 'unknown'}\n"
+            f"command: {command}\n"
+        )
         server_log.flush()
         process = subprocess.Popen(command, stdout=server_log, stderr=subprocess.STDOUT)
+        process._fulloch_generation = generation
+        process._fulloch_build = command[0] if command else "unknown"
+        server_log.write(f"pid: {process.pid}; generation: {generation}\n")
+        server_log.flush()
+    telemetry_event(
+        "local_inference_process_started", pid=process.pid, process_generation=generation,
+        build=process._fulloch_build, bind_host=LOCAL_SERVER_HOST, port=port,
+    )
     try:
         _wait_for_local_server(process, port)
     except Exception:
@@ -323,12 +365,19 @@ def _load_local_slm(
     )
     client._fulloch_local_server = True
     client._fulloch_local_process = process
+    client._fulloch_process_generation = 1
+    client._fulloch_backend_state = "READY"
+    # Per-slot context, not the aggregate llama-server reservation for parallel
+    # slots; an individual request cannot spend another slot's KV cache.
+    client.context_tokens = n_ctx
     restart_lock = threading.Lock()
     restart_in_progress = threading.Event()
 
-    def restart(reason: str) -> None:
+    def restart(reason: str, *, expected_process=None) -> None:
         """Recycle a failed server without holding the caller through model load."""
         with restart_lock:
+            if expected_process is not None and expected_process is not client._fulloch_local_process:
+                return
             if restart_in_progress.is_set():
                 logger.warning("Local llama-server recovery already in progress")
                 return
@@ -337,11 +386,28 @@ def _load_local_slm(
         def recover() -> None:
             try:
                 current = client._fulloch_local_process
+                client._fulloch_backend_state = "RECOVERING"
+                telemetry_event(
+                    "local_inference_recovery_started", pid=getattr(current, "pid", None),
+                    process_generation=client._fulloch_process_generation,
+                    reason=str(reason)[:120],
+                )
                 _capture_local_server_failure(reason, current, persistent_logging_enabled)
                 _stop_local_server(current)
-                client._fulloch_local_process = _start_local_server(command, port, persistent_logging_enabled)
+                next_generation = client._fulloch_process_generation + 1
+                client._fulloch_local_process = _start_local_server(
+                    command, port, persistent_logging_enabled, generation=next_generation,
+                )
+                client._fulloch_process_generation += 1
+                client._fulloch_backend_state = "READY"
+                telemetry_event(
+                    "local_inference_process_ready",
+                    pid=getattr(client._fulloch_local_process, "pid", None),
+                    process_generation=client._fulloch_process_generation,
+                )
                 logger.warning("Restarted local llama-server after request failure")
             except Exception:
+                client._fulloch_backend_state = "FAILED"
                 logger.exception("Could not restart local llama-server")
             finally:
                 restart_in_progress.clear()
@@ -356,6 +422,39 @@ def _load_local_slm(
         reason, client._fulloch_local_process, persistent_logging_enabled
     )
     atexit.register(stop_current)
+
+    def watch_process() -> None:
+        """Recover an exited child independently of foreground requests."""
+        observed_generation = client._fulloch_process_generation
+        attempted_generation = None
+        while True:
+            time.sleep(0.25)
+            current = client._fulloch_local_process
+            generation = client._fulloch_process_generation
+            if generation != observed_generation:
+                observed_generation = generation
+            if current.poll() is None:
+                continue
+            # A request-triggered restart can replace the process between the
+            # poll and this check. Never let an old watcher restart its successor.
+            if current is not client._fulloch_local_process:
+                continue
+            if attempted_generation == generation:
+                continue
+            attempted_generation = generation
+            client._fulloch_backend_state = "FAILED"
+            telemetry_event(
+                "local_inference_process_exited", pid=getattr(current, "pid", None),
+                process_generation=generation, exit_code=current.returncode,
+            )
+            restart(
+                f"llama-server process exited with code {current.returncode}",
+                expected_process=current,
+            )
+
+    threading.Thread(
+        target=watch_process, daemon=True, name="llama-server-exit-watcher",
+    ).start()
     logger.info("Local llama-server ready (%s; %d slot%s)", mode, server_slots, "" if server_slots == 1 else "s")
     return grammar, client
 
@@ -401,6 +500,10 @@ def generate_slm(
     read_timeout: float | None = None,
     generation_timeout: float | None = None,
     recover_on_failure: bool = True,
+    output_policy: str = "conversation",
+    diagnostics: dict | None = None,
+    response_schema: dict | None = None,
+    failure_capture: Callable[[dict], None] | None = None,
 ) -> str:
     """Generate through the shared OpenAI-compatible LLM client."""
     if getattr(slm_model, "_fulloch_remote", False) is not True:
@@ -418,4 +521,8 @@ def generate_slm(
         read_timeout=read_timeout,
         generation_timeout=generation_timeout,
         recover_on_failure=recover_on_failure,
+        output_policy=output_policy,
+        diagnostics=diagnostics,
+        response_schema=response_schema,
+        failure_capture=failure_capture,
     )

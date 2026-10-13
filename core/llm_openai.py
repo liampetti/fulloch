@@ -3,10 +3,13 @@
 import json
 import logging
 import os
+import subprocess
 import time
 from typing import Callable, Optional
 
 import httpx
+
+from utils.prompts import JSON_REPAIR_USER_PROMPT, LLM_CONNECTION_USER_PROMPT
 
 from .slm import GRAMMAR_FILE, ContextExhaustedError, RemoteUnreachable
 from .url_utils import normalize_url
@@ -66,6 +69,7 @@ DEFAULT_GENERATION_TIMEOUT = 90.0  # seconds — bounds a server that continues 
 # gets a roomier, still-bounded budget since the user explicitly asked for depth.
 REMOTE_REPLY_MAX_TOKENS = 1024
 REMOTE_THINK_MAX_TOKENS = 8192
+REMOTE_RESEARCH_MAX_TOKENS = 8192
 
 
 def _is_context_error(exc: Exception) -> bool:
@@ -87,6 +91,7 @@ class OpenAIClient:
     """Thin wrapper over the OpenAI SDK pointed at any compatible endpoint."""
 
     _fulloch_remote = True
+    research_output_ceiling = REMOTE_RESEARCH_MAX_TOKENS
 
     def __init__(
         self,
@@ -105,11 +110,15 @@ class OpenAIClient:
         self._generation_timeout = generation_timeout
         self._client = self._build_client(api_key)
 
-    def _recover_local_server(self, reason: str) -> bool:
+    def _recover_local_server(self, reason: str, *, only_if_dead: bool = False) -> bool:
         """Restart the bundled server after a failed local request, if available."""
         restart = getattr(self, "_fulloch_restart_local_server", None)
         if restart is None:
             return False
+        if only_if_dead:
+            process = getattr(self, "_fulloch_local_process", None)
+            if process is None or process.poll() is None:
+                return False
         record_failure = getattr(self, "_fulloch_record_local_server_failure", None)
         if record_failure is not None:
             try:
@@ -157,7 +166,7 @@ class OpenAIClient:
         try:
             self._client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": "ping"}],
+                messages=[{"role": "user", "content": LLM_CONNECTION_USER_PROMPT}],
                 max_tokens=1,
             )
             return True, ""
@@ -171,6 +180,66 @@ class OpenAIClient:
         if user_prompt is not None:
             messages.append({"role": "user", "content": user_prompt})
         return messages
+
+    def count_message_tokens(self, messages: list, *, thinking_mode: bool = False) -> int:
+        """Count prompt tokens via the server's chat template.
+
+        llama.cpp exposes a ``/v1/chat/completions`` request with
+        ``max_tokens=1`` and reads back ``usage.prompt_tokens``, which is the
+        authoritative count for the exact chat template the server will apply
+        (including the reasoning switch). Unsupported or unavailable endpoints
+        raise so the budget's conservative estimator remains the fallback.
+
+        Keep this established SDK completion probe unless a replacement is
+        reviewed against agentic budget admission. It performs full prompt
+        prefill plus up to one output token; the budget's bounded in-memory
+        cache avoids repeats while entries remain cached. It uses its own timeout
+        and does not inherit generate()'s application-level recovery handling.
+        """
+        if not messages:
+            raise ValueError("No messages to count")
+        client = self._client.with_options(timeout=10.0, max_retries=0)
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            max_tokens=1,
+            temperature=0.0,
+            extra_body={"chat_template_kwargs": {"enable_thinking": bool(thinking_mode)}},
+        )
+        usage = getattr(response, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        if not isinstance(prompt_tokens, int) or prompt_tokens <= 0:
+            raise ValueError("Server did not report prompt token usage")
+        return prompt_tokens
+
+    def server_gpu_memory_metrics(self) -> dict:
+        """Bounded NVIDIA driver measurement for the actual local server PID.
+
+        llama-server's Prometheus endpoint does not expose CUDA allocator
+        counters. Driver process memory includes model and KV allocations;
+        unavailable drivers/permissions simply leave this diagnostic absent.
+        """
+        if not getattr(self, "_fulloch_local_server", False):
+            return {}
+        process = getattr(self, "_fulloch_local_process", None)
+        pid = getattr(process, "pid", None)
+        if not isinstance(pid, int) or process.poll() is not None:
+            return {}
+        try:
+            response = subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid,used_gpu_memory", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=1.0, check=True,
+            )
+            values = []
+            for line in response.stdout.splitlines():
+                parts = [part.strip() for part in line.split(",")]
+                if len(parts) == 2 and parts[0] == str(pid):
+                    value = int(parts[1])
+                    if value >= 0:
+                        values.append(value * 1024 * 1024)
+            return {"gpu_allocated_bytes": sum(values)} if values else {}
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return {}
 
     def generate(
         self,
@@ -186,17 +255,25 @@ class OpenAIClient:
         read_timeout: float | None = None,
         generation_timeout: float | None = None,
         recover_on_failure: bool = True,
+        output_policy: str = "conversation",
+        diagnostics: dict | None = None,
+        response_schema: dict | None = None,
+        failure_capture: Callable[[dict], None] | None = None,
     ) -> str:
         from openai import APIConnectionError, APITimeoutError, BadRequestError
 
         messages = self._messages(system_prompt, history, user_prompt)
-        json_mode = grammar is not None
+        json_mode = grammar is not None or response_schema is not None
 
         # Clamp to the remote ceiling (see REMOTE_*_MAX_TOKENS): no grammar bounds
         # generation here, so the caller's N_CONTEXT-sized default would otherwise
         # let a single answer run to thousands of tokens. A caller asking for less
         # (e.g. the 256-token web summariser) is honoured.
-        ceiling = REMOTE_THINK_MAX_TOKENS if thinking_mode else REMOTE_REPLY_MAX_TOKENS
+        if output_policy not in {"conversation", "research"}:
+            raise ValueError("Unknown output policy")
+        ceiling = (REMOTE_RESEARCH_MAX_TOKENS if output_policy == "research" else
+                   REMOTE_THINK_MAX_TOKENS if thinking_mode else REMOTE_REPLY_MAX_TOKENS)
+        requested_limit = max_new_tokens
         max_new_tokens = min(max_new_tokens, ceiling)
 
         t_call = time.monotonic()
@@ -207,6 +284,15 @@ class OpenAIClient:
         full_text = ""
         usage = None
         stream = None
+        finish_reason = None
+        termination = "completed"
+        error_category = None
+        reported_model = None
+        server_build = None
+        restarted = False
+        transport_requests = []
+        if diagnostics is None:
+            diagnostics = {}
         try:
             kwargs = {
                 "model": self.model,
@@ -225,8 +311,13 @@ class OpenAIClient:
                 "extra_body": {"chat_template_kwargs": {"enable_thinking": thinking_mode}},
             }
             if json_mode:
-                gbnf = _load_gbnf()
-                if gbnf:
+                gbnf = _load_gbnf() if response_schema is None else None
+                if response_schema is not None:
+                    kwargs["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": {"name": "research_stage", "strict": False, "schema": response_schema},
+                    }
+                elif gbnf:
                     # A real grammar is strictly tighter than json_object mode —
                     # and llama-server silently drops a custom grammar in favour
                     # of a trivial schema-derived one whenever response_format
@@ -240,7 +331,19 @@ class OpenAIClient:
                 client = client.with_options(
                     timeout=httpx.Timeout(read_timeout, connect=self._connect_timeout)
                 )
-            stream = client.chat.completions.create(**kwargs)
+            try:
+                transport_requests.append({"kind": "generation", "state": "dispatched"})
+                stream = client.chat.completions.create(**kwargs)
+            except BadRequestError as exc:
+                transport_requests[-1].update(state="rejected", status_code=exc.status_code,
+                                              elapsed_ms=round((time.monotonic() - t_call) * 1000))
+                if response_schema is None or _is_context_error(exc):
+                    raise
+                # Some OpenAI-compatible servers do not implement JSON Schema;
+                # make one bounded retry with their common JSON-object mode.
+                kwargs["response_format"] = {"type": "json_object"}
+                transport_requests.append({"kind": "schema_compatibility", "state": "dispatched"})
+                stream = client.chat.completions.create(**kwargs)
             try:
                 for chunk in stream:
                     if time.monotonic() >= deadline:
@@ -249,12 +352,16 @@ class OpenAIClient:
                         )
                     if cancel_check is not None and cancel_check():
                         logger.info("Remote LLM generation cancelled")
+                        termination = "cancelled"
                         break
                     if getattr(chunk, "usage", None):
                         usage = chunk.usage
+                    reported_model = getattr(chunk, "model", None) or reported_model
+                    server_build = getattr(chunk, "system_fingerprint", None) or server_build
                     if not chunk.choices:
                         continue
                     delta = chunk.choices[0].delta
+                    finish_reason = getattr(chunk.choices[0], "finish_reason", None) or finish_reason
                     content = getattr(delta, "content", None)
                     if content:
                         if ttft is None:
@@ -266,7 +373,12 @@ class OpenAIClient:
                 if callable(close):
                     close()
         except (APIConnectionError, APITimeoutError) as e:
-            local_restarted = recover_on_failure and self._recover_local_server(f"{type(e).__name__}: {e}")
+            termination = "timed_out" if isinstance(e, APITimeoutError) else "failed"
+            error_category = type(e).__name__
+            local_restarted = recover_on_failure and self._recover_local_server(
+                f"{type(e).__name__}: {e}", only_if_dead=isinstance(e, APITimeoutError),
+            )
+            restarted = bool(local_restarted)
             if local_restarted:
                 raise RemoteUnreachable(f"Local llama-server failed and was restarted: {type(e).__name__}: {e}") from e
             # No usable response → degrade. (A read timeout *after* partial
@@ -274,14 +386,18 @@ class OpenAIClient:
             if not full_text:
                 raise RemoteUnreachable(f"{type(e).__name__}: {e}") from e
         except TimeoutError as e:
-            if recover_on_failure and self._recover_local_server(str(e)):
+            termination, error_category = "timed_out", type(e).__name__
+            if recover_on_failure and self._recover_local_server(str(e), only_if_dead=True):
+                restarted = True
                 raise RemoteUnreachable(f"Local llama-server timed out and was restarted: {e}") from e
             raise RemoteUnreachable(str(e)) from e
         except BadRequestError as e:
+            termination, error_category = "failed", type(e).__name__
             if _is_context_error(e):
                 raise ContextExhaustedError(str(e)) from e
             raise
         except Exception as e:
+            termination, error_category = "failed", type(e).__name__
             # Any *other* failure mid-stream: the server closed the connection
             # after the 200 (the httpcore "receive_response_body.failed
             # GeneratorExit" symptom), sent a malformed/error SSE chunk, or the
@@ -293,20 +409,63 @@ class OpenAIClient:
             # the concrete type so the cause is visible next time.
             if _is_context_error(e):
                 raise ContextExhaustedError(str(e)) from e
+            if getattr(e, "status_code", 0) == 503 and "loading model" in str(e).casefold():
+                # llama-server deliberately answers 503 while a model is being
+                # loaded. This is an admission state, not evidence that a
+                # healthy process should be restarted again.
+                raise RemoteUnreachable("Local llama-server is still loading the model") from e
             logger.warning("Remote LLM stream failed mid-response: %s: %s", type(e).__name__, e)
             if recover_on_failure and self._recover_local_server(f"{type(e).__name__}: {e}"):
+                restarted = True
                 raise RemoteUnreachable(f"Local llama-server failed and was restarted: {type(e).__name__}: {e}") from e
             if not full_text:
                 raise RemoteUnreachable(f"{type(e).__name__}: {e}") from e
-
-        if json_mode and full_text:
-            full_text = self._ensure_json(
-                full_text,
-                messages,
-                max_new_tokens,
-                cancel_check=cancel_check,
-                deadline=deadline,
-            )
+        finally:
+            if termination == "completed":
+                termination = "truncated" if finish_reason == "length" else "empty" if not full_text.strip() else "completed"
+            if diagnostics is not None:
+                details = getattr(usage, "completion_tokens_details", None)
+                diagnostics.update({
+                    "requested_output_tokens": requested_limit,
+                    "effective_output_tokens": max_new_tokens,
+                    "output_policy": output_policy, "thinking_mode": thinking_mode,
+                    "finish_reason": finish_reason, "termination": termination,
+                    "error_category": error_category, "visible_chars": len(full_text),
+                    "elapsed_ms": round((time.monotonic() - t_call) * 1000),
+                    "ttft_ms": round(ttft * 1000) if ttft is not None else None,
+                    "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                    "completion_tokens": getattr(usage, "completion_tokens", None),
+                    "reasoning_tokens": getattr(details, "reasoning_tokens", None),
+                    "model": self.model, "reported_model": str(reported_model)[:200] if reported_model else None,
+                    "server_build": str(server_build)[:200] if server_build else None,
+                    "local_build": str(getattr(getattr(self, "_fulloch_local_process", None),
+                                               "_fulloch_build", ""))[:200] or None,
+                    "context_tokens": getattr(self, "context_tokens", None),
+                    "read_timeout_seconds": read_timeout if read_timeout is not None else self._read_timeout,
+                    "generation_timeout_seconds": request_generation_timeout,
+                    "recovery_allowed": recover_on_failure, "restarted": restarted,
+                    "transport_requests": transport_requests,
+                })
+                if transport_requests:
+                    transport_requests[-1].update({
+                        key: diagnostics[key] for key in ("termination", "finish_reason", "elapsed_ms",
+                                                         "prompt_tokens", "completion_tokens", "error_category")
+                    })
+            if output_policy == "research" and failure_capture is not None and full_text:
+                invalid_json = False
+                if json_mode:
+                    try:
+                        json.loads(full_text)
+                    except ValueError:
+                        invalid_json = True
+                if termination != "completed" or invalid_json:
+                    # Explicit diagnostic consumers own review/redaction and storage.
+                    # Never send prompt/history/auth or hidden reasoning to the sink.
+                    try:
+                        failure_capture({"diagnostics": dict(diagnostics), "emission": full_text[:8192],
+                                         "capture_clipped": len(full_text) > 8192})
+                    except Exception:  # Diagnostics must not interfere with work/recovery.
+                        logger.warning("Controlled research emission capture failed")
 
         if stats is not None:
             stats.llm_calls += 1
@@ -318,6 +477,23 @@ class OpenAIClient:
                 stats.llm_prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
             else:
                 stats.llm_output_tokens += out_tokens
+
+        # Research retries belong to the worker, which admits and charges each
+        # fresh request. Never close or repair its emission in the transport;
+        # even syntactically valid JSON at a length/timeout boundary is incomplete.
+        if output_policy == "research" and termination != "completed":
+            full_text = ""
+        if json_mode and full_text and output_policy != "research":
+            full_text = self._ensure_json(
+                full_text,
+                messages,
+                max_new_tokens,
+                cancel_check=cancel_check,
+                deadline=deadline,
+                recover_on_failure=recover_on_failure,
+                diagnostics=diagnostics,
+                stats=stats,
+            )
 
         return full_text
 
@@ -365,6 +541,9 @@ class OpenAIClient:
         *,
         cancel_check: Optional[Callable[[], bool]] = None,
         deadline: Optional[float] = None,
+        recover_on_failure: bool = True,
+        diagnostics: dict | None = None,
+        stats=None,
     ) -> str:
         """Validate the JSON; cheap local close attempt, then one repair round-trip.
 
@@ -396,10 +575,15 @@ class OpenAIClient:
         remaining = (deadline - time.monotonic()) if deadline is not None else self._generation_timeout
         if remaining <= 0:
             error = TimeoutError("LLM generation deadline elapsed before JSON repair")
-            if self._recover_local_server(str(error)):
+            if recover_on_failure and self._recover_local_server(str(error), only_if_dead=True):
                 raise RemoteUnreachable(f"Local llama-server timed out and was restarted: {error}") from error
             raise RemoteUnreachable(str(error)) from error
         logger.debug("Remote JSON invalid; attempting one repair")
+        started = time.monotonic()
+        event = {"kind": "client_format_repair", "state": "dispatched", "termination": "failed"}
+        if diagnostics is not None:
+            diagnostics.setdefault("transport_requests", []).append(event)
+        resp = None
         try:
             from openai import APIConnectionError, APITimeoutError
 
@@ -407,7 +591,7 @@ class OpenAIClient:
                 {"role": "assistant", "content": text},
                 {
                     "role": "user",
-                    "content": "That was not valid JSON. Reply with ONLY the corrected JSON object.",
+                    "content": JSON_REPAIR_USER_PROMPT,
                 },
             ]
             resp = self._client.chat.completions.create(
@@ -425,29 +609,52 @@ class OpenAIClient:
                 return text
             fixed = resp.choices[0].message.content or text
             json.loads(fixed)
+            event["termination"] = "completed"
             return fixed
         except (APIConnectionError, APITimeoutError) as e:
-            if self._recover_local_server(f"JSON repair {type(e).__name__}: {e}"):
+            event.update(error_category=type(e).__name__, termination="timed_out" if isinstance(e, APITimeoutError) else "failed")
+            if recover_on_failure and self._recover_local_server(
+                f"JSON repair {type(e).__name__}: {e}", only_if_dead=isinstance(e, APITimeoutError),
+            ):
+                event["restarted"] = True
                 raise RemoteUnreachable(
                     f"Local llama-server failed and was restarted during JSON repair: {type(e).__name__}: {e}"
                 ) from e
             raise RemoteUnreachable(f"{type(e).__name__}: {e}") from e
         except TimeoutError as e:
-            if self._recover_local_server(str(e)):
+            event.update(error_category=type(e).__name__, termination="timed_out")
+            if recover_on_failure and self._recover_local_server(str(e), only_if_dead=True):
+                event["restarted"] = True
                 raise RemoteUnreachable(f"Local llama-server timed out and was restarted: {e}") from e
             raise RemoteUnreachable(str(e)) from e
         except Exception as e:
+            event["error_category"] = type(e).__name__
             # A 5xx from the local server is a server failure even though the
             # original streaming response completed. Preserve diagnostics and
             # recycle it just like a stream disconnect; malformed repair output
             # itself remains a normal parse failure for the agent loop to handle.
             status_code = getattr(e, "status_code", 0)
             if status_code >= 500:
-                if self._recover_local_server(f"JSON repair {type(e).__name__}: {e}"):
+                if recover_on_failure and self._recover_local_server(f"JSON repair {type(e).__name__}: {e}"):
+                    event["restarted"] = True
                     raise RemoteUnreachable(
                         f"Local llama-server failed and was restarted during JSON repair: {type(e).__name__}: {e}"
                     ) from e
             return text  # let the agent loop's parse-failure path handle it
+        finally:
+            repair_usage = getattr(resp, "usage", None)
+            event.update({
+                "elapsed_ms": round((time.monotonic() - started) * 1000),
+                "finish_reason": getattr(resp.choices[0], "finish_reason", None) if resp else None,
+                "prompt_tokens": getattr(repair_usage, "prompt_tokens", None),
+                "completion_tokens": getattr(repair_usage, "completion_tokens", None),
+                "recovery_allowed": recover_on_failure,
+            })
+            if stats is not None:
+                stats.llm_calls += 1
+                stats.llm_gen_seconds += time.monotonic() - started
+                stats.llm_prompt_tokens += getattr(repair_usage, "prompt_tokens", 0) or 0
+                stats.llm_output_tokens += getattr(repair_usage, "completion_tokens", 0) or 0
 
 
 def _resolve_api_key(explicit: str = "") -> str:
@@ -519,7 +726,7 @@ def test_connection(
         )
         client.chat.completions.create(
             model=model or DEFAULT_MODEL,
-            messages=[{"role": "user", "content": "ping"}],
+            messages=[{"role": "user", "content": LLM_CONNECTION_USER_PROMPT}],
             max_tokens=1,
         )
         return {"ok": True, "error": None}

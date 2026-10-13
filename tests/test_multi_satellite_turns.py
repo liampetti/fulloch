@@ -40,6 +40,23 @@ class TestIsSpeakingIndependence:
         assert a._is_speaking("never-connected") is False
 
 
+class TestConversationHistoryIndependence:
+    def test_history_and_terminal_research_outcomes_stay_on_their_origin_thread(self):
+        a = _make_assistant()
+        sat_a = _connect(a, "sat-a")
+        sat_b = _connect(a, "sat-b")
+
+        history_a = a._history_for(sat_a)
+        history_b = a._history_for(sat_b)
+        history_a.append({"role": "user", "content": "research A"})
+        history_b.append({"role": "user", "content": "research B"})
+        a._record_thinking_history({"role": "tool", "name": "deep_think", "content": "A report"}, "sat-a")
+
+        assert [item["content"] for item in a._history_for(sat_a)] == ["research A", "A report"]
+        assert [item["content"] for item in a._history_for(sat_b)] == ["research B"]
+        assert a._history == []
+
+
 class TestSelfEchoIndependence:
     def test_a_spoken_text_does_not_suppress_b_self_echo_check(self):
         a = _make_assistant()

@@ -42,15 +42,16 @@ class TurnSearch:
     """
 
     def __init__(self):
-        self._cache: dict[str, str] = {}
+        self._cache: dict[str, StepResult] = {}
         self.latest: str | None = None
+        self.summaries: list[str] = []
 
     def cached(self, query: str | None) -> StepResult | None:
-        summary = self._cache.get(query) if query is not None else None
-        if summary is None:
+        step = self._cache.get(query) if query is not None else None
+        if step is None:
             return None
-        self.latest = summary
-        return StepResult(StepKind.NORMAL, summary, in_output=True)
+        self.latest = step.text
+        return step
 
     def summarise(
         self, payload: str, *, summariser, watchdog, clips, play_chunks,
@@ -61,13 +62,21 @@ class TurnSearch:
             clips, play_chunks, session, sink=sink,
             tts_active_event=tts_active_event, max_stalls=2,
         ):
-            return summariser(payload, cancel_check, stats=stats)
+            summary = summariser(payload, cancel_check, stats=stats)
+            if not isinstance(summary, str) or not summary.strip():
+                raise ValueError("The search summariser returned no usable text")
+            return summary
 
     def accept(self, query: str | None, summary: str, original: StepResult) -> StepResult:
         self.latest = summary
+        if summary not in self.summaries:
+            self.summaries.append(summary)
+        step = StepResult(StepKind.NORMAL, summary, in_output=True,
+                          artifact=original.artifact, outcome=original.outcome,
+                          raw_text=original.raw_text if original.raw_text is not None else str(original.text))
         if query is not None:
-            self._cache[query] = summary
-        return StepResult(StepKind.NORMAL, summary, in_output=True, artifact=original.artifact)
+            self._cache[query] = step
+        return step
 
     def grounded_reply(self) -> str | None:
         return self.latest.strip() if self.latest and self.latest.strip() else None

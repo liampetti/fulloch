@@ -39,12 +39,6 @@ thinking_playbook(
     name="notes research",
     triggers=(r"\b(notes?|remember|recall|journal|saved fact|my vault)\b",),
     capabilities=("search_notes", "read_note"),
-    solve_path=(
-        "Search notes using the user's terms before making a claim about saved information.",
-        "Read a specific matching note only when the search excerpt needs context.",
-        "Distinguish stored facts from new analysis in the report.",
-    ),
-    completion_rule="The report identifies the note evidence used or states that none was found.",
 )
 
 _notes_config = config.get("notes", {}) or {}

@@ -32,6 +32,8 @@ class LiveAsrResult:
     text: str
     pcm: np.ndarray
     transcribe_seconds: Optional[float] = None
+    generation: Optional[int] = None
+    capture_id: Optional[int] = None
 
 
 @dataclass
@@ -60,49 +62,151 @@ class ParakeetLiveWorker:
         self._last_partial = defaultdict(float)
         self._started_at = {}
         self._active = set()
+        self._capture_ids = {}
+        self._capture_generations = {}
+        # A rejection must take effect immediately in the recorder thread, not
+        # after stale frame commands happen to drain from this worker's FIFO.
+        # Commands and results carry this per-satellite generation so an
+        # in-flight CUDA call cannot route obsolete speech after cancellation.
+        self._generations = defaultdict(int)
+        self._retired_captures = defaultdict(int)
+        self._generation_lock = threading.Lock()
         self._closed = threading.Event()
         self._thread = threading.Thread(target=self._run, name="parakeet-live-asr", daemon=True)
         self._thread.start()
 
-    def feed_frame(self, satellite_id, pcm) -> None:
+    def feed_frame(self, satellite_id, pcm, *, capture_id=None) -> None:
+        generation = self._generation(satellite_id)
+        if not self._is_current(satellite_id, generation, capture_id):
+            return
         try:
-            self._frames.put_nowait(("frame", satellite_id, np.asarray(pcm, dtype=np.float32)))
+            self._frames.put_nowait(
+                ("frame", satellite_id, generation, capture_id, np.asarray(pcm, dtype=np.float32))
+            )
         except queue.Full:
             pass
 
-    def start(self, satellite_id, pcm) -> None:
+    def start(self, satellite_id, pcm, *, capture_id=None) -> None:
         """Begin a VAD-confirmed capture with its short speech pre-roll."""
+        generation = self._generation(satellite_id)
+        if not self._is_current(satellite_id, generation, capture_id):
+            return
         try:
-            self._frames.put_nowait(("start", satellite_id, np.asarray(pcm, dtype=np.float32)))
+            self._frames.put_nowait(
+                ("start", satellite_id, generation, capture_id, np.asarray(pcm, dtype=np.float32))
+            )
         except queue.Full:
             pass
 
     def finish(self, item) -> bool:
+        satellite_id = item[4]
+        generation = self._generation(satellite_id)
+        capture_id = item[12] if len(item) > 12 else None
+        if not self._is_current(satellite_id, generation, capture_id):
+            return True  # already accepted; no duplicate inference needed
+        command = ("final", satellite_id, generation, capture_id, item)
         try:
-            self._frames.put_nowait(("final", item[4], item))
+            # Endpoint and wake-verification work is authoritative. Drop queued
+            # rolling partials for this capture and run it next rather than
+            # making it wait behind stale live snapshots.
+            if not (len(item) > 10 and item[10]):
+                self._discard_queued_frames(
+                    satellite_id, generation, capture_id=capture_id, partials_only=True
+                )
+            with self._frames.mutex:
+                if self._frames.maxsize > 0 and len(self._frames.queue) >= self._frames.maxsize:
+                    return False
+                self._frames.queue.appendleft(command)
+                self._frames.not_empty.notify()
             return True
         except queue.Full:
-            # Preserve an endpoint over a stale partial frame.
-            try:
-                self._frames.get_nowait()
-                self._frames.put_nowait(("final", item[4], item))
-                return True
-            except queue.Empty:
-                return False
+            return False
 
     def discard(self, satellite_id) -> None:
-        """Drop an abandoned capture without blocking the recorder."""
-        try:
-            self._frames.put_nowait(("discard", satellite_id, None))
-        except queue.Full:
-            # The next endpoint is more important than stale partial state.
-            pass
+        """Immediately invalidate pending live work for an abandoned capture."""
+        with self._generation_lock:
+            old_generation = self._generations[satellite_id]
+            self._generations[satellite_id] += 1
+            generation = self._generations[satellite_id]
+        # A concurrently started new generation must not be removed.
+        self._discard_queued_frames(satellite_id, old_generation)
+        self._queue_reset(satellite_id, generation)
+
+    def discard_capture(self, satellite_id, capture_id) -> None:
+        """Retire a committed capture without invalidating newer speech."""
+        with self._generation_lock:
+            self._retired_captures[satellite_id] = max(
+                self._retired_captures[satellite_id], capture_id
+            )
+            generation = self._generations[satellite_id]
+        self._discard_queued_frames(satellite_id, capture_id=capture_id)
+        self._queue_reset(satellite_id, generation, capture_id)
+
+    def _queue_reset(self, satellite_id, generation, capture_id=None) -> None:
+        # Buffer mutation belongs to the model worker. This control command is
+        # non-blocking and never waits for an in-flight CUDA call. If the
+        # queue is full, the next command's validity check performs the cleanup.
+        with self._frames.mutex:
+            if len(self._frames.queue) < self._frames.maxsize:
+                self._frames.queue.appendleft(("reset", satellite_id, generation, capture_id, None))
+                self._frames.not_empty.notify()
+
+    def _generation(self, satellite_id) -> int:
+        with self._generation_lock:
+            return self._generations[satellite_id]
+
+    def _is_current(self, satellite_id, generation, capture_id=None) -> bool:
+        with self._generation_lock:
+            return self._generations[satellite_id] == generation and (
+                capture_id is None or capture_id > self._retired_captures[satellite_id]
+            )
+
+    def is_current_result(self, satellite_id, result) -> bool:
+        """Recheck after emission/queueing as cancellation can happen at either boundary."""
+        return result.generation is None or self._is_current(
+            satellite_id, result.generation, result.capture_id
+        )
+
+    def _discard_queued_frames(
+        self, satellite_id, generation=None, *, capture_id=None, partials_only=False
+    ) -> None:
+        """Remove stale partial commands without waiting for the worker loop.
+
+        `queue.Queue` does not provide selective removal. Its queue is protected
+        by `mutex`, so filtering it here is safe and lets cancellation free the
+        backlog immediately. A currently executing NeMo call cannot be safely
+        interrupted, but its generation check prevents it from emitting a stale
+        result when it returns.
+        """
+        with self._frames.mutex:
+            retained = deque(
+                command
+                for command in self._frames.queue
+                if not (
+                    command is not None
+                    and command[1] == satellite_id
+                    and (generation is None or command[2] <= generation)
+                    and (not partials_only or command[0] in {"frame", "start"})
+                    and (
+                        capture_id is None
+                        or (command[3] is not None and command[3] <= capture_id)
+                    )
+                )
+            )
+            if len(retained) != len(self._frames.queue):
+                self._frames.queue.clear()
+                self._frames.queue.extend(retained)
+                self._frames.not_full.notify_all()
 
     def get_event(self, timeout=0.5):
-        try:
-            return self._events.get(timeout=timeout)
-        except queue.Empty:
-            return None
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                event = self._events.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                return None
+            if not isinstance(event, LiveAsrEvent) or self.is_current_result(event.item[4], event.result):
+                return event
 
     def close(self) -> None:
         self._closed.set()
@@ -153,20 +257,34 @@ class ParakeetLiveWorker:
         self._last_partial.pop(satellite_id, None)
         self._started_at.pop(satellite_id, None)
         self._active.discard(satellite_id)
+        self._capture_ids.pop(satellite_id, None)
+        self._capture_generations.pop(satellite_id, None)
 
     def _run(self) -> None:
         while not self._closed.is_set():
             command = self._frames.get()
             if command is None:
                 return
-            kind, satellite_id, payload = command
+            kind, satellite_id, generation, capture_id, payload = command
+            if satellite_id in self._active and not self._is_current(
+                satellite_id, self._capture_generations[satellite_id], self._capture_ids[satellite_id]
+            ):
+                self._reset_capture(satellite_id)
+            if kind == "reset":
+                # Cleanup above retires stale state but leaves a concurrently
+                # started, current capture alone.
+                continue
+            if not self._is_current(satellite_id, generation, capture_id):
+                continue
             if kind == "start":
                 self._reset_capture(satellite_id)
                 self._active.add(satellite_id)
+                self._capture_ids[satellite_id] = capture_id
+                self._capture_generations[satellite_id] = generation
                 self._started_at[satellite_id] = time.monotonic()
                 self._append(satellite_id, payload)
             elif kind == "frame":
-                if satellite_id not in self._active:
+                if satellite_id not in self._active or self._capture_ids[satellite_id] != capture_id:
                     continue
                 self._append(satellite_id, payload)
                 now = time.monotonic()
@@ -184,32 +302,39 @@ class ParakeetLiveWorker:
                     True,
                     satellite_id,
                     time.monotonic(),
+                    False, False, None, None, False, None, capture_id,
                 )
                 try:
                     text, transcribe_seconds = self._transcribe(pcm)
-                    self._emit(
-                        LiveAsrEvent(
-                            LiveAsrResult(text, pcm, transcribe_seconds), item, False
+                    if self._is_current(satellite_id, generation, capture_id):
+                        self._emit(
+                            LiveAsrEvent(
+                                LiveAsrResult(text, pcm, transcribe_seconds, generation, capture_id),
+                                item, False,
+                            )
                         )
-                    )
                 except Exception as exc:
                     logger.exception("Parakeet live partial failed")
                     self._emit(LiveAsrFailure(exc))
                     self._closed.set()
                     return
-            elif kind == "discard":
-                self._reset_capture(satellite_id)
-            else:
+            elif kind == "final":
                 item = payload
                 pcm = np.asarray(item[0], dtype=np.float32)
-                self._reset_capture(satellite_id)
+                early_verification = len(item) > 10 and item[10]
+                if not early_verification and (
+                    capture_id is None or self._capture_ids.get(satellite_id) == capture_id
+                ):
+                    self._reset_capture(satellite_id)
                 try:
                     text, transcribe_seconds = self._transcribe(pcm)
-                    self._emit(
-                        LiveAsrEvent(
-                            LiveAsrResult(text, pcm, transcribe_seconds), item, True
+                    if self._is_current(satellite_id, generation, capture_id):
+                        self._emit(
+                            LiveAsrEvent(
+                                LiveAsrResult(text, pcm, transcribe_seconds, generation, capture_id),
+                                item, True,
+                            )
                         )
-                    )
                 except Exception as exc:
                     logger.exception("Parakeet live final failed")
                     self._emit(LiveAsrFailure(exc))

@@ -52,7 +52,30 @@ def route_deep_think_only_tools(emission, user_prompt, *, registry, requires_dee
         or not registry.is_available("deep_think")
     ):
         return emission
-    return {"actions": [{"intent": "deep_think", "args": [user_prompt]}]}
+    # Keep the original order: a dependent save must not move ahead of research
+    # when a specialist lookup is delegated. Coalesce background work and remap
+    # explicit dependencies when several specialist calls become one handoff.
+    routed, indices, research_index = [], {}, None
+    for index, action in enumerate(actions):
+        name = str(action.get("intent") or "")
+        canonical = registry.canonical_name(name)
+        background = requires_deep_think(name) or canonical == "deep_think" or (
+            finance_advice and canonical in {"get_finance_quote", "get_exchange_rate", "get_watchlist_brief", "get_market_brief"}
+        )
+        if background:
+            if research_index is None:
+                research_index = len(routed)
+                routed.append({"intent": "deep_think", "args": [user_prompt]})
+            indices[index] = research_index
+        else:
+            indices[index] = len(routed)
+            action = dict(action)
+            if isinstance(action.get("depends_on"), list):
+                action["depends_on"] = [indices.get(dependency, dependency)
+                                        if isinstance(dependency, int) and not isinstance(dependency, bool)
+                                        else dependency for dependency in action["depends_on"]]
+            routed.append(action)
+    return {"actions": routed}
 
 
 def _satellite_message_args(emission):
@@ -104,6 +127,13 @@ def parse_model_emission(text, *, parse):
             raise ValueError("Unusable agent emission") from exc
         logger.warning("Agent emission was prose, not JSON; treating as a reply (%s)", exc)
         emission = {"reply": prose}
+    if not isinstance(emission, dict):
+        raise ValueError("Agent emission must be an object")
+    if "actions" in emission and (not isinstance(emission["actions"], list) or any(
+        not isinstance(action, dict) or not isinstance(action.get("intent"), str)
+        or not action["intent"].strip() for action in emission["actions"]
+    )):
+        raise ValueError("Agent actions must name tools")
     if isinstance(emission.get("actions"), list) and len(emission["actions"]) > 3:
         logger.warning("Agent emitted %d actions; capping to 3", len(emission["actions"]))
         emission = {**emission, "actions": emission["actions"][:3]}

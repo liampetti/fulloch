@@ -17,7 +17,7 @@ from typing import Optional
 import requests
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .config_store import read_config
 from .lifecycle import LOG_BUFFER, AppContext
@@ -25,6 +25,7 @@ from .lifecycle import LOG_BUFFER, AppContext
 _SERVER_DIR = Path(__file__).resolve().parent
 _LOGO_PATH = _SERVER_DIR.parent / "fulloch.png"
 _PARLOCH_PATH = _SERVER_DIR.parent / "parloch.png"
+_ANIMATION_PATH = _SERVER_DIR.parent / "utils" / "fulloch_animate.png"
 _SERVER_INSTANCE_ID = uuid.uuid4().hex
 logger = logging.getLogger(__name__)
 HISTORY_LIMIT = 200
@@ -137,6 +138,7 @@ class SatelliteSettingRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     text: str
+    ha_area: Optional[str] = Field(default=None, max_length=256)
 
 
 class SpeakRequest(BaseModel):
@@ -269,6 +271,12 @@ def register_chat_routes(
         remote = (q == "1") if q is not None else _is_remote_llm()
         path = _PARLOCH_PATH if remote and _PARLOCH_PATH.is_file() else _LOGO_PATH
         return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/fulloch_animate.png")
+    def animation_sheet() -> FileResponse:
+        return FileResponse(
+            _ANIMATION_PATH, media_type="image/png", headers={"Cache-Control": "no-cache"},
+        )
 
     @app.get("/config")
     def get_config() -> JSONResponse:
@@ -546,7 +554,21 @@ def register_chat_routes(
     @app.post("/chat")
     def chat(req: ChatRequest) -> dict:
         require_ready()
-        answer = context.assistant.handle_text_turn(req.text)
+        # Room selection belongs to this browser request, not the shared
+        # dashboard-text session or whichever voice satellite happens to be live.
+        ha_area = (req.ha_area or "").strip()
+        if ha_area:
+            from tools import ha_client
+
+            areas = {area["id"]: area["name"] for area in ha_client.list_areas()}
+            if ha_area not in areas:
+                raise HTTPException(status_code=400, detail=(
+                    "I couldn't verify this browser's selected room. "
+                    "Please select the room again; no command was sent."
+                ))
+            answer = context.assistant.handle_text_turn(req.text, ha_area=ha_area)
+        else:
+            answer = context.assistant.handle_text_turn(req.text)
         return {"answer": answer}
 
     @app.get("/media-artwork/{entity_id}")

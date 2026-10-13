@@ -423,4 +423,4 @@ class TestNoLlmReactive:
         out = loop._run_without_llm(
             "weather", {"actions": [{"intent": "external_information", "args": ["x"]}]}
         )
-        assert out == "NO_AI"
+        assert out == "NO_AI Not completed: external information."

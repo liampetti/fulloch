@@ -18,6 +18,7 @@ from utils.intent_catch import (
     extract_color,
     extract_compound_actions,
     extract_cover,
+    extract_currency_conversion,
     extract_deep_think,
     extract_dim_brighten,
     extract_light_brightness,
@@ -847,3 +848,10 @@ class TestExtractDeepThink:
     )
     def test_non_matches(self, utterance):
         assert extract_deep_think(utterance) is None
+
+
+def test_currency_conversion_is_not_misread_as_a_stock_ticker():
+    assert extract_currency_conversion("7500 aud in euro") == ("AUD", "EUR", 7500.0)
+    assert catchAll("7500 aud in euro") == {
+        "actions": [{"intent": "get_exchange_rate", "args": ["AUD", "EUR", 7500.0]}]
+    }

@@ -136,6 +136,7 @@ general:
 # alongside foreground conversation.
 thinking:
   server_slots: 1                 # 1 = idle jobs; 2 = foreground + background
+  fact_card_synthesis: true       # compact evidence cards; false restores raw-ledger synthesis
 
 # === MCP Servers ============================================================
 # Each server must explicitly allowlist tools the thinking worker may use.

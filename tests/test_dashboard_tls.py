@@ -45,10 +45,9 @@ def _capture_dispatcher(monkeypatch):
 
     class _FakeServer:
         async def serve_forever(self):
-            # Block (cheaply) so the test thread can observe the captured
-            # args. The test process is going to exit shortly; the daemon
-            # thread dies with it.
-            await asyncio.Event().wait()
+            # The fake owns no listening socket; finish and join before patches
+            # are undone instead of leaking a daemon into later routing tests.
+            return
 
         async def __aenter__(self):
             return self
@@ -64,6 +63,15 @@ def _capture_dispatcher(monkeypatch):
         return _FakeServer()
 
     monkeypatch.setattr(tls_dispatcher.asyncio, "start_server", fake_start_server)
+    original_start = tls_dispatcher.start_tls_dispatcher
+
+    def joined_start(*args, **kwargs):
+        thread = original_start(*args, **kwargs)
+        thread.join(timeout=2.0)
+        assert not thread.is_alive(), "Fake dispatcher must finish within its test"
+        return thread
+
+    monkeypatch.setattr(tls_dispatcher, "start_tls_dispatcher", joined_start)
     return captured
 
 
@@ -118,6 +126,7 @@ def test_tls_enabled_when_both_files_exist(monkeypatch, tmp_path):
     cert.write_text("x")
     key.write_text("x")
     captured = _capture_config(monkeypatch)
+    _capture_dispatcher(monkeypatch)
 
     dashboard.start_dashboard(
         _stub_assistant(),

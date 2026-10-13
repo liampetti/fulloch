@@ -151,6 +151,14 @@ SCHEMA: tuple = (
         choices=(1, 2),
     ),
     Field(
+        "thinking",
+        "fact_card_synthesis",
+        "bool",
+        "Thinking",
+        True,
+        "Generate deliberate-thinking reports from compact evidence fact cards. Disable only to compare the previous raw-ledger synthesis path; a restart is required.",
+    ),
+    Field(
         "finance",
         "watchlist",
         "list",

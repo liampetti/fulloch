@@ -84,6 +84,31 @@ def test_thinking_clarification_resumes_existing_job_instead_of_submitting(monke
     assert assistant._pending_thinking_tasks == {}
 
 
+def test_approval_queues_research_with_conversation_scope(monkeypatch):
+    from core.background_jobs import BackgroundJobManager
+
+    monkeypatch.setattr(assistant_module.notes, "recall_facts", lambda: "")
+    assistant = Assistant.__new__(Assistant)
+    assistant._history = []
+    assistant._satellite_histories = {"thread": [
+        {"role": "user", "content": "How are my shares doing?"},
+        {"role": "user", "content": "Should I buy, sell or hold?"},
+        {"role": "user", "content": "yes"},
+    ]}
+    assistant._pending_thinking_tasks = {}
+    assistant.thinking_jobs = BackgroundJobManager(lambda *_: ("", ""), admission_check=lambda: False)
+    result = assistant.run_thinking_task(
+        "yes", origin_satellite_id="thread", origin_source="conversation",
+        handoff={"research_task": "Research the portfolio's outlook"},
+    )
+    job = assistant.thinking_jobs._jobs[result["id"]]
+    assert "Research the portfolio's outlook" in job.snapshot.task
+    assert "How are my shares doing?" in job.snapshot.task
+    assert "Should I buy, sell or hold?" in job.snapshot.task
+    assert result["title"] != "yes"
+    assistant.thinking_jobs.cancel(result["id"])
+
+
 def test_conversation_retry_keeps_task_identity_and_links_failed_predecessor(monkeypatch):
     from core.background_jobs import BackgroundJobManager, JobStatus
 
@@ -135,6 +160,63 @@ def test_conversation_retry_keeps_task_identity_and_links_failed_predecessor(mon
     assert "9B parameters" in retry_job.snapshot.task
     assert "sources recent" in retry_job.snapshot.task
     assistant.thinking_jobs.cancel(retry["id"])
+
+
+def test_repeated_analysis_request_is_fresh_and_carries_no_evidence(monkeypatch):
+    """A reworded repeat of a prior analysis must start a fresh run: new task
+    identity, attempt 1, and no retained-evidence handoff from the predecessor.
+    (Regression: unrelated sources were imported from an earlier
+    runs of the same task, not fetched by the new search.)"""
+    from core.background_jobs import BackgroundJobManager
+
+    monkeypatch.setattr(assistant_module.notes, "recall_facts", lambda: "")
+    assistant = Assistant.__new__(Assistant)
+    assistant._history = []
+    assistant._satellite_histories = {"thread-example": [{"role": "user", "content": "Example thread"}]}
+    assistant._pending_thinking_tasks = {}
+    assistant.thinking_jobs = BackgroundJobManager(lambda *_: ("", ""), admission_check=lambda: False)
+
+    initial = assistant.run_thinking_task(
+        "give me a deep analysis on the next Solar League race coming up",
+        origin_satellite_id="thread-example", origin_source="conversation",
+    )
+    first_job = assistant.thinking_jobs._jobs[initial["id"]]
+    first_job.record_outcome(
+        "external_information", "evidence", "One prior-race source.",
+        {"sources": [{"url": "https://example.test/old-race", "text": "Old race timing."}]},
+        (), {"type": "web_research", "sources": [
+            {"url": "https://example.test/old-race", "source_text": "Old race timing."},
+        ]},
+    )
+    first_job.status = JobStatus.READY
+
+    # A new analysis of the same topic, reworded. It matches the prior task by
+    # topic overlap, so the OLD code would have folded it into the same task_id
+    # and handed over the predecessor's evidence. It must instead be fresh.
+    repeated = assistant.run_thinking_task(
+        "deep analysis of the next Solar League race coming up",
+        origin_satellite_id="thread-example", origin_source="conversation",
+    )
+    repeated_job = assistant.thinking_jobs._jobs[repeated["id"]]
+
+    assert repeated["id"] != initial["id"]
+    record = repeated_job.snapshot.task_record
+    # Fresh task identity: new task_id, attempt resets to 1, fresh flag set.
+    assert record["task_id"] != first_job.snapshot.task_record["task_id"]
+    assert record["attempt"] == 1
+    # No evidence carried over from the predecessor: the job's handoff holds no
+    # retained observations (the retry path would have populated them).
+    assert not repeated_job.snapshot.handoff.get("observations")
+    # Lineage is kept for provenance but must not trigger a handoff.
+    assert record["parent_job_id"] == initial["id"]
+    # The fresh flag is set on the resolved record (assistant gate), even though
+    # submit's snapshot task_record is a fixed projection that omits it.
+    from core.research_task import resolve_research_task
+    _, resolved = resolve_research_task(
+        "deep analysis of the next Solar League race coming up", first_job,
+    )
+    assert resolved.get("fresh") is True
+    assistant.thinking_jobs.cancel(repeated["id"])
 
 
 def test_conversation_retry_reuses_same_thread_active_job(monkeypatch):
@@ -244,10 +326,16 @@ def test_refinement_records_source_turn_on_versioned_amendment(monkeypatch):
     )
     record = assistant.thinking_jobs._jobs[refined["id"]].snapshot.task_record
 
-    assert record["revision"] == 2
+    # A related request now starts a fresh task (revision 1, new task_id) based
+    # on the prior objective, with the request recorded as a constraint amendment.
+    assert record["revision"] == 1
     assert "turn-refinement" in record["source_turn_ids"]
     assert record["amendments"][0]["source_turn_id"] == "turn-refinement"
-    assert "9B parameters" in assistant.thinking_jobs._jobs[refined["id"]].snapshot.task
+    # The task is anchored on the prior objective; the new request is a constraint.
+    assert "9B parameters" in record["constraints"][-1]
+    assert assistant.thinking_jobs._jobs[refined["id"]].snapshot.task == (
+        "Research the latest local AI trends for running capable models at home"
+    )
     assistant.thinking_jobs.cancel(refined["id"])
 
 
@@ -419,6 +507,26 @@ def test_worker_callback_binds_current_model_and_services(monkeypatch):
     assistant.thinking_jobs.update_stage.assert_called_once_with(job, "Planning research")
     assert job.planning_complete is True
     assert job.synthesis_state["chapter_planning"] == "deterministic_fallback"
+
+
+def test_worker_publishes_title_from_structured_plan(monkeypatch):
+    assistant = Assistant.__new__(Assistant)
+    assistant.slm_model = object()
+    assistant.grammar = None
+    assistant._turn_lock = threading.Lock()
+    assistant.thinking_jobs = MagicMock()
+    assistant.thinking_server_slots = 2
+    response = ('{"report_title":"News and price movements for held shares",'
+                '"chapters":[{"title":"Share prices","priority":"high",'
+                '"questions":[{"question":"How have share prices moved?","priority":"high"}],'
+                '"tools":[],"queries":["share price history"]}]}')
+    monkeypatch.setattr(assistant_module, "generate_slm", MagicMock(return_value=response))
+    monkeypatch.setattr(assistant_module, "native_capabilities", lambda: {})
+    job = BackgroundJob("job", JobSnapshot("Analyze my shares"))
+    assistant._run_background_thinking_job(job, lambda: bool(job.title))
+    assert job.title == "News and price movements for held shares"
+    assert job.view()["title"] == job.title
+    assert assistant.thinking_jobs.update_stage.call_count == 2
 
 
 def test_terminal_job_callback_serializes_history_and_forwards_report_card():

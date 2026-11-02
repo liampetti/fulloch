@@ -73,6 +73,39 @@ def test_late_attachment_and_chat_state_are_isolated_per_app(tmp_path, monkeypat
     assert len(clients[1].get("/history").json()) == 2
 
 
+def test_satellite_lifecycle_events_are_not_dashboard_messages(tmp_path, monkeypatch):
+    monkeypatch.delenv("DASHBOARD_PASSWORD", raising=False)
+    monkeypatch.setattr("server.auth.load_sessions", lambda: {})
+    config = tmp_path / "config.yml"
+    config.write_text("general: {}\n")
+    listeners = []
+    context = AppContext(lifecycle=Lifecycle(phase=READY), config_path=str(config))
+    context.set_assistant(SimpleNamespace(greeting_text="", register_turn_listener=listeners.append))
+    app = create_app(context=context)
+    client = TestClient(app)
+
+    async def exercise_stream():
+        class ConnectedRequest:
+            async def is_disconnected(self):
+                return False
+
+        stream = await next(route.endpoint for route in app.routes if route.path == "/stream")(
+            ConnectedRequest()
+        )
+        message = {"role": "assistant", "content": "Reminder", "source": "proactive", "ts": 1}
+        try:
+            listeners[0]({"type": "assistant.state", "state": "thinking"})
+            listeners[0]({"type": "assistant.stand_down_after_tts", "satellite_id": "kitchen"})
+            listeners[0](message)
+            frame = await asyncio.wait_for(anext(stream.body_iterator), timeout=1)
+            assert json.loads(frame.removeprefix("data: ")) == message
+            assert client.get("/history").json() == [message]
+        finally:
+            await stream.body_iterator.aclose()
+
+    asyncio.run(exercise_stream())
+
+
 def test_ha_credentials_and_artwork_share_live_client_state(tmp_path, monkeypatch):
     from server import credentials_store, routes_chat
     from tools import ha_client

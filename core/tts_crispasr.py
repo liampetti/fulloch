@@ -256,10 +256,10 @@ def set_voice(voice_name: str):
     Same convention as core/tts.py: the transcript falls back to
     data/voices/default.txt when <voice_name>.txt doesn't exist.
     """
-    ref_audio = f"{VOICES_DIR}/{voice_name}.wav"
-    txt_path = Path(f"{VOICES_DIR}/{voice_name}.txt")
-    if not txt_path.is_file():
-        txt_path = Path(f"{VOICES_DIR}/default.txt")
+    from .voice_reference import voice_reference
+
+    audio, txt_path = voice_reference(voice_name, VOICES_DIR)
+    ref_audio = str(audio)
     ref_text = txt_path.read_text().strip()
     logger.info("Setting voice clone to: %s", voice_name)
     global _voice_prompt

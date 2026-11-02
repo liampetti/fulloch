@@ -28,6 +28,37 @@ from .thinking_evidence import (
 
 logger = logging.getLogger(__name__)
 
+UNDER_ANSWERED_MAX_QUESTIONS = 6
+
+
+def _under_answered_section(job: BackgroundJob) -> str:
+    """Bounded, verbatim list of essential requirements the report left open.
+
+    Rendered only when the job marked itself a partial answer *and* named at
+    least one essential unresolved requirement. A fully answered report must
+    not carry a limitations footer, and a partial report whose gaps are
+    unnamed (e.g. an evidence-only fallback) has nothing honest to list.
+    Questions are verbatim from the requirement records -- no model prose.
+    """
+    state = job.synthesis_state or {}
+    if not state.get("partial_report"):
+        return ""
+    unresolved_ids = [
+        str(value) for value in (state.get("essential_unresolved_requirement_ids") or [])
+        if value
+    ]
+    if not unresolved_ids:
+        return ""
+    questions = []
+    for requirement in job.evidence_requirements or []:
+        if str(requirement.get("identifier")) in set(unresolved_ids):
+            question = str(requirement.get("question") or "").strip()
+            if question and question not in questions:
+                questions.append(question)
+    if not questions:
+        return ""
+    return "## Under-answered\n\n" + "\n".join(f"- {question}" for question in questions[:UNDER_ANSWERED_MAX_QUESTIONS])
+
 
 def _failed_report_message(job: BackgroundJob) -> str:
     """Explain a blocking search outage without speaking execution diagnostics."""
@@ -124,6 +155,7 @@ def publish_status(
                 "elapsed_seconds": round(elapsed_seconds, 2),
                 "terminal_reason": reason,
                 "task": job.snapshot.task,
+                "title": job.display_title(),
                 "objective": task_record.get("objective") or job.snapshot.task,
                 "stage": job.stage,
                 "progress": research_progress(job),
@@ -158,6 +190,17 @@ def publish_status(
         if conversational and question:
             announce(question, follow_up=True, thread_label="input")
         return
+    if job.status in {JobStatus.FAILED, JobStatus.CANCELLED} and job.synthesis_state.get("memory_safety_stop"):
+        message = (
+            "I stopped that research because system memory was overloaded. "
+            "I'll cool down for five minutes; please ask me to try again afterwards if you want."
+        )
+        if satellite_id:
+            pending_tasks.pop(satellite_id, None)
+        publish(message, job.error)
+        if conversational:
+            announce(message, follow_up=False, thread_label="memory-stop")
+        return
     if job.status == JobStatus.FAILED:
         if satellite_id:
             pending_tasks.pop(satellite_id, None)
@@ -174,7 +217,12 @@ def publish_status(
     if job.status == JobStatus.READY:
         delivery = (job.synthesis_state.get("delivery_assessment") or {}).get("status")
         evidence_only = bool(job.synthesis_state.get("limited_evidence_fallback")) or delivery in {"blocked", "evidence_only"}
-        partial_message = "I've saved the research report."
+        if evidence_only:
+            partial_message = "I've saved research notes, but the requested analysis is not yet verified."
+        elif delivery == "partial" or job.synthesis_state.get("partial_report"):
+            partial_message = "I've saved a partial research report; some questions remain open."
+        else:
+            partial_message = "I've saved the research report."
         if not job.note_id:
             job.note_id = save_report(job)
         if satellite_id:
@@ -632,11 +680,13 @@ def save_report(job: BackgroundJob) -> str:
         findings = re.sub(r"(?ims)^## References\s*\n.*?(?=^##\s|\Z)", "", findings).rstrip()
         findings = _retain_referenced_paragraphs(findings, references)
     report = (
-        f"# Deep Think {'Research Notes' if evidence_only else 'Report'}\n\n"
+        f"# {job.display_title()}\n\n"
+        f"**Type:** Deep Think {'Research Notes' if evidence_only else 'Report'}\n\n"
         f"**Generated:** {timestamp}\n\n"
         f"**Objective:** {job.snapshot.task}\n\n{findings.strip()}\n"
     )
     for appendix in (
+        _under_answered_section(job),
         _travel_report_appendix(job.artifacts) if not job.chapter_plan else "",
         references,
     ):

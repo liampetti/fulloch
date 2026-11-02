@@ -1,0 +1,232 @@
+{
+  "schema_version": 2,
+  "task": "Give me a deep, neutral briefing on TEST including its latest quoted price and uncertainties.",
+  "task_record": {},
+  "run_metadata": {
+    "job_id": "synthetic-finance",
+    "task_id": null,
+    "thread_id": null,
+    "parent_job_id": null,
+    "attempt": 1,
+    "origin_turn_id": null,
+    "process_generation": null,
+    "deployment": {},
+    "process_id": null,
+    "model_calls": 0,
+    "context_tokens": null,
+    "tokenizer": null,
+    "model_settings": {},
+    "admission_denials": [],
+    "admission_decisions": [],
+    "selected_actions": [],
+    "stage_diagnostics": []
+  },
+  "research_context": {
+    "task": "Give me a deep, neutral briefing on TEST including its latest quoted price and uncertainties.",
+    "temporal_intent": "current",
+    "requested_dates": [],
+    "ambiguous_dates": [],
+    "as_of": "2026-10-29T10:00:00+00:00",
+    "edition_year": 2026,
+    "edition_year_explicit": false,
+    "scope_version": 2,
+    "event_labels": [],
+    "entities": [
+      "TEST"
+    ],
+    "comparison_dimensions": [
+      "price",
+      "limitations"
+    ],
+    "source_preferences": [
+      "specialised_provider"
+    ],
+    "inherited_entities": [],
+    "unresolved_references": [],
+    "requested_category": ""
+  },
+  "source_registry": {
+    "artifact-001": {
+      "id": "artifact-001",
+      "title": "Market record 1",
+      "class": "specialised_provider",
+      "retrieved_at": "2026-10-29T10:00:00+00:00",
+      "publisher_role": "specialised_provider",
+      "origin": "Google Finance via SerpApi"
+    }
+  },
+  "scope_registry": {
+    "src-aaf9d50526fa271a": {
+      "subject": "Example Corporation",
+      "temporal_role": "provider_snapshot",
+      "provider": "Google Finance via SerpApi",
+      "observed_at": "2026-10-29T09:59:00+00:00",
+      "constraints": {
+        "symbol": "TEST",
+        "exchange": "EXAMPLE",
+        "currency": "USD"
+      },
+      "source_scope": "Synthetic test fixture; not real provider data."
+    }
+  },
+  "fact_cards": [
+    {
+      "id": "artifact-001-finance-1",
+      "source": "artifact-001",
+      "kind": "structured_record",
+      "record": {
+        "symbol": "TEST",
+        "exchange": "EXAMPLE",
+        "name": "Example Corporation",
+        "price": 42.5,
+        "currency": "USD",
+        "quoted_at": "2026-10-29T09:59:00+00:00"
+      },
+      "identity": {
+        "subject": "example corporation",
+        "claim_type": "market_snapshot",
+        "period": "2026-10-29t09:59:00+00:00"
+      },
+      "status": "single_source",
+      "scope_id": "src-aaf9d50526fa271a",
+      "eligibility": {
+        "scoped_claims": true,
+        "complete_structured_option": true
+      },
+      "provenance": {
+        "source_id": "artifact-001"
+      },
+      "finding": {
+        "version": 1,
+        "role": "record",
+        "context_state": "record",
+        "assessment": "unassessed"
+      },
+      "independence_key": "provider:google finance via serpapi",
+      "temporal_role": "provider_snapshot"
+    }
+  ],
+  "coverage_requirements": [
+    {
+      "identifier": "answer",
+      "question": "Give me a deep, neutral briefing on TEST including its latest quoted price and uncertainties.",
+      "importance": "high",
+      "freshness": "task-dependent",
+      "state": "open",
+      "dimension": "",
+      "temporal_scope": "current",
+      "evidence_ids": [],
+      "completion_criteria": "Answer the named analytical questions; shared task keywords alone are insufficient.",
+      "answer_coverage": "not_verified",
+      "evidence_terms": [],
+      "dependencies": [],
+      "as_of": "2026-10-29T10:00:00+00:00",
+      "is_subject_identity": false
+    },
+    {
+      "identifier": "current-context",
+      "question": "Verify the material current claim with fresh source material.",
+      "importance": "high",
+      "freshness": "fresh",
+      "state": "open",
+      "dimension": "",
+      "temporal_scope": "current",
+      "evidence_ids": [],
+      "completion_criteria": "At least one direct substantive answering claim within the requested scope.",
+      "answer_coverage": "not_verified",
+      "evidence_terms": [],
+      "dependencies": [],
+      "as_of": "2026-10-29T10:00:00+00:00",
+      "is_subject_identity": false
+    },
+    {
+      "identifier": "fact-price",
+      "question": "Establish price for the requested subject(s).",
+      "importance": "high",
+      "freshness": "task-dependent",
+      "state": "open",
+      "dimension": "price",
+      "temporal_scope": "current",
+      "evidence_ids": [],
+      "completion_criteria": "At least one direct substantive answering claim within the requested scope.",
+      "answer_coverage": "not_verified",
+      "evidence_terms": [],
+      "dependencies": [],
+      "as_of": "2026-10-29T10:00:00+00:00",
+      "is_subject_identity": false
+    },
+    {
+      "identifier": "fact-limitations",
+      "question": "Establish limitations for the requested subject(s).",
+      "importance": "high",
+      "freshness": "task-dependent",
+      "state": "open",
+      "dimension": "limitations",
+      "temporal_scope": "current",
+      "evidence_ids": [],
+      "completion_criteria": "At least one direct substantive answering claim within the requested scope.",
+      "answer_coverage": "not_verified",
+      "evidence_terms": [],
+      "dependencies": [],
+      "as_of": "2026-10-29T10:00:00+00:00",
+      "is_subject_identity": false
+    },
+    {
+      "identifier": "fact-test-including-its-latest-quoted-price",
+      "question": "Establish TEST including its latest quoted price for the requested subject(s).",
+      "importance": "high",
+      "freshness": "task-dependent",
+      "state": "open",
+      "dimension": "TEST including its latest quoted price",
+      "temporal_scope": "current",
+      "evidence_ids": [],
+      "completion_criteria": "At least one direct substantive answering claim within the requested scope.",
+      "answer_coverage": "not_verified",
+      "evidence_terms": [],
+      "dependencies": [],
+      "as_of": "2026-10-29T10:00:00+00:00",
+      "is_subject_identity": false
+    },
+    {
+      "identifier": "fact-uncertainties",
+      "question": "Establish uncertainties for the requested subject(s).",
+      "importance": "high",
+      "freshness": "task-dependent",
+      "state": "open",
+      "dimension": "uncertainties",
+      "temporal_scope": "current",
+      "evidence_ids": [],
+      "completion_criteria": "At least one direct substantive answering claim within the requested scope.",
+      "answer_coverage": "not_verified",
+      "evidence_terms": [],
+      "dependencies": [],
+      "as_of": "2026-10-29T10:00:00+00:00",
+      "is_subject_identity": false
+    }
+  ],
+  "cited_card_ids": [],
+  "progress": {
+    "discovered_documents": 1,
+    "fetched_documents": 1,
+    "processed_unique_documents": 1,
+    "eligible_documents": 1,
+    "unprocessed_documents": 0,
+    "rejected_documents": 0,
+    "cited_documents": 0,
+    "retrieval_artifacts": 0,
+    "saved_sections": 0,
+    "unresolved_obligations": [
+      "answer",
+      "current-context",
+      "fact-price",
+      "fact-limitations",
+      "fact-test-including-its-latest-quoted-price",
+      "fact-uncertainties"
+    ]
+  },
+  "fixture_metadata": {
+    "synthetic": true,
+    "purpose": "Offline tool-record regression; not live or current evidence.",
+    "tool": "get_finance_quote"
+  }
+}

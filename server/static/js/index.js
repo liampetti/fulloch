@@ -43,6 +43,7 @@ const satellite = createBrowserSatellite({
   const thinkingJobDetails = document.getElementById('thinking-job-details');
   const thinkingJobDiagnostics = document.getElementById('thinking-job-diagnostics');
   let thinkingJob = null;
+  const dismissedThinkingJobs = new Set();
   let thinkingReceivedAt = 0;
   let thinkingOutcomeTimer = null;
   const terminalThinkingJob = job => ['READY', 'FAILED', 'CANCELLED'].includes(job?.status);
@@ -66,6 +67,7 @@ const satellite = createBrowserSatellite({
     thinkingJobOutcome.hidden = !thinkingJobOutcome.textContent;
   };
   const renderThinkingJob = (job) => {
+    if (job?.id && dismissedThinkingJobs.has(job.id)) return;
     const changedJob = thinkingJob?.id !== job?.id;
     thinkingJob = job || null;
     thinkingReceivedAt = Date.now();
@@ -80,7 +82,7 @@ const satellite = createBrowserSatellite({
     if (!thinkingJob) return;
     thinkingJobCard.dataset.status = thinkingJob.status || '';
     if (changedJob && thinkingJobDetails) thinkingJobDetails.open = false;
-    if (thinkingJobTask) thinkingJobTask.textContent = thinkingJob.objective || thinkingJob.task || 'Deliberate work';
+    if (thinkingJobTask) thinkingJobTask.textContent = thinkingJob.title || thinkingJob.objective || thinkingJob.task || 'Deliberate work';
     const statusLabels = { QUEUED: 'Queued', PAUSED: 'Paused', NEEDS_INPUT: 'Waiting for your answer',
       FAILED: 'Couldn’t complete the report', CANCELLED: 'Cancelled' };
     if (thinkingJobStage) thinkingJobStage.textContent = statusLabels[thinkingJob.status]
@@ -124,14 +126,35 @@ const satellite = createBrowserSatellite({
       if (valid) thinkingJobReport.href = link;
       else thinkingJobReport.removeAttribute('href');
     }
-    if (thinkingJobCancel) thinkingJobCancel.hidden = ['READY', 'FAILED', 'CANCELLED'].includes(thinkingJob.status);
+    if (thinkingJobCancel) {
+      const dismissOnly = terminalThinkingJob(thinkingJob) || thinkingJob.status === 'NEEDS_INPUT';
+      thinkingJobCancel.title = dismissOnly ? 'Dismiss Deep Think job' : 'Cancel Deep Think job';
+      thinkingJobCancel.setAttribute('aria-label', thinkingJobCancel.title);
+    }
   };
   thinkingJobCancel?.addEventListener('click', async () => {
     if (!thinkingJob?.id) return;
+    const job = thinkingJob;
+    const dismissOnly = terminalThinkingJob(job) || job.status === 'NEEDS_INPUT';
+    if (!dismissOnly && !window.confirm('Cancel this Deep Think job?')) return;
     thinkingJobCancel.disabled = true;
     try {
-      await fetch(`/thinking/${encodeURIComponent(thinkingJob.id)}/cancel`, { method: 'POST' });
-      renderThinkingJob(null);
+      if (!dismissOnly) {
+        const response = await fetch(`/thinking/${encodeURIComponent(job.id)}/cancel`, { method: 'POST' });
+        if (!response.ok) {
+          // The job may have finished while the confirmation was open.
+          const status = await fetch(`/thinking/${encodeURIComponent(job.id)}`);
+          const latest = status.ok ? await status.json() : null;
+          if (!latest || !(terminalThinkingJob(latest) || latest.status === 'NEEDS_INPUT')) {
+            throw new Error('Cancellation failed');
+          }
+        }
+      }
+      dismissedThinkingJobs.add(job.id);
+      if (thinkingJob?.id === job.id) renderThinkingJob(null);
+      pollStatus();
+    } catch (e) {
+      window.alert('Could not cancel the Deep Think job. Please try again.');
     } finally {
       thinkingJobCancel.disabled = false;
     }

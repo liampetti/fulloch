@@ -16,8 +16,16 @@ Fulloch downloads model assets during setup. The selected backend determines whi
   `data/models/wakeword/hey_atticus_v*.onnx`. Docker images seed every bundled
   version into the persistent data volume on first run, so configuration can
   select a model filename without a model download. Fulloch uses it only as an
-  optional candidate gate and verifies each candidate with ASR. The openWakeWord runtime is
+  acoustic candidate gate. ASR verification is on by default except for
+  Moonshine Base/Tiny and Parakeet ONNX, which cannot reliably recover unusual
+  wakeword names. Custom activation remains available in config.yml only. The openWakeWord runtime is
   [Apache-2.0](https://github.com/dscripka/openWakeWord/blob/main/LICENSE).
+- Alexa and Hey Jarvis: official unmodified `alexa_v0.1.onnx` and
+  `hey_jarvis_v0.1.onnx` classifiers from the openWakeWord v0.5.1 release below,
+  bundled in `third_party/openwakeword-models/` for native and Docker use.
+  **CC BY-NC-SA 4.0 (non-commercial)**, separate from the application license.
+  Selectable alongside Hey Atticus in the wizard and Settings; no runtime
+  model download or cloud voice-service connection is needed.
 - Feature extractors: Fulloch images and this repository include the unmodified
   `embedding_model` and `melspectrogram` ONNX/TFLite files from
   [openWakeWord v0.5.1](https://github.com/dscripka/openWakeWord/releases/tag/v0.5.1).
@@ -33,7 +41,7 @@ Fulloch downloads model assets during setup. The selected backend determines whi
 - Qwen3-TTS GGUF: [1.7B](https://huggingface.co/cstr/qwen3-tts-1.7b-base-GGUF), [0.6B](https://huggingface.co/cstr/qwen3-tts-0.6b-base-GGUF), and [tokenizer](https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF).
 - Kokoro: [onnx-community/Kokoro-82M-v1.0-ONNX](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX).
 - Pocket TTS ONNX: [KevinAHM/pocket-tts-onnx](https://huggingface.co/KevinAHM/pocket-tts-onnx), using the English INT8 bundle for CPU one-shot voice cloning (CC-BY-4.0 model; Apache-2.0 wrapper code).
-- Pocket TTS PyTorch: [Kyutai Pocket TTS](https://huggingface.co/kyutai/pocket-tts), the official CUDA voice-cloning backend with native PCM streaming (CC-BY-4.0). **Gated:** accept the model terms before downloading.
+- Pocket TTS PyTorch: Kyutai's CUDA voice-cloning runtime with native PCM streaming, using an [ungated pinned mirror](https://huggingface.co/latent-variable/pocket-tts-cloning-en) of Kyutai's English weights (CC BY 4.0). Premium's default; no Hugging Face account or token required. See provenance and consent below.
 - Pocket TTS GGUF: [cstr/pocket-tts-GGUF](https://huggingface.co/cstr/pocket-tts-GGUF), using the English Q8_0 voice-cloning build for GPU use through CrispASR (CC-BY-4.0).
 - Higgs TTS 3: [Fulloch mirror](https://huggingface.co/liampetti/HiggsTTS3.gguf), using `higgs-v3-tts-q4_k.gguf` and `higgs_tts_v3_tokenizer.json`. The mirror preserves provenance from the [original GGUF conversion](https://huggingface.co/NeemaShioSe/HiggsTTS3.gguf) and is derived from [Boson AI's Higgs TTS 3](https://huggingface.co/bosonai/higgs-tts-3-4b).
 - Breeze TTS 2: [cstr/breeze-tts-2-GGUF](https://huggingface.co/cstr/breeze-tts-2-GGUF), using `breeze-tts-2-q4_k.gguf` with the [Qwen3 TTS 12 Hz tokenizer](https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF). It runs through the GPU CrispASR `bt2-tts` backend and supports Breeze's documented English audio tags.
@@ -42,7 +50,7 @@ Fulloch downloads model assets during setup. The selected backend determines whi
 
 - Local Qwen 9B GGUF: [unsloth/Qwen3.5-9B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF), using the `UD-Q4_K_XL` quant. MTP speculative decoding is an optional runtime setting.
 - Optional Gemma 4 GGUF: [unsloth/gemma-4-12B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF), using the `UD-Q4_K_XL` quant.
-- NeoHorse 1 9B GGUF: [TokenRhythm/NeoHorse-1-9B-GGUF](https://huggingface.co/TokenRhythm/NeoHorse-1-9B-GGUF), using `NeoHorse-1-9B-Q4_K_M.gguf` (Apache-2.0; text-only; no MTP draft head).
+- Qwen3.8 27B GGUF: [unsloth/Qwen3.8-27B-GGUF](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF), using `Qwen3.8-27B-UD-IQ4_XS.gguf` (the Max tier's "God-tier" agent model; the full Qwen 1.7B ASR/TTS stack targets a 32 GB GPU; no MTP draft head). A custom Orukeet + Pocket speech stack can target 24 GB instead.
 
 ## Semantic Command Routing
 
@@ -60,13 +68,13 @@ Only provide a reference recording when you have that person's explicit, verifia
 
 Breeze TTS 2 weights and derivative GGUFs are licensed under the BreezeBlue Research and Non-Commercial License Agreement, not the Fulloch MIT license. They may be used only for permitted research and non-commercial self-hosted use. Only provide a voice reference when you have that person's explicit, verifiable consent.
 
-## Hugging Face Access
+## Pocket TTS PyTorch provenance and consent
 
-The `pocket-tts-pytorch` backend uses Kyutai's official CUDA implementation. Its cloning weights are gated; its tokenizer is public. The GGUF and ONNX Pocket backends use independent public conversions.
+The `pocket-tts-pytorch` backend runs the [Kyutai Labs Pocket TTS runtime](https://github.com/kyutai-labs/pocket-tts) and the English `2026-04` voice-cloning weights. Kyutai's original weights are distributed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); credit Kyutai Labs and link to the license and [original model](https://huggingface.co/kyutai/pocket-tts). The runtime code has its own license. The upstream original repository is gated, but Fulloch obtains the weights from the public [latent-variable mirror](https://huggingface.co/latent-variable/pocket-tts-cloning-en), pinned to revision `ead4edebb72d7dd41468bbf8456f2822b3aa3fb1`. The mirror describes the model as unmodified and byte-identical to Kyutai's release; its SHA-256 is `473f47d99560bd50eb8b4509d3cacfe7f316ab20bdca86505403a2e6a936a6e9`. The matching tokenizer comes from Kyutai's public [no-cloning repository](https://huggingface.co/kyutai/pocket-tts-without-voice-cloning), pinned to `d29db7978e464fb90cb3359ee0c69a273b9142cc`. No model files or external model code are executed from the mirror. The mirror is third-party infrastructure and its availability is not guaranteed.
 
-Before downloading Pocket TTS PyTorch, accept the [Kyutai Pocket TTS](https://huggingface.co/kyutai/pocket-tts) terms while signed in to Hugging Face. If Hugging Face returns an authentication, authorization, or gated-access denial during setup or reconfiguration, Fulloch displays a token field on the failed download screen. Create a read token at [Hugging Face settings](https://huggingface.co/settings/tokens), paste it into that field, and retry. Fulloch stores it as `hf_token` in `data/credentials.json` and provides it to Hugging Face as `HF_TOKEN`.
+**Consent and responsible use:** only clone your own voice or a voice for which you have the person's explicit, lawful consent. Do not impersonate people deceptively or use generated audio for fraud, misinformation, unlawful, harmful, or privacy-invasive purposes. Respect applicable laws, disclosure requirements and each reference recording's license. A model license does not grant rights to a person's voice or to individual reference recordings. The ONNX and GGUF Pocket backends are separate public conversions with their own source documentation.
 
-For headless use, pass `-e HF_TOKEN=hf_...` to Docker. An explicit environment variable takes precedence over the saved credential. The generic denial handling also prompts for a token if a future selected Hugging Face asset becomes gated; accepting that repository's terms is still required.
+The generic Hugging Face denial handler remains available if another selected asset requires access; in that case the setup screen may request a read token after the user accepts that repository's terms. The Premium Pocket PyTorch model itself does not require one.
 
 ## Higgs Creator Use Grant
 

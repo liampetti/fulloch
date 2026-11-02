@@ -385,3 +385,54 @@ def test_server_gpu_metrics_are_relayed_into_controller_metrics_without_blocking
     plain_budget.finish("section", time.monotonic(), "ok")
     assert not any(key.startswith("server_gpu_")
                    for key in plain_state["controller_metrics"])
+
+
+def _fill_calls(budget: ThinkingBudget, stage: str, count: int) -> None:
+    """Admit ``count`` calls on ``stage`` (each within its per-stage limit)."""
+    for _ in range(count):
+        budget.begin(stage, system_prompt="short", user_prompt="p")
+        budget.finish(stage, time.monotonic(), "ok", failed=True)
+
+
+def test_protected_writing_stages_are_admitted_after_quality_passes():
+    state = {}
+    budget = ThinkingBudget(object(), state, context_tokens=12_288)
+    # Consume a substantial number of quality-pass calls (each within its
+    # per-stage cap). The exact total depends on per-stage caps and token
+    # reserves, but writing stages must still be admitted.
+    for stage, cap in (("source_review", 8), ("chapter_coverage", 6),
+                       ("audit", 4), ("revision", 4), ("planning", 4)):
+        _fill_calls(budget, stage, cap)
+    assert state["calls"] >= 20
+    # Writing stages keep their allowance regardless of quality-pass spend.
+    budget.begin("chapter_analysis", system_prompt="short", user_prompt="p")
+    budget.begin("chapter_digest", system_prompt="short", user_prompt="p")
+    assert state["calls"] >= 22
+
+
+def test_non_protected_stages_denied_when_only_protected_allowance_remains():
+    from core.thinking_budget import MAX_MODEL_CALLS, PROTECTED_WRITING_CALLS
+    state = {"charged_tokens": 0, "stages": {}}
+    budget = ThinkingBudget(object(), state, context_tokens=12_288)
+    shared = MAX_MODEL_CALLS - PROTECTED_WRITING_CALLS
+    # Directly set the call count to the protected boundary and verify a
+    # non-protected stage is denied (the per-stage cap of source_review is 32,
+    # so we use a stage with a higher cap to isolate the global boundary).
+    state["calls"] = shared
+    with pytest.raises(ModelBudgetExhausted, match="model-call/token budget"):
+        budget.begin("source_review", system_prompt="short", user_prompt="p")
+    # But a protected writing stage is still admitted at the same boundary.
+    budget.begin("chapter_analysis", system_prompt="short", user_prompt="p")
+    assert state["calls"] == shared + 1
+
+
+def test_final_assembly_denied_when_ceiling_reached():
+    from core.thinking_budget import MAX_MODEL_CALLS
+    state = {}
+    budget = ThinkingBudget(object(), state, context_tokens=12_288)
+    # Directly set the call count to the ceiling and verify final_assembly is
+    # denied (the per-stage cap of 2 would also deny it, but we're testing the
+    # global ceiling).
+    state["calls"] = MAX_MODEL_CALLS
+    with pytest.raises(ModelBudgetExhausted, match="model-call/token budget"):
+        budget.begin("final_assembly", system_prompt="short", user_prompt="p")

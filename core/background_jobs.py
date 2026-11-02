@@ -57,10 +57,13 @@ _STAGE_DIAGNOSTIC_REASONS = {
         "model_authored_marker", "invalid_passage_shape", "digest_contract",
     }),
     "generation_failure": frozenset({"model_error", "model_budget", "context_limit", "empty_output"}),
+    "skipped": frozenset({"context_or_budget", "backend_unavailable"}),
+    "failed": frozenset({"model_error"}),
+    "rejected": frozenset({"no_card_markers"}),
 }
 _STAGE_DIAGNOSTIC_STAGES = frozenset({
     "chapter_planning", "chapter_research", "capability_dispatch", "chapter_analysis",
-    "report_audit", "final_assembly", "synthesis", "chapter_coverage",
+    "report_audit", "final_assembly", "synthesis", "chapter_coverage", "chapter_digest",
 })
 _STAGE_DIAGNOSTIC_FALLBACK_REASONS = {
     "action_rejection": "invalid_action_shape",
@@ -69,6 +72,9 @@ _STAGE_DIAGNOSTIC_FALLBACK_REASONS = {
     "citation_failure": "invalid_support_id",
     "output_rejection": "invalid_output_shape",
     "generation_failure": "model_error",
+    "skipped": "context_or_budget",
+    "failed": "model_error",
+    "rejected": "no_card_markers",
 }
 _SAFE_DIAGNOSTIC_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
 
@@ -130,6 +136,7 @@ class BackgroundJob:
     summary: str = ""
     error: str = ""
     note_id: str = ""
+    title: str = ""
     artifact: dict | None = None
     evidence: list[dict] = field(default_factory=list)
     artifacts: dict[str, dict] = field(default_factory=dict)
@@ -163,6 +170,7 @@ class BackgroundJob:
     stage: str = "Queued"
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    checkpoint_error: bool = field(default=False, repr=False)
     cancel_requested: threading.Event = field(default_factory=threading.Event, repr=False)
     pause_requested: threading.Event = field(default_factory=threading.Event, repr=False)
 
@@ -270,12 +278,20 @@ class BackgroundJob:
         """JSON-compatible durable worker state (without threading primitives)."""
         from dataclasses import fields
 
-        return deepcopy({
+        checkpoint = deepcopy({
             item.name: sorted(getattr(self, item.name)) if isinstance(getattr(self, item.name), set)
             else dict(vars(self.snapshot)) if item.name == "snapshot"
             else str(self.status) if item.name == "status" else getattr(self, item.name)
-            for item in fields(self) if item.name not in {"cancel_requested", "pause_requested"}
+            for item in fields(self)
+            if item.name not in {"cancel_requested", "pause_requested", "checkpoint_error"}
         })
+        # Older in-memory chapter state can contain the digest builder's set.
+        # Keep the persisted schema as a sorted list without mutating the worker.
+        for chapter in checkpoint["chapter_plan"]:
+            ids = chapter.get("evidence_digest_ids")
+            if isinstance(ids, set):
+                chapter["evidence_digest_ids"] = sorted(ids)
+        return checkpoint
 
     def record_stage_event(
         self, stage: str, category: str, reason: str, *, count: int = 1,
@@ -357,7 +373,9 @@ class BackgroundJob:
         saved["status"] = JobStatus(saved.get("status", "QUEUED"))
         for key in ("attempted_actions", "exhausted_capabilities"):
             saved[key] = set(saved.get(key) or ())
-        allowed = {item.name for item in fields(cls)} - {"snapshot", "cancel_requested", "pause_requested"}
+        allowed = {item.name for item in fields(cls)} - {
+            "snapshot", "cancel_requested", "pause_requested", "checkpoint_error",
+        }
         return cls(snapshot=JobSnapshot(**snapshot), **{key: item for key, item in saved.items() if key in allowed})
 
     def resolve_pending_clarification(self, recovery: dict, resolution: str) -> None:
@@ -385,10 +403,12 @@ class BackgroundJob:
         return {
             "id": self.id,
             "task": self.snapshot.task,
+            "title": self.display_title(),
             "objective": task_record.get("objective") or self.snapshot.task,
             "status": self.status,
             "summary": self.summary,
             "error": self.error,
+            "checkpoint_error": self.checkpoint_error,
             "note_id": self.note_id,
             "stage": self.stage,
             "origin_source": self.snapshot.origin_source,
@@ -406,6 +426,16 @@ class BackgroundJob:
             "request_metrics": [dict(item) for item in requests[-64:] if isinstance(item, dict)],
             "context_tokens": self.model_budget.get("context_tokens"),
         }
+
+    def display_title(self) -> str:
+        """Display a durable title without changing the task contract."""
+        from .research_task import is_unresolved_task_reference
+
+        candidate = self.title or self.snapshot.task_record.get("objective") or self.snapshot.task
+        candidate = " ".join(str(candidate).split()).strip(" #*`\"'")
+        if not candidate or re.fullmatch(r"(?:yes|yeah|yep|sure|okay|ok)[.!?]*", candidate, re.I) or is_unresolved_task_reference(candidate):
+            return "Research investigation"
+        return candidate[:160].rstrip()
 
 
 Worker = Callable[[BackgroundJob, Callable[[], bool]], tuple[str, str]]
@@ -438,7 +468,7 @@ class BackgroundJobManager:
         self._queue: queue.Queue[str] = queue.Queue(MAX_QUEUED_JOBS)
         self._lock = threading.Lock()
         self._wake = threading.Event()
-        self._load_job_checkpoints()
+        self._restore_job_checkpoints()
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="thinking-background-worker"
         )
@@ -468,16 +498,36 @@ class BackgroundJobManager:
                 encoding="utf-8",
             )
             os.replace(temporary, path)
+            if job.checkpoint_error:
+                logger.info("Thinking job checkpoint persistence recovered id=%s", job.id)
+                job.checkpoint_error = False
         except (OSError, TypeError, ValueError):
-            logger.exception("Could not persist thinking job checkpoint id=%s", job.id)
+            if not job.checkpoint_error:
+                logger.exception("Could not persist thinking job checkpoint id=%s", job.id)
+            job.checkpoint_error = True
 
     def checkpoint(self, job: BackgroundJob) -> None:
         """Atomically persist a worker-owned batch boundary."""
         self._persist_checkpoint(job)
 
-    def _load_job_checkpoints(self) -> None:
+    def _restore_job_checkpoints(self) -> None:
+        """Restore durable job state without re-running finished research.
+
+        Checkpoints persist so an interrupted run can resume, but a process
+        that exits (normally or not) leaves them behind. Re-running a job
+        whose worker already finished — READY, FAILED or CANCELLED — on every
+        startup would spam the dashboard with stale "I couldn't complete
+        that report" messages and burn GPU on already-dead work (e.g. jobs
+        that failed with "local language model is not loaded" because the
+        models had not finished loading). Terminal jobs are recorded for
+        status lookups and archive so they stop cluttering the checkpoint
+        directory. In-flight jobs (QUEUED/RUNNING/PAUSED) are re-queued as
+        before, and NEEDS_INPUT jobs are preserved in case a later version
+        can resume them.
+        """
         if self._checkpoint_dir is None or not self._checkpoint_dir.is_dir():
             return
+        archived = []
         for path in sorted(self._checkpoint_dir.glob("*.json")):
             try:
                 job = BackgroundJob.from_checkpoint(json.loads(path.read_text(encoding="utf-8")))
@@ -495,30 +545,51 @@ class BackgroundJobManager:
                 except queue.Full:
                     logger.warning("Thinking checkpoint queue limit reached id=%s", job.id)
                     break
+            elif job.status in {JobStatus.READY, JobStatus.FAILED, JobStatus.CANCELLED}:
+                job.snapshot.task_record["execution_status"] = {
+                    JobStatus.READY: "completed",
+                    JobStatus.FAILED: "failed",
+                    JobStatus.CANCELLED: "cancelled",
+                }[job.status]
+                archived.append(job)
             self._jobs[job.id] = job
+        for job in archived:
+            self._persist_task(job)
+            self._cleanup_terminal(job)
 
     def _load_task_ledger(self) -> dict[str, dict]:
+        """Restore per-thread task pointers, skipping corrupt entries.
+
+        A stale or corrupt ledger (left behind by a crashed run or a fresh
+        reset that restored the file from git) must never block startup: any
+        entry that fails to validate is dropped and the rest are restored.
+        """
         if self._task_ledger_path is None:
             return {}
+        payload = {}
         try:
             payload = json.loads(self._task_ledger_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
+        except (OSError, ValueError, TypeError):
+            payload = {}
         tasks = payload.get("threads") if isinstance(payload, dict) else None
         if not isinstance(tasks, dict):
             return {}
         restored = {}
         for thread_id, item in list(tasks.items())[-MAX_PERSISTED_TASKS:]:
-            if (not isinstance(thread_id, str) or not isinstance(item, dict)
-                    or not isinstance(item.get("task"), str)
-                    or not isinstance(item.get("task_record"), dict)):
+            try:
+                if (not isinstance(thread_id, str) or not isinstance(item, dict)
+                        or not isinstance(item.get("task"), str)
+                        or not isinstance(item.get("task_record"), dict)):
+                    continue
+                status = item.get("status", JobStatus.FAILED.value)
+                record = deepcopy(item["task_record"])
+                if status in {"QUEUED", "RUNNING", "PAUSED", "NEEDS_INPUT"}:
+                    status = JobStatus.FAILED.value
+                    record["execution_status"] = "interrupted"
+                restored[thread_id] = {**item, "status": status, "task_record": record}
+            except (KeyError, TypeError, ValueError, AttributeError):
+                # One bad entry must not poison the whole ledger.
                 continue
-            status = item.get("status", JobStatus.FAILED.value)
-            record = deepcopy(item["task_record"])
-            if status in {"QUEUED", "RUNNING", "PAUSED", "NEEDS_INPUT"}:
-                status = JobStatus.FAILED.value
-                record["execution_status"] = "interrupted"
-            restored[thread_id] = {**item, "status": status, "task_record": record}
         return restored
 
     def _persist_task(self, job: BackgroundJob) -> None:
@@ -526,6 +597,20 @@ class BackgroundJobManager:
         if self._task_ledger_path is None or job.snapshot.origin_source != "conversation" or not thread_id:
             return
         current = self._persisted_tasks.get(thread_id)
+        if job.status in {JobStatus.READY, JobStatus.FAILED, JobStatus.CANCELLED}:
+            if current and current.get("task_record", {}).get("job_id") == job.id:
+                del self._persisted_tasks[thread_id]
+                try:
+                    if self._persisted_tasks:
+                        self._task_ledger_path.write_text(
+                            json.dumps({"version": 1, "threads": self._persisted_tasks}, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
+                    else:
+                        self._task_ledger_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.exception("Could not remove completed research task ledger entry")
+            return
         if current and float(current.get("created_at", 0)) > job.created_at:
             # A slow older task must not replace a newer task's thread pointer
             # when it completes later.
@@ -550,11 +635,52 @@ class BackgroundJobManager:
         except OSError:
             logger.exception("Could not persist conversation research task ledger")
 
-    def _notify(self, job: BackgroundJob) -> None:
-        if self._status_listener is None:
-            return
+    def _cleanup_terminal(self, job: BackgroundJob) -> None:
+        """Remove terminal working files without deleting another job's sources."""
+        from .thinking_source_store import _root, remove_documents
+
+        def references(value):
+            found = set()
+            if isinstance(value, dict):
+                key, digest = value.get("key"), value.get("content_hash")
+                if isinstance(key, str) and isinstance(digest, str):
+                    found.add((key, digest))
+                for child in value.values():
+                    found.update(references(child))
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    found.update(references(child))
+            return found
+
+        live = set()
+        running = False
+        for other in self._jobs.values():
+            if other is not job and other.status not in {JobStatus.READY, JobStatus.FAILED, JobStatus.CANCELLED}:
+                if other.status is JobStatus.RUNNING:
+                    # The worker may be writing a source before it has recorded
+                    # its reference. Defer collection until that job finishes.
+                    running = True
+                else:
+                    live.update(references(other.checkpoint()))
         try:
-            self._status_listener(job)
+            path = self._checkpoint_path(job.id)
+            if path is not None:
+                path.unlink(missing_ok=True)
+                try:
+                    path.parent.rmdir()
+                except OSError:
+                    pass
+            if not running:
+                root = _root()
+                stored = {(path.parent.name, path.stem) for path in root.glob("*/*.json")}
+                remove_documents(stored - live)
+        except OSError:
+            logger.exception("Could not clean up research working files id=%s", job.id)
+
+    def _notify(self, job: BackgroundJob) -> None:
+        try:
+            if self._status_listener is not None:
+                self._status_listener(job)
         except Exception:  # Observability must never stop the worker.
             logger.exception("Background thinking status listener failed")
         finally:
@@ -562,7 +688,10 @@ class BackgroundJobManager:
             # classification to task state; persist those fields after it runs.
             with self._lock:
                 self._persist_task(job)
-                self._persist_checkpoint(job)
+                if job.status in {JobStatus.READY, JobStatus.FAILED, JobStatus.CANCELLED}:
+                    self._cleanup_terminal(job)
+                else:
+                    self._persist_checkpoint(job)
 
     def wake(self) -> None:
         """Recheck idle admission after foreground activity finishes."""
@@ -645,7 +774,8 @@ class BackgroundJobManager:
             raise RuntimeError("thinking job queue is full") from None
         with self._lock:
             self._persist_task(job)
-            self._persist_checkpoint(job)
+            if job.status not in {JobStatus.READY, JobStatus.FAILED, JobStatus.CANCELLED}:
+                self._persist_checkpoint(job)
         self._notify(job)
         self.wake()
         job.snapshot.task_record["acknowledgement_seconds"] = round(
@@ -653,7 +783,8 @@ class BackgroundJobManager:
         )
         with self._lock:
             self._persist_task(job)
-            self._persist_checkpoint(job)
+            if job.status not in {JobStatus.READY, JobStatus.FAILED, JobStatus.CANCELLED}:
+                self._persist_checkpoint(job)
         return job.id
 
     def status(self, job_id: str) -> dict | None:
@@ -726,6 +857,7 @@ class BackgroundJobManager:
         self._notify(job)
 
     def cancel(self, job_id: str) -> bool:
+        notify = False
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None or job.status in {
@@ -736,14 +868,27 @@ class BackgroundJobManager:
             }:
                 return False
             job.cancel_requested.set()
-            if job.status is JobStatus.QUEUED:
+            if job.status in {JobStatus.QUEUED, JobStatus.PAUSED}:
                 job.status = JobStatus.CANCELLED
                 job.updated_at = time.time()
                 job.snapshot.task_record["execution_status"] = "cancelled"
                 self._persist_task(job)
                 self._persist_checkpoint(job)
-                self._notify(job)
-            return True
+                notify = True
+        if notify:
+            self._notify(job)
+        return True
+
+    def cancel_for_memory_pressure(self) -> None:
+        """Cancel all pending work, including queued jobs, without replaying it."""
+        with self._lock:
+            jobs = [job for job in self._jobs.values() if job.status in {
+                JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.PAUSED,
+            }]
+            for job in jobs:
+                job.synthesis_state["memory_safety_stop"] = True
+        for job in jobs:
+            self.cancel(job.id)
 
     def pause(self, job_id: str) -> bool:
         with self._lock:
@@ -891,20 +1036,24 @@ class BackgroundJobManager:
                             self._persist_checkpoint(job)
                         self._notify(job)
             except Exception as exc:  # Worker failures must not kill the scheduler.
-                logger.exception("Background thinking job %s failed", job.id)
+                logger.error(
+                    "Background thinking job %s failed at %s: %s: %s",
+                    job.id, job.synthesis_state.get("backend_failure_stage") or job.stage,
+                    type(exc).__name__, str(exc)[:400],
+                )
                 with self._lock:
                     job.error = f"{type(exc).__name__}: {exc}"[:MAX_STATE_CHARS]
-                    failed_stage = str(job.stage or "research")[:200]
+                    failed_stage = str(job.synthesis_state.get("backend_failure_stage") or job.stage or "research")[:200]
                     job.synthesis_state["failed_stage"] = failed_stage
                     job.snapshot.task_record["failure_stage"] = failed_stage
                     job.snapshot.task_record["failure_reason"] = job.error
                     job.snapshot.task_record["finished_at"] = time.time()
-                    if job.report_draft.strip():
-                        job.summary = job.report_draft.strip()
-                        job.synthesis_state["partial_report"] = True
-                        job.snapshot.task_record["delivery_status"] = "partial"
-                    else:
-                        job.snapshot.task_record["delivery_status"] = "blocked"
+                    # report_draft can hold unaudited text as well as accepted
+                    # chapters. Never promote it to a supported partial report
+                    # merely because an exception interrupted the worker.
+                    job.summary = ""
+                    job.synthesis_state.pop("partial_report", None)
+                    job.snapshot.task_record["delivery_status"] = "blocked"
                     job.status = JobStatus.FAILED
                     job.snapshot.task_record["execution_status"] = "failed"
                     job.updated_at = time.time()

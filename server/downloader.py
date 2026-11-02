@@ -496,6 +496,13 @@ def _already_present(asset: Asset) -> bool:
     # Snapshot downloads created by this version carry an explicit completion
     # marker. Retain the standard HF ref/snapshot check for pre-marker caches.
     hub_dir = Path(asset.dest) / f"models--{asset.repo.replace('/', '--')}"
+    if asset.revision and asset.allow:
+        # A repo-level marker or main ref may refer to another revision or a
+        # partial allowlist; never skip a pinned asset on that basis.
+        snapshot = hub_dir / "snapshots" / asset.revision
+        return snapshot.is_dir() and all(
+            any(path.is_file() for path in snapshot.glob(pattern)) for pattern in asset.allow
+        )
     if (hub_dir / COMPLETE_SENTINEL).is_file():
         return True
     ref = hub_dir / "refs" / "main"

@@ -33,6 +33,47 @@ def test_schema_endpoint_lists_fields(tmp_path):
     assert body["wakeword_presets"] and body["tier_presets"]
 
 
+def test_integration_token_creation_preserves_existing_and_is_live(tmp_path, monkeypatch):
+    import json
+
+    from server.integration_api import _tokens, create_integration_app
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    credentials = tmp_path / "data/credentials.json"
+    credentials.write_text(json.dumps({"integration_tokens": ["existing"], "ha_token": "ha-secret"}))
+    client, ctx, path = _client(tmp_path)
+    Path(path).write_text("general:\n  integration_api_port: 9999\n  dashboard_host: 0.0.0.0\n")
+    first = client.post('/setup/integration-token')
+    second = client.post('/setup/integration-token')
+    assert first.status_code == second.status_code == 200
+    assert first.headers['cache-control'] == 'no-store'
+    one, two = first.json()['token'], second.json()['token']
+    assert len(one) >= 40 and one != two
+    assert first.json()['port'] == 9999
+    assert first.json()['bind_host'] == '0.0.0.0'
+    assert _tokens() == ['existing', one, two]
+    assert json.loads(credentials.read_text())['ha_token'] == 'ha-secret'
+    integration = TestClient(create_integration_app(ctx))
+    # Successful authentication gets past middleware; setup-mode status may
+    # still return 503 until the assistant finishes starting.
+    assert integration.get('/status', headers={'Authorization': f'Bearer {one}'}).status_code != 401
+    assert integration.get('/status', headers={'Authorization': 'Bearer invalid'}).status_code == 401
+    # The dashboard's normal password protection applies to token creation.
+    ctx.dashboard_password_hash = 'configured'
+    assert client.post('/setup/integration-token').status_code == 401
+
+
+def test_integration_token_does_not_overwrite_corrupt_credentials(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / 'data').mkdir()
+    path = tmp_path / 'data/credentials.json'
+    path.write_text('not json')
+    client, _, _ = _client(tmp_path)
+    assert client.post('/setup/integration-token').status_code == 500
+    assert path.read_text() == 'not json'
+
+
 def test_config_put_validates_and_writes(tmp_path):
     client, _, path = _client(tmp_path)
     r = client.put("/config", json={"updates": {"general.wakeword": "computer"}})
@@ -90,10 +131,10 @@ def test_config_timezone_update_rejects_unknown_zone(tmp_path):
 
 def test_models_endpoint_writes_tier(tmp_path):
     client, _, path = _client(tmp_path)
-    r = client.post("/setup/models", json={"tier": "cpu_local"})
+    r = client.post("/setup/models", json={"tier": "lite"})
     assert r.status_code == 200
-    assert "qwen-onnx" in Path(path).read_text()
-    assert "pocket-tts-onnx" in Path(path).read_text()
+    assert "moonshine" in Path(path).read_text()
+    assert "kokoro-onnx" in Path(path).read_text()
 
 
 def test_models_endpoint_rejects_unknown_tier(tmp_path):
@@ -156,7 +197,7 @@ def test_cancel_startup_arms_setup_marker(tmp_path, monkeypatch):
 
 def test_plan_endpoint_reports_presence_and_domain(tmp_path):
     client, _, _ = _client(tmp_path)
-    r = client.post("/setup/plan", json={"tier": "cpu_local"})
+    r = client.post("/setup/plan", json={"tier": "lite"})
     assert r.status_code == 200
     assets = r.json()["assets"]
     asr = next(a for a in assets if a["key"].startswith("asr:"))
@@ -200,7 +241,7 @@ def test_install_runs_download_and_signals_proceed(tmp_path):
     marker = Path(path).parent / ".setup_pending"
     marker.write_text("x")
     # Pick a CPU stack (no GGUF/grammar gymnastics), then install.
-    client.post("/setup/models", json={"tier": "cpu_local"})
+    client.post("/setup/models", json={"tier": "lite"})
     r = client.post("/setup/install")
     assert r.status_code == 200 and r.json()["started"] is True
 

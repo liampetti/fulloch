@@ -30,10 +30,13 @@ dict once at import and so takes a `FULLOCH_CONFIG_PATH` env override instead).
 import json
 import logging
 import os
+import secrets
 import tempfile
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+_WRITE_LOCK = threading.RLock()
 
 DEFAULT_PATH = "./data/credentials.json"
 
@@ -76,14 +79,35 @@ def inject_env(path: str = DEFAULT_PATH) -> None:
 
 def set_credential(key: str, value: str, path: str = DEFAULT_PATH) -> None:
     """Set/replace a single credential atomically and reflect into os.environ."""
-    p = Path(path)
-    creds = load(path)
-    creds[key] = value
-    _write(creds, p)
-    env_name = _ENV_MAP.get(key)
-    if env_name:
-        os.environ[env_name] = value
+    with _WRITE_LOCK:
+        p = Path(path)
+        creds = load(path)
+        creds[key] = value
+        _write(creds, p)
+        env_name = _ENV_MAP.get(key)
+        if env_name:
+            os.environ[env_name] = value
     logger.debug("Credential '%s' updated", key)
+
+
+def create_integration_token(path: str = DEFAULT_PATH) -> str:
+    """Create a separate HA integration credential without replacing existing tokens."""
+    with _WRITE_LOCK:
+        p = Path(path)
+        # Never overwrite an unreadable or malformed credentials file.
+        if p.exists():
+            creds = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(creds, dict):
+                raise ValueError("credentials file must contain an object")
+        else:
+            creds = {}
+        tokens = creds.get("integration_tokens", [])
+        if not isinstance(tokens, list) or not all(isinstance(t, str) for t in tokens):
+            raise ValueError("integration_tokens must be a list of strings")
+        token = secrets.token_urlsafe(32)
+        creds["integration_tokens"] = [*tokens, token]
+        _write(creds, p)
+        return token
 
 
 def get_credential(key: str, path: str = DEFAULT_PATH) -> str:

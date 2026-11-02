@@ -13,10 +13,49 @@ from core.thinking_coverage import (
 )
 from core.thinking_fact_cards import build_fact_cards
 from core.thinking_scope import research_context
+from core.thinking_worker import _apply_survey_questions
+
+
+def test_survey_review_adds_questions_without_replacing_original_evidence():
+    task = "Give me a detailed analysis of xyzq shares"
+    context = research_context(task, as_of="2030-06-15T12:00:00Z")
+    job = BackgroundJob("survey", JobSnapshot(task), research_context=context)
+    job.chapter_plan = [{"id": "chapter-01", "title": "Financial position", "priority": "high",
+                         "state": "research_complete", "queries": [], "questions": [{
+                             "id": "original", "requirement_id": "original", "priority": "high",
+                             "question": "What is the recent price?"}]}]
+    job.evidence_requirements = chapter_requirements(job.chapter_plan, task, context)
+    original = job.evidence_requirements[0]
+    original.update(state="resolved", evidence_ids=["original-card"])
+    added = _apply_survey_questions(job, [
+        {"chapter_id": "chapter-01", "question": "What is the cash runway?",
+         "priority": "high", "query": "XYZQ cash runway quarterly report"},
+        {"chapter_id": "unknown", "question": "Invent a topic?", "priority": "high", "query": "test"},
+    ])
+    assert len(added) == 1 and added[0]["state"] == "open"
+    assert added[0]["freshness"] == "fresh" and added[0]["constraints"] == task
+    assert job.evidence_requirements[0] is original and original["evidence_ids"] == ["original-card"]
+    assert job.chapter_plan[0]["state"] == "planned"
+    assert job.chapter_plan[0]["queries"] == ["XYZQ cash runway quarterly report"]
+
+
+def test_survey_review_rejects_duplicate_and_invalid_questions():
+    task = "deep analysis of a project"
+    context = research_context(task)
+    job = BackgroundJob("survey", JobSnapshot(task), research_context=context)
+    job.chapter_plan = [{"id": "c1", "title": "Project", "priority": "high", "questions": [{
+        "id": "q1", "requirement_id": "q1", "question": "What is the cash runway?"}]}]
+    job.evidence_requirements = chapter_requirements(job.chapter_plan, task, context)
+    proposals = [{"chapter_id": "c1", "question": "What is the cash runway?",
+                  "priority": "high", "query": "cash runway"},
+                 {"chapter_id": "c1", "question": "What is the project cost?",
+                  "priority": "invalid", "query": "project cost"}]
+    assert _apply_survey_questions(job, proposals) == []
+    assert len(job.evidence_requirements) == 1
 
 
 def test_temporal_scope_and_coverage_share_coming_up_and_frozen_relative_dates():
-    task = "Give me a deep analysis on the Bathurst 1000 race coming up"
+    task = "Give me a deep analysis on the Harbour 1000 race coming up"
     scope = research_context(task, as_of="2026-09-30T05:00:00Z")
     assert scope["temporal_intent"] == "future"
     requirements = initial_requirements(task, scope)
@@ -29,13 +68,13 @@ def test_temporal_scope_and_coverage_share_coming_up_and_frozen_relative_dates()
     assert not ambiguous["requested_dates"] and ambiguous["ambiguous_dates"]
 
 
-def test_bathurst_decomposition_is_task_derived_validated_and_preserves_constraints():
-    task = "Give me a deep analysis on the Bathurst 1000 race coming up; do not predict a winner."
+def test_synthetic_decomposition_is_task_derived_validated_and_preserves_constraints():
+    task = "Give me a deep analysis on the Harbour 1000 race coming up; do not predict a winner."
     scope = research_context(task, as_of="2026-09-30T05:00:00Z")
     dimensions = {"timing": ["schedule", "date"], "entrants/co-drivers": ["driver", "co-driver", "entrant"],
                   "recent form": ["form", "finished", "results"], "race factors": ["weather", "strategy"],
                   "uncertainty": ["uncertainty", "risk"]}
-    plan = json.dumps({"requirements": [{"question": f"What is known about {name} for Bathurst 1000?",
+    plan = json.dumps({"requirements": [{"question": f"What is known about {name} for Harbour 1000?",
         "dimension": name, "importance": "high", "temporal_scope": "future",
         "completion_criteria": f"Evidence directly establishes {name}; missing details stay visible.",
         "evidence_terms": terms} for name, terms in dimensions.items()]})
@@ -45,8 +84,8 @@ def test_bathurst_decomposition_is_task_derived_validated_and_preserves_constrai
     assert apply_decomposition(requirements, '{"requirements":[{"question":"invented"}]}', task, scope) is None
 
     evidence = [{"status": "evidence", "evidence": {"type": "web_research", "sources": [{
-        "title": "Bathurst entrants recent form race factors schedule", "url": "https://hotel.example/event",
-        "evidence": "Our accommodation offers rooms near Bathurst 1000.", "eligible": True,
+        "title": "Harbour entrants recent form race factors schedule", "url": "https://hotel.example/event",
+        "evidence": "Our accommodation offers rooms near Harbour 1000.", "eligible": True,
     }]}}]
     cards = build_fact_cards(evidence, {}, task, scope)
     refresh_coverage(requirements, cards)

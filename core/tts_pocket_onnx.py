@@ -60,14 +60,9 @@ def set_voice(voice_name: Optional[str]):
     """Select a bundled voice reference; Pocket conditions on the WAV alone."""
     global _voice
     name = (voice_name or "").strip()
-    wav_path = VOICES_DIR / f"{name}.wav"
-    txt_path = VOICES_DIR / f"{name}.txt"
-    if not txt_path.is_file():
-        txt_path = VOICES_DIR / "default.txt"
-    if not wav_path.is_file():
-        raise FileNotFoundError(f"Pocket TTS voice reference not found: {wav_path}")
-    if not txt_path.is_file():
-        raise FileNotFoundError(f"Pocket TTS transcript not found: {txt_path}")
+    from .voice_reference import voice_reference
+
+    wav_path, txt_path = voice_reference(name, VOICES_DIR)
     _voice = wav_path
     logger.info("Pocket TTS voice clone: %s (transcript %s validated; audio-only conditioning)", name, txt_path.name)
     return wav_path

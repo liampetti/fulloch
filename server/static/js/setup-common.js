@@ -69,7 +69,7 @@ function wakewordModelDatalist(schema, id) {
   return `<datalist id="${id}">${options}</datalist>`;
 }
 
-const WIZARD_STEPS = ['Brain', 'Set up', 'Download', 'Starting up'];
+const WIZARD_STEPS = ['Preset', 'Home Assistant', 'Web search', 'Download', 'Starting up'];
 
 function renderSteps(activeIdx, mode) {
   const box = $('steps');

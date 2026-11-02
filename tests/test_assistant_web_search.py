@@ -137,7 +137,7 @@ def test_current_research_acknowledgement_is_replaced_with_real_deep_think_dispa
     "double check that",
 ])
 def test_contextual_cross_check_request_dispatches_fresh_web_search(turn, prompt):
-    topic = "what does the green C mean on the Bathurst Supercars timing screen?"
+    topic = "what does the green C mean on the Harbour Example Cars timing screen?"
     turn.history.append({"role": "user", "content": topic})
     turn.host._generate_with_context_recovery.return_value = '{"reply":"Cross-checked results."}'
 
@@ -148,10 +148,10 @@ def test_contextual_cross_check_request_dispatches_fresh_web_search(turn, prompt
 
 
 def test_unchanged_search_plan_stops_after_one_no_progress_correction(turn):
-    repeated = {"actions": [_search("Bathurst green C Supercars timing") ]}
+    repeated = {"actions": [_search("Harbour green C Example Cars timing") ]}
     _emissions(turn, *([repeated] * 8))
 
-    result = turn.loop.run("Search web and cross-check the Bathurst green C meaning")
+    result = turn.loop.run("Search web and cross-check the Harbour green C meaning")
 
     assert turn.search.call_count == 1
     assert turn.host._generate_with_context_recovery.call_count < 6

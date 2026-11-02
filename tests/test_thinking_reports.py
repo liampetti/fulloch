@@ -39,6 +39,14 @@ def notifications(job, *, pending=None):
     return state
 
 
+def test_memory_cancel_reports_cooldown_without_retry():
+    job = BackgroundJob("job", JobSnapshot("research", origin_source="conversation"), status=JobStatus.CANCELLED)
+    job.synthesis_state["memory_safety_stop"] = True
+    state = notifications(job)
+    assert "memory was overloaded" in state.dispatch.call_args.args[0]["summary"]
+    assert "try again afterwards" in state.emit.call_args.args[1]
+
+
 def test_spoken_report_summary_is_short_and_sentence_complete():
     report = "One finding is useful. Two finding is useful. Three finding is useful. Four finding is useful. Five finding is useful."
     assert reports.spoken_summary(report) == "One finding is useful. Two finding is useful."
@@ -154,13 +162,9 @@ def test_evidence_only_report_never_announces_a_completed_analysis(report_root):
 
     assert "**Completed:**" not in report
     assert "## Research Notes" in report
-    # A generated report is announced as generated; the reader learns about
-    # unresolved questions from the note at the end, not from a "partial"
-    # headline. Evidence-only reports still avoid claiming a completed analysis.
     assert state.history[0]["content"].startswith("Retained research notes (not verified answers) for:")
     message = state.emit.call_args.args[1]
-    assert "saved" in message and "completed analysis" not in message
-    assert "partial" not in message.casefold()
+    assert "research notes" in message and "not yet verified" in message
     assert state.emit.call_args.kwargs["artifact"]["analysis_status"] == "available"
 
 
@@ -170,11 +174,23 @@ def test_blocked_ready_outcome_saves_notes_without_positive_report_or_verified_f
                         synthesis_state={"delivery_assessment": {"status": "blocked"}})
     state = notifications(job)
     saved = (report_root / f"{job.note_id}.md").read_text()
-    assert saved.startswith("# Deep Think Research Notes")
+    assert saved.startswith("# Upcoming event\n")
+    assert "**Type:** Deep Think Research Notes" in saved
     assert "not verified answers" in state.history[0]["content"]
     assert state.emit.call_args.kwargs["artifact"]["analysis_status"] == "available"
-    assert "saved the research report" in state.emit.call_args.args[1]
+    assert "research notes" in state.emit.call_args.args[1]
     assert "finished looking" not in state.emit.call_args.args[1]
+
+
+def test_partial_report_notification_discloses_open_questions(report_root):
+    job = BackgroundJob(
+        "partial-notes", JobSnapshot("Research event", origin_source="integration"),
+        status=JobStatus.READY, summary="## Summary\n\nOne checked finding.",
+        synthesis_state={"delivery_assessment": {"status": "partial"}, "partial_report": True},
+    )
+    state = notifications(job)
+    assert "partial research report" in state.emit.call_args.args[1]
+    assert "questions remain open" in state.emit.call_args.args[1]
 
 
 def test_saving_fallback_has_one_bibliography_and_keeps_real_limitations(report_root):
@@ -201,6 +217,48 @@ def test_saving_fallback_has_one_bibliography_and_keeps_real_limitations(report_
     assert report.count("](https://example.com/event)") == 1
     assert "bounded extract" not in report
     assert "Times are provisional." in report
+
+
+def test_fallback_summary_does_not_render_byline_cards(report_root):
+    """Author/date boilerplate cards never become standalone Summary bullets."""
+    from core.thinking_fact_cards import is_byline_card, validate_fact_card
+    from core.thinking_fallback import evidence_fallback
+
+    def _card(card_id, statement):
+        return {
+            "id": card_id, "kind": "atomic_claim", "label": f"Source {card_id}",
+            "statement": statement,
+            "fields": {},
+            "source_ids": [f"source-{card_id}"], "source_class": "secondary_reporting",
+            "freshness": "unknown", "evidence_status": "conflicted",
+            "scope": "Bounded extract.", "compatibility": "compatible",
+            "context": {},
+            "provenance": {"source_id": f"source-{card_id}"},
+            "source_url": "https://example.com/news",
+        }
+
+    bylines = [
+        _card("byline-1", "By Ben Bush Published September 26, 2026"),
+        _card("byline-2", "By Ben Bush Published September 13, 2026"),
+        _card("byline-3", "By Ben Bush Published October 17, 2026"),
+    ]
+    real = _card("real-1", "The 2026 season has 24 races and the next stop is the United States Grand Prix.")
+    assert all(validate_fact_card(card) is None for card in bylines + [real])
+    assert all(is_byline_card(card) for card in bylines)
+    assert not is_byline_card(real)
+
+    cards = bylines + [real]
+    requirements = [{
+        "identifier": "answer", "broad": False,
+        "question": "What is the next race?", "dimension": "next race",
+        "freshness": "task-dependent", "state": "open", "evidence_ids": [],
+    }]
+    summary = evidence_fallback("What is the next race?", cards, requirements=requirements)
+
+    assert "By Ben Bush" not in summary
+    assert "United States Grand Prix" in summary
+    # The real fact, not boilerplate, carries the Summary.
+    assert "## Summary" in summary
 
 
 def test_completed_travel_report_appends_retrieved_offers_and_source_link(report_root):
@@ -383,7 +441,7 @@ def test_search_outage_failure_is_explained_without_raw_diagnostics(monkeypatch,
     error = "ReportSynthesisError: No verified evidence was retrieved; refusing to mark a source-less report ready."
     job = BackgroundJob(
         "search-outage",
-        JobSnapshot("Analyse the next Formula 1 race", origin_source="conversation",
+        JobSnapshot("Analyse the next Solar League race", origin_source="conversation",
                     origin_satellite_id="dashboard-text"),
         status=JobStatus.FAILED,
         error=error,
@@ -686,3 +744,91 @@ def test_final_citation_guard_drops_paragraphs_missing_a_reference_entry():
     references = "## References\n\n1. [Source](https://example.test/source)"
 
     assert reports._retain_referenced_paragraphs(report, references) == "Supported statement. [1]"
+
+
+def test_partial_report_saves_under_answered_section_with_verbatim_questions(report_root):
+    job = BackgroundJob(
+        "12345678",
+        JobSnapshot("Deep analysis of the next Solar League race"),
+        status=JobStatus.READY,
+        summary="## Summary\n\nThe race is at the Circuit.",
+        evidence_requirements=[
+            {"identifier": "race-identity", "question": "Which race is next?", "state": "resolved"},
+            {"identifier": "race-schedule", "question": "When does it start?", "state": "open"},
+            {"identifier": "race-venue", "question": "Where is it held?", "state": "open"},
+        ],
+        synthesis_state={
+            "partial_report": True,
+            "essential_unresolved_requirement_ids": ["race-schedule", "race-venue"],
+        },
+    )
+    note_id = reports.save_report(job)
+    report = (report_root / f"{note_id}.md").read_text(encoding="utf-8")
+
+    assert "## Under-answered" in report
+    assert "- When does it start?" in report
+    assert "- Where is it held?" in report
+    # Resolved questions are not listed.
+    assert "- Which race is next?" not in report
+
+
+def test_fully_resolved_report_has_no_under_answered_section(report_root):
+    job = BackgroundJob(
+        "12345678",
+        JobSnapshot("Compare options"),
+        status=JobStatus.READY,
+        summary="## Summary\n\nA scoped result.",
+        evidence_requirements=[
+            {"identifier": "answer", "question": "Answer the central request.", "state": "resolved"},
+        ],
+        synthesis_state={"partial_report": False, "essential_unresolved_requirement_ids": []},
+    )
+    note_id = reports.save_report(job)
+    report = (report_root / f"{note_id}.md").read_text(encoding="utf-8")
+
+    assert "## Under-answered" not in report
+
+
+def test_under_answered_section_is_capped_at_six_questions(report_root):
+    requirements = [
+        {"identifier": f"q{i}", "question": f"Question {i}?", "state": "open"}
+        for i in range(9)
+    ]
+    job = BackgroundJob(
+        "12345678",
+        JobSnapshot("Broad research"),
+        status=JobStatus.READY,
+        summary="## Summary\n\nPartial answer.",
+        evidence_requirements=requirements,
+        synthesis_state={
+            "partial_report": True,
+            "essential_unresolved_requirement_ids": [f"q{i}" for i in range(9)],
+        },
+    )
+    note_id = reports.save_report(job)
+    report = (report_root / f"{note_id}.md").read_text(encoding="utf-8")
+
+    section = report.split("## Under-answered", 1)[1].split("\n##", 1)[0]
+    questions = [line for line in section.splitlines() if line.startswith("- ")]
+    assert len(questions) == 6
+    assert questions[0] == "- Question 0?"
+    assert questions[5] == "- Question 5?"
+
+
+def test_partial_report_without_named_gaps_has_no_under_answered_section(report_root):
+    job = BackgroundJob(
+        "12345678",
+        JobSnapshot("Research event"),
+        status=JobStatus.READY,
+        summary="## Evidence-only partial answer\n\nA few extracted facts are available.",
+        evidence_requirements=[
+            {"identifier": "answer", "question": "Answer the central request.", "state": "open"},
+        ],
+        synthesis_state={"limited_evidence_fallback": True, "partial_report": True},
+    )
+    note_id = reports.save_report(job)
+    report = (report_root / f"{note_id}.md").read_text(encoding="utf-8")
+
+    # partial_report is true but no essential_unresolved_requirement_ids were
+    # named, so there is nothing honest to list.
+    assert "## Under-answered" not in report

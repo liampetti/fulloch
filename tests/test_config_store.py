@@ -171,8 +171,8 @@ def test_write_models_validates_public_llm_modes(tmp_path):
     cs.write_models({"llm": {"backend": "local", "local_model": "ornith"}}, path)
     assert cs.read_config(path)["models"]["llm"]["local_model"] == "ornith"
 
-    cs.write_models({"llm": {"backend": "local", "local_model": "neohorse"}}, path)
-    assert cs.read_config(path)["models"]["llm"]["local_model"] == "neohorse"
+    cs.write_models({"llm": {"backend": "local", "local_model": "qwen27b"}}, path)
+    assert cs.read_config(path)["models"]["llm"]["local_model"] == "qwen27b"
 
     cs.write_models({"llm": {"backend": "laya"}}, path)
     assert cs.read_config(path)["models"]["llm"]["backend"] == "laya"
@@ -190,6 +190,16 @@ def test_write_models_validates_generation_timeout(tmp_path):
         {"llm": {"backend": "local", "local_model": "qwen", "generation_timeout": 120}}, path
     )
     assert cs.read_config(path)["models"]["llm"]["generation_timeout"] == 120
+
+
+def test_write_models_preserves_and_validates_prompt_cache(tmp_path):
+    path = _write(tmp_path, "general:\n  wakeword: hi\n")
+    for size in (0, 2048):
+        cs.write_models({"llm": {"backend": "local", "prompt_cache_mib": size}}, path)
+        assert cs.read_config(path)["models"]["llm"]["prompt_cache_mib"] == size
+    with pytest.raises(ValueError, match="prompt_cache_mib"):
+        cs.write_models({"llm": {"backend": "local", "prompt_cache_mib": -1}}, path)
+    assert cs.read_config(path)["models"]["llm"]["prompt_cache_mib"] == 2048
 
 
 @pytest.mark.parametrize("threshold", [-0.1, 1.1, float("nan"), True])
@@ -227,7 +237,7 @@ def test_wakeword_presets_offer_all_bundled_atticus_models(tmp_path, monkeypatch
     (wakeword_dir / "hey_atticus_v0.6.onnx").touch()
     monkeypatch.chdir(tmp_path)
 
-    assert [preset.wakeword for preset in WAKEWORD_PRESETS] == ["hey atticus"]
+    assert [preset.wakeword for preset in WAKEWORD_PRESETS] == ["hey atticus", "alexa", "hey jarvis"]
     preset = wakeword_presets_as_dicts()[0]
     assert preset["model"] == "data/models/wakeword/hey_atticus_v0.6.onnx"
     assert preset["model_options"] == [
@@ -307,19 +317,41 @@ def test_settings_view_marks_offerable_by_variant(tmp_path, monkeypatch):
     gpu = cs.settings_view(path)
     assert gpu["variant"] == "gpu"
     assert {t["id"]: t["offerable"] for t in gpu["tier_presets"]} == {
-        "full": True,
-        "cpu_server": True,
-        "cpu_local": True,
-        "cpu_laya": True,
+        "max": True,
+        "pro": True,
+        "premium": True,
+        "economy": True,
+        "lite": True,
     }
 
     monkeypatch.setenv("FULLOCH_VARIANT", "cpu")
     cpu = cs.settings_view(path)
     assert cpu["variant"] == "cpu"
     tiers = {t["id"]: t["offerable"] for t in cpu["tier_presets"]}
-    # Full needs GPU-only backends; the CPU stacks run on the CPU image.
-    assert tiers == {"full": False, "cpu_server": True, "cpu_local": True, "cpu_laya": True}
+    # GPU tiers need GPU-only backends; only Lite (all-CPU) runs on the CPU image.
+    assert tiers == {"max": False, "pro": False, "premium": False, "economy": False, "lite": True}
     llm = {x["backend"]: x["offerable"] for x in cpu["backends"]["llm"]}
     assert llm["none"] is True and llm["openai"] is True and llm["llama"] is False
     asr = {x["backend"]: x["offerable"] for x in cpu["backends"]["asr"]}
     assert asr["moonshine"] is True and asr["qwen"] is False
+
+
+def test_model_save_rejects_gpu_backend_on_cpu_image(tmp_path, monkeypatch):
+    monkeypatch.setenv("FULLOCH_VARIANT", "cpu")
+    path = _write(tmp_path, "general:\n  wakeword: hey atticus\n")
+    with pytest.raises(ValueError, match="not available"):
+        cs.write_models({"llm": {"backend": "local", "local_model": "ornith"}}, path)
+    assert "models" not in cs.read_config(path)
+
+
+def test_backend_metadata_exposes_wakeword_and_voice_capabilities(tmp_path):
+    view = cs.settings_view(_write(tmp_path, "general: {}\n"))
+    asr = {b["backend"]: b for b in view["backends"]["asr"]}
+    tts = {b["backend"]: b for b in view["backends"]["tts"]}
+    assert asr["moonshine"]["verify_asr_wakeword"] is False
+    assert asr["moonshine-tiny"]["verify_asr_wakeword"] is False
+    assert asr["qwen"]["verify_asr_wakeword"] is True
+    assert tts["pocket-tts-onnx"]["voice_cloning"] is True
+    assert tts["kokoro-onnx"]["voice_cloning"] is False
+    assert tts["pocket-tts-pytorch"]["gated_repo"] is None
+    assert tts["pocket-tts-onnx"]["gated_repo"] is None

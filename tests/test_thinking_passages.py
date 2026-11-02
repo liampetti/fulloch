@@ -7,7 +7,7 @@ import pytest
 from core.background_jobs import BackgroundJob, JobSnapshot
 from core.thinking_budget import PromptOverflow, ThinkingBudget
 from core.thinking_fact_cards import build_fact_cards, serialize_synthesis_packet
-from core.thinking_worker import ThinkingWorker, _canonical_markers
+from core.thinking_worker import ThinkingWorker, _canonical_markers, _render_chapter_passage
 
 
 def setup_worker(generate):
@@ -35,6 +35,37 @@ def test_bad_alias_cannot_erase_an_independent_valid_passage():
     assert issues and "C99" not in retained
     assert job.synthesis_state["passage_reviews"][0]["original"] == raw
     assert BackgroundJob.from_checkpoint(job.checkpoint()).synthesis_state["alias_maps"]
+
+
+def test_broad_absence_claim_is_rejected_even_when_model_passes_it():
+    job, cards, worker, ledger = setup_worker(lambda **_: '{"verdict":"pass","issues":[]}')
+    raw = ("The service supports mobile backup. <!-- cards: C1 -->\n\n"
+           "The available evidence does not provide the backup capability. <!-- cards: C1 -->")
+    clean, bindings, issues, _ = worker._audit_candidate(
+        job, raw, cards, ledger, ThinkingBudget(worker.model, job.model_budget), lambda: False,
+        allow_revision=False,
+    )
+    assert "supports mobile backup" in clean
+    assert "does not provide" not in clean
+    assert len(bindings) == 1
+    assert any("partial source packet" in issue for issue in issues)
+    outcomes = job.synthesis_state["passage_reviews"][0]["passage_outcomes"]
+    assert {item["outcome"] for item in outcomes} == {"accepted", "rejected"}
+    assert all(cards[0]["id"] in item["card_ids"] for item in outcomes)
+
+
+def test_source_absence_claim_is_rejected_even_when_model_passes_it():
+    job, cards, worker, ledger = setup_worker(lambda **_: '{"verdict":"pass","issues":[]}')
+    raw = ("The service supports mobile backup. <!-- cards: C1 -->\n\n"
+           "The service capability is not provided in these sources. <!-- cards: C1 -->")
+    clean, bindings, issues, _ = worker._audit_candidate(
+        job, raw, cards, ledger, ThinkingBudget(worker.model, job.model_budget), lambda: False,
+        allow_revision=False,
+    )
+    assert "supports mobile backup" in clean
+    assert "not provided" not in clean
+    assert len(bindings) == 1
+    assert any("cannot establish absence from an entire source" in issue for issue in issues)
 
 
 @pytest.mark.parametrize("fenced", [False, True])
@@ -68,6 +99,20 @@ def test_packet_aliases_are_remapped_explicitly_across_sections():
     second = serialize_synthesis_packet(cards[1:], {})
     assert first["aliases"]["C1"] != second["aliases"]["C1"]
     assert _canonical_markers("Finding. <!-- cards: C1 -->", second["aliases"]).endswith(cards[1]["id"] + " -->")
+
+
+def test_original_card_ids_are_accepted_only_when_in_the_current_packet():
+    aliases = {"C1": "src-example-card-1", "C2": "src-example-card-2"}
+    text, error = _render_chapter_passage(
+        "A supported finding.", ["src-example-card-2", "C1", "src-example-card-2"], aliases,
+    )
+    assert error == ""
+    assert text.endswith("<!-- cards: C2, C1 -->")
+    assert _canonical_markers(text, aliases).endswith(
+        "<!-- cards: src-example-card-2, src-example-card-1 -->"
+    )
+    text, error = _render_chapter_passage("A finding.", ["src-other-card"], aliases)
+    assert text == "" and "aliases from the supplied source packet" in error
 
 
 def test_unavailable_support_audit_allows_only_exact_extracts_not_new_prose():

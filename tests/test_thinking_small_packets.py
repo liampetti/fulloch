@@ -71,6 +71,16 @@ def sdk_worker(job, *, finish="stop", window=2048):
             termination = finish
         elif stage in {"Merge the grounded chapter digests.", "Repair the chapter merge."}:
             emission, termination = "", "stop"
+        elif stage == "Compress the chapter's evidence into the card-bound fact list.":
+            # Tier-0 all-cards digest (TODO-1/TODO-5): emit a card-bound fact
+            # list so the digest path is exercised end-to-end. Honor the
+            # shared ``finish`` so a truncating backend truncates the digest
+            # too (it is a real model call, not a probe).
+            rows = re.findall(r"^(\S+) \| (.+)$", prompt, re.M)
+            emission = "\n".join(
+                f"{text} <!-- cards: {row_id} -->" for row_id, text in rows[:4]
+            )
+            termination = finish
         elif stage == "Audit the draft report now.":
             assessments = []
             draft = prompt.split("Draft report:\n", 1)[1]

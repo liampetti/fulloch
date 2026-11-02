@@ -23,7 +23,7 @@ def worker():
 
 def test_whole_timetable_and_undated_background_are_not_assertion_filtered():
     sources = {
-        "schedule": {"text": "FRIDAY 23 OCTOBER | | Local time\nFORMULA 1 | Practice | 12:30 - 13:30",
+        "schedule": {"text": "FRIDAY 23 OCTOBER | | Local time\nSOLAR LEAGUE | Practice | 12:30 - 13:30",
                      "title": "Official United States GP", "url": "https://example.org/timetable"},
         "track": {"text": "The uphill first corner offers overtaking opportunities.",
                   "title": "COTA", "url": "https://example.org/cota"},
@@ -131,7 +131,7 @@ def test_review_navigation_does_not_replace_an_accepted_answer_source_identity()
 
 def test_production_replay_preserves_saved_scope_and_groups_without_tools():
     job = BackgroundJob("replay", JobSnapshot("Analyse the next race"))
-    job.research_context = {"as_of": "2026-10-13T02:07:22Z", "entities": ["Formula 1"],
+    job.research_context = {"as_of": "2026-10-13T02:07:22Z", "entities": ["Solar League"],
                             "subject_resolution": {"state": "resolved", "name": "Austin", "date": "2026-10-25"}}
     job.evidence_requirements = [
         {"identifier": "chapter-01-q01", "question": "When is the race?"},

@@ -160,7 +160,7 @@ def test_arxiv_rate_limit_is_not_retried_and_falls_back_to_another_provider(monk
 
 
 @pytest.mark.parametrize("task,allowed", [
-    ("a deep analysis of the upcoming Bathurst 1000 race", False),
+    ("a deep analysis of the upcoming Harbour 1000 race", False),
     ("Research the best budget espresso machines", False),
     ("Research and compare private photo backup services", False),
     ("Compare recent arXiv papers on inference and product news", True),

@@ -40,9 +40,9 @@ def test_check_disk_fails_with_useful_message_when_full():
 
 def test_check_disk_passes_for_zero_download_tier():
     """A tier with no download (regex-only, remote LLM) → ok regardless of disk."""
-    # cpu_local uses regex-only LLM with no model download. We construct a
-    # synthetic models dict the resolver treats as download-free by
-    # bypassing resolve_models' own download_size_gb.
+    # lite uses Laya (semantic + regex routing) with no model download. We
+    # construct a synthetic models dict the resolver treats as download-free
+    # by bypassing resolve_models' own download_size_gb.
     with patch.object(pf, "disk_free_gb", return_value=0.0):
         with patch.object(pf, "_models_download_gb", return_value=0.0):
             ok, msg = pf.check_disk_for_models({})

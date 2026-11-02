@@ -253,7 +253,7 @@ class TestAppend:
     def test_append_does_not_semantic_write_into_daily_note(self, notes_dir, monkeypatch):
         # Regression: a date-like title with no literal match must not fall
         # through to the loose semantic index and silently append into the
-        # nearest daily journal (the F1-into-2026-06-05 corruption).
+        # nearest daily journal.
         daily = notes_dir / "daily" / "2026-06-05.md"
         daily.write_text("# Friday\n\n- 09:00 had coffee\n")
         monkeypatch.setattr(
@@ -261,21 +261,21 @@ class TestAppend:
             "_get_index",
             lambda: _StubIndex([(0.62, _StubHit("daily/2026-06-05.md"))]),
         )
-        result = notes.append_to_note("2026 06 16", "F1 standings update.")
+        result = notes.append_to_note("2026 06 16", "Example standings update.")
         assert result.startswith("Reactive question:")
-        assert "F1 standings update." not in daily.read_text()
+        assert "Example standings update." not in daily.read_text()
 
     def test_append_refuses_literal_match_on_daily_note(self, notes_dir):
         # A date title literally exact-matches a daily file's slug; appending
         # there would edit another day's journal. Must refuse, not write.
         daily = notes_dir / "daily" / "2026-06-05.md"
         daily.write_text("# Friday\n\n- 09:00 had coffee\n")
-        result = notes.append_to_note("2026 06 05", "F1 standings update.")
+        result = notes.append_to_note("2026 06 05", "Example standings update.")
         assert result.startswith("Reactive question:")
         # Steer the content to a general note, never back into a daily log.
         assert "write_note" in result
         assert "append_to_today" not in result
-        assert "F1 standings update." not in daily.read_text()
+        assert "Example standings update." not in daily.read_text()
 
     def test_append_ignores_low_confidence_semantic_match(self, notes_dir, monkeypatch):
         # A weak topical match (below the stricter write threshold) must not

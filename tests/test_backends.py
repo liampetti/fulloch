@@ -101,7 +101,7 @@ def test_gpu_only_flags():
     assert b.get_spec("llm", "llama").gpu_only is True
     assert b.get_spec("llm", "gemma").gpu_only is True
     assert b.get_spec("llm", "ornith").gpu_only is True
-    assert b.get_spec("llm", "neohorse").gpu_only is True
+    assert b.get_spec("llm", "qwen27b").gpu_only is True
     assert b.get_spec("asr", "moonshine").gpu_only is False
     assert b.get_spec("tts", "kokoro-onnx").gpu_only is False
     assert b.get_spec("tts", "pocket-tts-onnx").gpu_only is False
@@ -164,8 +164,8 @@ def test_pocket_gguf_backend_metadata_and_cpu_gating():
 def test_pocket_pytorch_backend_metadata_and_cpu_gating():
     pocket = b.get_spec("tts", "pocket-tts-pytorch")
     assert pocket.loader == "core.tts_pocket:load_tts"
-    assert pocket.hf_snapshots[0][0] == "kyutai/pocket-tts"
-    assert pocket.hf_snapshots[0][1] == ("languages/english_2026-04/model.safetensors",)
+    assert pocket.hf_snapshots[0][0] == "latent-variable/pocket-tts-cloning-en"
+    assert pocket.hf_snapshots[0][1] == ("languages/english/model.safetensors",)
     assert b.is_offerable(pocket, "gpu") is True
     assert b.is_offerable(pocket, "cpu") is False
 
@@ -231,31 +231,25 @@ def test_ornith_backend_metadata_and_public_resolution():
     assert resolved["opts"]["mtp"] is False
 
 
-def test_neohorse_backend_metadata_and_public_resolution():
-    neohorse = b.get_spec("llm", "neohorse")
-    assert neohorse.loader == "core.slm:load_slm"
-    assert neohorse.hf_repo == "TokenRhythm/NeoHorse-1-9B-GGUF"
-    assert neohorse.hf_file == "NeoHorse-1-9B-Q4_K_M.gguf"
-    assert neohorse.experimental is True
-    assert neohorse.extra == {"mtp": False}
+def test_qwen27b_backend_metadata_and_public_resolution():
+    qwen27b = b.get_spec("llm", "qwen27b")
+    assert qwen27b.loader == "core.slm:load_slm"
+    assert qwen27b.hf_repo == "unsloth/Qwen3.8-27B-GGUF"
+    assert qwen27b.hf_file == "Qwen3.8-27B-UD-IQ4_XS.gguf"
+    assert qwen27b.experimental is True
+    assert qwen27b.extra == {"mtp": False}
 
-    resolved = b.resolve_models({"llm": {"backend": "local", "local_model": "neohorse"}})["llm"]
-    assert resolved["backend"] == "neohorse"
-    assert resolved["model"].endswith(neohorse.hf_file)
+    resolved = b.resolve_models({"llm": {"backend": "local", "local_model": "qwen27b"}})["llm"]
+    assert resolved["backend"] == "qwen27b"
+    assert resolved["model"].endswith(qwen27b.hf_file)
     assert resolved["opts"]["mtp"] is False
-
-    # NeoHorse has no compatible MTP draft head, regardless of a stale config.
-    override = b.resolve_models(
-        {"llm": {"backend": "local", "local_model": "neohorse", "mtp": True}}
-    )["llm"]
-    assert override["opts"]["mtp"] is False
 
 
 def test_public_local_llm_modes_resolve_to_their_internal_servers():
     qwen = b.resolve_models({"llm": {"backend": "local", "local_model": "qwen"}})["llm"]
     gemma = b.resolve_models({"llm": {"backend": "local", "local_model": "gemma"}})["llm"]
     ornith = b.resolve_models({"llm": {"backend": "local", "local_model": "ornith"}})["llm"]
-    neohorse = b.resolve_models({"llm": {"backend": "local", "local_model": "neohorse"}})["llm"]
+    qwen27b = b.resolve_models({"llm": {"backend": "local", "local_model": "qwen27b"}})["llm"]
     external = b.resolve_models({"llm": {"backend": "external", "base_url": "http://llm/v1"}})[
         "llm"
     ]
@@ -265,7 +259,7 @@ def test_public_local_llm_modes_resolve_to_their_internal_servers():
     assert qwen["opts"]["flash_attn"] is False
     assert gemma["backend"] == "gemma"
     assert ornith["backend"] == "ornith"
-    assert neohorse["backend"] == "neohorse"
+    assert qwen27b["backend"] == "qwen27b"
     assert external["backend"] == "openai"
     assert external["opts"]["base_url"] == "http://llm/v1"
 
@@ -279,19 +273,20 @@ def test_model_docs_and_settings_cover_the_registry():
     # by /settings is selectable without a second hard-coded menu.
     assert "optsFor('asr'" in settings
     assert "optsFor('tts'" in settings
-    assert "currentBackend('tts') !== 'kokoro-onnx'" in settings
+    assert "spec?.voice_cloning === true" in settings
     for domain in (b.ASR, b.TTS):
         for spec in b.list_backends(domain):
             assert spec.backend in example
 
     # Local LLMs have public config aliases rather than their internal server
     # backend names; keep the explicit selector and config docs in sync.
-    for local_model in ("qwen", "gemma", "ornith", "neohorse", "custom"):
+    for local_model in ("qwen", "gemma", "ornith", "qwen27b", "custom"):
         assert f"local_model: {local_model}" in example
-        assert f'<option value="{local_model}"' in settings
+    # Model choices are now registry-driven, including image-variant filtering.
+    assert "optsFor('llm')" in settings
+    assert "state.schema.variant === 'cpu' && b.gpu_only" in settings
     assert "backend: local             # local | external | laya | none" in example
-    assert '<option value="external"' in settings
-    assert '<option value="none"' in settings
+    assert "previous.backend || 'external'" in settings
 
 
 def test_local_llm_experimental_options_are_explicit_overrides():
@@ -301,6 +296,18 @@ def test_local_llm_experimental_options_are_explicit_overrides():
 
     assert llm["opts"]["mtp"] is True
     assert llm["opts"]["flash_attn"] is True
+
+
+@pytest.mark.parametrize("size", [0, 512, 1024, 2048])
+def test_local_prompt_cache_config_is_forwarded(size):
+    llm = b.resolve_models({"llm": {"backend": "local", "prompt_cache_mib": size}})["llm"]
+    assert llm["opts"]["prompt_cache_mib"] == size
+
+
+@pytest.mark.parametrize("size", [-1, True, 1.5, "1024", None, 2**31])
+def test_local_prompt_cache_rejects_invalid_values(size):
+    with pytest.raises(ValueError, match="prompt_cache_mib"):
+        b.resolve_models({"llm": {"backend": "local", "prompt_cache_mib": size}})
 
 
 def test_variant_reads_env(monkeypatch):

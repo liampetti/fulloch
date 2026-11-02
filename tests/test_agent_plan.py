@@ -180,12 +180,12 @@ def test_research_acknowledgement_omits_unexecuted_context_lookups(turn, monkeyp
     al.tool_registry.register_tool(note, name="read_note")
     turn.catch.return_value = None
     _emissions(turn, {"actions": [
-        {"intent": "deep_think", "args": ["next Formula 1 race"]},
+        {"intent": "deep_think", "args": ["next Solar League race"]},
         {"intent": "get_conversation_history", "args": ["2026-10-11"]},
         {"intent": last_lookup, "args": args},
     ]})
 
-    prompt = "Give me a deep analysis on the next Formula 1 race coming up."
+    prompt = "Give me a deep analysis on the next Solar League race coming up."
     answer = turn.loop.run(prompt)
 
     assert answer == "I'll look into that and let you know when I'm done."

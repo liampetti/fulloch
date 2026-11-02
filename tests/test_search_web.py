@@ -59,7 +59,7 @@ def test_search_option_validation_is_internal_recovery_not_a_user_question(kwarg
         raise AssertionError("Invalid options must be rejected before retrieval")
 
     monkeypatch.setattr(search_web, "searxng_search", retrieve)
-    result = search_web.external_information(**{"query": "Bathurst 1000", **kwargs})
+    result = search_web.external_information(**{"query": "Harbour 1000", **kwargs})
 
     assert result.thinking_status == "needs_input"
     assert result.recovery["kind"] == "argument_validation"
@@ -313,7 +313,7 @@ def test_fetch_retains_only_bounded_prose_tables_and_metadata(monkeypatch):
 
 
 def test_fetch_does_not_misdecode_utf8_when_requests_defaults_to_latin1(monkeypatch):
-    paragraph = "Mount Panorama is a public road — except during race weekends. "
+    paragraph = "Example Circuit is a public road — except during race weekends. "
     body = "<html><body><article><p>" + paragraph * 30 + "</p></article></body></html>"
 
     class Response(FakeResp):
@@ -607,7 +607,7 @@ def test_comparison_research_has_a_web_retrieval_playbook():
 
 def test_upcoming_race_analysis_has_a_current_information_fallback():
     matches = matching_playbooks(
-        "Give me a deep analysis on the Bathurst 1000 race coming up",
+        "Give me a deep analysis on the Harbour 1000 race coming up",
         {"external_information"},
     )
 

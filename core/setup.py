@@ -97,6 +97,13 @@ def _asset_present(domain_cfg: dict, models_dir: str) -> bool:
     model = domain_cfg.get("model")
     if not model:
         return True
+    if spec is not None and spec.backend == "pocket-tts-pytorch":
+        # Both pinned snapshots are required, not merely any cached revision.
+        return all(
+            all((_hub_dir(repo, models_dir) / "snapshots" / revision / filename).is_file()
+                for filename in allow)
+            for repo, allow, revision in spec.hf_snapshots
+        )
     if spec is not None and spec.hf_files:
         root = Path(model)
         return root.is_dir() and all((root / filename).is_file() for _, filename in spec.hf_files)
@@ -200,7 +207,7 @@ def detect_setup_state(
             missing_assets.append(f"{domain}:{cfg['backend']} ({cfg['model']})")
     # Local llama-server backends use the shipped GBNF grammar; external OpenAI
     # endpoints may not recognise it and fall back to JSON mode.
-    if resolved[LLM]["backend"] in {"llama", "gemma", "ornith", "neohorse"}:
+    if resolved[LLM]["backend"] in {"llama", "gemma", "ornith", "qwen27b"}:
         if not (Path(models_dir) / "grammars" / "agent.gbnf").is_file():
             missing_assets.append("grammar (agent.gbnf)")
 

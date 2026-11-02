@@ -1,7 +1,7 @@
 ## llama.cpp experimental options
 > Native MTP speculative decoding and llama.cpp's built-in Flash Attention are
-> off by default for every GPU. Enable them individually in the setup wizard or
-> Settings only after stability-testing the selected model, driver, and hardware.
+> off by default for every GPU. Enable them individually in `data/config.yml`
+> only after stability-testing the selected model, driver, and hardware.
 > This does not affect the Python FlashAttention 2 dependency used by the GPU
 > speech models.
 
@@ -58,23 +58,22 @@ nothing in the timeline surprises you:
    entrypoint chowns the data dir (a no-op on bind mounts; fixes named
    volumes on first boot). The image is ~2 GB for the CPU stack and ~6
    GB for the GPU stack; only download size, not memory.
-2. **Open `https://localhost:8765`.** The dashboard's first render
-   shows the URL banner with a Copy button and a one-line note about
-   the self-signed-cert warning. Click through the warning; it's
+2. **Open `https://localhost:8765`.** The server logs show the dashboard URL.
+   Click through the self-signed certificate warning; it's
    expected for a private LAN install.
-3. **Walk the wizard.** Pick a language-model stack (regex-only / Full GPU /
-   remote LLM), set a name and voice, optionally connect Home Assistant and
-   SearXNG, then optionally connect Obsidian.
+3. **Walk the wizard.** Choose a hardware preset and a bundled wakeword,
+   optionally connect Home Assistant, then optionally enter a SearXNG URL.
+   Continue without changing anything for the defaults. Voice selection,
+   individual models and external AI endpoints are in Settings afterwards.
 4. **Models download.** This is the long bit. The CPU stack pulls
-     roughly 5 GB (Qwen3 1.7B ONNX + Pocket TTS's English ONNX voice-cloning
-     bundle). Kokoro 82M is available as a smaller built-in-voice alternative. The GPU
+      roughly 1.4 GB for Lite (Moonshine Base, Kokoro and Laya). The Pro GPU
     stack pulls roughly 13 GB (Qwen3 1.7B PyTorch ASR + Qwen3 1.7B PyTorch TTS + the
    9B language model).
 5. **Startup.** Once models are downloaded, Fulloch loads them on this and every
    later restart. This normally takes a minute or two; Qwen3 TTS takes longest
-   to warm up. The wizard then shows the final **Almost done** screen, where you
-   can enter your name and an optional dashboard password before opening the
-   dashboard. You can type text or click to activate voice mode. Selecting
+   to warm up. The wizard then opens chat directly. Set a password in
+   **Settings → Dashboard** before exposing the server outside a trusted
+   network. You can type text or click to activate voice mode. Selecting
    **Always Listen** starts exclusive Conversation mode: it skips the wakeword,
    keeps the mic live during replies, and disconnects other voice satellites
    until you turn it off (the default wakeword is “Hey Atticus”).
@@ -102,13 +101,13 @@ python scripts/create_local_ca.py --force --host fulloch.home --ip 192.168.1.20
 
 ## Configuration
 
-The **setup wizard** configures Fulloch on first boot, and the **settings console** (gear icon, the same web UI) edits schema-backed settings afterwards: wakeword, barge-in, voice, model backends, the Home Assistant connection, notes path, web search, and normal external-LLM connection settings. Spotify OAuth, native `satellite_tokens`, and external-LLM timeout options remain hand-configured in [`data/config.example.yml`](data/config.example.yml). The setup browser seeds `general.timezone` only when it is unset; later changes are explicit Settings edits that take effect immediately. Ordinary dashboard visits never change the household timezone.
+The **setup wizard** configures Fulloch on first boot. Settings exposes Presets, General, Models, Dashboard, Wakeword, Voice, Home Assistant and Web Search. Other options—including wakeword regex/tuning, barge-in, timezone overrides, Spotify OAuth, native `satellite_tokens`, and external-LLM timeouts—remain in [`data/config.example.yml`](data/config.example.yml). The setup browser seeds `general.timezone` only when unset. Ordinary dashboard visits never change the household timezone. Saving an unrelated visible control preserves hidden configuration.
 
-Secrets are stored in `data/credentials.json`. The setup wizard writes the HA token, LLM API key, dashboard password, and Obsidian token; add integration API tokens manually. Copying `data/` to a new machine transfers everything. To configure headlessly, copy [`data/credentials.example.json`](data/credentials.example.json) to `data/credentials.json` and fill in the values, or set the equivalent env vars (`HA_TOKEN`, `LLM_API_KEY`, `DASHBOARD_PASSWORD`, `OBSIDIAN_TOKEN`) in `.env`.
+Secrets are stored in `data/credentials.json`. The wizard saves the HA token; Settings also saves API keys and the dashboard password. Advanced Obsidian setup uses the script below. Add integration API tokens manually. Copying `data/` to a new machine transfers everything. To configure headlessly, copy [`data/credentials.example.json`](data/credentials.example.json) to `data/credentials.json` and fill in the values, or set the equivalent env vars (`HA_TOKEN`, `LLM_API_KEY`, `DASHBOARD_PASSWORD`, `OBSIDIAN_TOKEN`) in `.env`.
 
 ## Web Dashboard
 
-The web dashboard is **unauthenticated and bound to `127.0.0.1` by default**. To reach it from another device, set `dashboard_host: "0.0.0.0"` in config and set a password in the setup wizard's finish step.
+The web dashboard is **unauthenticated and bound to `127.0.0.1` by default**. To reach it from another device, set `dashboard_host: "0.0.0.0"` and a password in **Settings → Dashboard**.
 
 ## Voice Satellites
 
@@ -194,16 +193,16 @@ The optional Fulloch plugin adds live Obsidian-app integration. It supplies the 
 
 **Setup (about 2 minutes):**
 
-1. **In the Fulloch setup wizard**, the "Connect Obsidian" step lets you auto-detect your vault or paste its path. Click **Save and continue**, or **Skip** to do it later.
-2. **Open the dashboard's Obsidian tab**, download the transitional plugin archive, extract it into `<your-vault>/.obsidian/plugins/fulloch/`, then enable the Fulloch plugin in **Settings → Community plugins** and paste the dashboard's auth token into its settings.
+1. Set **Settings → General → Notes directory** to your server/container vault path. This is sufficient for ordinary Markdown notes.
+2. For the optional plugin, use [`scripts/setup_obsidian.py`](scripts/setup_obsidian.py) to select the vault, download the plugin archive and reveal the pairing token. See [`scripts/OBSIDIAN.md`](scripts/OBSIDIAN.md). Extract the archive into `<your-vault>/.obsidian/plugins/fulloch/`, then enable the Fulloch plugin in Obsidian's **Settings → Community plugins** and enter the token.
 
    In the plugin settings, use the HTTPS dashboard URL (for example, `https://localhost` with port `8765`). A plain `localhost` value creates an insecure `ws://` connection, which Fulloch redirects and WebSockets cannot follow. The default self-signed dashboard certificate must be trusted on the computer running Obsidian; use the private-CA instructions above for a permanent trust setup.
 
-That's it. Once the plugin connects, the dashboard flips to **Connected** and voice notes go straight to your vault. Closing Obsidian doesn't break anything, Fulloch remembers the vault and voice keeps working.
+Once the plugin connects, voice notes go straight to your vault. Closing Obsidian doesn't break anything; Fulloch remembers the notes directory and voice keeps working. Plugin controls are not part of the web setup/settings UI.
 
-By default, voice can only create and append notes. While the plugin is connected, the Obsidian tab has an explicit **Enable edit/delete** control for active-editor actions: insert at the live cursor, replace currently selected text, rename the active note, or move it to Obsidian trash. The dashboard tab pulses red while this mode is enabled; disable it again when you are finished.
+By default, voice can only create and append notes. Advanced users can configure `obsidian.allow_edit_delete` in config.yml for active-editor actions. Treat this as an explicit opt-in and disable it when no longer needed.
 
-To point Fulloch at a different vault later, use the **Switch vault** section on the Obsidian tab.
+To point Fulloch at a different vault later, update the Notes directory or use the optional script's `--vault-path` argument.
 
 The plugin runs on the host, so it reports host paths (e.g. `/Users/you/Documents/MyVault`). Fulloch inside the container can't see those. Two edits to wire it up:
 

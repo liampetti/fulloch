@@ -62,6 +62,7 @@ data/token.json
 data/models/*
 !data/models/grammars/
 !data/models/grammars/agent.gbnf
+!third_party/openwakeword-models/NOTICE.md
 !data/models/wakeword/
 !data/models/wakeword/hey_atticus_v*.onnx
 # The image seeds these repository-owned starter references on first run.

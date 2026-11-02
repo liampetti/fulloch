@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 
@@ -46,6 +47,24 @@ def load_document(reference: dict) -> dict:
     if not isinstance(text, str) or hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
         return {}
     return value
+
+
+def remove_documents(references: set[tuple[str, str]]) -> None:
+    """Remove unshared working documents and their empty directories."""
+    root = _root()
+    for key, digest in references:
+        if not re.fullmatch(r"[0-9a-f]{24}", key) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            continue
+        directory = root / key
+        (directory / f"{digest}.json").unlink(missing_ok=True)
+        try:
+            directory.rmdir()
+        except OSError:
+            pass  # Another document may still be in use.
+    try:
+        root.rmdir()
+    except OSError:
+        pass
 
 
 def archive_source(source: dict) -> dict:

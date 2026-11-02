@@ -36,9 +36,14 @@ class OpenWakeWordBackend:
     def _model(self, satellite_id: str):
         model = self._models.get(satellite_id)
         if model is None:
+            # Use the shipped feature extractors on native installs too; a
+            # fresh openWakeWord wheel need not have downloaded resources.
+            resources = Path(__file__).resolve().parents[1] / "third_party" / "openwakeword-models"
             model = self._model_type(
                 wakeword_models=[self.model_path],
                 inference_framework=self.inference_framework,
+                melspec_model_path=str(resources / f"melspectrogram.{self.inference_framework}"),
+                embedding_model_path=str(resources / f"embedding_model.{self.inference_framework}"),
             )
             self._models[satellite_id] = model
         return model

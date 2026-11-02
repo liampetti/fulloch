@@ -8,8 +8,8 @@ ARG MAX_JOBS=4
 ENV MAX_JOBS=${MAX_JOBS}
 ARG HIGGS_TTS_REPO=https://github.com/liampetti/HiggsTTS.cpp.git
 ARG HIGGS_TTS_REF=061134ad8c3dc544ebf1362f12882fd26a879f8f
-# llama.cpp b10199: pinned local-LLM runtime revision.
-ARG LLAMA_CPP_REF=b4ca032ae3729516943884786de4ae39fba0bbca
+# llama.cpp b11960: pinned local-LLM runtime revision with LFM3 support.
+ARG LLAMA_CPP_REF=8642541b255bfb5dc39cd351a178be09013a55d6
 
 RUN apt-get update && apt-get install -y git cmake && rm -rf /var/lib/apt/lists/*
 
@@ -49,7 +49,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
 
 # openWakeWord's wheel excludes its CC BY-NC-SA 4.0 feature extractors. They
 # are vendored with their attribution notice, avoiding an external build-time
-# download while excluding unrelated pre-trained wakeword classifiers.
+# download. The bundled Alexa/Jarvis classifiers are also available to the UI.
 COPY third_party/openwakeword-models/ /tmp/openwakeword-models/
 RUN set -eux; \
     target="$(python -c 'from pathlib import Path; import openwakeword; target = Path(openwakeword.__file__).parent / "resources" / "models"; target.mkdir(parents=True, exist_ok=True); print(target)')"; \
@@ -124,9 +124,10 @@ COPY --chown=appuser:appuser tools/ tools/
 COPY --chown=appuser:appuser utils/ utils/
 COPY --chown=appuser:appuser audio/ audio/
 COPY --chown=appuser:appuser server/ server/
-# Retain attribution for the vendored CC BY-NC-SA 4.0 feature extractors in
+# Retain attribution for the vendored CC BY-NC-SA 4.0 wakeword models in
 # the published runtime image.
 COPY --chown=appuser:appuser third_party/openwakeword-models/NOTICE.md /app/THIRD_PARTY_NOTICES/openwakeword-models.md
+COPY --chown=appuser:appuser third_party/openwakeword-models/ /app/third_party/openwakeword-models/
 
 # First-run seeds (copied into the empty ./data volume by core/bootstrap.py):
 # the config template the wizard fills in, the app's own GBNF grammar (which

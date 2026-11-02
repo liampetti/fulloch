@@ -166,7 +166,9 @@ class _StubModule(types.ModuleType):
         # machinery would default to anyway.
         if name == "__path__":
             return []
-        return _make_stub_class(name)
+        value = _make_stub_class(name)
+        setattr(self, name, value)
+        return value
 
 
 for _name in _HEAVY_MODULES:

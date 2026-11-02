@@ -207,14 +207,17 @@ def write_models(models: dict, path: str = DEFAULT_CONFIG_PATH) -> None:
     """Write the structured `models:` block (tier/backends)."""
     if not isinstance(models, dict):
         raise ValueError("models must be an object")
+    for domain in ("asr", "tts"):
+        if domain in models and not isinstance(models[domain], dict):
+            raise ValueError(f"models.{domain} must be an object")
     llm = models.get("llm")
     if not isinstance(llm, dict):
         raise ValueError("models.llm must be an object")
     backend = llm.get("backend")
     if backend == "local":
         local_model = llm.get("local_model", "qwen")
-        if local_model not in {"qwen", "gemma", "ornith", "neohorse", "custom"}:
-            raise ValueError("models.llm.local_model must be qwen, gemma, ornith, neohorse, or custom")
+        if local_model not in {"qwen", "gemma", "ornith", "qwen27b", "custom"}:
+            raise ValueError("models.llm.local_model must be qwen, gemma, ornith, qwen27b, or custom")
         if local_model == "custom":
             model = llm.get("model")
             if not isinstance(model, str) or not model.lower().endswith(".gguf"):
@@ -222,7 +225,7 @@ def write_models(models: dict, path: str = DEFAULT_CONFIG_PATH) -> None:
     elif backend == "external":
         if not isinstance(llm.get("base_url"), str) or not llm["base_url"].strip():
             raise ValueError("an external LLM needs a base_url")
-    elif backend not in {"llama", "gemma", "ornith", "neohorse", "openai", "none", "laya"}:
+    elif backend not in {"llama", "gemma", "ornith", "qwen27b", "openai", "none", "laya"}:
         raise ValueError("models.llm.backend must be local, external, laya, or none")
     if "confidence_threshold" in llm and (
         not isinstance(llm["confidence_threshold"], (int, float))
@@ -269,6 +272,12 @@ def write_models(models: dict, path: str = DEFAULT_CONFIG_PATH) -> None:
                     raise ValueError(f"models.wakeword.{key} must be between {low} and {high}")
             if "verify_asr" in wakeword and not isinstance(wakeword["verify_asr"], bool):
                 raise ValueError("models.wakeword.verify_asr must be true or false")
+    from core.backends import DOMAINS, is_offerable, resolve_models
+
+    resolved = resolve_models(models)
+    for domain in DOMAINS:
+        if domain in models and not is_offerable(resolved[domain]["spec"]):
+            raise ValueError(f"models.{domain}: this backend is not available in the running image")
     doc = _load_doc(path)
     block = CommentedMap()
     for domain in ("asr", "tts", "llm", "wakeword"):
@@ -303,6 +312,7 @@ def _backends_view() -> dict:
     GPU-only backends), so the wizard renders only what this image can run.
     """
     from core.backends import DOMAINS, is_offerable, list_backends
+    from core.wakeword_policy import ACOUSTIC_ONLY_ASR
 
     out: dict = {}
     for domain in DOMAINS:
@@ -318,6 +328,9 @@ def _backends_view() -> dict:
                 "download_size_gb": s.download_size_gb,
                 "notes": s.notes,
                 "experimental": s.experimental,
+                "verify_asr_wakeword": s.backend not in ACOUSTIC_ONLY_ASR,
+                "voice_cloning": s.voice_cloning,
+                "gated_repo": s.gated_repo,
             }
             for s in list_backends(domain)
         ]

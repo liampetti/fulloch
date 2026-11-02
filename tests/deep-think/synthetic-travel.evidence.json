@@ -1,0 +1,207 @@
+{
+  "schema_version": 2,
+  "task": "Compare return flight options from AAA to BBB on 2027-01-17 and back on 2027-03-03.",
+  "task_record": {},
+  "run_metadata": {
+    "job_id": "synthetic-travel",
+    "task_id": null,
+    "thread_id": null,
+    "parent_job_id": null,
+    "attempt": 1,
+    "origin_turn_id": null,
+    "process_generation": null,
+    "deployment": {},
+    "process_id": null,
+    "model_calls": 0,
+    "context_tokens": null,
+    "tokenizer": null,
+    "model_settings": {},
+    "admission_denials": [],
+    "admission_decisions": [],
+    "selected_actions": [],
+    "stage_diagnostics": []
+  },
+  "research_context": {
+    "task": "Compare return flight options from AAA to BBB on 2027-01-17 and back on 2027-03-03.",
+    "temporal_intent": "timeless",
+    "requested_dates": [
+      "2027-01-17",
+      "2027-03-03"
+    ],
+    "ambiguous_dates": [],
+    "as_of": "2026-10-29T10:00:00+00:00",
+    "edition_year": 2027,
+    "edition_year_explicit": true,
+    "scope_version": 2,
+    "event_labels": [],
+    "entities": [
+      "AAA",
+      "BBB"
+    ],
+    "comparison_dimensions": [],
+    "source_preferences": [
+      "specialised_provider"
+    ],
+    "inherited_entities": [],
+    "unresolved_references": [],
+    "requested_category": ""
+  },
+  "source_registry": {
+    "artifact-001": {
+      "id": "artifact-001",
+      "title": "Flight offer 1",
+      "class": "specialised_provider",
+      "publisher_role": "specialised_provider",
+      "origin": "flight provider"
+    }
+  },
+  "scope_registry": {
+    "src-e76a72ffa4dceb05": {
+      "subject": "AAA → BBB",
+      "temporal_role": "provider_snapshot",
+      "provider": "flight provider",
+      "constraints": {
+        "route": {
+          "origin": "AAA",
+          "destination": "BBB"
+        },
+        "departure_date": "2027-01-17",
+        "return_date": "2027-03-03",
+        "currency": "EUR"
+      },
+      "source_scope": "Synthetic test fixture; not real provider data."
+    }
+  },
+  "fact_cards": [
+    {
+      "id": "artifact-001-flight-1",
+      "source": "artifact-001",
+      "kind": "structured_record",
+      "record": {
+        "price": 700,
+        "currency": "EUR",
+        "outbound": {
+          "departure": {
+            "time": "2027-01-17 14:40"
+          }
+        },
+        "inbound": {
+          "departure": {
+            "time": "2027-03-03 21:45"
+          }
+        }
+      },
+      "identity": {
+        "subject": "aaa → bbb",
+        "claim_type": "travel_offer",
+        "period": "2027-01-17"
+      },
+      "status": "single_source",
+      "scope_id": "src-e76a72ffa4dceb05",
+      "eligibility": {
+        "scoped_claims": true,
+        "complete_structured_option": true
+      },
+      "provenance": {
+        "source_id": "artifact-001"
+      },
+      "finding": {
+        "version": 1,
+        "role": "record",
+        "context_state": "record",
+        "assessment": "unassessed"
+      },
+      "independence_key": "provider:flight provider",
+      "temporal_role": "provider_snapshot"
+    }
+  ],
+  "coverage_requirements": [
+    {
+      "identifier": "answer",
+      "question": "Compare return flight options from AAA to BBB on 2027-01-17 and back on 2027-03-03.",
+      "importance": "high",
+      "freshness": "task-dependent",
+      "state": "open",
+      "dimension": "",
+      "temporal_scope": "timeless",
+      "evidence_ids": [],
+      "completion_criteria": "At least one direct substantive answering claim within the requested scope.",
+      "answer_coverage": "not_verified",
+      "evidence_terms": [],
+      "dependencies": [],
+      "as_of": "2026-10-29T10:00:00+00:00",
+      "is_subject_identity": false
+    },
+    {
+      "identifier": "tradeoffs",
+      "question": "Retrieve evidence for the material limitations, alternatives, or trade-offs.",
+      "importance": "medium",
+      "freshness": "task-dependent",
+      "state": "open",
+      "dimension": "",
+      "temporal_scope": "timeless",
+      "evidence_ids": [],
+      "completion_criteria": "At least one direct substantive answering claim within the requested scope.",
+      "answer_coverage": "not_verified",
+      "evidence_terms": [],
+      "dependencies": [],
+      "as_of": "2026-10-29T10:00:00+00:00",
+      "is_subject_identity": false
+    },
+    {
+      "identifier": "fact-2027-01-17",
+      "question": "Establish 2027-01-17 for the requested subject(s).",
+      "importance": "high",
+      "freshness": "task-dependent",
+      "state": "open",
+      "dimension": "2027-01-17",
+      "temporal_scope": "timeless",
+      "evidence_ids": [],
+      "completion_criteria": "At least one direct substantive answering claim within the requested scope.",
+      "answer_coverage": "not_verified",
+      "evidence_terms": [],
+      "dependencies": [],
+      "as_of": "2026-10-29T10:00:00+00:00",
+      "is_subject_identity": false
+    },
+    {
+      "identifier": "fact-back-on-2027-03-03",
+      "question": "Establish back on 2027-03-03 for the requested subject(s).",
+      "importance": "high",
+      "freshness": "task-dependent",
+      "state": "open",
+      "dimension": "back on 2027-03-03",
+      "temporal_scope": "timeless",
+      "evidence_ids": [],
+      "completion_criteria": "At least one direct substantive answering claim within the requested scope.",
+      "answer_coverage": "not_verified",
+      "evidence_terms": [],
+      "dependencies": [],
+      "as_of": "2026-10-29T10:00:00+00:00",
+      "is_subject_identity": false
+    }
+  ],
+  "cited_card_ids": [],
+  "progress": {
+    "discovered_documents": 1,
+    "fetched_documents": 1,
+    "processed_unique_documents": 1,
+    "eligible_documents": 1,
+    "unprocessed_documents": 0,
+    "rejected_documents": 0,
+    "cited_documents": 0,
+    "retrieval_artifacts": 0,
+    "saved_sections": 0,
+    "unresolved_obligations": [
+      "answer",
+      "tradeoffs",
+      "fact-2027-01-17",
+      "fact-back-on-2027-03-03"
+    ]
+  },
+  "fixture_metadata": {
+    "synthetic": true,
+    "purpose": "Offline tool-record regression; not live or current evidence.",
+    "tool": "search_flights"
+  }
+}

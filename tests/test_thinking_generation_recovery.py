@@ -5,8 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from core.background_jobs import BackgroundJob, JobSnapshot
+from core.slm import RemoteUnreachable
 from core.thinking_budget import ThinkingBudget
-from core.thinking_worker import ThinkingWorker, _recover_empty_section
+from core.thinking_worker import ThinkingWorker, _budgeted_generate, _recover_empty_section
 
 
 def test_empty_recovery_changes_strategy_once_and_circuit_survives_resume():
@@ -62,6 +63,23 @@ def test_deep_think_generation_always_starts_with_fresh_messages():
     assert len(calls) == 2
 
 
+def test_planning_schema_requires_report_title():
+    calls = []
+
+    def generate(_model, **kwargs):
+        calls.append(kwargs)
+        return ('{"report_title":"XYZQ outlook","chapters":[{"title":"XYZQ",'
+                '"priority":"high","questions":["What changed?"],'
+                '"tools":[],"queries":["XYZQ news"]}]}')
+
+    worker = ThinkingWorker(object(), None, None, generate, lambda: {}, None,
+                            lambda *_: "", threading.Lock(), 1)
+    result = _budgeted_generate(worker, ThinkingBudget(worker.model, {}), "chapter_planning",
+                                system_prompt="Plan XYZQ", user_prompt="Plan")
+    assert '"report_title":"XYZQ outlook"' in result
+    assert "report_title" in calls[0]["response_schema"]["required"]
+
+
 def test_stage_prompts_receive_only_their_bounded_stage_payloads():
     from core.thinking_worker import (
         MAX_THINKING_CAPABILITY_DESCRIPTION_CHARS,
@@ -109,3 +127,113 @@ def test_one_slot_worker_releases_model_lock_between_calls_for_foreground_turns(
 
     assert calls == ["first stage", "next stage"]
     assert not lock.locked()
+
+
+def test_backend_recovery_waits_for_ready_then_resumes_with_durable_state(monkeypatch):
+    import core.thinking_worker as module
+
+    model = SimpleNamespace(_fulloch_backend_state="RECOVERING", _fulloch_process_generation=1)
+    checkpoints = []
+    jobs = SimpleNamespace(checkpoint=lambda job: checkpoints.append(job.checkpoint()))
+    worker = ThinkingWorker(model, None, jobs, None, lambda: {}, None, lambda *_: "", threading.Lock(), 1)
+    job = BackgroundJob("recovery", JobSnapshot("Research"))
+    job.attempted_actions.add("previous-action")
+    attempts = []
+
+    def run_once(current, _cancelled, **_kwargs):
+        attempts.append(model._fulloch_backend_state)
+        if len(attempts) == 1:
+            raise RemoteUnreachable("backend recovering")
+        assert current.attempted_actions == {"previous-action"}
+        assert "backend_recovery" not in current.synthesis_state
+        return "verified result", "state"
+
+    def recover(_seconds):
+        assert len(attempts) == 1
+        model._fulloch_backend_state = "READY"
+        model._fulloch_process_generation = 2
+
+    monkeypatch.setattr(worker, "_run_once", run_once)
+    monkeypatch.setattr(module.time, "sleep", recover)
+    assert worker.run(job, lambda: False) == ("verified result", "state")
+    assert attempts == ["RECOVERING", "READY"]
+    assert any(item["synthesis_state"].get("backend_recovery_limits", {}).get("attempts") == 1
+               for item in checkpoints)
+    assert job.synthesis_state["backend_recovery_limits"]["attempts"] == 1
+
+
+def test_backend_recovery_obeys_persisted_retry_limit_and_cancellation(monkeypatch):
+    model = SimpleNamespace(_fulloch_backend_state="READY")
+    jobs = SimpleNamespace(checkpoint=lambda _job: None)
+    worker = ThinkingWorker(model, None, jobs, None, lambda: {}, None, lambda *_: "", threading.Lock(), 1)
+    job = BackgroundJob("limited", JobSnapshot("Research"))
+    job.synthesis_state["backend_recovery_limits"] = {"attempts": 2, "deadline_epoch": time.time() + 60}
+    monkeypatch.setattr(worker, "_run_once", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RemoteUnreachable("still unavailable")
+    ))
+    with pytest.raises(RemoteUnreachable):
+        worker.run(job, lambda: False)
+    assert job.synthesis_state["backend_recovery_limits"]["attempts"] == 2
+
+    job.synthesis_state["backend_recovery_limits"]["attempts"] = 0
+    model._fulloch_backend_state = "RECOVERING"
+    calls = iter((False, False, True))
+    assert worker.run(job, lambda: next(calls, True)) == ("", "")
+
+
+def test_backend_recovery_refuses_resume_when_checkpoint_fails(monkeypatch):
+    model = SimpleNamespace(_fulloch_backend_state="READY")
+
+    def fail_checkpoint(job):
+        job.checkpoint_error = True
+
+    worker = ThinkingWorker(model, None, SimpleNamespace(checkpoint=fail_checkpoint), None,
+                            lambda: {}, None, lambda *_: "", threading.Lock(), 1)
+    job = BackgroundJob("not-durable", JobSnapshot("Research"))
+    monkeypatch.setattr(worker, "_run_once", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RemoteUnreachable("disconnected")
+    ))
+    with pytest.raises(RemoteUnreachable):
+        worker.run(job, lambda: False)
+    assert job.checkpoint_error
+
+
+def test_backend_recovery_stops_after_three_failures(monkeypatch):
+    model = SimpleNamespace(_fulloch_backend_state="READY")
+    worker = ThinkingWorker(model, None, SimpleNamespace(checkpoint=lambda _job: None), None,
+                            lambda: {}, None, lambda *_: "", threading.Lock(), 1)
+    job = BackgroundJob("three-failures", JobSnapshot("Research"))
+    attempts = []
+
+    def fail(*_args, **_kwargs):
+        attempts.append(1)
+        raise RemoteUnreachable("backend crashed")
+
+    monkeypatch.setattr(worker, "_run_once", fail)
+    with pytest.raises(RemoteUnreachable, match="backend crashed"):
+        worker.run(job, lambda: False)
+    assert len(attempts) == 3
+
+
+def test_backend_recovery_deadline_and_retry_budget_survive_restart(monkeypatch):
+    import core.thinking_worker as module
+
+    model = SimpleNamespace(_fulloch_backend_state="RECOVERING")
+    checkpoints = []
+    jobs = SimpleNamespace(checkpoint=lambda job: checkpoints.append(job.checkpoint()))
+    worker = ThinkingWorker(model, None, jobs, None, lambda: {}, None, lambda *_: "", threading.Lock(), 1)
+    job = BackgroundJob("deadline", JobSnapshot("Research"))
+    monkeypatch.setattr(module, "BACKEND_RECOVERY_SECONDS", 0)
+    monkeypatch.setattr(worker, "_run_once", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RemoteUnreachable("backend recovering")
+    ))
+
+    with pytest.raises(RemoteUnreachable):
+        worker.run(job, lambda: False)
+    restored = BackgroundJob.from_checkpoint(checkpoints[-1])
+    assert restored.synthesis_state["backend_recovery_limits"]["attempts"] == 1
+    assert restored.synthesis_state["backend_recovery"]["checkpointed"] is True
+    assert restored.synthesis_state["backend_recovery_limits"]["deadline_epoch"] <= time.time()
+    with pytest.raises(RemoteUnreachable):
+        worker.run(restored, lambda: False)
+    assert restored.synthesis_state["backend_recovery_limits"]["attempts"] == 2

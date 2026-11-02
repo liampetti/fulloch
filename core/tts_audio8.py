@@ -62,8 +62,8 @@ def set_voice(voice_name: Optional[str]):
     """Select the reference WAV and its required exact transcript."""
     global _voice
     name = (voice_name or "").strip()
-    wav_path = VOICES_DIR / f"{name}.wav"
-    txt_path = VOICES_DIR / f"{name}.txt"
+    wav_path = Path(name) if name.lower().endswith(".wav") else VOICES_DIR / f"{name}.wav"
+    txt_path = wav_path.with_suffix(".txt")
     if not wav_path.is_file():
         raise FileNotFoundError(f"Audio8 voice reference not found: {wav_path}")
     if not txt_path.is_file():

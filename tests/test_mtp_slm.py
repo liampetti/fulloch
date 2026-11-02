@@ -68,6 +68,33 @@ def test_server_command_disables_experimental_features_by_default(monkeypatch):
     assert command[command.index("--flash-attn") + 1] == "off"
 
 
+@pytest.mark.parametrize("size", [0, 512, 1024, 2048])
+def test_server_command_sets_prompt_cache_mib(monkeypatch, size):
+    monkeypatch.setattr(slm, "_local_server_binary", lambda: "/opt/llama-cpp/llama-server")
+    command = slm._local_server_command("model.gguf", 12288, 4, 512, prompt_cache_mib=size)
+    assert command[command.index("--cache-ram") + 1] == str(size)
+
+
+def test_server_command_defaults_prompt_cache_to_one_gib(monkeypatch):
+    monkeypatch.setattr(slm, "_local_server_binary", lambda: "/opt/llama-cpp/llama-server")
+    command = slm._local_server_command("model.gguf", 12288, 4, 512)
+    assert command[command.index("--cache-ram") + 1] == "1024"
+
+
+@pytest.mark.parametrize("size", [-1, True, 1.5, "1024", None, 2**31])
+def test_server_command_rejects_invalid_prompt_cache(monkeypatch, size):
+    monkeypatch.setattr(slm, "_local_server_binary", lambda: "/opt/llama-cpp/llama-server")
+    with pytest.raises(ValueError, match="prompt_cache_mib"):
+        slm._local_server_command("model.gguf", 12288, 4, 512, prompt_cache_mib=size)
+
+
+def test_load_slm_forwards_prompt_cache(monkeypatch):
+    received = []
+    monkeypatch.setattr(slm, "_load_local_slm", lambda *args: received.append(args))
+    slm.load_slm(prompt_cache_mib=2048)
+    assert received[0][-1] == 2048
+
+
 def test_mtp_server_requires_native_binary(monkeypatch):
     monkeypatch.setattr(slm, "_local_server_binary", lambda: "")
 
@@ -105,6 +132,63 @@ def test_server_failure_detail_does_not_guess_oom_for_unknown_process_exit(monke
     assert "exited with code -9" in detail
     assert "out of memory" not in detail.lower()
     assert "GPU memory fault" not in detail
+
+
+def test_memory_emergency_cools_down_and_does_not_repeat_recovery(monkeypatch):
+    from core import llm_openai, memory_guard
+
+    threads = []
+    sleeps = []
+    stopped = []
+    cancelled = []
+
+    class Process:
+        pid = 42
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+    class Thread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            threads.append(self.target)
+
+    class Client:
+        pass
+
+    client = Client()
+    monkeypatch.setattr(llm_openai, "load_openai", lambda **_kwargs: (None, client))
+    monkeypatch.setattr(slm, "_local_server_command", lambda *args, **kwargs: ["server"])
+    monkeypatch.setattr(slm, "_start_local_server", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(slm, "_stop_local_server", lambda process: stopped.append(process))
+    monkeypatch.setattr(slm, "_capture_local_server_failure", lambda *args: None)
+    monkeypatch.setattr(slm.threading, "Thread", Thread)
+    monkeypatch.setattr(slm.atexit, "register", lambda _func: None)
+    monkeypatch.setattr(slm.time, "sleep", sleeps.append)
+    monkeypatch.setattr(memory_guard, "snapshot", lambda: memory_guard.MemorySnapshot(None, None, None, None))
+    slm._load_local_slm("model", 1024, 4, 512, False, False, 1, None, False)
+    client._fulloch_on_memory_emergency = lambda: cancelled.append(True)
+
+    client._fulloch_memory_emergency("memory pressure")
+    assert client._fulloch_backend_state == "RECOVERING"
+    threads[-1]()
+    assert sleeps == [300]
+    assert cancelled == [True]
+    assert len(stopped) == 2  # safety stop followed by the normal recovery cleanup
+    assert client._fulloch_backend_state == "READY"
+    assert not client._fulloch_memory_cooldown
+
+    client._fulloch_memory_emergency("memory pressure again")
+    threads[-1]()
+    assert client._fulloch_backend_state == "FAILED"
+    assert client._fulloch_memory_cooldown
+    assert sleeps == [300]
+    count = len(threads)
+    client._fulloch_restart_local_server("request failed")
+    assert len(threads) == count
 
 
 def test_failure_capture_is_timestamped_and_appended(monkeypatch, tmp_path):

@@ -546,6 +546,14 @@ WAKEWORD_PRESETS: tuple = (
         r"\b(?:hey|hay|hi)\W+[ao][dtl]{1,2}i?c\W*u[sz]\b",
         recommended=True,
     ),
+    WakewordPreset(
+        "alexa", "Alexa", "alexa", r"\balexa\b",
+        model="third_party/openwakeword-models/alexa_v0.1.onnx",
+    ),
+    WakewordPreset(
+        "hey_jarvis", "Hey Jarvis", "hey jarvis", r"\b(?:hey|hay|hi)\W+jarvi[sz]\b",
+        model="third_party/openwakeword-models/hey_jarvis_v0.1.onnx",
+    ),
 )
 
 
@@ -569,6 +577,7 @@ def wakeword_presets_as_dicts() -> list:
                 for path, label in (model_options if p.id == "hey_atticus" else p.model_options)
             ],
             "recommended": p.recommended,
+            "license": "CC BY-NC-SA 4.0 (non-commercial)" if p.id != "hey_atticus" else "",
         }
         for p in WAKEWORD_PRESETS
     ]
@@ -583,53 +592,71 @@ class TierPreset:
     blurb: str
     models: dict
     recommended: bool = False
+    vram_class_gb: int = 0
 
 
-# Ready-made backend stacks offered by the wizard.
+# Ready-made backend stacks offered by the wizard. Hardware-anchored tiers:
+# each tier is named for the VRAM class it needs.
 TIER_PRESETS: tuple = (
     TierPreset(
-        "full",
-        "Full (GPU)",
-        "Everything GPU-accelerated — speech recognition, voice-clone TTS, and "
-        "the 9B language model. Tight fit on a 16GB card; needs a 16GB GPU.",
+        "max",
+        "Max — 32 GB VRAM",
+        "The God-tier stack: Qwen3.8 27B (4-bit) on the GPU, plus Qwen3 ASR and "
+        "Qwen3 TTS. For a 32 GB GPU (RTX 5090 or equivalent). ",
         {
             "asr": {"backend": "qwen"},
             "tts": {"backend": "qwen"},
-            "llm": {"backend": "local", "local_model": "qwen", "mtp": False, "flash_attn": False},
+            "llm": {"backend": "local", "local_model": "qwen27b", "mtp": False, "flash_attn": False},
         },
+        vram_class_gb=32,
     ),
     TierPreset(
-        "cpu_server",
-        "CPU + LLM on another server",
-        "Speech runs locally on CPU; the language model runs on a separate "
-        "OpenAI-compatible server you point it at (e.g. another box on your "
-        "network). No GPU needed on this device.",
+        "pro",
+        "Pro — 16 GB VRAM",
+        "The recommended GPU stack: Ornith 1.5 9B on the GPU, plus Qwen3 ASR and "
+        "Qwen3 TTS. Fast and high quality. Needs 16 GB VRAM (RTX 4080 / "
+        "5060 Ti 16GB or equivalent).",
         {
-            "asr": {"backend": "qwen-onnx"},
-            "tts": {"backend": "pocket-tts-onnx"},
-            "llm": {"backend": "external"},
-        },
-    ),
-    TierPreset(
-        "cpu_local",
-        "CPU (fully local)",
-        "Everything runs locally on CPU — no GPU, no network. Regex command "
-        "matching only (no free-form language model).",
-        {
-            "asr": {"backend": "qwen-onnx"},
-            "tts": {"backend": "pocket-tts-onnx"},
-            "llm": {"backend": "none"},
+            "asr": {"backend": "qwen"},
+            "tts": {"backend": "qwen"},
+            "llm": {"backend": "local", "local_model": "ornith", "mtp": False, "flash_attn": False},
         },
         recommended=True,
+        vram_class_gb=16,
     ),
     TierPreset(
-        "cpu_laya",
-        "CPU semantic commands",
-        "Everything runs locally on CPU. Laya understands common command phrasing but does not "
-        "provide free-form conversation.",
+        "premium",
+        "Premium — 12 GB VRAM",
+        "The balanced GPU stack: Ornith 1.5 9B on the GPU, with Orukeet ASR and "
+        "Pocket TTS PyTorch on the GPU. Good quality at 12 GB VRAM (RTX 3060 or "
+        "equivalent).",
         {
-            "asr": {"backend": "qwen-onnx"},
-            "tts": {"backend": "pocket-tts-onnx"},
+            "asr": {"backend": "orukeet"},
+            "tts": {"backend": "pocket-tts-pytorch"},
+            "llm": {"backend": "local", "local_model": "ornith", "mtp": False, "flash_attn": False},
+        },
+        vram_class_gb=12,
+    ),
+    TierPreset(
+        "economy",
+        "Economy — 8 GB VRAM",
+        "The budget GPU stack: Ornith 1.5 9B on the GPU, with Moonshine ASR and "
+        "Kokoro TTS on the CPU. Fits 8 GB VRAM (RTX 4060 or equivalent).",
+        {
+            "asr": {"backend": "moonshine"},
+            "tts": {"backend": "kokoro-onnx"},
+            "llm": {"backend": "local", "local_model": "ornith", "mtp": False, "flash_attn": False},
+        },
+        vram_class_gb=8,
+    ),
+    TierPreset(
+        "lite",
+        "Lite — no GPU required",
+        "Runs entirely on the CPU — no GPU, no network. Laya semantic + regex "
+        "command routing, Moonshine ASR, and Kokoro TTS.",
+        {
+            "asr": {"backend": "moonshine"},
+            "tts": {"backend": "kokoro-onnx"},
             "llm": {"backend": "laya"},
         },
     ),
@@ -644,6 +671,7 @@ def tier_presets_as_dicts() -> list:
             "blurb": t.blurb,
             "models": t.models,
             "recommended": t.recommended,
+            "vram_class_gb": t.vram_class_gb,
         }
         for t in TIER_PRESETS
     ]

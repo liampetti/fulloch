@@ -4,7 +4,7 @@ from core import thinking_coverage as coverage
 
 
 def test_fallback_search_seeds_are_facts_not_repeated_report_assignments():
-    task = "give me a deep analysis on the next Formula 1 race coming up"
+    task = "give me a deep analysis on the next Solar League race coming up"
     requirements = coverage.initial_requirements(task)
     plan = coverage.fallback_chapter_plan(task, requirements, ["external_information"])
     queries = [query for chapter in plan for query in chapter["queries"]]
@@ -12,8 +12,22 @@ def test_fallback_search_seeds_are_facts_not_repeated_report_assignments():
     assert all("give me" not in query and "deep analysis" not in query and " — " not in query for query in queries)
     identity = next(item for item in requirements if item["identifier"] == "subject-identity")
     query = coverage.searchable_gap_query(task, identity)
-    assert "Formula 1" in query and "official date schedule" in query
+    assert "Solar League" in query and "official date schedule" in query
     assert "Resolve the exact" not in query and "source evidence" not in query
+
+
+def test_gap_query_leads_with_the_needed_fact_and_keeps_only_the_entity_core():
+    task = "give me a deep analysis on the next Solar League race coming up"
+    standings = {"identifier": "standings", "evidence_terms": ["SL standings October 2026", "recent SL race results"]}
+    query = coverage.searchable_gap_query(task, standings)
+    # The gap fact leads, and the shared task phrase is trimmed to its entity
+    # core so a standings search does not re-rank the same calendar cluster.
+    assert query.startswith("SL standings October 2026")
+    assert "coming up" not in query and "the next Solar League race" not in query
+    assert "Solar League" in query
+    # Distinct sub-facts stay distinct instead of collapsing to one template.
+    dates = {"identifier": "dates", "evidence_terms": ["next SL race October 2026", "Solar League calendar 2026"]}
+    assert coverage.searchable_gap_query(task, dates) != query
 
 
 def test_gap_search_preserves_pin_and_specific_needed_fact_without_rewriting_task():
@@ -23,7 +37,10 @@ def test_gap_search_preserves_pin_and_specific_needed_fact_without_rewriting_tas
     }}
     query = coverage.searchable_gap_query(task, gap)
     assert "Example Runtime 2026-11-12 4.3" in query
-    assert "local runtime limitations" in query
+    # The needed fact survives even though "runtime" is already named by the
+    # resolved subject and is therefore deduplicated out of the gap terms.
+    assert "local" in query and "limitations" in query
+    assert "Runtime" in query
     assert task == "Compare the upcoming release with version 4.2, excluding cloud-only deployments"
 
 
@@ -159,26 +176,26 @@ def test_delivery_gate_reports_complete_only_when_all_obligations_are_fully_deli
 
 
 def test_lexical_duplicate_rejects_reworded_action():
-    selections = [{"tool": "external_information", "args": ["Bathurst 1000 entry list"]}]
+    selections = [{"tool": "external_information", "args": ["Harbour 1000 entry list"]}]
 
     assert coverage.is_near_duplicate_action(
-        "external_information", ["Who is on the Bathurst 1000 entry list?"], selections
+        "external_information", ["Who is on the Harbour 1000 entry list?"], selections
     )
 
 
 def test_duplicate_allows_changed_date_or_source():
-    selections = [{"tool": "external_information", "args": ["Bathurst results 2026-10-08"]}]
+    selections = [{"tool": "external_information", "args": ["Harbour results 2026-10-08"]}]
 
     assert not coverage.is_near_duplicate_action(
-        "external_information", ["Bathurst results 2026-10-09"], selections
+        "external_information", ["Harbour results 2026-10-09"], selections
     )
 
 
 def test_lexical_guard_rejects_reordered_words():
-    selections = [{"tool": "external_information", "args": ["Bathurst 1000 entry list driver"]}]
+    selections = [{"tool": "external_information", "args": ["Harbour 1000 entry list driver"]}]
 
     assert coverage.is_near_duplicate_action(
-        "external_information", ["Bathurst 1000 driver entry list"], selections
+        "external_information", ["Harbour 1000 driver entry list"], selections
     )
 
 
@@ -186,7 +203,7 @@ def test_duplicate_guard_allows_changed_profile_or_period_but_not_only_a_changed
     selections = [
         {
             "tool": "external_information",
-            "args": ["Bathurst 1000 schedule", "research", "news", "week"],
+            "args": ["Harbour 1000 schedule", "research", "news", "week"],
             "requirement_id": "answer",
         },
         {
@@ -197,10 +214,10 @@ def test_duplicate_guard_allows_changed_profile_or_period_but_not_only_a_changed
     ]
 
     assert not coverage.is_near_duplicate_action(
-        "external_information", ["Bathurst 1000 schedule", "conversation", "news", "week"], selections
+        "external_information", ["Harbour 1000 schedule", "conversation", "news", "week"], selections
     )
     assert not coverage.is_near_duplicate_action(
-        "external_information", ["Bathurst 1000 schedule Q2 2027", "research", "news", "week"], selections
+        "external_information", ["Harbour 1000 schedule Q2 2027", "research", "news", "week"], selections
     )
     assert not coverage.is_near_duplicate_action(
         "search_flights",
@@ -209,7 +226,7 @@ def test_duplicate_guard_allows_changed_profile_or_period_but_not_only_a_changed
     )
     assert coverage.is_near_duplicate_action(
         "external_information",
-        ["Bathurst 1000 schedule", "research", "news", "week"],
+        ["Harbour 1000 schedule", "research", "news", "week"],
         selections,
         {"identifier": "tradeoffs"},
     )
@@ -222,28 +239,50 @@ def test_general_retrieval_is_directed_to_the_named_gap_without_rewriting_struct
         "evidence_terms": ["entrants", "drivers", "pairings"],
     }
 
+    # Gap terms lead; the task/subject entity is appended so the query still
+    # names the Harbour 1000 without repeating it as a prefix of every gap.
     assert coverage.direct_retrieval_to_gap(
-        "external_information", ["Bathurst 1000", "research"], requirement
-    )[0] == "Bathurst 1000 entrants drivers pairings"
+        "external_information", ["Harbour 1000", "research"], requirement
+    )[0] == "entrants drivers pairings Harbour 1000"
+    # When the gap term already appears in the query, no rewrite happens.
     assert coverage.direct_retrieval_to_gap(
-        "external_information", ["Bathurst 1000 entrants", "research"], requirement
-    )[0] == "Bathurst 1000 entrants"
+        "external_information", ["Harbour 1000 entrants", "research"], requirement
+    )[0] == "Harbour 1000 entrants"
     structured = [{"route": {"origin": "SYD", "destination": "TYO"}}]
     assert coverage.direct_retrieval_to_gap("search_flights", structured, requirement) == structured
 
 
 def test_third_capability_call_requires_measured_gain():
     stalled = [
-        {"tool": "external_information", "new_eligible_cards": 0, "coverage_gain": 0},
-        {"tool": "external_information", "new_eligible_cards": 0, "coverage_gain": 0},
+        {"tool": "external_information", "new_eligible_cards": 0, "coverage_gain": 0, "new_sources": 0},
+        {"tool": "external_information", "new_eligible_cards": 0, "coverage_gain": 0, "new_sources": 0},
     ]
     productive = [*stalled[:1], {
-        "tool": "external_information", "new_eligible_cards": 2, "coverage_gain": 1,
+        "tool": "external_information", "new_eligible_cards": 2, "coverage_gain": 1, "new_sources": 2,
     }]
 
     assert coverage.effective_capability_call_limit("external_information", stalled) == 2
     assert coverage.effective_capability_call_limit("external_information", productive) == 3
     assert coverage.effective_capability_call_limit("external_information", [{}]) == 3
+
+
+def test_new_distinct_source_keeps_third_retrieval_call_alive():
+    # A call that adds no card/coverage but fetches a brand-new source is not
+    # stalled: it is diversifying, so the third call stays available. This is
+    # the synthetic case where calendar pages kept adding redundant cards while the
+    # standings page was never fetched because retrieval stopped too early.
+    diversifying = [
+        {"tool": "external_information", "new_eligible_cards": 1, "coverage_gain": 0, "new_sources": 1},
+        {"tool": "external_information", "new_eligible_cards": 0, "coverage_gain": 0, "new_sources": 1},
+    ]
+    assert coverage.effective_capability_call_limit("external_information", diversifying) == 3
+    # Re-fetching only already-seen sources (no new source) is stalled even if
+    # it yields a redundant card.
+    repeated = [
+        {"tool": "external_information", "new_eligible_cards": 3, "coverage_gain": 0, "new_sources": 0},
+        {"tool": "external_information", "new_eligible_cards": 2, "coverage_gain": 0, "new_sources": 0},
+    ]
+    assert coverage.effective_capability_call_limit("external_information", repeated) == 2
 
 
 def test_irrelevant_card_volume_cannot_extend_retrieval_and_distinct_verification_can():
@@ -252,6 +291,36 @@ def test_irrelevant_card_volume_cannot_extend_retrieval_and_distinct_verificatio
     assert not coverage.is_near_duplicate_query("lookup", ["Example release 2026-11-01 site:official.example"], [
         {"tool": "lookup", "args": ["Example release 2026-10-01 site:other.example"]},
     ])
+
+
+def test_result_set_duplicate_catches_reworded_needs_below_the_near_duplicate_bar():
+    # The synthetic case: "next SL race ... calendar" and "days until next SL race"
+    # share ~0.33-0.67 token overlap, far below the 0.9 near-duplicate bar,
+    # yet rank the same calendar cluster on SearXNG. A selection that fetched
+    # new sources proves its result set was collected; a rewording of the same
+    # need (no new fact term, only question-frame words like "date"/"days")
+    # is a result-set duplicate.
+    fetched = {"tool": "external_information",
+               "args": ["next SL race October 2026 Solar League calendar"],
+               "new_sources": 6}
+    assert coverage.is_result_set_duplicate(
+        "external_information", ["next SL race date October 2026 Solar League calendar"], [fetched]
+    )
+    assert coverage.is_result_set_duplicate(
+        "external_information", ["days until next SL race Solar League"], [fetched]
+    )
+    # A genuinely new fact domain (standings) stays below the bar even while
+    # sharing the entity and date, so the diversifying call is allowed.
+    assert not coverage.is_result_set_duplicate(
+        "external_information", ["SL standings October 2026 recent race results Solar League"], [fetched]
+    )
+    # A selection that fetched nothing proves nothing was collected.
+    assert not coverage.is_result_set_duplicate(
+        "external_information", ["next SL race date October 2026 Solar League calendar"],
+        [{**fetched, "new_sources": 0}],
+    )
+    # Non-retrieval tools and structured arguments are never result-set gated.
+    assert not coverage.is_result_set_duplicate("search_flights", [["SYD", "TYO"]], [fetched])
 
 
 def test_broad_analysis_uncertainty_cannot_be_completed_by_an_unrelated_alternative():

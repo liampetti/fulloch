@@ -5,8 +5,10 @@ worker keeps CUDA model access serial, matching Qwen's worker contract, while
 the consumer sends each frame to the browser immediately.
 """
 
+import importlib.resources
 import logging
 import queue
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -43,12 +45,16 @@ _model = None
 _torch = None
 _voice_state = None
 
+WEIGHTS_URI = "hf://latent-variable/pocket-tts-cloning-en/languages/english/model.safetensors@ead4edebb72d7dd41468bbf8456f2822b3aa3fb1"
+ORIGINAL_WEIGHTS_URI = "hf://kyutai/pocket-tts/languages/english_2026-04/model.safetensors@19f95fe2df36e79fbd9f10008595cc4c977a0fcc"
+
 
 def load_tts(model_id=None, language: str = "english_2026-04", device: str = "cuda", **opts):
     """Load the official Pocket model and place its tensors on CUDA.
 
-    The setup downloader pre-caches this language's weights. The model is
-    gated by Kyutai, so Hugging Face must have an accepted license and token.
+    The setup downloader pre-caches the public mirror and official tokenizer.
+    The pinned runtime's bundled YAML points at the gated repo, so construct a
+    temporary copy with the mirror URI instead of silently using that default.
     """
     global _model, _torch
     import torch
@@ -56,13 +62,25 @@ def load_tts(model_id=None, language: str = "english_2026-04", device: str = "cu
 
     if not device.startswith("cuda") or not torch.cuda.is_available():
         raise RuntimeError("Pocket TTS PyTorch requires an available CUDA device")
+    if language not in {"english", "english_2026-04"}:
+        raise ValueError("Pocket TTS mirror supports english_2026-04 only")
     _torch = torch
     temperature = opts.get("temperature")
-    _model = TTSModel.load_model(
-        language=language,
-        temp=0.7 if temperature is None else float(temperature),
-        lsd_decode_steps=int(opts.get("lsd_decode_steps", 1)),
-    ).to(device)
+    config = importlib.resources.files("pocket_tts").joinpath("config/english_2026-04.yaml").read_text(encoding="utf-8")
+    if config.count(ORIGINAL_WEIGHTS_URI) != 1:
+        raise RuntimeError("Unsupported Pocket TTS config: expected pinned Kyutai weights URI")
+    config = config.replace(ORIGINAL_WEIGHTS_URI, WEIGHTS_URI)
+    # Do not allow an inaccessible mirror to silently switch to non-cloning
+    # weights: setup should report the actual download/load failure instead.
+    config = "\n".join(line for line in config.splitlines() if not line.startswith("weights_path_without_voice_cloning:")) + "\n"
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8") as file:
+        file.write(config)
+        file.flush()
+        _model = TTSModel.load_model(
+            config=file.name,
+            temp=0.7 if temperature is None else float(temperature),
+            lsd_decode_steps=int(opts.get("lsd_decode_steps", 1)),
+        ).to(device)
     _model.eval()
     logger.info("Loaded official Pocket TTS PyTorch on %s", device)
     return _model
@@ -73,7 +91,12 @@ def set_voice(voice_name: Optional[str]):
     if _model is None:
         raise RuntimeError("Pocket TTS PyTorch is not loaded")
     name = (voice_name or "").strip()
-    wav_path = VOICES_DIR / f"{name}.wav"
+    if name.lower().endswith(".wav"):
+        from .voice_reference import voice_reference
+
+        wav_path, _ = voice_reference(name, VOICES_DIR)
+    else:
+        wav_path = VOICES_DIR / f"{name}.wav"
     if not wav_path.is_file():
         raise FileNotFoundError(f"Pocket TTS voice reference not found: {wav_path}")
     global _voice_state

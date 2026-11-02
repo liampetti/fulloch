@@ -15,7 +15,6 @@ from typing import Optional
 
 from tools import notes
 from tools.capabilities import native_access_class, native_requires_deep_think
-from tools.thinking_context import reset_handoff, set_handoff
 from tools.tool_registry import tool_registry
 from utils import intents
 from utils.intent_catch import catchAll, is_contextual_web_search_request
@@ -52,6 +51,7 @@ from .satellite_context import (
 )
 from .slm import ContextExhaustedError, RemoteUnreachable
 from .telemetry import event as telemetry_event
+from .thinking_context import reset_handoff, set_handoff
 from .thinking_watchdog import ThinkingWatchdog
 
 logger = logging.getLogger(__name__)

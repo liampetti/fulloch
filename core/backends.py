@@ -36,6 +36,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from .llm_cache_config import validate_prompt_cache_mib
+
 logger = logging.getLogger(__name__)
 
 # Domains a backend can serve.
@@ -78,6 +80,16 @@ class BackendSpec:
     # so users know the tier presets are the picks.
     experimental: bool = False
     extra: dict = field(default_factory=dict)
+    gated_repo: Optional[str] = None  # HF terms + approved account/token required
+
+    @property
+    def voice_cloning(self) -> bool:
+        """Whether the TTS adapter accepts a reference WAV/transcript pair."""
+        return self.domain == TTS and self.backend in {
+            "qwen", "qwen-small", "qwen-gguf", "qwen-gguf-small",
+            "pocket-tts-onnx", "pocket-tts-pytorch", "pocket-tts-gguf",
+            "higgs-gguf", "breeze-tts-2-gguf", "audio8",
+        }
 
     @property
     def implemented(self) -> bool:
@@ -304,21 +316,20 @@ _register(
         "Fast greedy TDT decoding through onnx-asr; no phrase/context biasing or live partials.",
     )
 )
-# Ultra-light CPU ASR for constrained edge devices — English-only, no wakeword
-# biasing (unlike the Qwen3-ASR ONNX backends above), so an experimental
-# fallback rather than a tier default.
+# Lightweight English CPU ASR for the Economy/Lite presets. Without wakeword
+# biasing, acoustic candidates bypass transcript verification by default.
 _register(
     BackendSpec(
         domain=ASR,
         backend="moonshine",
         cpu_ok=True,
         display_name="Moonshine Base (CPU)",
-        experimental=True,  # English-only, no wakeword biasing; edge fallback only
+        experimental=True,  # English-only, no wakeword biasing
         loader="core.asr_tiny:load_asr_model",
         default_model="UsefulSensors/moonshine-base",
         hf_repo="UsefulSensors/moonshine-base",
         download_size_gb=0.2,
-        vram_gb=0.5,
+        vram_gb=0.0,
         ram_gb=1.0,  # small weights, but torch/transformers runtime overhead dominates
         deps=("transformers",),
         notes="Light CPU ASR (~62M). English-only, no wakeword biasing. More "
@@ -337,7 +348,7 @@ _register(
         default_model="UsefulSensors/moonshine-tiny",
         hf_repo="UsefulSensors/moonshine-tiny",
         download_size_gb=0.1,
-        vram_gb=0.5,
+        vram_gb=0.0,
         ram_gb=0.8,
         deps=("transformers",),
         notes="Smallest/fastest CPU ASR (~27M) for very constrained devices. "
@@ -469,9 +480,7 @@ _register(
     )
 )
 
-# Official Kyutai Pocket TTS. It streams native PCM chunks, unlike the
-# complete-buffer CrispASR GGUF adapter. Voice-cloning weights are gated on
-# Hugging Face, so setup requires accepted terms and HF_TOKEN.
+# Kyutai Pocket TTS runtime with pinned public mirror of the cloning weights.
 _register(
     BackendSpec(
         domain=TTS,
@@ -480,12 +489,12 @@ _register(
         experimental=True,
         display_name="Pocket TTS PyTorch (GPU voice clone)",
         loader="core.tts_pocket:load_tts",
-        default_model="kyutai/pocket-tts",
+        default_model="latent-variable/pocket-tts-cloning-en",
         hf_snapshots=(
             (
-                "kyutai/pocket-tts",
-                ("languages/english_2026-04/model.safetensors",),
-                "19f95fe2df36e79fbd9f10008595cc4c977a0fcc",
+                "latent-variable/pocket-tts-cloning-en",
+                ("languages/english/model.safetensors",),
+                "ead4edebb72d7dd41468bbf8456f2822b3aa3fb1",
             ),
             (
                 "kyutai/pocket-tts-without-voice-cloning",
@@ -496,8 +505,8 @@ _register(
         download_size_gb=0.5,
         vram_gb=1.0,
         deps=("pocket_tts",),
-        notes="Experimental official Kyutai PyTorch CUDA backend with native PCM streaming. "
-        "Accept the kyutai/pocket-tts Hugging Face terms and set HF_TOKEN before setup; "
+        notes="Kyutai PyTorch CUDA backend with native PCM streaming; cloning weights use a "
+        "pinned public mirror, no Hugging Face login required. "
         "English one-shot cloning from data/voices/<name>.wav.",
     )
 )
@@ -652,25 +661,27 @@ _register(
         notes="Grammar-constrained agent loop. Alternative full-tier local SLM (MIT).",
     )
 )
-# NeoHorse is a text-only Qwen3.5-9B agentic fine-tune. It uses the bundled
-# llama-server path, but does not include an MTP draft head.
+# The 27B is the "Max" tier's local agent model. It shares the bundled
+# llama-server path but is too large for the 9B context default, so it ships a
+# shorter context to leave headroom for the KV cache on a 24GB card.
 _register(
     BackendSpec(
         domain=LLM,
-        backend="neohorse",
+        backend="qwen27b",
         gpu_only=True,
         experimental=True,
-        display_name="NeoHorse 1 9B Q4",
+        display_name="Qwen3.8 27B IQ4_XS (local)",
         loader="core.slm:load_slm",
-        default_model="./data/models/NeoHorse-1-9B-Q4_K_M.gguf",
-        hf_repo="TokenRhythm/NeoHorse-1-9B-GGUF",
-        hf_file="NeoHorse-1-9B-Q4_K_M.gguf",
-        download_size_gb=5.63,
-        vram_gb=7.5,
-        n_context=12288,
+        default_model="./data/models/Qwen3.8-27B-UD-IQ4_XS.gguf",
+        hf_repo="unsloth/Qwen3.8-27B-GGUF",
+        hf_file="Qwen3.8-27B-UD-IQ4_XS.gguf",
+        download_size_gb=14.3,
+        vram_gb=22.0,
+        n_context=8192,
         deps=(),
         extra={"mtp": False},
-        notes="Experimental grammar-constrained agent loop. Text-only Qwen3.5 9B fine-tune; no MTP draft head.",
+        notes="Experimental Max-tier agent model (Qwen3.8 27B). The full Qwen speech stack needs a 32GB GPU; a 16GB card "
+        "cannot hold the 14.3GB IQ4_XS weights plus the KV cache. No MTP draft head.",
     )
 )
 _register(
@@ -681,7 +692,7 @@ _register(
         display_name="None (regex-only commands)",
         loader=None,
         notes="No language model. Regex fast-path only; everything else gets a "
-        "spoken 'basic commands only' fallback. The cpu_local stack's LLM.",
+        "spoken 'basic commands only' fallback.",
     )
 )
 _register(
@@ -854,27 +865,26 @@ def resolve_models(config_models: Optional[dict]) -> dict:
                     backend = "gemma"
                 elif local_model == "ornith":
                     backend = "ornith"
-                elif local_model == "neohorse":
-                    backend = "neohorse"
+                elif local_model == "qwen27b":
+                    backend = "qwen27b"
                 elif local_model == "custom":
                     backend = "llama"
                 else:
                     raise ValueError(
-                        f"Unknown local LLM model {local_model!r}; choose qwen, gemma, ornith, neohorse, or custom"
+                        f"Unknown local LLM model {local_model!r}; choose qwen, gemma, ornith, qwen27b, or custom"
                     )
             elif backend == "external":
                 backend = "openai"
             for option in ("mtp", "flash_attn"):
                 if option in block and not isinstance(block[option], bool):
                     raise ValueError(f"models.llm.{option} must be true or false")
+            if "prompt_cache_mib" in block:
+                validate_prompt_cache_mib(block["prompt_cache_mib"])
         spec = get_spec(domain, backend)
         model = block.pop("model", None) or spec.default_model
         n_context = block.pop("n_context", None) or spec.n_context
         opts = dict(spec.extra)
         opts.update(block)  # Explicit config overrides registry loader defaults.
-        if domain == LLM and backend == "neohorse":
-            # NeoHorse's GGUF does not include a compatible MTP draft head.
-            opts["mtp"] = False
         resolved[domain] = {
             "backend": backend,
             "model": model,

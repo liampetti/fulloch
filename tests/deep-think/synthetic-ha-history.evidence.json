@@ -1,0 +1,148 @@
+{
+  "schema_version": 2,
+  "task": "Analyze the history of my living room temperature over the last seven days. Identify the recorded highs and lows, notable changes, and any gaps in the data.",
+  "task_record": {},
+  "run_metadata": {
+    "job_id": "synthetic-ha-history",
+    "task_id": null,
+    "thread_id": null,
+    "parent_job_id": null,
+    "attempt": 1,
+    "origin_turn_id": null,
+    "process_generation": null,
+    "deployment": {},
+    "process_id": null,
+    "model_calls": 0,
+    "context_tokens": null,
+    "tokenizer": null,
+    "model_settings": {},
+    "admission_denials": [],
+    "admission_decisions": [],
+    "selected_actions": [],
+    "stage_diagnostics": []
+  },
+  "research_context": {
+    "task": "Analyze the history of my living room temperature over the last seven days. Identify the recorded highs and lows, notable changes, and any gaps in the data.",
+    "temporal_intent": "historical",
+    "requested_dates": [],
+    "ambiguous_dates": [],
+    "as_of": "2026-10-29T10:00:00+00:00",
+    "edition_year": null,
+    "edition_year_explicit": false,
+    "scope_version": 2,
+    "event_labels": [],
+    "entities": [
+      "Analyze",
+      "Identify"
+    ],
+    "comparison_dimensions": [],
+    "source_preferences": [],
+    "inherited_entities": [],
+    "unresolved_references": [],
+    "requested_category": ""
+  },
+  "source_registry": {
+    "artifact-001": {
+      "id": "artifact-001",
+      "title": "synthetic living room temperature",
+      "class": "typed_tool_output",
+      "publisher_role": "typed_tool_output",
+      "origin": "artifact-001"
+    }
+  },
+  "scope_registry": {
+    "src-80bef31661c87a0b": {
+      "subject": "get_entity_history",
+      "temporal_role": "observation",
+      "provider": "get_entity_history",
+      "constraints": {
+        "tool": "get_entity_history"
+      },
+      "source_scope": "Synthetic test fixture; not real provider data."
+    }
+  },
+  "fact_cards": [
+    {
+      "id": "artifact-001-observation",
+      "source": "artifact-001",
+      "kind": "generic_observation",
+      "record": {
+        "type": "temperature_history",
+        "unit": "°C",
+        "current": 20.5,
+        "min": 18.5,
+        "max": 20.0,
+        "points": [
+          {
+            "time": "2026-10-28T19:30:00+00:00",
+            "value": 18.5
+          },
+          {
+            "time": "2026-10-28T23:00:00+00:00",
+            "value": 20.0
+          }
+        ]
+      },
+      "identity": {
+        "subject": "get_entity_history",
+        "claim_type": "tool_observation"
+      },
+      "status": "single_source",
+      "scope_id": "src-80bef31661c87a0b",
+      "eligibility": {
+        "scoped_claims": true,
+        "complete_structured_option": true
+      },
+      "limitations": "No specialised card normalizer matched this evidence.",
+      "provenance": {
+        "source_id": "artifact-001"
+      },
+      "finding": {
+        "version": 1,
+        "role": "assertion",
+        "context_state": "unavailable",
+        "assessment": "unassessed"
+      },
+      "independence_key": "tool:get_entity_history",
+      "temporal_role": "observation"
+    }
+  ],
+  "coverage_requirements": [
+    {
+      "identifier": "answer",
+      "question": "Analyze the history of my living room temperature over the last seven days. Identify the recorded highs and lows, notable changes, and any gaps in the data.",
+      "importance": "high",
+      "freshness": "task-dependent",
+      "state": "open",
+      "dimension": "",
+      "temporal_scope": "historical",
+      "evidence_ids": [],
+      "completion_criteria": "At least one direct substantive answering claim within the requested scope.",
+      "answer_coverage": "not_verified",
+      "evidence_terms": [],
+      "dependencies": [],
+      "as_of": "2026-10-29T10:00:00+00:00",
+      "is_subject_identity": false
+    }
+  ],
+  "cited_card_ids": [],
+  "progress": {
+    "discovered_documents": 1,
+    "fetched_documents": 1,
+    "processed_unique_documents": 1,
+    "eligible_documents": 1,
+    "unprocessed_documents": 0,
+    "rejected_documents": 0,
+    "cited_documents": 0,
+    "retrieval_artifacts": 0,
+    "saved_sections": 0,
+    "unresolved_obligations": [
+      "answer"
+    ]
+  },
+  "fixture_metadata": {
+    "synthetic": true,
+    "purpose": "Offline tool-record regression; not live or current evidence.",
+    "tool": "get_entity_history"
+  }
+}

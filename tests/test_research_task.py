@@ -1,5 +1,7 @@
 """Thread-scoped task identity and retry resolution."""
 
+import json
+
 from core.background_jobs import BackgroundJob, BackgroundJobManager, JobSnapshot, JobStatus
 from core.research_task import (
     is_unresolved_task_reference,
@@ -108,6 +110,40 @@ def test_task_objective_and_lineage_survive_manager_restart(tmp_path):
     assert retry_record["attempt"] == 3
 
 
+def test_corrupt_task_ledger_does_not_block_startup(tmp_path):
+    """A stale/corrupt ledger (crashed run, or a fresh reset that restored the
+    file from git) must be skipped, never block startup, and never leak a
+    partially-decoded entry into the restored ledger."""
+    ledger = tmp_path / "research-tasks.json"
+
+    # Case 1: the whole file is corrupt JSON.
+    ledger.write_text('{"threads": {"thread-a": {"task": "X", "task_record": {', encoding="utf-8")
+    manager = BackgroundJobManager(lambda *_: ("", ""), admission_check=lambda: False,
+                                   task_ledger_path=ledger)
+    assert manager._persisted_tasks == {}
+    assert manager.latest_for_thread("thread-a") is None
+
+    # Case 2: one bad entry among good ones — good entries survive, the bad
+    # entry is dropped without raising.
+    ledger.write_text(json.dumps({
+        "version": 1,
+        "threads": {
+            "thread-good": {
+                "task": "Research good topic",
+                "task_record": {"task_id": "task-good", "objective": "Research good topic",
+                                "constraints": [], "amendments": [], "parent_job_id": None,
+                                "attempt": 1},
+                "status": "FAILED", "created_at": 100.0,
+            },
+            "thread-bad": {"task": "Research bad topic"},  # missing task_record
+        },
+    }), encoding="utf-8")
+    restarted = BackgroundJobManager(lambda *_: ("", ""), admission_check=lambda: False,
+                                     task_ledger_path=ledger)
+    assert restarted.latest_for_thread("thread-bad") is None
+    assert restarted.latest_for_thread("thread-good").snapshot.task_record["task_id"] == "task-good"
+
+
 def test_legacy_checkpoint_migrates_to_typed_task_contract():
     checkpoint = BackgroundJob(
         "legacy-job",
@@ -184,7 +220,7 @@ def test_pronoun_only_reference_resolves_only_against_prior_thread_task():
     assert is_unresolved_task_reference("it")
 
 
-def test_related_user_request_is_saved_as_refinement_of_prior_task():
+def test_related_user_request_starts_a_fresh_task_with_carried_constraints():
     prior = BackgroundJob(
         "job-prior",
         JobSnapshot(
@@ -192,7 +228,8 @@ def test_related_user_request_is_saved_as_refinement_of_prior_task():
             task_record={
                 "version": 1, "task_id": "task-home-ai",
                 "objective": "Research the latest local AI trends for running capable models at home",
-                "constraints": [], "amendments": [], "parent_job_id": None, "attempt": 1,
+                "constraints": ["trending 9B models"], "amendments": [],
+                "parent_job_id": None, "attempt": 1,
             },
         ),
     )
@@ -202,32 +239,42 @@ def test_related_user_request_is_saved_as_refinement_of_prior_task():
         prior,
     )
 
-    assert task.startswith(prior.snapshot.task)
-    assert "9B parameters" in task and "Keep sources recent" in task
-    assert record["task_id"] == "task-home-ai"
+    # Related request: fresh task (new evidence, no carry-over) based on the
+    # prior objective, with standing constraints plus the new text carried over.
+    assert task == prior.snapshot.task
+    assert record["task_id"] != "task-home-ai"
+    assert record["attempt"] == 1
+    assert record["fresh"] is True
     assert record["parent_job_id"] == "job-prior"
     assert record["constraints"] == [
+        "trending 9B models",
         "can you find latest info on trending local models with 9B parameters? Keep sources recent",
     ]
     assert record["amendments"][0]["kind"] == "constraint_refinement"
-    assert record["revision"] == 2
+    assert record["amendments"][0]["text"] == (
+        "can you find latest info on trending local models with 9B parameters? Keep sources recent"
+    )
 
 
-def test_repeating_objective_is_a_retry_not_a_duplicate_constraint():
-    objective = "give me a deep analysis on the next Formula 1 race coming up"
-    prior = BackgroundJob("previous-f1", JobSnapshot(objective, task_record={
-        "task_id": "f1-task", "objective": objective, "revision": 3,
+def test_repeating_objective_starts_a_fresh_task_not_a_retry():
+    objective = "give me a deep analysis on the next Solar League race coming up"
+    prior = BackgroundJob("previous-example", JobSnapshot(objective, task_record={
+        "task_id": "example-task", "objective": objective, "revision": 3,
         "constraints": ["Use official schedules"], "amendments": [], "attempt": 1,
     }))
 
-    task, record = resolve_research_task("  GIVE ME A DEEP ANALYSIS on the next Formula 1 race coming up  ", prior)
+    task, record = resolve_research_task("  GIVE ME A DEEP ANALYSIS on the next Solar League race coming up  ", prior)
 
+    # A repeated analysis request wants a fresh run: new task identity, no
+    # evidence carry-over (fresh=True), standing constraints preserved.
     assert task == objective
-    assert record["task_id"] == "f1-task" and record["attempt"] == 2
-    assert record["revision"] == 3
+    assert record["task_id"] != "example-task"
+    assert record["attempt"] == 1
+    assert record["fresh"] is True
+    assert record["revision"] == 1
     assert record["constraints"] == ["Use official schedules"]
     assert record["amendments"] == []
-    assert record["parent_job_id"] == "previous-f1"
+    assert record["parent_job_id"] == "previous-example"  # lineage only
 
 
 def test_unresolved_reference_detection_only_matches_topicless_commands():
@@ -235,6 +282,67 @@ def test_unresolved_reference_detection_only_matches_topicless_commands():
     assert is_unresolved_task_reference("try again")
     assert is_unresolved_task_reference("it")
     assert not is_unresolved_task_reference("Research it: local 9B models")
+
+
+def test_topicless_retry_is_the_only_case_that_carries_over_evidence():
+    prior = BackgroundJob("job-prior", JobSnapshot("Research current local models", task_record={
+        "task_id": "task-local", "objective": "Research current local models",
+        "constraints": ["recent sources"], "amendments": [], "attempt": 3,
+    }))
+
+    for request in ("just do it", "try again", "it", "retry"):
+        task, record = resolve_research_task(request, prior)
+
+        assert task == "Research current local models"
+        assert record["task_id"] == "task-local"
+        assert record["attempt"] == 4
+        assert record["fresh"] is False  # retry: evidence handoff applies
+        assert record["parent_job_id"] == "job-prior"
+        assert record["constraints"] == ["recent sources"]
+
+
+def test_reworded_request_is_fresh_even_when_it_restates_the_objective():
+    prior = BackgroundJob("job-prior", JobSnapshot(
+        "give me a deep analysis on the next Solar League race coming up",
+        task_record={
+            "task_id": "example-task",
+            "objective": "give me a deep analysis on the next Solar League race coming up",
+            "constraints": ["use official schedules"], "amendments": [], "attempt": 5,
+        },
+    ))
+
+    task, record = resolve_research_task(
+        "deep analysis of the next Solar League race coming up", prior,
+    )
+
+    # Related wording: fresh task based on the prior objective, no carry-over
+    # of evidence (fresh=True), standing constraints preserved, the request
+    # recorded as an amendment of the current intent.
+    assert task == prior.snapshot.task
+    assert record["task_id"] != "example-task"
+    assert record["attempt"] == 1
+    assert record["fresh"] is True
+    assert record["parent_job_id"] == "job-prior"
+    assert "use official schedules" in record["constraints"]
+    assert record["constraints"][-1] == "deep analysis of the next Solar League race coming up"
+    assert record["amendments"][-1]["kind"] == "constraint_refinement"
+
+
+def test_unrelated_request_is_fresh_and_carries_nothing_from_prior():
+    prior = BackgroundJob("job-prior", JobSnapshot("Research current local models", task_record={
+        "task_id": "task-local", "objective": "Research current local models",
+        "constraints": ["recent sources"], "amendments": [], "attempt": 2,
+    }))
+
+    task, record = resolve_research_task("Research solar battery recycling", prior)
+
+    assert task == "Research solar battery recycling"
+    assert record["task_id"] != "task-local"
+    assert record["attempt"] == 1
+    assert record["fresh"] is True
+    assert record["parent_job_id"] is None  # unrelated: no lineage, no carry-over
+    assert record["constraints"] == []
+    assert record["amendments"] == []
 
 
 def test_task_status_intents_are_not_classified_as_new_research_topics():

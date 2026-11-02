@@ -93,7 +93,7 @@ a {{ color: #087f72; }} pre, code {{ font-family: ui-monospace, SFMono-Regular, 
 pre {{ overflow-x: auto; padding: 1rem; border-radius: 8px; background: #eaf0ec; }}
 code {{ padding: .12em .3em; border-radius: 4px; background: #eaf0ec; }} pre code {{ padding: 0; background: none; }}
 blockquote {{ margin-left: 0; padding-left: 1rem; border-left: 3px solid #49a38f; color: #425148; }}
-table {{ width: 100%; border-collapse: collapse; overflow: hidden; }} th, td {{ padding: .6rem; border: 1px solid #ccd8d1; text-align: left; }}
+table {{ display: block; width: 100%; max-width: 100%; overflow-x: auto; border-collapse: collapse; }} th, td {{ padding: .6rem; border: 1px solid #ccd8d1; text-align: left; }}
 img {{ max-width: 100%; height: auto; }}
 .document-action {{ position: fixed; top: 14px; right: 16px; width: 34px; height: 34px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: inherit; cursor: pointer; }}
 .document-action:hover {{ background: #8882; }} .document-action:disabled {{ opacity: .5; cursor: wait; }}
@@ -192,8 +192,8 @@ def register_chat_routes(
     startup_greeting_seeded = False
 
     def on_turn(event: dict) -> None:
-        # Native lifecycle events aren't dashboard chat messages.
-        if event.get("type") == "assistant.state":
+        # Native lifecycle events have no chat role and aren't dashboard messages.
+        if not event.get("role"):
             return
         with history_lock:
             history_log.append(event)

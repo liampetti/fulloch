@@ -367,6 +367,8 @@ export function createChatUI({ connectSpeaker, onThinking, getChatContext = () =
   };
 
   const appendMessage = (ev, live = false) => {
+    // Ignore protocol events, including any retained in older server history.
+    if (!ev || typeof ev.role !== 'string' || !ev.role) return;
     // Stats patch (e.g. TTS time, known only after playback): merge into the
     // already-rendered assistant message keyed by ref_ts. Handled before the
     // dedup guard since it carries its own later ts.

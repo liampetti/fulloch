@@ -184,6 +184,94 @@ def test_fresh_wakeword_free_follow_up_is_not_flushed_by_early_commit(assistant)
     assert assistant._start_turn.call_args.args[0] == "turn off kitchen lights"
 
 
+@pytest.mark.parametrize("text", [
+    "never mind", "Nevermind, please.", "Don't worry about it", "do not worry about that",
+    "forget it", "no, never mind", "atticus never mind", "stop",
+])
+@pytest.mark.parametrize("conversation_mode", [False, True])
+def test_follow_up_dismissal_stands_down_silently(assistant, text, conversation_mode):
+    sat = assistant.satellites["sat-a"]
+    sat.last_turn_end = 10.0
+    sat.last_spoken_text = "Would you like a summary?"
+    sat.conversation_mode = conversation_mode
+    assistant.follow_up_seconds = 5.0
+    assistant._queue_conversation_turn = MagicMock()
+    _run_transcripts(assistant, [text], onsets=[10.1], capture_ids=[1])
+    assistant._start_turn.assert_not_called()
+    assistant._queue_conversation_turn.assert_not_called()
+    assistant.audio_capture.clear_follow_up.assert_called_once_with(sat)
+    assert sat.last_turn_end == 0
+
+
+@pytest.mark.parametrize("text", ["no", "no thanks", "no thank you"])
+def test_no_declines_an_offer_silently(assistant, text):
+    sat = assistant.satellites["sat-a"]
+    sat.last_turn_end = 10.0
+    sat.last_spoken_text = "Would you like me to check the weather?"
+    assistant.follow_up_seconds = 5.0
+    _run_transcripts(assistant, [text], onsets=[10.1])
+    assistant._start_turn.assert_not_called()
+    assistant.audio_capture.clear_follow_up.assert_called_once_with(sat)
+
+
+def test_no_is_not_echo_of_know_in_offer(assistant):
+    sat = assistant.satellites["sat-a"]
+    sat.last_turn_end = 10.0
+    sat.last_spoken_text = "Would you like to know more?"
+    assistant.follow_up_seconds = 5.0
+    _run_transcripts(assistant, ["no"], onsets=[10.1])
+    assistant._start_turn.assert_not_called()
+    assistant.audio_capture.clear_follow_up.assert_called_once_with(sat)
+
+
+def test_dismissal_retires_capture_in_conversation_mode(assistant):
+    sat = assistant.satellites["sat-a"]
+    sat.conversation_mode = True
+    sat.last_turn_end = 10.0
+    assistant._queue_conversation_turn = MagicMock()
+    _run_transcripts(
+        assistant, ["never mind", "never mind"], onsets=[10.1, 10.1],
+        capture_ids=[1, 1], provisional_indexes=set(),
+    )
+    assistant.audio_capture.clear_follow_up.assert_called_once_with(sat)
+    assistant._queue_conversation_turn.assert_not_called()
+
+
+@pytest.mark.parametrize("text,spoken", [
+    ("no", "Is the light on?"),
+    ("no, use the kitchen lights", "Would you like me to turn on the lights?"),
+    ("never mind the lights, turn on the fan", "Would you like the lights on?"),
+    ("don't worry about it, play jazz", "Would you like music?"),
+])
+def test_follow_up_answers_and_corrections_are_dispatched(assistant, text, spoken):
+    sat = assistant.satellites["sat-a"]
+    sat.last_turn_end = 10.0
+    sat.last_spoken_text = spoken
+    assistant.follow_up_seconds = 5.0
+    _run_transcripts(assistant, [text], onsets=[10.1])
+    assistant._start_turn.assert_called_once()
+    assert assistant._start_turn.call_args.args[0] == text
+
+
+def test_partial_dismissal_waits_for_full_correction(assistant):
+    sat = assistant.satellites["sat-a"]
+    sat.last_turn_end = 10.0
+    sat.last_spoken_text = "Would you like me to turn on the lights?"
+    assistant.follow_up_seconds = 5.0
+    _run_transcripts(
+        assistant, ["no", "no, use the kitchen lights"],
+        onsets=[10.1, 10.1], capture_ids=[1, 1],
+    )
+    assistant._start_turn.assert_called_once()
+    assert assistant._start_turn.call_args.args[0] == "no, use the kitchen lights"
+    assistant.audio_capture.clear_follow_up.assert_not_called()
+
+
+def test_idle_wakeword_dismissal_is_still_dispatched(assistant):
+    _run_transcripts(assistant, ["atticus never mind"])
+    assistant._start_turn.assert_called_once()
+
+
 def test_legacy_empty_final_clears_fallback_before_text_filtering(assistant):
     command = "atticus turn on kitchen lights"
     _run_transcripts(assistant, [command, ""])

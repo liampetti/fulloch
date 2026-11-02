@@ -26,7 +26,7 @@ Fulloch is your privacy-focused local voice assistant running on your own PC or 
 
 > **Higgs TTS 3:** The optional Higgs GPU backend is available only under Boson AI's Research and Non-Commercial License, not Fulloch's MIT license. It requires explicit consent for every voice reference. See [Model Sources and Licenses](MODELS.md#higgs-tts-3-license).
 
-> **Pocket TTS PyTorch:** The experimental GPU streaming option uses Kyutai's official gated model. Accept its Hugging Face terms before selecting it. If the download is denied, the wizard prompts for a Hugging Face read token, saves it in `data/credentials.json`, and retries. See [Model Sources and Licenses](MODELS.md#hugging-face-access).
+> **Pocket TTS PyTorch:** Premium uses Kyutai's GPU streaming runtime with a pinned, ungated mirror of its English voice-cloning weights. No Hugging Face account or token is required. Only clone voices with explicit, lawful consent. See [Model Sources and Licenses](MODELS.md#pocket-tts-pytorch-provenance-and-consent).
 
 > **openWakeWord feature extractors:** The optional wakeword gate includes unmodified pre-trained feature extractor models from openWakeWord v0.5.1 under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/), not Fulloch's MIT license. See [Model Sources and Licenses](MODELS.md#wakeword).
 
@@ -51,7 +51,7 @@ docker run -d \
   ghcr.io/liampetti/fulloch:cpu
 ```
 
-The named volume is repaired automatically on first boot and receives the bundled starter voice references. If you prefer a bind mount, use an existing writable directory such as `-v "$PWD/data:/app/data:rw"`; see [data-directory permissions](TECHNICAL_DETAILS.md#docker-data-directory-permissions) if startup reports a permission error. Open the HTTPS URL shown in `docker logs fulloch-ai` in a browser to continue the setup wizard. A self-signed certificate warning is expected on first visit; accept it to enable browser microphone access. The dashboard is LAN-visible with this command, so set a dashboard password in the wizard before using it beyond a trusted network.
+The named volume is repaired automatically on first boot and receives the bundled starter voice references. If you prefer a bind mount, use an existing writable directory such as `-v "$PWD/data:/app/data:rw"`; see [data-directory permissions](TECHNICAL_DETAILS.md#docker-data-directory-permissions) if startup reports a permission error. Open the HTTPS URL shown in `docker logs fulloch-ai` in a browser to continue the setup wizard. A self-signed certificate warning is expected on first visit; accept it to enable browser microphone access. Complete setup on a trusted network, then set a password in **Settings → Dashboard** before exposing the dashboard beyond it.
 
 Add `-v /path/to/your/ObsidianVault:/vault:rw` before the image name to expose an Obsidian vault.
 
@@ -65,6 +65,8 @@ docker run -d \
   --restart unless-stopped \
   --log-opt max-size=10m \
   --log-opt max-file=5 \
+  --memory=10g \
+  --memory-swap=10g \
   --gpus all \
   -p 8765:8765 \
   -p 8766:8766 \
@@ -72,6 +74,21 @@ docker run -d \
   -v fulloch-data:/app/data:rw \
   ghcr.io/liampetti/fulloch:latest
 ```
+
+The example limits container **system RAM** to 10 GiB and disables container
+swap (`--memory-swap` equals `--memory`); `--gpus all` does not cap GPU VRAM.
+Choose a limit appropriate to your models and leave sufficient RAM for the host
+and other services. Too low a limit can kill model processes. Fulloch detects
+Linux cgroup memory limits and monitors system memory headroom; on sustained
+pressure it stops local inference and research, waits 300 seconds, and attempts
+to restore the backend without replaying research. Without a container limit,
+checks remain best effort and cannot isolate the VM from an OOM. A hard limit
+and the monitor cannot guarantee recovery from all allocation spikes or driver
+and hardware hangs. If the entire container is killed, Docker's restart policy
+can restart it immediately; the in-process cooldown cannot survive that event.
+If pressure persists after the cooldown, or a second emergency occurs, Fulloch
+leaves the backend stopped rather than repeatedly reloading it.
+Configure Docker itself, not `config.yml`, to change the limit.
 
 ### OpenAI Endpoint
 
@@ -81,34 +98,57 @@ The moment you point the language model at an OpenAI-compatible endpoint, the av
 
 ### Recovering Or Reconfiguring
 
-Use **Settings** for normal changes: voices, model backends, language-model mode, Home Assistant, Search, and dashboard preferences. Model changes need a restart; if their weights are missing, the restart returns to the wizard to download them. The **Re-run setup wizard** action makes a backup under `data/backups/`; use it to choose a different stack, not to edit a custom model path or advanced remote-LLM settings. To repair a failed download, re-run setup and select the same stack; incomplete model caches are detected and downloaded again.
+Use **Settings** for presets, voices, models, wakewords, notes, Home Assistant, web search, and dashboard access. Model changes need a restart; missing weights are downloaded for an already-completed installation, or setup reopens if needed. Hidden config-file options are preserved when unrelated controls are saved. Custom AI accepts a GGUF path on the GPU image or an OpenAI-compatible API address on either image.
 
 Advanced options not shown in Settings are documented in `data/config.example.yml`: Spotify OAuth, native satellite tokens, and external-LLM timeouts. Keep those files under the persistent `data` volume.
 
 ## Model options
 
-Choose a model for each part of the stack during setup or in **Settings**. CPU options work in the `:cpu` image; GPU options require the CUDA image. Download sources and licence details are in [MODELS.md](MODELS.md).
+The wizard has three steps: **Preset and wakeword → Home Assistant → Web Search**. Press **Continue** through all three for system-appropriate defaults; integrations are optional. **Go back** preserves your choices. Individual model selection is in **Settings**; GPU-only models are not offered on the CPU image. Download sources and licence details are in [MODELS.md](MODELS.md).
+
+| Preset | GPU capacity class | AI | Speech-to-text | Text-to-speech |
+| -- | -- | -- | -- | -- |
+| Max (experimental) | 32 GB | Qwen 27B | Qwen 1.7B GPU | Qwen 1.7B GPU |
+| Pro | 16 GB | Ornith 9B | Qwen 1.7B GPU | Qwen 1.7B GPU |
+| Premium | 12 GB | Ornith 9B | Orukeet GPU | Pocket PyTorch GPU |
+| Economy | 8 GB | Ornith 9B | Moonshine Base CPU | Kokoro CPU |
+| Lite | No GPU required | Laya + regex | Moonshine Base CPU | Kokoro CPU |
+
+These are hardware classes, not precise model-memory estimates. The wizard
+recommends the highest available tier that fits; it falls back to Lite when
+no GPU tier fits or GPU information is unavailable. A 24 GB card can use Pro,
+or a custom 27B + Orukeet + Pocket stack through Settings; the full Max stack
+targets 32 GB.
 
 | Component | CPU options | GPU options |
 | -- | -- | -- |
 | Speech recognition (ASR) | Qwen3-ASR ONNX 1.7B or 0.6B; Parakeet TDT v3 ONNX 0.6B; Moonshine Base or Tiny | Qwen3-ASR PyTorch 1.7B or 0.6B; Qwen3-ASR GGUF 1.7B or 0.6B; NVIDIA Parakeet TDT 0.6B; Orukeet 0.6B |
 | Text to speech (TTS) | Kokoro 82M; Pocket TTS ONNX voice cloning | Qwen3-TTS PyTorch 1.7B or 0.6B; Qwen3-TTS GGUF 1.7B or 0.6B; Pocket TTS PyTorch or GGUF; Audio8; Higgs TTS 3; Breeze TTS 2 |
-| Language and command routing | Regex-only commands; Laya semantic commands; an external OpenAI-compatible endpoint | Local Qwen3.5 9B MTP, Gemma 4 12B, Ornith 1.5 9B, NeoHorse 1 9B, or a custom GGUF; an external OpenAI-compatible endpoint |
+| Language and command routing | Regex-only commands; Laya semantic commands; an external OpenAI-compatible endpoint | Local Qwen3.5 9B MTP, Gemma 4 12B, Ornith 1.5 9B, Qwen3.8 27B IQ4_XS (32 GB full stack), or a custom GGUF; an external OpenAI-compatible endpoint |
 
-The optional **Hey Atticus** wakeword gate uses the bundled openWakeWord classifier; without it, wakeword detection uses ASR.
+Choose **Hey Atticus**, **Alexa**, or **Hey Jarvis** in the wizard's preset step
+or Settings. All use local acoustic openWakeWord classifiers. Alexa/Jarvis
+weights have a **CC BY-NC-SA 4.0 non-commercial** license; they do not connect
+to Amazon or another voice service. Moonshine Base/Tiny and Parakeet ONNX
+trust the acoustic detector without ASR verification by default, avoiding
+rejection of names such as Atticus; the UI warns about possible false
+activations. Other ASR backends verify candidates by default. Custom wakeword
+models, names, regex and verification overrides are **config-file only**.
 
 ### Obsidian Integration
 Connect your Obsidian vault so Fulloch reads, writes, appends, and searches your notes by voice.
 
 Just add your vault's directory as a volume when launching Docker container `-v /Users/you/Documents/MyVault:/vault:rw`
 
-The Obsidian wizard's "Auto-detect" scans the container filesystem for a vault, so it'll find `/vault` (or wherever you mounted it) without further config.
+Set **Settings → General → Notes directory** to `/vault` (or your mount path).
 
-The plugin is optional: the folder link alone supports reading, writing, appending, and searching notes. Install the separate plugin for live active-note and selection context, editor actions, and automatic note navigation; Docker installations with different host and container paths cannot yet navigate back to a written note automatically. See the [Obsidian setup details](TECHNICAL_DETAILS.md#obsidian-integration).
+The plugin is optional: the folder link alone supports reading, writing, appending, and searching notes. Advanced plugin setup is outside the web UI; see [scripts/OBSIDIAN.md](scripts/OBSIDIAN.md) and `scripts/setup_obsidian.py`. Existing bridge configuration remains supported.
 
 ## Home Assistant Integration
 
 When Fulloch runs in Docker, enter Home Assistant's LAN address, for example `http://192.168.1.50:8123`. `localhost` refers to the Fulloch container, not Home Assistant.
+
+For the HACS integration, create a **Fulloch integration token** in the wizard's Home Assistant step or **Settings → Home Assistant → Connect from Home Assistant**, then copy it into Home Assistant. This token lets Home Assistant connect to Fulloch; it is separate from the Home Assistant long-lived access token Fulloch uses to control devices. Use Fulloch's LAN address and integration API port (normally `8766`). The integration API uses plain HTTP, so use it only on a trusted network. If Fulloch listens only on localhost, set its Dashboard Host to `0.0.0.0`, set a dashboard password, and restart; ensure the integration port is exposed when using Docker. Token creation does not revoke existing integrations.
 
 A HACS-installable integration for status sensors, mic control, proactive speech, and automation triggers.
 
@@ -162,7 +202,7 @@ Common commands take a regex fast-path that skips the language model entirely, f
 
 Laya is a local CPU-only option between the regex fast-path and a full language model. Regex commands still run first; after a miss, Laya can recognise common command phrasing and select only from Fulloch's supported action schemas, using locally validated values and Home Assistant aliases.
 
-It does not provide free-form conversation or generate arbitrary tool arguments. Choose **CPU semantic commands** in the setup wizard when you want more flexible command phrasing without running a full LLM.
+It does not provide free-form conversation or generate arbitrary tool arguments. Choose **Lite** in the setup wizard when you want more flexible command phrasing without running a full LLM.
 
 ## Reporting a Problem
 

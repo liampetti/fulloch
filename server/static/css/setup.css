@@ -66,7 +66,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .topbar h2 { margin: 0; font-size: 1.05rem; }
 .topbar .spacer { flex: 1; }
 label { display: block; font-size: 0.85rem; font-weight: 600; margin: 0.9rem 0 0.3rem; }
-input[type=text], input[type=number], select, textarea {
+input[type=text], input[type=number], input[type=password], input[type=url], select, textarea {
   width: 100%; font: inherit; padding: 0.5rem 0.6rem; border-radius: 8px;
   border: 1px solid var(--border); background: var(--bg); color: var(--text); }
 textarea { resize: vertical; min-height: 4rem; }
@@ -301,4 +301,45 @@ audio { width: 100%; margin-top: 0.75rem; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   max-width: 60ch;
 }
-  padding-bottom: 0.35rem; border-bottom: 1px solid var(--border); color: var(--text-muted); }
+/* Keyboard-accessible information popovers, shared by setup and settings. */
+.info-popover { display: inline-block; position: relative; margin-left: .3rem; vertical-align: middle; }
+.info-popover > summary, .connect-section .info-popover > summary { display: inline-flex; align-items: center; justify-content: center; width: 1.1rem; height: 1.1rem; padding: 0; border: 1px solid currentColor; border-radius: 50%; font-size: .75rem; line-height: 1; cursor: pointer; color: var(--text-muted); }
+.info-popover > summary::marker { content: ''; }
+.info-popover > summary::before { content: none; }
+.info-popover[open] { z-index: 20; }
+.info-popover > p { position: absolute; z-index: 10; top: 1.2rem; left: 0; width: min(17rem, 65vw); padding: .8rem; margin: 0; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: .5rem; box-shadow: 0 3px 12px #0003; font-size: .85rem; font-weight: 400; }
+.warning { color: var(--error); }
+.settings-group { position: relative; }
+.settings-group > .info-popover { position: absolute; top: .75rem; right: .75rem; z-index: 2; }
+.settings-group > .info-popover > p { left: auto; right: 0; }
+.settings-card > summary { gap: .75rem; }
+.settings-card > summary::before { order: 3; margin-left: auto; }
+.settings-card .settings-icon { flex: none; width: 2.25rem; height: 2.25rem; border-radius: .7rem; background: color-mix(in srgb, var(--primary) 12%, var(--surface)); font-size: 1.2rem; }
+.settings-card .cbody { padding: .6rem .25rem .35rem; }
+.settings-section-intro { margin: 0 0 .8rem; color: var(--text-muted); font-size: .85rem; }
+.preset-panel { padding: 1.25rem; margin-bottom: 1rem; border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border)); border-radius: 16px; background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 8%, var(--surface)), var(--surface)); }
+.preset-heading { display: flex; align-items: center; gap: .5rem; }
+.preset-heading h3 { margin: 0; font-size: 1.15rem; }
+.preset-kicker { color: var(--primary); font-size: .68rem; letter-spacing: .09em; font-weight: 700; }
+.preset-intro, .preset-status { color: var(--text-muted); font-size: .83rem; margin: .45rem 0 .9rem; }
+.preset-status { margin: .8rem 0 0; }
+.preset-pills { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: .5rem; }
+button.preset-pill { display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; padding: .65rem .75rem; border-radius: 12px; background: var(--surface); }
+.preset-pill-name { font-weight: 700; }
+.preset-pill-detail { font-size: .73rem; }
+button.preset-pill.selected { background: var(--primary); border-color: var(--primary); color: var(--primary-fg); }
+button.preset-pill.selected.customised { background: color-mix(in srgb, var(--primary) 18%, var(--surface)); border-color: color-mix(in srgb, var(--primary) 55%, var(--border)); color: var(--text); }
+.access-notice { padding: .75rem; margin-top: .75rem; border: 1px solid var(--warn); border-radius: .6rem; background: color-mix(in srgb, var(--warn) 10%, var(--surface)); font-size: .82rem; }
+.access-notice p { margin: .25rem 0 0; }
+.access-notice a { color: inherit; font-weight: 600; }
+.ha-integration-card { margin-top: 1.25rem; padding: 1rem; border: 1px solid color-mix(in srgb, var(--primary) 25%, var(--border)); border-radius: 12px; background: color-mix(in srgb, var(--primary) 6%, var(--surface)); font-size: .86rem; }
+.ha-integration-heading { display: flex; align-items: center; gap: .7rem; }
+.ha-integration-heading > span { display: grid; place-items: center; width: 2rem; height: 2rem; border-radius: .6rem; background: color-mix(in srgb, var(--primary) 15%, var(--surface)); color: var(--primary); font-size: 1.25rem; }
+.ha-integration-heading p { margin: 0; color: var(--text-muted); }
+.ha-token-row { display: flex; align-items: center; gap: .5rem; }
+.ha-token-row input { min-width: 0; }
+@media (max-width: 600px) {
+  .info-popover > p, .settings-group > .info-popover > p {
+    position: fixed; top: 25vh; left: 1rem; right: 1rem; width: auto;
+  }
+}

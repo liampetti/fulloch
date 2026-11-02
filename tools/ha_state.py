@@ -470,7 +470,7 @@ def get_entity_state(entity: str) -> str:
     aliases=["list_area_entities", "ha_list_entities", "area_entities", "what_is_in"],
 )
 def list_entities_in_area(area: str, domain: Optional[str] = None) -> str:
-    """List the entities Home Assistant has registered in an area or floor.
+    """List the entities Home Assistant has registered in an area or floor. 5 max, then "amongst others" if more exist.
 
     Args:
         area: Room/area/zone name, e.g. 'downstairs', 'office', 'kitchen'.
@@ -502,7 +502,9 @@ def list_entities_in_area(area: str, domain: Optional[str] = None) -> str:
         return f"I don't see any {scoped}entities in {area_name}."
 
     names = sorted({client._friendly_for(eid) for eid in entity_ids}, key=str.lower)
-    return f"{area_name} has: " + ", ".join(names)
+    return f"{area_name} has: " + ", ".join(names[:5]) + (
+        ", amongst others" if len(names) > 5 else ""
+        )
 
 
 @client.tool(

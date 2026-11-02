@@ -213,6 +213,18 @@ _STOP_FILLER_TOKENS = frozenset(
     }
 )
 
+# Only complete, unambiguous dismissals: trailing instructions must reach the
+# agent. Normalize punctuation before matching to tolerate ASR contractions.
+_FOLLOW_UP_DISMISSAL_RE = re.compile(
+    r"(?:no\s+)?(?:never\s*mind|dont worry about (?:it|that)|"
+    r"do not worry about (?:it|that)|forget (?:it|that))"
+    r"(?:\s+(?:please|thanks|thank you))?"
+)
+_DECLINED_OFFER_RE = re.compile(
+    r"\b(?:would you like|do you want|shall i|should i|can i|may i)\b[^?]*\?\s*$",
+    re.IGNORECASE,
+)
+
 
 def _build_wakeword_pattern(wakeword: str) -> str:
     """Compile a tolerant wakeword matcher pattern.
@@ -905,7 +917,9 @@ class Assistant:
             "Technical terms: " + ", ".join(terms) if self.asr_context_hint else ""
         )
         wake_cfg = (self._models_raw or {}).get("wakeword", {})
-        self.verify_asr_wakeword = bool(wake_cfg.get("verify_asr", True))
+        from .wakeword_policy import verify_asr_wakeword
+
+        self.verify_asr_wakeword = verify_asr_wakeword(asr_cfg["backend"], wake_cfg)
         self.audio_capture.wake_candidates.verify_asr_wakeword = self.verify_asr_wakeword
         if wake_cfg.get("backend", "asr") == "openwakeword":
             wakeword_settings = {
@@ -928,6 +942,10 @@ class Assistant:
                 self.wakeword_metrics["status"] = "openwakeword"
                 logger.info("Experimental openWakeWord idle gate enabled: %s", wakeword_settings)
             except Exception as exc:  # A gate must never make voice control unavailable.
+                # If acoustic initialization failed, restore transcript gating;
+                # the fallback must not treat arbitrary speech as activation.
+                self.verify_asr_wakeword = True
+                self.audio_capture.wake_candidates.verify_asr_wakeword = True
                 self.wakeword_metrics["status"] = f"asr fallback: {exc}"
                 logger.warning(
                     "openWakeWord unavailable; using ASR-only wakeword detection: %s", exc
@@ -1006,6 +1024,7 @@ class Assistant:
                     **llm_cfg["opts"],
                     persistent_logging_enabled=self.persistent_logging_enabled,
                 )
+                self.slm_model._fulloch_on_memory_emergency = self.thinking_jobs.cancel_for_memory_pressure
             self.greeting_prompt = get_greeting_system_prompt(
                 self.wakeword_name, self._personality_for_prompt()
             )
@@ -1606,6 +1625,8 @@ class Assistant:
         """Queue a bounded, non-speaking thinking task from the integration API."""
         if self.thinking_jobs is None:
             raise RuntimeError("thinking is not ready")
+        if getattr(getattr(self, "slm_model", None), "_fulloch_memory_cooldown", False):
+            raise RuntimeError("System memory protection is cooling down. Please try again later.")
         pending_task = (
             self._pending_thinking_tasks.get(origin_satellite_id)
             if origin_source == "conversation" and origin_satellite_id is not None
@@ -1620,6 +1641,10 @@ class Assistant:
                 return self.thinking_jobs.status(job_id) or {"id": job_id}
             prior_task = pending_task.get("task", "") if isinstance(pending_task, dict) else pending_task
             task = f"{prior_task}\n\nAdditional user detail: {task}"
+        if origin_source == "conversation" and not pending_task:
+            from .research_task import resolve_approved_research
+
+            task = resolve_approved_research(task, handoff, self._history_for_id(origin_satellite_id))
         prior_job = (
             self.thinking_jobs.latest_for_thread(origin_satellite_id)
             if origin_source == "conversation" and origin_satellite_id is not None
@@ -1658,7 +1683,14 @@ class Assistant:
                     and prior_job.status.value in {"QUEUED", "RUNNING", "PAUSED"}
                     and task == prior_job.snapshot.task):
                 return self.thinking_jobs.status(prior_job.id) or {"id": prior_job.id}
-            if prior_job is not None and task_record.get("parent_job_id") == prior_job.id:
+            # Only a genuine retry ("just do it" / "try again") inherits the
+            # prior job's evidence for revalidation. A fresh analysis of the
+            # same or a related topic must search from scratch — a new
+            # deep-think request implies current information, not the
+            # predecessor's historical ledger.
+            if (prior_job is not None
+                    and task_record.get("parent_job_id") == prior_job.id
+                    and not task_record.get("fresh")):
                 retry_handoff = self._retained_evidence_handoff(prior_job)
         if handoff is not None or retry_handoff:
             combined = dict(handoff or {})
@@ -3610,6 +3642,17 @@ class Assistant:
         tokens = re.sub(r"[^\w\s]", "", stripped).split()
         return all(t in _WAKE_GREETINGS or t in _STOP_FILLER_TOKENS for t in tokens)
 
+    def _is_follow_up_dismissal(self, text: str, spoken: str) -> bool:
+        """Recognize complete dismissals, without swallowing corrections or answers."""
+        stripped = self._barge_re.sub(" ", text.lower(), count=1)
+        normalized = re.sub(r"[^\w\s]", "", stripped).strip()
+        normalized = " ".join(normalized.split())
+        if _FOLLOW_UP_DISMISSAL_RE.fullmatch(normalized):
+            return True
+        return normalized in {"no", "no thanks", "no thank you"} and bool(
+            _DECLINED_OFFER_RE.search(spoken)
+        )
+
     def _transcriber_thread(self):
         """ASR results → wakeword/intent/TTS. Owns model loading on first call."""
         try:
@@ -4030,6 +4073,13 @@ class Assistant:
                         # even if every word also appears in the cancelled
                         # response. Consume the flag here.
                         sat.skip_followup_self_echo = False
+                    elif (
+                        self._is_follow_up_dismissal(text_lower, sat.last_spoken_text)
+                        and not re.search(r"\bno\b", sat.last_spoken_text, re.IGNORECASE)
+                        and re.fullmatch(r"no[\s.!?,]*", text_lower)
+                    ):
+                        # "no" in "know" is not an echo of a declined offer.
+                        pass
                     elif self._is_self_echo(
                         turn_satellite_id,
                         text_lower,
@@ -4078,20 +4128,37 @@ class Assistant:
                     # making them repeat it in a follow-up window.
                     logger.info("Barge-in — dispatching replacement request")
 
-                # Pure stop in the follow-up window: cease, don't issue a new
-                # command. Stand down silently and close the window (wakeword
-                # required again). Active turns use the barge-in path above; a
-                # fresh wakeword turn while idle still routes "stop" to the agent.
-                if not wakeword_present and self._is_pure_stop(text_lower):
-                    # Don't stand down on a partial — wait for the hard endpoint
-                    # to confirm the user really only said "stop".
+                # A dismissal applies only to an actual follow-up, including a
+                # follow-up prefixed with the wakeword. Idle wakeword requests
+                # remain ordinary commands. Wait for the final transcript so
+                # "no ..." can become "no, use the kitchen lights".
+                onset_gap = self._asr_onset["t"] - sat.last_turn_end
+                follow_up_context = in_follow_up or (
+                    not just_barged_in
+                    and (
+                        sat.conversation_mode
+                        or (
+                            sat.last_turn_end > 0
+                            and self.follow_up_seconds > 0
+                            and 0 <= onset_gap < self.follow_up_seconds
+                        )
+                    )
+                )
+                if follow_up_context and (
+                    self._is_pure_stop(text_lower)
+                    or self._is_follow_up_dismissal(text_lower, sat.last_spoken_text)
+                ):
                     if provisional:
                         continue
+                    if capture_id is not None:
+                        sat.committed_capture_id = max(sat.committed_capture_id, capture_id)
+                        self.audio_capture.commit_capture(sat, capture_id)
                     sat.last_turn_end = 0.0
+                    sat.skip_followup_self_echo = False
                     self._clear_pending_conversation_turn(sat)
                     self.audio_capture.clear_follow_up(sat)
                     self._satellite_idle(sat)
-                    logger.info("Pure stop in follow-up — standing down")
+                    logger.info("Follow-up dismissed — standing down")
                     continue
 
                 if wakeword_match is not None:

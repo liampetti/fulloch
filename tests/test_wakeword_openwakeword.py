@@ -35,7 +35,12 @@ def test_onnx_model_selects_onnx_runtime(tmp_path, monkeypatch):
     backend = OpenWakeWordBackend(str(model_path), 0.5, 3, 1500)
     backend.feed_pcm("satellite", np.zeros(1280, dtype=np.float32))
 
-    assert calls == [{"wakeword_models": [str(model_path)], "inference_framework": "onnx"}]
+    assert len(calls) == 1
+    assert calls[0]["wakeword_models"] == [str(model_path)]
+    assert calls[0]["inference_framework"] == "onnx"
+    for key in ("melspec_model_path", "embedding_model_path"):
+        assert Path(calls[0][key]).is_file()
+        assert "third_party/openwakeword-models" in calls[0][key]
 
 
 def test_wakeword_activation_records_score():

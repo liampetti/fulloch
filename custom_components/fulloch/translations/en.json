@@ -3,16 +3,17 @@
         "step": {
             "user": {
                 "title": "Connect to Fulloch",
-                "description": "Enter the host, integration API port, and token configured in Fulloch.",
+                "description": "In Fulloch, open Settings → Home Assistant → Connect from Home Assistant, then create and copy the Fulloch integration token. Enter Fulloch's network address and the integration API port shown there (normally 8766). This is not your Home Assistant long-lived access token. The API uses HTTP: connect only over a trusted network.",
                 "data": {
                     "host": "Host",
                     "port": "Integration API port",
-                    "token": "Integration token"
+                    "token": "Fulloch integration token"
                 }
             }
         },
         "error": {
-            "cannot_connect": "Cannot connect to Fulloch. Check that the integration API is enabled and the host, port, and token are correct."
+            "cannot_connect": "Cannot reach Fulloch. Check that Fulloch is running, its integration API is enabled, and the host and port are reachable from Home Assistant.",
+            "invalid_token": "Fulloch rejected this token. Create a Fulloch integration token in Fulloch Settings → Home Assistant; do not use a Home Assistant access token."
         },
         "abort": {
             "already_configured": "This Fulloch instance is already configured."

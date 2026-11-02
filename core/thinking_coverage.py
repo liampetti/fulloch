@@ -48,6 +48,27 @@ _STOPWORDS = frozenset(
 )
 
 
+# Question-frame words: they ask *how* to fetch a fact (date, schedule,
+# results) without naming the fact's subject, so they carry no evidence-need
+# of their own. Kept out of _STOPWORDS because other token comparisons treat
+# them as meaningful.
+_FRAME_WORDS = frozenset(
+    {
+        "after", "ahead", "all", "along", "also", "any", "away", "before", "between",
+        "both", "come", "coming", "date", "dated", "day", "days", "done", "each",
+        "either", "end", "first", "given", "got", "has", "have", "had", "here",
+        "how", "hundred", "into", "kind", "last", "less", "like", "many", "much",
+        "near", "next", "now", "off", "once", "only", "over", "own", "per", "put",
+        "run", "same", "schedule", "scheduled", "since", "some", "soon", "such",
+        "take", "tell", "then", "there", "these", "those", "through", "time",
+        "times", "today", "tomorrow", "tonight", "top", "under", "until", "upon",
+        "up", "upcoming", "very", "want", "was", "week", "weeks", "went", "when",
+        "where", "which", "while", "will", "with", "within", "without", "would",
+        "yet", "year", "years",
+    }
+)
+
+
 @dataclass(frozen=True)
 class EvidenceRequirement:
     """One answer-critical coverage obligation retained with a thinking job."""
@@ -86,6 +107,8 @@ def initial_requirements(task: str, context: dict | None = None) -> list[dict]:
     """Return the smallest coverage plan appropriate to a task's stated shape."""
     context = context or research_context(task)
     timing = temporal_scope(task, context["as_of"])
+    if context.get("temporal_intent") in {"future", "current", "historical"}:
+        timing["temporal_intent"] = context["temporal_intent"]
     requirements = [
         EvidenceRequirement(
             "answer",
@@ -367,11 +390,75 @@ def searchable_gap_query(task: str, requirement: dict | None = None) -> str:
         gap = re.sub(r"\b(?:source[- ]backed|original source evidence|directly answers?|fixed task scope|the analysis|this question|subject[- ]specific|its most|relevant|retained|supported|established)\b", "", gap, flags=re.I)
         gap = re.sub(r"^(?:Establish|Retrieve evidence for|Verify|Identify|Assess)\s+", "", gap, flags=re.I)
         gap = re.sub(r"\s+for the requested subject\(s\)\.?$", "", gap, flags=re.I)
-    words = re.findall(r"[^\s;?—]+", anchor + " " + gap)
+    anchor_words = re.findall(r"[^\s;?—]+", anchor)
+    gap_words = re.findall(r"[^\s;?—]+", gap)
+    # Lead with the needed fact and keep only the entity core of the task.
+    # A full task phrase ("the next Formula 1 race coming up") repeated as the
+    # seed of every gap query makes SearXNG rank the same calendar/schedule
+    # cluster at the top of each distinct evidence need (standings, results,
+    # dates), so the gap terms never move the result set. Trimming the anchor
+    # to its entity core ("Formula 1", "next race") lets the gap terms lead.
+    # The subject-identity requirement keeps the full anchor: its job is to
+    # bind the exact subject the task named, not to diversify a sub-fact.
+    identity_query = bool(requirement.get("is_subject_identity")) or requirement.get("identifier") == "subject-identity"
+    if gap_words and not identity_query:
+        ordered: list[str] = []
+        # A resolved subject pins the query to that exact name/date/version;
+        # those values must stay ahead of the gap terms.
+        if resolution.get("state") == "resolved":
+            for key in ("name", "date", "version"):
+                for word in re.findall(r"[^\s;?—]+", str(resolution.get(key) or "")):
+                    if word.casefold() not in {w.casefold() for w in ordered}:
+                        ordered.append(word)
+        for word in gap_words:
+            if word.casefold() not in {w.casefold() for w in ordered}:
+                ordered.append(word)
+        for word in re.findall(r"[^\s;?—]+", _entity_core(anchor)):
+            if word.casefold() not in {w.casefold() for w in ordered}:
+                ordered.append(word)
+        words = ordered
+    else:
+        words = anchor_words + gap_words
     # Keep phrases intact: removing repeated words individually can change
     # 'quarterly financial results' or a version's comparison conditions.
     query = " ".join(words[:28]).strip(" .,:?!")
     return query if len(query) <= 240 else query[:240].rsplit(" ", 1)[0]
+
+
+_STOPWORD_ENTITIES = {
+    "the", "a", "an", "and", "or", "of", "for", "on", "in", "to", "up", "coming",
+    "next", "upcoming", "latest", "current", "recent", "this", "that", "its",
+    "what", "which", "who", "when", "where", "how",
+}
+
+
+def _entity_core(anchor: str) -> str:
+    """The entity core of a cleaned task anchor: its longest noun run.
+
+    'the next Formula 1 race coming up' -> 'Formula 1 race'. The run is the
+    longest maximal stretch of non-stopword words; ties keep the earliest run
+    so proper-noun entities (which never stopword) win over trailing filler.
+    Falls back to the whole anchor when nothing qualifies.
+    """
+    words = re.findall(r"[^\s;?—]+", str(anchor or ""))
+    if not words:
+        return ""
+    best_start, best_len = 0, 0
+    start, length = None, 0
+    for index, word in enumerate(words):
+        if word.casefold().rstrip(".,") not in _STOPWORD_ENTITIES:
+            if length == 0:
+                start = index
+            length += 1
+            if length > best_len:
+                best_start, best_len = start, length
+        else:
+            length = 0
+    if best_len <= 1:
+        # A single surviving word (or none): keep the whole anchor rather than
+        # discarding the only subject signal.
+        return " ".join(words)
+    return " ".join(words[best_start:best_start + best_len])
 
 
 def fallback_chapter_plan(
@@ -680,7 +767,8 @@ def chapter_requirements(chapters: list[dict], task: str, context: dict) -> list
 
 
 def apply_supported_coverage(
-    requirements: list[dict], cards: list[dict], answers: object,
+    requirements: list[dict], cards: list[dict], answers: object, *,
+    dependency_requirements: list[dict] | None = None,
 ) -> None:
     """Accept only explicitly supported answers linked to eligible retained cards."""
     from .thinking_fact_cards import eligible_cards_for_requirement
@@ -690,6 +778,9 @@ def apply_supported_coverage(
         return
     by_id = {str(card.get("id")): card for card in cards if isinstance(card, dict)}
     by_requirement = {item["identifier"]: item for item in requirements}
+    dependencies_by_id = {item["identifier"]: item for item in (
+        dependency_requirements if dependency_requirements is not None else requirements
+    )}
     for answer in rows:
         if not isinstance(answer, dict):
             continue
@@ -725,8 +816,9 @@ def apply_supported_coverage(
                     valid_ids = []
                     break
             if valid_ids:
-                dependency_requirements = [by_requirement.get(value) for value in requirement.get("dependencies", [])]
-                if any(item is None or item.get("state") != "resolved" for item in dependency_requirements):
+                blocking = [value for value in requirement.get("dependencies", [])
+                            if dependencies_by_id.get(value, {}).get("state") != "resolved"]
+                if blocking:
                     requirement.update(
                         state="open", answer_coverage="partial", evidence_ids=[],
                         detail="Answer is retained, but one or more declared premises are unresolved.",
@@ -734,7 +826,7 @@ def apply_supported_coverage(
                     requirement["candidate_answer"] = {
                         "text": str(answer.get("answer") or answer.get("text") or "")[:2000],
                         "supporting_card_ids": valid_ids,
-                        "unresolved_dependencies": list(requirement.get("dependencies", [])),
+                        "unresolved_dependencies": blocking,
                     }
                     continue
                 requirement.update(
@@ -853,6 +945,87 @@ def _retrieval_tokens(value: object) -> set[str]:
     return tokens
 
 
+# Small-subset refinement: a human researcher reads a few related cards for one
+# question, decides whether they answer it even closely, and either writes the
+# supported answer or rephrases the question from what those cards reveal. The
+# loop below mirrors that on the *retained* card set, so a compact model is
+# never asked to hunt one answer across the whole inventory in a single batch.
+MAX_REFINEMENT_ROUNDS = 3
+MAX_REFINEMENT_CARDS = 24
+# Total refinement model calls per chapter, so refinement never starves the
+# chapter_coverage stage allowance shared with the batch assessment.
+MAX_REFINEMENT_CALLS_PER_CHAPTER = 6
+
+
+def _requirement_focus(requirement: dict) -> str:
+    """The terms that steer a small card subset toward this question.
+
+    Round one uses the requirement's own gap vocabulary. Later rounds blend in
+    the model's rephrased question, so the next subset is a different
+    neighbourhood of the evidence rather than a re-shuffle of the same cards.
+    """
+    parts = []
+    if requirement.get("evidence_terms"):
+        parts.append(" ".join(requirement["evidence_terms"]))
+    dimension = str(requirement.get("dimension") or "")
+    if dimension and dimension not in {"limitations", "caveats", "risks", "uncertainties"}:
+        parts.append(dimension.replace("_", " "))
+    parts.append(str(requirement.get("question") or ""))
+    parts.append(str(requirement.get("rephrased_question") or ""))
+    return " ".join(parts)
+
+
+def refinement_subsample(
+    cards: list[dict], requirement: dict, *, seen_ids: set[str] | None = None,
+    max_cards: int = MAX_REFINEMENT_CARDS,
+) -> list[dict]:
+    """Rank eligible evidence and rotate bounded windows for an open question.
+
+    Source-review selections guide the ordering, but are not an exhaustive
+    relevance verdict. Previously shown cards remain available once unseen
+    material is exhausted, including after a question is rephrased.
+    """
+    from .thinking_fact_cards import report_card_ledger, select_requirement_cards
+
+    eligible = report_card_ledger(cards)
+    if not eligible or max_cards <= 0:
+        return []
+    seen = seen_ids or set()
+    base_terms = requirement_terms(requirement)
+    focused_terms = _retrieval_tokens(_requirement_focus(requirement))
+    if requirement.get("rephrased_question"):
+        # A later round ranks by the shifted focus, not the original wording.
+        primary, secondary = focused_terms, base_terms
+    else:
+        primary, secondary = base_terms, base_terms
+
+    def card_text(card: dict) -> set[str]:
+        return _retrieval_tokens(substantive_card_text(card))
+
+    def rank(card: dict) -> tuple:
+        text = card_text(card)
+        matched_primary = len(primary & text)
+        matched_secondary = len(secondary & text)
+        return (
+            1 if str(card.get("id")) in seen else 0,
+            -(2 * matched_primary + matched_secondary),
+        )
+
+    # A completed source review is model navigation, not proof that every
+    # unselected card is irrelevant. Keep its question assignments and ranking
+    # boosts, but allow refinement to inspect the remaining eligible inventory.
+    navigation = {**requirement, "source_review_complete": False}
+    selected, _ = select_requirement_cards(
+        eligible, [navigation], max_cards=len(eligible),
+        per_requirement_max_cards=len(eligible),
+    )
+    if requirement.get("rephrased_question"):
+        selected = sorted(selected, key=rank)
+    elif seen:
+        selected = sorted(selected, key=lambda card: str(card.get("id")) in seen)
+    return selected[:max_cards]
+
+
 def matching_cards_for_requirement(cards: list[dict], requirement: dict | None,
                                    source_id: str | None = None) -> list[dict]:
     """Keep generic successful retrieval distinct from evidence for a named gap."""
@@ -872,10 +1045,69 @@ def matching_cards_for_requirement(cards: list[dict], requirement: dict | None,
     return matching
 
 
+def _structured_answer_text(card: dict) -> str:
+    """Render a structured record's key fields as a readable answer sentence.
+
+    A finance quote becomes "NVIDIA Corp (NVDA, NASDAQ) was quoted at USD221.3 on
+    Oct 14 2026, 07:42:08 PM UTC-04:00"; a results record becomes "NVIDIA Corp
+    reported revenue of ... for the ... period". Returns "" when nothing readable
+    is available, so the caller falls back to the raw field dump. Kept here
+    (not in thinking_worker) to avoid a circular import; the worker's
+    ``_structured_record_text`` mirrors this for the report path.
+    """
+    fields = card.get("fields") if isinstance(card.get("fields"), dict) else {}
+    if not fields:
+        return ""
+    price = str(fields.get("price") or fields.get("numeric_price") or "").strip()
+    if price:
+        name = str(fields.get("name") or "").strip()
+        symbol = str(fields.get("symbol") or fields.get("requested_symbol") or "").strip()
+        exchange = str(fields.get("exchange") or "").strip()
+        qualifier = ", ".join(part for part in (symbol, exchange) if part)
+        identity = f"{name} ({qualifier})" if name and qualifier else (name or qualifier)
+        sentence = f"{identity} was quoted at {price}" if identity else f"Quote: {price}"
+        quoted_at = str(fields.get("quoted_at") or "").strip()
+        if quoted_at:
+            sentence += f" on {quoted_at}"
+        change = str(fields.get("change") or "").strip()
+        change_percent = str(fields.get("change_percent") or "").strip()
+        if change or change_percent:
+            parts = [part for part in (change, change_percent and f"({change_percent}%)") if part]
+            sentence += ", " + " ".join(parts)
+        return sentence
+    revenue = str(
+        fields.get("revenue") or fields.get("net_income") or fields.get("revenue_usd") or ""
+    ).strip()
+    if revenue:
+        name = str(fields.get("name") or "").strip()
+        sentence = f"{name} reported revenue of {revenue}" if name else f"Revenue was {revenue}"
+        period = str(fields.get("reporting_period") or "").strip()
+        if period:
+            sentence += f" for the {period} period"
+        return sentence
+    guidance = str(fields.get("guidance") or "").strip()
+    if guidance:
+        name = str(fields.get("name") or "").strip()
+        period = str(fields.get("reporting_period") or "").strip()
+        sentence = f"{name} guidance: {guidance}" if name else f"Guidance: {guidance}"
+        if period:
+            sentence += f" for the {period} period"
+        return sentence
+    return ""
+
+
 def substantive_card_text(card: dict) -> str:
+    statement = str(card.get("statement") or "").strip()
+    if card.get("kind") == "structured_record" and not statement:
+        # A structured record with no prose statement carries its answer in the
+        # fields (price, revenue, guidance). Render that answer so retrieval
+        # matching and evidence compaction see the figure, not a field-key dump.
+        answer = _structured_answer_text(card)
+        if answer:
+            return answer.casefold()
     fields = {key: value for key, value in (card.get("fields") or {}).items()
               if key not in {"title", "url", "source_url", "retrieved_at", "requested_dates", "query"}}
-    return " ".join((str(card.get("statement") or ""), repr(fields))).casefold()
+    return " ".join((statement, repr(fields))).casefold()
 
 
 def refresh_coverage(requirements: list[dict], cards: list[dict], extraction: dict | None = None):
@@ -1177,9 +1409,11 @@ def effective_capability_call_limit(
 ) -> int:
     """Use the third capability call only after measured evidence gain.
 
-    Two completed calls that add neither an eligible card nor coverage are a
-    persisted signal that the capability is stalled. Older checkpoints without
-    gain fields retain the conservative configured default.
+    Two completed calls that add neither an eligible card, coverage, nor a new
+    distinct source are a persisted signal that the capability is stalled. A
+    call that re-fetches only sources already in the registry is not advancing
+    diversity even if it yields a redundant card, so it counts as stalled.
+    Older checkpoints without gain fields retain the conservative default.
     """
     completed = [
         item for item in selections
@@ -1190,8 +1424,12 @@ def effective_capability_call_limit(
     if len(completed) < 2:
         return default
     recent = completed[-2:]
+    # A call is stalled when it neither diversifies (no new distinct source)
+    # nor resolves a gap (no coverage gain). Redundant cards from an already
+    # seen source do not count as progress, because they signal the same
+    # result cluster re-fetched rather than a new evidence path.
     if all(
-        int(item.get("useful_finding_gain", item.get("new_eligible_cards")) or 0) == 0
+        int(item.get("new_sources") or 0) == 0
         and int(item.get("coverage_gain") or 0) == 0
         for item in recent
     ):
@@ -1391,5 +1629,51 @@ def is_near_duplicate_query(tool: str, args: list, selections: Iterable[dict]) -
         previous_tokens = _meaningful_tokens(previous)
         overlap = len(candidate_tokens & previous_tokens) / max(len(candidate_tokens | previous_tokens), 1)
         if overlap >= 0.9 or SequenceMatcher(None, candidate, previous).ratio() >= 0.94:
+            return True
+    return False
+
+
+def is_result_set_duplicate(
+    tool: str, args: list, selections: Iterable[dict],
+) -> bool:
+    """Detect a query whose evidence need was already fetched, not just reworded.
+
+    ``is_near_duplicate_query`` only catches paraphrases (>= 0.9 token overlap).
+    A distinct gap term ("F1 standings" vs "next F1 race date") can sit well
+    below that threshold yet rank the same top result cluster on SearXNG, so
+    the second call re-fetches the same sources and adds no diversity. A
+    selection that returned at least one new source proves its query's result
+    set was already collected; a candidate whose own distinctive terms are
+    mostly covered by those collected queries is a result-set duplicate and
+    should be rejected in favour of an un-fetched gap.
+    """
+    if tool not in {"external_information", "search_papers"} or not args or not isinstance(args[0], str):
+        return False
+    candidate = " ".join(args[0].split()).casefold()
+    candidate_tokens = _meaningful_tokens(candidate)
+    if not candidate_tokens:
+        return False
+    for selection in selections:
+        if selection.get("tool") not in {"external_information", "search_papers"}:
+            continue
+        if int(selection.get("new_sources") or 0) <= 0:
+            continue
+        previous_args = selection.get("args") or []
+        if not previous_args or not isinstance(previous_args[0], str):
+            continue
+        previous_tokens = _meaningful_tokens(
+            " ".join(previous_args[0].split()).casefold()
+        )
+        # Compare the candidate's fact terms against this fetched query,
+        # ignoring question-frame words ("date", "next", "until") that ask how
+        # to fetch a fact without naming its subject. The candidate is a
+        # result-set duplicate when nothing remains: it re-asks the same
+        # evidence need in different words. A single new fact term (qualifying
+        # vs standings) marks a distinct domain and is left to the near-
+        # duplicate gate.
+        candidate_fact = _meaningful_tokens(
+            " ".join(sorted(candidate_tokens - previous_tokens))
+        ) - _FRAME_WORDS
+        if not candidate_fact:
             return True
     return False

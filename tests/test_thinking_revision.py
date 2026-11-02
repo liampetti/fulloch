@@ -29,7 +29,7 @@ from core.thinking_scope import research_context
 from core.thinking_worker import ThinkingWorker, _raw_card_packet, _recover_retained_evidence
 
 EXAMPLE_TASKS = [
-    "give me a deep analysis on the Bathurst 1000 race coming up",
+    "give me a deep analysis on the Harbour 1000 race coming up",
     "Give me a deep, neutral briefing on NVIDIA: its latest quoted price, recent results, major recent news, and the uncertainties that matter. Do not give me investment advice.",
     "cheapest flights hamburg to sydney return from 17th january till 3rd of march next year",
     "Plan a trip from Sydney to Tokyo, then Tokyo to Berlin, leaving on 12 May 2027. Find the best retrieved flight options, explain the schedule trade-offs, and clearly state what has not been checked.",
@@ -488,12 +488,12 @@ def test_material_value_conflict_reconciles_only_with_matching_event_year():
         entries.append({"status": "evidence", "scope": "Retrieved event page.",
                         "artifact_id": artifact_id, "evidence": {}})
         artifacts[artifact_id] = {"data": {"type": "web_research", "sources": [{
-            "title": "Bathurst 1000 schedule", "url": f"https://publisher-{index}.example/event",
-            "evidence": f"The Bathurst 1000 starts on {date} after practice and qualifying.",
+            "title": "Harbour 1000 schedule", "url": f"https://publisher-{index}.example/event",
+            "evidence": f"The Harbour 1000 starts on {date} after practice and qualifying.",
             "mentioned_dates": [date], "eligible": True, "source_class": "official_primary",
         }]}}
 
-    cards = build_fact_cards(entries, artifacts, "Research the upcoming Bathurst 1000")
+    cards = build_fact_cards(entries, artifacts, "Research the upcoming Harbour 1000")
     by_period = {}
     for card in cards:
         by_period.setdefault(card["claim_identity"]["period"], []).append(card)

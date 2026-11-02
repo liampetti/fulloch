@@ -11,13 +11,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import core.tts_pocket as tts  # noqa: E402
 
 
-def test_load_tts_uses_numeric_default_temperature(monkeypatch):
+def test_load_tts_uses_numeric_default_temperature(monkeypatch, tmp_path):
     calls = {}
 
     class Model:
         @classmethod
         def load_model(cls, **kwargs):
             calls.update(kwargs)
+            calls["config_contents"] = Path(kwargs["config"]).read_text()
             return cls()
 
         def to(self, device):
@@ -31,10 +32,22 @@ def test_load_tts_uses_numeric_default_temperature(monkeypatch):
     monkeypatch.setitem(
         sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True))
     )
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "english_2026-04.yaml").write_text(
+        f"weights_path: {tts.ORIGINAL_WEIGHTS_URI}\n"
+        "weights_path_without_voice_cloning: hf://fallback\n"
+        "tokenizer_path: hf://kyutai/pocket-tts-without-voice-cloning/tokenizer\n"
+    )
+    monkeypatch.setattr(tts.importlib.resources, "files", lambda _: tmp_path)
 
     tts.load_tts()
 
-    assert calls == {"language": "english_2026-04", "temp": 0.7, "lsd_decode_steps": 1}
+    assert calls["temp"] == 0.7 and calls["lsd_decode_steps"] == 1
+    assert tts.WEIGHTS_URI in calls["config_contents"]
+    assert tts.ORIGINAL_WEIGHTS_URI not in calls["config_contents"]
+    assert "weights_path_without_voice_cloning" not in calls["config_contents"]
+    assert "kyutai/pocket-tts-without-voice-cloning/tokenizer" in calls["config_contents"]
 
 
 def test_unsupported_speed_is_ignored_with_explicit_warning(caplog):

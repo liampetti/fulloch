@@ -225,6 +225,26 @@ def test_missing_orukeet_snapshot_enters_setup_and_auto_downloads(tmp_path, monk
     assert "asr:orukeet" in " ".join(decision.missing_assets)
 
 
+def test_pocket_pytorch_requires_both_pinned_mirror_and_tokenizer(tmp_path):
+    from core.backends import get_spec
+    from core.setup import _asset_present
+
+    spec = get_spec("tts", "pocket-tts-pytorch")
+    cfg = {"spec": spec, "model": spec.default_model}
+    old_cache = tmp_path / "hub/models--kyutai--pocket-tts"
+    old_cache.mkdir(parents=True)
+    (old_cache / ".fulloch_complete").touch()
+    assert not _asset_present(cfg, str(tmp_path))
+    for repo, filenames, revision in spec.hf_snapshots:
+        for filename in filenames:
+            path = tmp_path / "hub" / f"models--{repo.replace('/', '--')}" / "snapshots" / revision / filename
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        if repo.startswith("latent-variable/"):
+            assert not _asset_present(cfg, str(tmp_path))
+    assert _asset_present(cfg, str(tmp_path))
+
+
 def test_only_completed_setup_auto_downloads_missing_assets(tmp_path, monkeypatch):
     import core.setup as setup
 
@@ -303,20 +323,20 @@ def test_llama_requires_gguf_and_grammar(tmp_path):
     assert not d2.needs_setup
 
 
-def test_neohorse_requires_gguf_and_grammar(tmp_path):
+def test_qwen27b_requires_gguf_and_grammar(tmp_path):
     models = tmp_path / "models"
     _mk_hub(models, "Qwen/Qwen3-ASR-1.7B")
     _mk_hub(models, "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-    gguf = models / "NeoHorse-1-9B-Q4_K_M.gguf"
+    gguf = models / "Qwen3.8-27B-UD-IQ4_XS.gguf"
     config = {
         "general": {"wakeword": "hey atticus"},
-        "models": {"llm": {"backend": "local", "local_model": "neohorse", "model": str(gguf)}},
+        "models": {"llm": {"backend": "local", "local_model": "qwen27b", "model": str(gguf)}},
     }
 
     d = detect_setup_state(config, models_dir=str(models))
     assert d.needs_setup
     joined = " ".join(d.missing_assets)
-    assert "llm:neohorse" in joined and "grammar" in joined
+    assert "llm:qwen27b" in joined and "grammar" in joined
 
     gguf.write_text("x")
     (models / "grammars").mkdir()

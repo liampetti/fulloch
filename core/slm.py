@@ -15,6 +15,8 @@ from urllib.request import urlopen
 
 import torch
 
+from . import memory_guard
+from .llm_cache_config import DEFAULT_PROMPT_CACHE_MIB, validate_prompt_cache_mib
 from .telemetry import event as telemetry_event
 from .turn_stats import TurnStats
 
@@ -35,6 +37,7 @@ SERVER_LOG_PATH = Path("./data/logs/llama-server.log")
 SERVER_EVENT_LOG_PATH = Path("./data/logs/llama-server-events.log")
 DIAGNOSTIC_LOG_MAX_BYTES = 10 * 1024 * 1024
 DIAGNOSTIC_LOG_BACKUP_COUNT = 5
+MEMORY_COOLDOWN_SECONDS = 300
 
 
 class ContextExhaustedError(RuntimeError):
@@ -73,6 +76,7 @@ def _local_server_command(
     server_slots: int = N_PARALLEL,
     mtp: bool = False,
     flash_attn: bool = False,
+    prompt_cache_mib: int = DEFAULT_PROMPT_CACHE_MIB,
 ) -> list[str]:
     """Build the bundled llama-server command for a local GGUF backend."""
     binary = _local_server_binary()
@@ -83,6 +87,7 @@ def _local_server_command(
         )
     if server_slots not in (1, 2):
         raise ValueError("server_slots must be 1 or 2")
+    validate_prompt_cache_mib(prompt_cache_mib)
     total_context = n_ctx * server_slots
     command = [
         binary,
@@ -107,6 +112,8 @@ def _local_server_command(
         "--no-mmproj",
         "--flash-attn",
         "on" if flash_attn else "off",
+        "--cache-ram",
+        str(prompt_cache_mib),
     ]
     if mtp:
         command.extend(("--spec-type", "draft-mtp", "--spec-draft-n-max", str(MTP_DRAFT_TOKENS)))
@@ -325,6 +332,7 @@ def _load_local_slm(
     server_slots: int,
     generation_timeout: float | None,
     persistent_logging_enabled: bool,
+    prompt_cache_mib: int = DEFAULT_PROMPT_CACHE_MIB,
 ):
     """Start llama-server and return its OpenAI-compatible client."""
     from .llm_openai import load_openai
@@ -342,6 +350,7 @@ def _load_local_slm(
         server_slots=server_slots,
         mtp=effective_mtp,
         flash_attn=effective_flash_attn,
+        prompt_cache_mib=prompt_cache_mib,
     )
     mode = "MTP speculative decoding" if effective_mtp else "standard decoding"
     logger.info(
@@ -372,21 +381,54 @@ def _load_local_slm(
     client.context_tokens = n_ctx
     restart_lock = threading.Lock()
     restart_in_progress = threading.Event()
+    client._fulloch_memory_cooldown = False
+    memory_recoveries = 0
 
-    def restart(reason: str, *, expected_process=None) -> None:
+    def memory_emergency(reason: str, *, expected_process=None) -> None:
+        """Stop the model immediately; never replay interrupted research."""
+        restart(reason, expected_process=expected_process, memory_emergency=True)
+
+    def restart(reason: str, *, expected_process=None, memory_emergency=False) -> None:
         """Recycle a failed server without holding the caller through model load."""
+        nonlocal memory_recoveries
+        current = client._fulloch_local_process
+        if not memory_emergency and current.poll() is not None:
+            memory_emergency = (current.returncode == -9 or
+                                "out of memory" in _server_failure_detail(current.returncode).lower())
         with restart_lock:
             if expected_process is not None and expected_process is not client._fulloch_local_process:
+                return
+            if client._fulloch_memory_cooldown:
+                logger.warning("Local llama-server recovery blocked by memory protection")
                 return
             if restart_in_progress.is_set():
                 logger.warning("Local llama-server recovery already in progress")
                 return
             restart_in_progress.set()
+            client._fulloch_backend_state = "RECOVERING"
+            client._fulloch_memory_cooldown = memory_emergency
+            if memory_emergency:
+                memory_recoveries += 1
+            recovery_number = memory_recoveries
 
         def recover() -> None:
             try:
                 current = client._fulloch_local_process
                 client._fulloch_backend_state = "RECOVERING"
+                if memory_emergency:
+                    logger.error("Memory safety stop: %s; cooling down for %d seconds", reason, MEMORY_COOLDOWN_SECONDS)
+                    callback = getattr(client, "_fulloch_on_memory_emergency", None)
+                    if callback is not None:
+                        try:
+                            callback()
+                        except Exception:  # noqa: BLE001 - stopping the model takes priority
+                            logger.exception("Could not cancel research after memory safety stop")
+                    _stop_local_server(current)
+                    if recovery_number > 1:
+                        raise RuntimeError("Repeated memory emergencies; refusing automatic restart")
+                    time.sleep(MEMORY_COOLDOWN_SECONDS)
+                    if memory_guard.snapshot().overloaded():
+                        raise RuntimeError("Memory pressure persists after cooldown; refusing automatic restart")
                 telemetry_event(
                     "local_inference_recovery_started", pid=getattr(current, "pid", None),
                     process_generation=client._fulloch_process_generation,
@@ -400,6 +442,7 @@ def _load_local_slm(
                 )
                 client._fulloch_process_generation += 1
                 client._fulloch_backend_state = "READY"
+                client._fulloch_memory_cooldown = False
                 telemetry_event(
                     "local_inference_process_ready",
                     pid=getattr(client._fulloch_local_process, "pid", None),
@@ -418,6 +461,7 @@ def _load_local_slm(
         _stop_local_server(client._fulloch_local_process)
 
     client._fulloch_restart_local_server = restart
+    client._fulloch_memory_emergency = memory_emergency
     client._fulloch_record_local_server_failure = lambda reason: _record_local_server_request_failure(
         reason, client._fulloch_local_process, persistent_logging_enabled
     )
@@ -447,14 +491,36 @@ def _load_local_slm(
                 "local_inference_process_exited", pid=getattr(current, "pid", None),
                 process_generation=generation, exit_code=current.returncode,
             )
-            restart(
-                f"llama-server process exited with code {current.returncode}",
-                expected_process=current,
-            )
+            reason = f"llama-server process exited with code {current.returncode}"
+            # SIGKILL is not necessarily OOM, but retrying it immediately is
+            # unsafe when the kernel may have killed a memory-heavy child.
+            if current.returncode == -9 or "out of memory" in _server_failure_detail(current.returncode).lower():
+                memory_emergency(reason, expected_process=current)
+            else:
+                restart(reason, expected_process=current)
+
+    def watch_memory() -> None:
+        previous = memory_guard.snapshot()
+        if previous.limit is None:
+            logger.warning("No cgroup memory limit detected; VM-wide memory checks are best effort")
+        else:
+            logger.info("Detected system RAM limit: %.2f GiB", previous.limit / memory_guard.GIB)
+        consecutive = 0
+        while True:
+            time.sleep(1)
+            current = memory_guard.snapshot()
+            killed = (current.oom_kills is not None and previous.oom_kills is not None
+                      and current.oom_kills > previous.oom_kills)
+            consecutive = consecutive + 1 if current.overloaded() else 0
+            previous = current
+            if (killed or consecutive >= 2) and not restart_in_progress.is_set() and not client._fulloch_memory_cooldown:
+                consecutive = 0
+                memory_emergency("system RAM pressure or cgroup OOM", expected_process=client._fulloch_local_process)
 
     threading.Thread(
         target=watch_process, daemon=True, name="llama-server-exit-watcher",
     ).start()
+    threading.Thread(target=watch_memory, daemon=True, name="memory-safety-watcher").start()
     logger.info("Local llama-server ready (%s; %d slot%s)", mode, server_slots, "" if server_slots == 1 else "s")
     return grammar, client
 
@@ -470,6 +536,7 @@ def load_slm(
     server_slots: int = N_PARALLEL,
     generation_timeout: float | None = None,
     persistent_logging_enabled: bool = False,
+    prompt_cache_mib: int = DEFAULT_PROMPT_CACHE_MIB,
 ):
     """Load a local GGUF through the bundled llama-server."""
     del grammar_path  # The shared OpenAI client loads GRAMMAR_FILE for constrained requests.
@@ -483,6 +550,7 @@ def load_slm(
         server_slots,
         generation_timeout,
         persistent_logging_enabled,
+        prompt_cache_mib,
     )
 
 

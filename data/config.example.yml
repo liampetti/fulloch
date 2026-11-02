@@ -1,6 +1,13 @@
 # Fulloch configuration. On first run the setup wizard copies this file to
 # data/config.yml and writes secrets (HA token, API keys) into
 # data/credentials.json. Env vars take precedence over credentials.json.
+#
+# System RAM protection is automatic; there is no config.yml memory limit.
+# The GPU Docker example uses --memory=10g --memory-swap=10g (10 GiB RAM,
+# no container swap). Adjust both for your host and models, leaving headroom
+# for other services. These flags do not restrict GPU VRAM. Fulloch detects
+# Linux cgroup limits and uses best-effort VM memory checks; Docker's limit is
+# the hard boundary, not a guarantee against driver hangs or VM-wide OOM.
 
 # === General ================================================================
 general:
@@ -21,6 +28,7 @@ general:
 
   # === Voice ================================================================
   voice_clone: "atticus"         # Qwen/Pocket/Audio8: data/voices/<name> clone. Kokoro: built-in name.
+  # Cloning backends also accept a custom /path/reference.wav with a matching reference.txt.
   tts_speed: 1.0                 # Kokoro only; Qwen/Pocket/Audio8 pace comes from the reference clip.
   whisper_gain: 0.30             # Volume for explicit whisper/quiet requests (0.0-1.0; applies to every TTS backend).
   personality: "balanced"       # balanced | playful | calm | wry | custom; applies to every model.
@@ -85,7 +93,7 @@ general:
 #     # breeze-tts-2-gguf        # Breeze TTS 2 Q4_K GGUF (GPU voice clone with English audio tags)
 #     # qwen-gguf                # Qwen3 1.7B GGUF (GPU)
 #     # qwen-gguf-small          # Qwen3 0.6B GGUF (GPU)
-#     # pocket-tts-pytorch       # Pocket TTS PyTorch (GPU streaming English voice clone; HF_TOKEN + accepted terms required)
+#     # pocket-tts-pytorch       # Pocket TTS PyTorch (GPU streaming English voice clone; ungated mirror, no token)
 #     # audio8                   # Audio8 0.6B (GPU 44.1 kHz Apache-2.0 voice clone; requires <name>.wav + exact <name>.txt)
 #     # pocket-tts-gguf          # Pocket TTS Q8_0 GGUF (GPU English voice clone)
 #     # qwen-small               # Qwen3 0.6B PyTorch (GPU)
@@ -93,13 +101,16 @@ general:
 #     # pocket-tts-onnx          # Pocket TTS ONNX (default CPU; experimental one-shot WAV voice clone)
 #   llm:
 #     backend: local             # local | external | laya | none (regex-only commands)
-#     local_model: qwen          # Qwen3.5 9B MTP (recommended)
+#     local_model: qwen          # Qwen3.5 9B MTP
 #     # local_model: gemma       # Gemma 4 12B QAT
 #     # local_model: ornith      # Ornith 1.5 9B Q4
-#     # local_model: neohorse    # NeoHorse 1 9B Q4
+#     # local_model: qwen27b     # Qwen3.8 27B IQ4_XS (Max full Qwen speech stack: 32GB GPU)
 #     # local_model: custom      # Provide `model` below for a local GGUF.
 #     # model: "/path/to/model.gguf"  # Required only when local_model: custom.
 #     # n_context: 12288         # Optional; larger contexts use more VRAM.
+#     # prompt_cache_mib: 1024   # Local llama-server prompt cache in system RAM, in MiB (1024 = 1 GiB; 0 disables).
+#                                # Non-negative integer; restart required. Smaller caches may slow repeated prompts.
+#                                # This is not a cap on total RAM or GPU VRAM; Docker's --memory is separate.
 #     # generation_timeout: 90   # Per-call hard limit; a local timeout restarts llama-server.
 #     mtp: false                 # Experimental speculative decoding; enable only after benchmarking your GPU.
 #     flash_attn: false          # Experimental llama.cpp Flash Attention; enable only after stability testing.
@@ -112,13 +123,20 @@ general:
 #   # always-running ASR wakeword detection, which transcribes voice activity.
 #   # Current model is v0.6 for the "Hey Atticus" wakeword, otherwise use
 #   # path for a custom wakeword model you have downloaded.
+#   # The web UI offers only Hey Atticus, Alexa and Hey Jarvis. Custom wakeword,
+#   # wakeword_pattern and all detection tuning are config-file-only options.
+#   # Other bundled classifiers (CC BY-NC-SA 4.0; non-commercial):
+#   # third_party/openwakeword-models/alexa_v0.1.onnx (general.wakeword: alexa)
+#   # third_party/openwakeword-models/hey_jarvis_v0.1.onnx (general.wakeword: hey jarvis)
 #   wakeword:
 #     backend: openwakeword
 #     model: "data/models/wakeword/hey_atticus_v0.6.onnx"
 #     threshold: 0.6            # Increase threshold to reduce false activations
 #     smoothing_frames: 1       # Add frames to reduce false activations
 #     cooldown_ms: 1500         # How long to wait between successive wakeword activations
-#     verify_asr: true          # Verify each activation in ASR; set false to trust openWakeWord alone.
+#     # verify_asr: true        # Optional explicit override. Without it, Moonshine
+#                               # Base/Tiny and Parakeet ONNX trust the acoustic gate;
+#                               # other ASRs verify the transcript. ASR-only mode always gates.
 #
 # External LLM (llama.cpp server / vLLM / Ollama / hosted API):
 #   llm:

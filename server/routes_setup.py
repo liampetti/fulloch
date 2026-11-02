@@ -220,6 +220,25 @@ def register_setup_routes(
 
         return JSONResponse(preflight())
 
+    @app.post("/setup/integration-token")
+    def setup_integration_token() -> JSONResponse:
+        """Issue a token once; existing integrations and credentials are preserved."""
+        from .config_store import read_config
+        from .credentials_store import create_integration_token
+
+        general = read_config(context.config_path).get("general") or {}
+        try:
+            token = create_integration_token()
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            logger.warning("Could not create integration token: %s", exc)
+            raise HTTPException(status_code=500, detail="Could not save integration token") from exc
+        return JSONResponse({
+            "token": token,
+            "port": general.get("integration_api_port", 8766),
+            "enabled": general.get("integration_api_enabled", True),
+            "bind_host": os.environ.get("DASHBOARD_HOST", general.get("dashboard_host", "127.0.0.1")),
+        }, headers={"Cache-Control": "no-store"})
+
     @app.put("/config")
     def config_update(req: ConfigUpdateRequest) -> JSONResponse:
         from utils import local_time
@@ -229,6 +248,14 @@ def register_setup_routes(
         timezone = req.updates.get("general.timezone")
         if "general.timezone" in req.updates and not local_time.is_valid_tz(timezone):
             raise HTTPException(status_code=422, detail={"general.timezone": "unknown IANA timezone"})
+        voice = req.updates.get("general.voice_clone")
+        if isinstance(voice, str) and voice.lower().endswith(".wav"):
+            from core.voice_reference import voice_reference
+
+            try:
+                voice_reference(voice, _VOICES_DIR)
+            except (OSError, ValueError) as e:
+                raise HTTPException(status_code=422, detail={"general.voice_clone": str(e)}) from e
         try:
             applied = update_config(req.updates, context.config_path)
         except ConfigValidationError as e:

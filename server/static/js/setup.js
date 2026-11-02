@@ -4,14 +4,28 @@ import { createVoiceManager } from './setup-voices.js';
 import { createWizard } from './setup-wizard.js';
 import { createInstallProgress } from './setup-install.js';
 import { createSettings } from './setup-settings.js';
+import { matchingTier, selectedWakeword } from './setup-models.js';
 
 const lifetime = createLifetime();
+// One delegated handler covers wizard and settings, including rerenders.
+document.addEventListener('click', event => {
+  document.querySelectorAll('.info-popover[open]').forEach(popover => {
+    if (!popover.contains(event.target)) popover.open = false;
+  });
+});
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  document.querySelectorAll('.info-popover[open]').forEach(popover => {
+    popover.open = false;
+    popover.querySelector('summary')?.focus();
+  });
+});
 const state = {
   schema: null, preflight: null, status: null,
   tierChosen: false, curStep: 0, cameViaWizard: false,
   sel: {
-    tier: 'cpu_local', models: null,
-    wakeword: 'hey atticus', wakeword_pattern: '', wakeword_model: '', voice_clone: '',
+    tier: 'pro', models: null,
+    wakeword: 'hey atticus', wakeword_pattern: '', wakeword_id: '', voice_clone: '',
     openai: { base_url: '', model: '', api_key: '' },
     ha: { url: '', token: '' }, search_url: '', clear_integrations: false,
   },
@@ -20,7 +34,7 @@ const sel = state.sel;
 const voice = createVoiceManager({ state });
 const wizard = createWizard({ state, voice, doInstall: () => install.doInstall() });
 const install = createInstallProgress({
-  state, chosenModels: wizard.chosenModels, boot: () => boot(), stepFinish: wizard.stepFinish,
+  state, chosenModels: wizard.chosenModels, boot: () => boot(),
 });
 const settings = createSettings({
   state, voice, doRestart: install.doRestart, doRestartToHttps: install.doRestartToHttps,
@@ -53,6 +67,7 @@ async function boot() {
 
   $('subtitle').textContent = 'First-run setup';
   state.schema = await getJSON('/setup/schema');
+  if (state.schema.models && !Object.keys(state.schema.models).length) state.schema.models = null;
   try { state.preflight = await getJSON('/setup/preflight'); } catch (e) { state.preflight = null; }
   if (lifetime.destroyed) return;
   if (status.phase === 'ERROR') {
@@ -77,10 +92,7 @@ async function boot() {
   // discard custom paths, context sizes, or remote endpoint options on save.
   if (state.schema.models) {
     sel.models = JSON.parse(JSON.stringify(state.schema.models));
-    const wakewordModel = sel.models.wakeword || {};
-    if (wakewordModel.backend === 'openwakeword') sel.wakeword_model = wakewordModel.model || '';
-    const matched = (state.schema.tier_presets || []).find(t =>
-      JSON.stringify(t.models) === JSON.stringify(sel.models));
+    const matched = matchingTier(state.schema, sel.models);
     sel.tier = matched ? matched.id : 'custom';
     state.tierChosen = true;
     if (sel.models.llm && (sel.models.llm.backend === 'openai' || sel.models.llm.backend === 'external')) {
@@ -88,12 +100,7 @@ async function boot() {
       sel.openai.model = sel.models.llm.model || '';
     }
   }
-  const defaultWakePreset = (state.schema.wakeword_presets || []).find(p => p.recommended);
-  if (!sel.wakeword_model && !(state.schema.models && state.schema.models.wakeword)
-      && defaultWakePreset && sel.wakeword === defaultWakePreset.wakeword) {
-    sel.wakeword_pattern = defaultWakePreset.pattern;
-    sel.wakeword_model = defaultWakePreset.model;
-  }
+  sel.wakeword_id = selectedWakeword(state.schema, sel.models, sel.wakeword, sel.wakeword_pattern)?.id || '';
   stepBrain();
 }
 

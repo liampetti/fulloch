@@ -41,10 +41,14 @@ def test_moonshine_loader_uses_cpu_pipeline_device(monkeypatch):
         pipeline=MagicMock(return_value=pipe),
     )
     monkeypatch.setitem(__import__("sys").modules, "transformers", transformers)
-    monkeypatch.setattr(asr_tiny, "DEVICE", "cpu")
-    monkeypatch.setattr(asr_tiny, "DTYPE", asr_tiny.torch.float32)
+    monkeypatch.setattr(asr_tiny.torch.cuda, "is_available", lambda: True)
+    assert asr_tiny.torch.cuda.is_available()
+    assert asr_tiny.DEVICE == "cpu"
+    assert asr_tiny.DTYPE == asr_tiny.torch.float32
 
     asr_tiny.load_asr_model("UsefulSensors/moonshine-tiny")
 
     transformers.pipeline.assert_called_once()
     assert transformers.pipeline.call_args.kwargs["device"] == -1
+    assert transformers.pipeline.call_args.kwargs["dtype"] == asr_tiny.torch.float32
+    model.to.assert_called_once_with(device="cpu", dtype=asr_tiny.torch.float32)

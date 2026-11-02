@@ -16,8 +16,10 @@ logger = logging.getLogger(__name__)
 
 ASR_MODEL_NAME = "UsefulSensors/moonshine-base"
 SAMPLE_RATE = 16000  # Moonshine expects 16 kHz mono
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
+# Moonshine is the CPU speech backend, including on machines with CUDA.
+# Auto-selecting CUDA breaks the Economy/Lite presets' device/memory contract.
+DEVICE = "cpu"
+DTYPE = torch.float32
 
 
 def _to_array(chunk) -> np.ndarray:

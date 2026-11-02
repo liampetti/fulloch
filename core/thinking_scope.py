@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 
 _CURRENT_RE = re.compile(r"\b(?:current|latest|today|now|recent|upcoming|newest|coming up)\b", re.I)
 _HISTORICAL_RE = re.compile(r"\b(?:history|historical|previous|past|former|archive)\b", re.I)
+_HISTORICAL_PERIOD_RE = re.compile(r"\b(?:last year|last month|last week|yesterday|\d+ years? ago)\b", re.I)
+_TIME_SENSITIVE_RE = re.compile(r"\b(?:stocks?|shares?|equities|share price|stock price|market price)\b", re.I)
 _FUTURE_RE = re.compile(r"\b(?:imminent|upcoming|coming up|next|future|tomorrow|leaving|departing|scheduled|plan(?:ning)?|book(?:ing)?)\b", re.I)
 _RELATIVE_SUBJECT_RE = re.compile(r"\b(?:next|upcoming|coming up|imminent)\b", re.I)
 _EVENT_RE = re.compile(
@@ -64,7 +66,8 @@ _COMPARISON_DIMENSIONS = {
 def temporal_scope(task: str, as_of: str) -> dict:
     """One temporal interpretation for scope, planning and coverage; never guess a year."""
     intent = ("future" if _FUTURE_RE.search(task) else "current" if _CURRENT_RE.search(task)
-              else "historical" if _HISTORICAL_RE.search(task) else "timeless")
+              else "historical" if _HISTORICAL_RE.search(task) or _HISTORICAL_PERIOD_RE.search(task)
+              else "current" if _TIME_SENSITIVE_RE.search(task) else "timeless")
     dates = extract_dates(task)
     ambiguous = []
     try:
@@ -280,12 +283,90 @@ def needs_subject_resolution(context: dict) -> bool:
                 and _RELATIVE_SUBJECT_RE.search(str(context.get("task") or "")))
 
 
-def apply_subject_candidates(context: dict, proposals: object, cards: list[dict]) -> dict:
+def _source_table_date(card: dict, name: str, date: str, version: str,
+                       source_registry: dict | None) -> str:
+    """Verify a table row against its immediately preceding, year-bearing heading.
+
+    This accepts only the original source version and an exact event column;
+    a date range establishes an event-window boundary, not the race/start time.
+    """
+    from .thinking_source_store import resolve_source
+
+    provenance = card.get("provenance") or {}
+    source_id = provenance.get("source_id")
+    source = (source_registry or {}).get(source_id) or {}
+    source_version = provenance.get("source_version")
+    original = (source.get("versions") or {}).get(source_version, source)
+    original = resolve_source(original)
+    text = original.get("text") or original.get("source_text") or ""
+    start, end = provenance.get("start"), provenance.get("end")
+    if (not isinstance(text, str) or not isinstance(start, int) or not isinstance(end, int)
+            or not 0 <= start < end <= len(text) or not isinstance(source_version, str)
+            or hashlib.sha256(text.encode("utf-8")).hexdigest() != source_version
+            or text[start:end] != card.get("statement")):
+        return ""
+    prefix_lines = text[:start].rstrip().splitlines()
+    # A card can bind either the whole table or one of its original rows.
+    # Walk only contiguous table lines back to the original header.
+    heading_index = len(prefix_lines) - 1
+    while heading_index >= 0 and "|" in prefix_lines[heading_index]:
+        heading_index -= 1
+    heading = prefix_lines[heading_index].strip() if heading_index >= 0 else ""
+    years = set(re.findall(r"\b(?:19|20)\d{2}\b", heading))
+    if (len(years) != 1 or date[:4] not in years
+            or not re.search(r"\b(?:calendar|schedule|season)\b", heading, re.I)
+            or re.search(r"\b(?:past|previous|historical|history|review|results?|archive|prior|earlier)\b",
+                         heading, re.I)
+            or (version and version.casefold() not in heading.casefold())):
+        return ""
+    rows = text[start:end].splitlines()
+    prior_table = prefix_lines[heading_index + 1:]
+    if prior_table:
+        rows = [prior_table[0], *rows]
+    if not rows or "|" not in rows[0]:
+        return ""
+    headers = [value.strip().casefold() for value in rows[0].split("|")]
+    event_columns = [i for i, value in enumerate(headers) if value in {"event", "event name", "grand prix", "race"}]
+    date_columns = [i for i, value in enumerate(headers) if value in {"date", "event date"}]
+    if len(event_columns) != 1 or len(date_columns) != 1:
+        return ""
+    for row in rows[1:]:
+        cells = [value.strip() for value in row.split("|")]
+        if max(event_columns[0], date_columns[0]) >= len(cells):
+            continue
+        if cells[event_columns[0]].casefold() != name.casefold():
+            continue
+        if re.search(r"\b(?:not scheduled|cancelled|canceled|not confirmed)\b", row, re.I):
+            continue
+        date_cell = cells[date_columns[0]]
+        explicit_years = set(re.findall(r"\b(?:19|20)\d{2}\b", date_cell))
+        if explicit_years and explicit_years != years:
+            continue
+        matches = list(re.finditer(
+            rf"\b(?:{_MONTH_NAMES})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?\b|"
+            rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+(?:{_MONTH_NAMES})\.?\b",
+            date_cell, re.I,
+        ))
+        dates = {value for match in matches for value in extract_dates(f"{match.group(0)} {date[:4]}")}
+        # A year-qualified season can cross New Year; do not guess which year
+        # either boundary belongs to without an explicit date in the row.
+        months = {value[5:7] for value in dates}
+        if {"01", "12"} <= months and not explicit_years:
+            continue
+        if date in dates or date in extract_dates(date_cell):
+            return "event_window_boundary" if len(dates) > 1 else "source_date"
+    return ""
+
+
+def apply_subject_candidates(context: dict, proposals: object, cards: list[dict], *,
+                             source_registry: dict | None = None) -> dict:
     """Pin only exact, future source-bound identities; preserve competing candidates.
 
     A date must be in the same original assertion/record as its subject. A title,
     retrieval timestamp or the task's own label cannot supply that relationship.
-    This is conservative: implicit dates remain gaps rather than guessed dates.
+    An original schedule row may use the year of its immediately preceding,
+    year-qualified source heading; a multi-day range remains an event window,
+    not proof of a particular race or start time.
     """
     previous = context.get("subject_resolution") or {}
     candidates = {tuple(row.get(key, "") for key in ("name", "date", "version")): row
@@ -319,6 +400,8 @@ def apply_subject_candidates(context: dict, proposals: object, cards: list[dict]
             rejected.append({"name": name, "date": date, "reason": "elapsed_subject"})
             continue
         support = []
+        table_support = []
+        date_scope = candidates.get((name, date, version), {}).get("date_scope", "source_date")
         for identifier in ids:
             card = by_id.get(identifier) if isinstance(identifier, str) else None
             if not card or card.get("evidence_status") == "conflicted" or card.get("compatibility") not in {"compatible", "unknown"}:
@@ -341,6 +424,13 @@ def apply_subject_candidates(context: dict, proposals: object, cards: list[dict]
                             and (not version or version.casefold() in line.casefold())
                             and not re.search(r"\b(?:not scheduled|cancelled|canceled|not confirmed)\b", line, re.I)
                             for line in str(card.get("statement") or "").splitlines())
+            if not valid:
+                table_scope = _source_table_date(card, name, date, version, source_registry)
+                if table_scope:
+                    valid = True
+                    table_support.append(identifier)
+                    if table_scope == "event_window_boundary":
+                        date_scope = table_scope
             if valid:
                 support.append(identifier)
         if not support:
@@ -348,19 +438,44 @@ def apply_subject_candidates(context: dict, proposals: object, cards: list[dict]
             continue
         key = (name, date, version)
         support = list(dict.fromkeys([*candidates.get(key, {}).get("card_ids", []), *support]))
+        table_support = list(dict.fromkeys([
+            *candidates.get(key, {}).get("table_context_card_ids", []), *table_support,
+        ]))
         candidates[key] = {"name": name, "date": date, "version": version, "card_ids": support,
+                           "date_scope": date_scope,
+                           "table_context_card_ids": table_support,
                            "source_bindings": {identifier: binding(by_id[identifier])
-                                               for identifier in support if identifier in by_id}}
-    # Keep only candidates whose exact support remains present and unconflicted.
-    retained = [row for row in candidates.values() if any(
-        identifier in by_id and by_id[identifier].get("evidence_status") != "conflicted"
-        and binding(by_id[identifier]) == row.get("source_bindings", {}).get(identifier)
-        for identifier in row.get("card_ids", []))][:8]
+                                                for identifier in support if identifier in by_id}}
+    # Revalidate every saved support, not just one: changed, conflicted or
+    # incompatible cards must not remain in a resolved identity's citations.
+    retained = []
+    for row in candidates.values():
+        bindings = row.get("source_bindings", {})
+        table_ids = set(row.get("table_context_card_ids") or [])
+        valid_ids = [identifier for identifier in row.get("card_ids", [])
+                     if identifier in by_id
+                     and by_id[identifier].get("evidence_status") != "conflicted"
+                     and by_id[identifier].get("compatibility") in {"compatible", "unknown"}
+                     and (identifier not in table_ids or _source_table_date(
+                         by_id[identifier], row["name"], row["date"], row.get("version", ""), source_registry,
+                     ))
+                     and binding(by_id[identifier]) == bindings.get(identifier)]
+        if valid_ids:
+            retained.append({**row, "card_ids": valid_ids,
+                             "table_context_card_ids": [identifier for identifier in valid_ids
+                                                        if identifier in table_ids],
+                             "source_bindings": {identifier: bindings[identifier]
+                                                 for identifier in valid_ids}})
+        if len(retained) == 8:
+            break
     state = "resolved" if len(retained) == 1 else "ambiguous" if retained else "unresolved"
     result = {"state": state, "candidates": retained, "rejected": rejected[-8:],
-              "detail": "Competing supported identities/dates remain." if state == "ambiguous" else
-                        "Exact future identity/date support is missing." if state == "unresolved" else
-                        "Identity/date pinned to retained original support; other facts still require checking."}
+               "detail": "Competing supported identities/dates remain." if state == "ambiguous" else
+                         "Exact future identity/date support is missing." if state == "unresolved" else
+                         "Identity and event-window boundary pinned to retained original support; "
+                         "the race or start date still requires checking."
+                         if retained[0].get("date_scope") == "event_window_boundary" else
+                         "Identity/date pinned to retained original support; other facts still require checking."}
     if state == "resolved":
         result.update(retained[0])
     context["subject_resolution"] = result

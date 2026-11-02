@@ -19,7 +19,12 @@ from .thinking_budget import (
     STAGE_CALL_LIMITS,
     ThinkingBudget,
 )
-from .thinking_coverage import ensure_requirements, initial_requirements, refresh_coverage
+from .thinking_coverage import (
+    classify_delivered_synthesis,
+    ensure_requirements,
+    initial_requirements,
+    refresh_coverage,
+)
 from .thinking_evidence import restore_report_cards
 from .thinking_fact_cards import build_fact_cards, report_card_ledger
 from .thinking_scope import research_context
@@ -54,12 +59,13 @@ def _acceptance_metrics(job, cards, report, elapsed_seconds):
         if isinstance(binding, dict) and binding.get("card_id")
     }
     displayed_ids = set(job.synthesis_state.get("display_card_ids") or [])
-    for requirement in job.evidence_requirements:
-        evidence_ids = set(requirement.get("evidence_ids") or [])
-        used = evidence_ids & delivered_ids
-        requirement["delivered_synthesis"] = "partial" if used else "missing"
-        if used and requirement.get("state") == "resolved" and evidence_ids <= delivered_ids:
-            requirement["delivered_synthesis"] = "evidence_scoped"
+    # Use the production delivery rules without mutating the job merely by
+    # measuring it. In particular, displayed extracts are not synthesized answers.
+    requirements = [dict(item) for item in job.evidence_requirements]
+    delivery = classify_delivered_synthesis(
+        requirements, job.report_bindings,
+        job.synthesis_state.get("extractive_only_card_ids") or [],
+    )
     if not job.synthesis_state.get("limited_evidence_fallback"):
         job.synthesis_state["evidence_counts"] = {
             "ineligible": len(job.fact_cards) - len(cards),
@@ -68,7 +74,7 @@ def _acceptance_metrics(job, cards, report, elapsed_seconds):
             "display_omitted": 0,
         }
     evaluated_requirements = [
-        item for item in job.evidence_requirements
+        item for item in requirements
         if not (item.get("identifier") == "answer" and item.get("broad"))
     ]
     important_ids = {
@@ -85,7 +91,9 @@ def _acceptance_metrics(job, cards, report, elapsed_seconds):
     responses = job.model_budget.get("responses", [])
     return {
         "visible_output_success": bool(report.strip()),
-        "evidence_only_fallback": bool(job.synthesis_state.get("limited_evidence_fallback")),
+        "evidence_only_fallback": bool(job.synthesis_state.get("limited_evidence_fallback"))
+        or delivery["status"] == "evidence_only",
+        "delivery_status": delivery["status"],
         "partial_report": bool(job.synthesis_state.get("partial_report")),
         "response_counts": {
             "visible": sum(item.get("visible_chars", 0) > 0 for item in responses),
@@ -164,9 +172,15 @@ def restore_replay_chapters(job, titles=()):
                           if item.get("is_subject_identity")}
     for requirement in job.evidence_requirements:
         identifier = str(requirement["identifier"])
-        chapter_id = identifier.split("-q", 1)[0] if identifier.startswith("chapter-") else identifier
+        chapter_id = str(requirement.get("chapter_id") or (
+            identifier.split("-q", 1)[0] if identifier.startswith("chapter-") else identifier
+        ))
+        dimension = str(requirement.get("dimension") or "").strip()
+        title = dimension if dimension and dimension != chapter_id else str(
+            requirement["question"]
+        ).rstrip(" .?!")[:100]
         group = groups.setdefault(chapter_id, {
-            "id": chapter_id, "title": str(requirement["question"]).rstrip(" .?!")[:100],
+            "id": chapter_id, "title": title,
             "priority": requirement.get("importance", "medium"), "questions": [],
             "body": "", "digest": "", "tools": [], "queries": [],
         })
@@ -174,11 +188,14 @@ def restore_replay_chapters(job, titles=()):
                            as_of=job.research_context.get("as_of"),
                            subject_resolution=job.research_context.get("subject_resolution", {}))
         requirement.setdefault("is_subject_identity", requirement["question"] in identity_questions)
-        group["questions"].append({
+        question = {
             "id": identifier, "requirement_id": identifier, "question": requirement["question"],
             "priority": requirement.get("importance", "medium"), "state": "open",
             "supporting_card_ids": list(requirement.get("evidence_ids") or []),
-        })
+        }
+        if requirement.get("is_subject_identity"):
+            question["source_requirement_id"] = "subject-identity"
+        group["questions"].append(question)
     job.chapter_plan = list(groups.values())
     if len(titles) == len(job.chapter_plan):
         for chapter, title in zip(job.chapter_plan, titles, strict=True):
@@ -222,7 +239,9 @@ def replay(path=DEFAULT_FIXTURE, *, model=None, reextract=False, context_tokens=
         titles = []
         if sibling_report != path and sibling_report.is_file():
             titles = [title for title in re.findall(r"(?m)^## (.+)$", sibling_report.read_text())
-                      if title.casefold() not in {"summary", "references", "conclusions"}]
+                      if title.casefold() not in {
+                          "summary", "references", "conclusions", "under-answered", "constraint checks",
+                      }]
         restore_replay_chapters(job, titles)
     model = model or ExtractiveReplayModel()
     if stage_policies:
@@ -238,6 +257,11 @@ def replay(path=DEFAULT_FIXTURE, *, model=None, reextract=False, context_tokens=
     budget = ThinkingBudget(model, job.model_budget, context_tokens)
     error = ""
     try:
+        if production:
+            # Use the production coverage/identity judge on saved cards before
+            # synthesis. This mode returns before the retrieval loop and does
+            # not rebuild or replace the retained evidence.
+            worker.run(job, lambda: False, retained_assessment_only=True)
         report, job.report_bindings = worker._synthesise(
             job, cards, budget, lambda: False, "",
         )

@@ -71,11 +71,16 @@ STAGE_CALL_LIMITS = {
     "source_review": 32,
     "planning": 12, "chapter_planning": 2, "chapter_research": 12,
     "chapter_coverage": 18, "card_extraction": 12, "chapter_analysis": 18,
-    "final_assembly": 2, "extraction": 4, "synthesis": 3, "section": 12,
-    "reconciliation": 6, "audit": 16, "revision": 12,
+    "chapter_digest": 96, "final_assembly": 2, "extraction": 4, "synthesis": 3,
+    "section": 12, "reconciliation": 6, "audit": 16, "revision": 12,
 }
-MAX_MODEL_CALLS = 64
+MAX_MODEL_CALLS = 96
 MAX_GENERATED_TOKENS = 96_000
+# Calls that the quality passes (audit/revision, coverage, planning) may
+# consume before the writing stages are guaranteed their remaining allowance.
+# Writing can never be starved by quality-pass churn.
+PROTECTED_WRITING_CALLS = 24
+PROTECTED_WRITING_STAGES = frozenset({"chapter_analysis", "chapter_digest", "final_assembly"})
 SYNTHESIS_STAGES = frozenset({
     "synthesis", "section", "chapter_coverage", "card_extraction",
     "chapter_analysis", "final_assembly", "reconciliation", "audit", "revision",
@@ -98,6 +103,9 @@ DEFAULT_STAGE_POLICIES = {
     "chapter_coverage": {"output_tokens": 768, "thinking_mode": False},
     "card_extraction": {"output_tokens": 1024, "thinking_mode": False},
     "chapter_analysis": {"output_tokens": 6144, "thinking_mode": False},
+    # One bounded all-cards compaction per chapter (the Tier-0 digest). Kept
+    # separate from chapter_analysis so it cannot starve the section writer.
+    "chapter_digest": {"output_tokens": 1024, "thinking_mode": False},
     "final_assembly": {"output_tokens": 2048, "thinking_mode": False},
     "extraction": {"output_tokens": 1024, "thinking_mode": False},
     "audit": {"output_tokens": 1024, "thinking_mode": False},
@@ -455,11 +463,18 @@ class ThinkingBudget:
             "calls": 0, "input_tokens": 0, "output_tokens": 0,
             "reserved_output_tokens": 0, "latency_ms": 0, "failures": 0,
         })
-        if (metrics["calls"] >= STAGE_CALL_LIMITS[stage] or self.state["calls"] >= MAX_MODEL_CALLS
-                 or self.state["charged_tokens"] + output > MAX_GENERATED_TOKENS
-                or (stage != "final_assembly"
-                    and (self.state["calls"] >= MAX_MODEL_CALLS - STAGE_CALL_LIMITS["final_assembly"]
-                          or self.state["charged_tokens"] + output > MAX_GENERATED_TOKENS - 12_288))):
+        # Protected writing stages keep their call allowance no matter how many
+        # calls the quality passes have spent; every other stage is denied once
+        # only the protected allowance remains. final_assembly is the last
+        # writer and keeps the full ceiling. The legacy output-token reserve for
+        # final_assembly is subsumed: MAX_GENERATED_TOKENS still bounds total
+        # output, and the call-count reserve now protects the last writer.
+        if stage in PROTECTED_WRITING_STAGES:
+            calls_remaining = MAX_MODEL_CALLS
+        else:
+            calls_remaining = max(0, MAX_MODEL_CALLS - PROTECTED_WRITING_CALLS)
+        if (metrics["calls"] >= STAGE_CALL_LIMITS[stage] or self.state["calls"] >= calls_remaining
+                 or self.state["charged_tokens"] + output > MAX_GENERATED_TOKENS):
             exc = ModelBudgetExhausted(f"The {stage} model-call/token budget is exhausted.")
             self._record_admission_denial(
                 stage, "model_call_or_token_budget", input_tokens=count,

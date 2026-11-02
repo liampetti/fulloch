@@ -6,7 +6,12 @@ import re
 from datetime import datetime
 from urllib.parse import urlparse
 
-from .thinking_fact_cards import report_card_ledger, select_requirement_cards, source_record_view
+from .thinking_fact_cards import (
+    is_byline_card,
+    report_card_ledger,
+    select_requirement_cards,
+    source_record_view,
+)
 
 MAX_FALLBACK_FACTS = 8
 MAX_FALLBACK_FACTS_PER_SECTION = 2
@@ -92,15 +97,70 @@ def _finance_quote_body(card, fields):
     return body + "."
 
 
+def _markdown_source_table(text: str) -> str:
+    """Render a rectangular source table without changing or inventing cells."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2 or any("|" not in line for line in lines):
+        return ""
+    rows = []
+    for line in lines:
+        # Outer bars are Markdown borders only when both are present. A lone
+        # trailing bar in extracted source text can be an empty final cell.
+        content = line[1:-1] if line.startswith("|") and line.endswith("|") else line
+        rows.append([cell.strip() for cell in content.split("|")])
+    columns = len(rows[0])
+    if (columns < 2 or any(len(row) != columns for row in rows)
+            or any(not header for header in rows[0])):
+        return ""
+    if all(re.fullmatch(r":?-{3,}:?", cell) for cell in rows[1]):
+        rows.pop(1)
+    if len(rows) < 2:
+        return ""
+    rendered = ["| " + " | ".join(html.escape(cell) for cell in row) + " |" for row in rows]
+    rendered.insert(1, "| " + " | ".join("---" for _ in range(columns)) + " |")
+    return "\n".join(rendered)
+
+
+def _yearless_calendar_record(columns: dict) -> bool:
+    """Avoid rendering a dated row without its own year as a timeline fact."""
+    years = {str(value).strip() for key, value in columns.items()
+             if str(key).strip().casefold() == "year" and re.fullmatch(r"(?:19|20)\d{2}", str(value).strip())}
+    for key, value in columns.items():
+        if not re.search(r"\bdate\b", str(key), re.I) or not isinstance(value, str):
+            continue
+        if re.search(r"\b(?:19|20)\d{2}\b", value) or len(years) == 1:
+            continue
+        if (re.search(r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+                      r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
+                      r"dec(?:ember)?)\b", value, re.I)
+                or re.search(r"\b\d{1,2}[/\-]\d{1,2}\b", value)):
+            return True
+    return False
+
+
 def _fallback_fact_body(card):
     """Render one concise source fact without exposing table-parser metadata."""
     if card.get("source_class") == "search_snippet":
+        return ""
+    if is_byline_card(card):
+        # Author/date boilerplate carries no answer content; it must not be
+        # rendered as a standalone finding or dominate the Summary.
         return ""
     if card.get("kind") != "structured_record":
         body = str(card.get("statement") or "").strip()
         if not body:
             fields = card.get("fields") if isinstance(card.get("fields"), dict) else {}
             body = _display(fields) if fields else ""
+        # A source block may begin at a table header, after the section heading
+        # that gives the year. Do not present its undated rows as a current
+        # timeline. The original evidence remains available for source review.
+        rows = [line.strip() for line in body.splitlines() if "|" in line]
+        if (len(rows) >= 3 and re.search(r"\bdate\b", rows[0], re.I)
+                and not re.search(r"\b(?:19|20)\d{2}\b", "\n".join(rows))):
+            return ""
+        table = _markdown_source_table(body)
+        if table:
+            return table
         # Source extractors can retain Wikipedia-style inline note numbers;
         # they are not this report's source-reference numbers.
         body = re.sub(r"\s*\[\s*\d+(?:\s*[,–-]\s*\d+)*\s*\]", "", body)
@@ -121,6 +181,8 @@ def _fallback_fact_body(card):
 
     columns = fields.get("columns")
     if isinstance(columns, dict):
+        if _yearless_calendar_record(columns):
+            return ""
         # Flattened multi-row HTML headers are not trustworthy field labels.
         if any(not str(key).strip() or len(str(key)) > 64
                or re.search(r"\s/\s|\bsources?\s*:", str(key), re.I) for key in columns):
@@ -135,6 +197,8 @@ def _fallback_fact_body(card):
         if len(headers) != len(cells) or not headers or any(
             not str(header or "").strip() or len(str(header)) > 64 for header in headers
         ):
+            return ""
+        if _yearless_calendar_record(dict(zip(headers, cells, strict=True))):
             return ""
         pairs = [(str(header).strip(), value) for header, value in zip(headers, cells, strict=True)
                  if value not in (None, "", [], {})]
@@ -184,6 +248,13 @@ def extracted_fact(card, reference_number=None):
         qualifications.append(str(card["evidence_status"]).replace("_", " "))
     extra = " — " + "; ".join(qualifications) if qualifications else ""
     citation = f" [{reference_number}]" if reference_number else f" — Source: {source}"
+    if "\n| ---" in body:
+        # Keep the source marker inside the header so it stays attached to the
+        # complete table through chapter cleanup and citation rendering.
+        header, rest = body.split("\n", 1)
+        boundary = header.find("|", 1)
+        table = header[:boundary].rstrip() + citation + " " + header[boundary:] + "\n" + rest
+        return table + ("\n\n" + extra.removeprefix(" — ") if extra else "")
     return f"- {body}{citation}{extra}"
 
 
@@ -253,7 +324,8 @@ def chapter_excerpts(cards, *, max_chars=5_000):
 def evidence_fallback(task, cards, *, requirements=(), state=None, max_chars=12_000):
     state = state if state is not None else {}
     eligible = report_card_ledger(cards)
-    selected, reasons = select_requirement_cards(eligible, list(requirements))
+    selection_trace = {}
+    selected, reasons = select_requirement_cards(eligible, list(requirements), selection_trace=selection_trace)
     groups = {}
     owners_by_requirement = {}
     for item in requirements:
@@ -290,6 +362,10 @@ def evidence_fallback(task, cards, *, requirements=(), state=None, max_chars=12_
                 break
             if card["id"] in displayed:
                 continue
+            if is_byline_card(card):
+                # Author/date boilerplate carries no answer content; it must not
+                # be rendered as a standalone finding or dominate the Summary.
+                continue
             peers = [card]
             if card.get("evidence_status") == "conflicted":
                 peers = [peer for peer in selected if peer.get("evidence_status") == "conflicted"
@@ -314,7 +390,7 @@ def evidence_fallback(task, cards, *, requirements=(), state=None, max_chars=12_
                 displayed.append(card["id"])
                 used += len(fact) + len(heading) + 4
                 group_fact_count += 1
-                if (card.get("evidence_status") != "conflicted" and len(fact) <= 500
+                if (card.get("evidence_status") != "conflicted" and len(fact) <= 500 and "\n" not in fact
                         and not str(card.get("statement") or "").rstrip().endswith(("...", "…"))):
                     summary_candidates.append((group_id, fact.removeprefix("- ")))
         if bullets:
@@ -376,6 +452,7 @@ def evidence_fallback(task, cards, *, requirements=(), state=None, max_chars=12_
         "unsynthesized": len(selected_ids), "display_omitted": len(selected_ids - displayed_ids),
     }
     state.update(limited_evidence_fallback=True, partial_report=True,
+                 selection_decisions=selection_trace, selection_reasons=reasons,
                  display_card_ids=displayed, evidence_counts=counts,
                  selected_card_ids=sorted(selected_ids),
                  omitted_card_ids=sorted({str(card["id"]) for card in eligible} - selected_ids),

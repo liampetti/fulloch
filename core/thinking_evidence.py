@@ -203,6 +203,7 @@ def report_evidence(job) -> dict:
             "tool": item.get("tool"), "requirement_id": item.get("requirement_id"),
             "chapter_id": item.get("chapter_id"), "query_digest": query_digest,
             "status": item.get("status"),
+            "scheduling_reason": item.get("scheduling_reason"),
         })
     return {
         "schema_version": 2,
@@ -230,6 +231,7 @@ def report_evidence(job) -> dict:
             "admission_denials": list(job.model_budget.get("admission_denials") or []),
             "admission_decisions": list(job.model_budget.get("admission_decisions") or []),
             "selected_actions": selections,
+            "card_evidence_trace": job.synthesis_state.get("card_evidence_trace"),
             "stage_diagnostics": list(job.stage_log),
         },
         "research_context": job.research_context,
@@ -274,6 +276,7 @@ def restore_report_cards(evidence: dict) -> list[dict]:
             "temporal_role": fact.get("temporal_role") or context.get("temporal_role", ""),
             "subject": context.get("subject", ""), "context": context,
             "claim_identity": fact.get("identity", {}), "claim_eligibility": fact.get("eligibility", {}),
+            "conflicting_fields": list(fact.get("conflicting_fields") or []),
             "independence_key": fact.get("independence_key", source_id),
             "provenance": fact.get("provenance", {"source_id": source_id}),
         })

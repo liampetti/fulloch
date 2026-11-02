@@ -135,17 +135,17 @@ def test_plan_downloads_ornith_gguf(tmp_path):
     assert asset.dest == "data/models"
 
 
-def test_plan_downloads_neohorse_gguf(tmp_path):
-    resolved = resolve_models({"llm": {"backend": "local", "local_model": "neohorse"}})
+def test_plan_downloads_qwen27b_gguf(tmp_path):
+    resolved = resolve_models({"llm": {"backend": "local", "local_model": "qwen27b"}})
 
     asset = next(
         asset
         for asset in dl.plan_assets(resolved, models_dir=str(tmp_path))
-        if asset.key == "llm:neohorse"
+        if asset.key == "llm:qwen27b"
     )
     assert asset.kind == "file"
-    assert asset.repo == "TokenRhythm/NeoHorse-1-9B-GGUF"
-    assert asset.filename == "NeoHorse-1-9B-Q4_K_M.gguf"
+    assert asset.repo == "unsloth/Qwen3.8-27B-GGUF"
+    assert asset.filename == "Qwen3.8-27B-UD-IQ4_XS.gguf"
     assert asset.dest == "data/models"
 
 
@@ -248,11 +248,25 @@ def test_plan_downloads_pocket_tts_pytorch_weights_into_hub_cache():
 
     assert len(assets) == 2
     assert {asset.repo for asset in assets} == {
-        "kyutai/pocket-tts",
+        "latent-variable/pocket-tts-cloning-en",
         "kyutai/pocket-tts-without-voice-cloning",
     }
     assert all(asset.kind == "snapshot" for asset in assets)
     assert all(asset.revision for asset in assets)
+
+
+def test_pinned_snapshot_does_not_accept_another_revision_or_missing_files(tmp_path):
+    resolved = resolve_models({"tts": {"backend": "pocket-tts-pytorch"}})
+    asset = next(a for a in dl.plan_assets(resolved, models_dir=str(tmp_path))
+                 if a.repo == "kyutai/pocket-tts-without-voice-cloning")
+    root = Path(asset.dest) / f"models--{asset.repo.replace('/', '--')}"
+    root.mkdir(parents=True)
+    (root / dl.COMPLETE_SENTINEL).touch()
+    assert not dl._already_present(asset)
+    file = root / "snapshots" / asset.revision / asset.allow[0]
+    file.parent.mkdir(parents=True)
+    file.touch()
+    assert dl._already_present(asset)
 
 
 def test_plan_downloads_audio8_checkpoint_into_hub_cache():
@@ -478,10 +492,12 @@ def test_tier_fit_badges_without_gpu():
     gpu = {"available": False, "name": None, "vram_gb": None}
     fits = pf.tier_fit(gpu, disk_gb=999)
     by_id = {f["id"]: f for f in fits}
-    # GPU-needing tiers warn on a CPU-only box; CPU stacks (no VRAM need) are ok.
-    assert by_id["cpu_local"]["badge"] == "ok"
-    assert by_id["cpu_server"]["badge"] == "ok"
-    assert by_id["full"]["badge"] == "warn"
+    # GPU-needing tiers warn on a CPU-only box; the Lite stack (all-CPU) is ok.
+    assert by_id["lite"]["badge"] == "ok"
+    assert by_id["max"]["badge"] == "warn"
+    assert by_id["pro"]["badge"] == "warn"
+    assert by_id["premium"]["badge"] == "warn"
+    assert by_id["economy"]["badge"] == "warn"
 
 
 def test_tier_fit_warns_on_low_disk():
@@ -492,13 +508,12 @@ def test_tier_fit_warns_on_low_disk():
 
 def test_tier_fit_warns_on_low_ram():
     gpu = {"available": False, "name": None, "vram_gb": None}
-    # CPU tiers need ~5.2 GB RAM (4.5 qwen-onnx ASR + 0.7 Pocket TTS); 1 GB available should warn.
+    # Lite needs ~3.4 GB RAM including Laya; 1 GB available should warn.
     ram = {"total_gb": 4.0, "available_gb": 1.0}
     fits = pf.tier_fit(gpu, disk_gb=999, ram=ram)
     by_id = {f["id"]: f for f in fits}
-    assert by_id["cpu_local"]["badge"] == "warn"
-    assert "RAM" in by_id["cpu_local"]["reason"]
-    assert by_id["cpu_server"]["badge"] == "warn"
+    assert by_id["lite"]["badge"] == "warn"
+    assert "RAM" in by_id["lite"]["reason"]
 
 
 def test_tier_fit_ok_with_sufficient_ram():
@@ -506,8 +521,7 @@ def test_tier_fit_ok_with_sufficient_ram():
     ram = {"total_gb": 16.0, "available_gb": 8.0}
     fits = pf.tier_fit(gpu, disk_gb=999, ram=ram)
     by_id = {f["id"]: f for f in fits}
-    assert by_id["cpu_local"]["badge"] == "ok"
-    assert by_id["cpu_server"]["badge"] == "ok"
+    assert by_id["lite"]["badge"] == "ok"
 
 
 def test_tier_fit_skips_ram_check_when_unknown():
@@ -517,17 +531,17 @@ def test_tier_fit_skips_ram_check_when_unknown():
     fits_null = pf.tier_fit(gpu, disk_gb=999, ram={"total_gb": None, "available_gb": None})
     for fits in (fits_no_ram, fits_null):
         by_id = {f["id"]: f for f in fits}
-        assert by_id["cpu_local"]["badge"] == "ok"
+        assert by_id["lite"]["badge"] == "ok"
 
 
 def test_tier_fit_exposes_ram_gb():
     gpu = {"available": False, "name": None, "vram_gb": None}
     fits = pf.tier_fit(gpu, disk_gb=999)
     by_id = {f["id"]: f for f in fits}
-    # cpu_local: qwen-onnx (4.5) + pocket-tts-onnx (0.7) = 5.2
-    assert by_id["cpu_local"]["ram_gb"] == pytest.approx(5.2)
-    # full: ASR/TTS/LLM are all GPU-resident now, none set ram_gb
-    assert by_id["full"]["ram_gb"] == pytest.approx(0.0)
+    # lite: moonshine (1.0) + kokoro-onnx (0.4) + laya (2.0) = 3.4
+    assert by_id["lite"]["ram_gb"] == pytest.approx(3.4)
+    # max: ASR/TTS/LLM are all GPU-resident, none set ram_gb
+    assert by_id["max"]["ram_gb"] == pytest.approx(0.0)
 
 
 def test_ram_info_returns_dict():

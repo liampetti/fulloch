@@ -25,7 +25,6 @@ respecting the job's `TtsSession.cancelled` flag for barge-in.
 """
 
 import logging
-import os
 import queue
 import threading
 import time
@@ -219,10 +218,10 @@ def set_voice(voice_name: str):
     — the shared transcript every bundled sample clip is recorded with — so a clip
     needs no per-voice .txt of its own.
     """
-    ref_audio = f"{VOICES_DIR}/{voice_name}.wav"
-    txt_path = f"{VOICES_DIR}/{voice_name}.txt"
-    if not os.path.isfile(txt_path):
-        txt_path = f"{VOICES_DIR}/default.txt"
+    from .voice_reference import voice_reference
+
+    audio, txt_path = voice_reference(voice_name, VOICES_DIR)
+    ref_audio = str(audio)
     with open(txt_path) as f:
         ref_text = f.read()
     logger.info(f"Setting voice clone to: {voice_name}")

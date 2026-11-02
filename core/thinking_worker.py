@@ -9,6 +9,7 @@ import ast
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 from contextlib import nullcontext
@@ -20,7 +21,6 @@ from urllib.error import URLError
 from urllib.parse import urlparse
 
 from tools.capabilities import ToolCapability
-from tools.thinking_context import reset_artifacts, set_artifacts
 from tools.thinking_playbooks import matching_playbooks, scoped_capabilities
 from tools.tool_registry import ThinkingResult, ToolRegistry, thinking_result_error
 from utils import intents
@@ -31,11 +31,14 @@ from utils.prompts import (
     get_thinking_chapter_analysis_prompt,
     get_thinking_chapter_card_prompt,
     get_thinking_chapter_coverage_prompt,
+    get_thinking_chapter_evidence_digest_chunk_prompt,
+    get_thinking_chapter_evidence_digest_prompt,
     get_thinking_chapter_merge_prompt,
     get_thinking_chapter_plan_prompt,
     get_thinking_chapter_repair_prompt,
     get_thinking_chapter_research_prompt,
     get_thinking_digest_repair_prompt,
+    get_thinking_evidence_refinement_prompt,
     get_thinking_final_assembly_prompt,
     get_thinking_output_error,
     get_thinking_output_repair_prompt,
@@ -43,6 +46,7 @@ from utils.prompts import (
     get_thinking_reconciliation_prompt,
     get_thinking_report_audit_prompt,
     get_thinking_report_prompt,
+    get_thinking_survey_review_prompt,
     get_thinking_user_prompt,
 )
 
@@ -60,6 +64,7 @@ from .thinking_budget import (
     estimate_tokens,
     is_context_overflow,
 )
+from .thinking_context import reset_artifacts, set_artifacts
 from .thinking_coverage import (
     apply_reasoned_coverage,
     apply_supported_coverage,
@@ -70,11 +75,14 @@ from .thinking_coverage import (
     ensure_requirements,
     fallback_chapter_plan,
     initial_requirements,
+    is_broad_analysis,
     is_near_duplicate_action,
     is_near_duplicate_query,
+    is_result_set_duplicate,
     matching_cards_for_requirement,
     open_requirement,
     record_action_selection,
+    refinement_subsample,
     refresh_coverage,
     resolve_requirement,
     searchable_gap_query,
@@ -101,12 +109,21 @@ from .thinking_source_context import contextual_source_registry, with_source_pas
 
 logger = logging.getLogger(__name__)
 
+# A job may resume after a transient backend outage, but must not loop forever
+# or regain a fresh retry allowance after a process restart.
+BACKEND_RECOVERY_SECONDS = 180.0
+BACKEND_RECOVERY_RETRIES = 2
+BACKEND_RECOVERY_POLL_SECONDS = 0.2
 MAX_THINKING_WORKER_CALLS = 12
 MAX_THINKING_TOOL_CALLS = 8
 MAX_THINKING_CAPABILITY_CALLS = 3
 MAX_CHAPTER_RESEARCH_DECISIONS = 4
 MAX_THINKING_ARGUMENT_CORRECTIONS = 2
 MAX_RETAINED_EXTRACTION_RECOVERIES = 4
+# Quality-pass convergence: after this many revision-dispatching audit rounds
+# (chapter groups plus the final assembly, per job) audits still validate prose
+# against cards but can no longer trigger rewrite calls.
+MAX_AUDIT_REVISION_ROUNDS = 4
 MAX_THINKING_CAPABILITY_DESCRIPTION_CHARS = 600
 DEEP_THINK_READ_TIMEOUT_S = 600.0
 DEEP_THINK_GENERATION_TIMEOUT_S = 900.0
@@ -291,6 +308,27 @@ def _normalise_thinking_args(schema, args: list, kwargs: dict, *, default_overri
     """
     known = {param.name: index for index, param in enumerate(schema.params)}
     kwargs = dict(kwargs)
+    # A grammar-less remote model may emit a named-argument object merged with
+    # positional strings (`[{"query": "x", ...}, "research", "auto", "", 1]`).
+    # Unwrap the dict into kwargs so the remaining positionals align with the
+    # signature; without this the dict is passed through as a positional and the
+    # tool rejects it as a non-string query.
+    dict_items = {}
+    for value in list(args):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key not in known:
+                    return None, f"Unknown keyword argument for {schema.name}: {key}."
+                dict_items[key] = item
+    if dict_items:
+        # A grammar-less model may emit a named-argument object merged with
+        # positional strings (`[{"query": "x", "profile": "research"}, "research", "auto", ...]`).
+        # The dict is the authoritative named-argument source; the trailing
+        # positionals are the same values in signature order and are redundant,
+        # so they are discarded to avoid a false conflict.
+        for key, item in dict_items.items():
+            kwargs.setdefault(key, item)
+        args = []
     assignments = [re.fullmatch(r"\s*([A-Za-z_]\w*)\s*=(.*)", value, re.S)
                    if isinstance(value, str) else None for value in args]
     named_list = len(args) > 1 and all(assignments) and any(match[1] in known for match in assignments)
@@ -375,6 +413,7 @@ def _budgeted_generate(worker, budget, stage: str, **kwargs):
         "chapter_planning": {
             "type": "object",
             "properties": {
+                "report_title": {"type": "string", "minLength": 2, "maxLength": 160},
                 "chapters": {
                     "type": "array",
                     "minItems": 1, "maxItems": 3,
@@ -399,7 +438,7 @@ def _budgeted_generate(worker, budget, stage: str, **kwargs):
                     },
                 },
             },
-            "required": ["chapters"],
+            "required": ["report_title", "chapters"],
         },
         "chapter_coverage": {
             "type": "object",
@@ -418,6 +457,9 @@ def _budgeted_generate(worker, budget, stage: str, **kwargs):
                         "card_ids": {"type": "array", "maxItems": 3, "items": {"type": "string"}},
                     }, "required": ["name", "date", "card_ids"],
                 }},
+                "rephrased_question": {"type": "string", "maxLength": 300},
+                "close_facts": {"type": "array", "maxItems": 8,
+                                "items": {"type": "string", "maxLength": 300}},
                 "answers": {
                     "type": "array",
                     "items": {
@@ -545,6 +587,20 @@ def _thinking_action_key(name: str, args: list) -> str:
     )
 
 
+def _duplicate_research_reason(name, args, attempted, selections, requirement, *, corrective_retry):
+    """Apply the three duplicate checks in order; return the first rejection."""
+    if _thinking_action_key(name, args) in attempted:
+        return "duplicate_action"
+    if corrective_retry:
+        return ""
+    if (is_near_duplicate_action(name, args, selections, requirement)
+            or is_near_duplicate_query(name, args, selections)):
+        return "near_duplicate_action"
+    if is_result_set_duplicate(name, args, selections):
+        return "result_set_duplicate"
+    return ""
+
+
 def _parse_direct_json(response: str) -> dict | None:
     """Accept one complete JSON object, optionally in a Markdown code fence.
 
@@ -659,7 +715,14 @@ def _render_chapter_passage(text: object, card_ids: object, aliases: dict) -> tu
         return "", "Each passage must list at least one supporting card alias."
     if any(not isinstance(identifier, str) for identifier in card_ids):
         return "", "Passage support IDs must be string aliases from the supplied source packet."
-    selected = list(dict.fromkeys(card_ids))
+    # Source context can expose the original ID alongside its short alias.
+    # Accept it only if this exact card is in the current packet; never resolve
+    # arbitrary IDs against the global ledger.
+    original_to_alias = {str(value): key for key, value in aliases.items()}
+    selected = list(dict.fromkeys(
+        identifier if identifier in aliases else original_to_alias.get(identifier, identifier)
+        for identifier in card_ids
+    ))
     if any(identifier not in aliases for identifier in selected):
         return "", "Passage support IDs must be aliases from the supplied source packet."
     return f"{clean} <!-- cards: {', '.join(selected)} -->", ""
@@ -732,6 +795,27 @@ def _fixed_scope_for_prompt(context: dict) -> str:
     )
     return json.dumps({key: context.get(key) for key in keys if context.get(key) not in (None, "", [], {})},
                        ensure_ascii=True, separators=(",", ":"))
+
+
+def _planning_conversation(conversation, task: str) -> list[dict]:
+    """Retain recent conversation as bounded, unverified navigation context."""
+    turns = []
+    remaining = 4000
+    for item in reversed(list(conversation or ())):
+        if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
+            continue
+        text = str(item.get("content") or "").strip()
+        if not text or text.casefold() == task.strip().casefold():
+            continue
+        if remaining <= 0 or len(turns) >= 12:
+            break
+        text = text[:min(remaining, 800)]
+        row = {"role": item["role"], "content": text}
+        if isinstance(item.get("ts"), (int, float, str)):
+            row["ts"] = item["ts"]
+        turns.append(row)
+        remaining -= len(text)
+    return list(reversed(turns))
 
 
 def _chapter_evidence_packet(
@@ -879,6 +963,31 @@ def _reader_source_language(text: str) -> str:
     return "".join(parts)
 
 
+def _fallback_summary_text(chapter: dict) -> str:
+    """Deterministic fallback material for one chapter's Summary.
+
+    Prefer the Tier-0 all-cards digest: it is a card-bound compaction of EVERY
+    selected card, so a dropped-marker audit failure degrades to a summary of
+    all the facts, not the writer's <=120-word digest of the truncated core
+    (TODO-5). Fall back to the writer digest when no evidence digest exists
+    (fixtures, ``ExtractiveReplayModel``, a failed digest call) so replay and
+    empty-digest degradation keep today's behavior.
+    """
+    text = str(chapter.get("evidence_digest") or "").strip()
+    if not text:
+        text = str(chapter.get("digest") or "").strip()
+    return text
+
+
+def _report_paragraph(paragraph: str) -> str:
+    """Preserve Markdown table rows while normalizing ordinary prose."""
+    lines = paragraph.strip().splitlines()
+    if (len(lines) >= 2 and "|" in lines[0]
+            and re.fullmatch(r"\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*", lines[1])):
+        return "\n".join(line.strip() for line in lines)
+    return re.sub(r"\s+", " ", paragraph).strip()
+
+
 def _clean_report_block(text: object, seen_passages: set[str] | None = None) -> str:
     """Remove model-owned headings/diagnostics and exact repeated passages."""
     lines = []
@@ -892,10 +1001,10 @@ def _clean_report_block(text: object, seen_passages: set[str] | None = None) -> 
     paragraphs = []
     seen = seen_passages if seen_passages is not None else set()
     for paragraph in re.split(r"\n\s*\n", "\n".join(lines)):
-        value = re.sub(r"\s+", " ", paragraph).strip()
+        value = _report_paragraph(paragraph)
         if not value:
             continue
-        prose = re.sub(r"\*+", "", _SOURCE_MARKER_RE.sub("", value)).strip().casefold()
+        prose = re.sub(r"\s+", " ", re.sub(r"\*+", "", _SOURCE_MARKER_RE.sub("", value))).strip().casefold()
         if re.match(
             r"(?:audit (?:issues?|result)|generation limitations|synthesis limitations?|"
             r"evidence counts|unresolved requirement|additional eligible evidence was omitted|"
@@ -908,6 +1017,31 @@ def _clean_report_block(text: object, seen_passages: set[str] | None = None) -> 
         seen.add(prose)
         paragraphs.append(value)
     return "\n\n".join(paragraphs)
+
+
+def _dedup_chapter_passages(seen_passages: set[str], body: str) -> str:
+    """Drop passages already delivered by an earlier chapter in this run.
+
+    ``seen_passages`` is a shared set of normalized prose keys (source
+    markers stripped, whitespace collapsed, casefolded) accumulated across
+    chapters. A passage is dropped only when its prose is *identical* to one
+    already delivered; near-duplicates are kept (verbatim-only, no fuzzy
+    matching). Marker-bearing passages compare on prose only, so the same
+    fact cited from two cards in two chapters is deduped. The set is mutated
+    in place so later chapters see this chapter's passages.
+    """
+    kept = []
+    for paragraph in re.split(r"\n\s*\n", body):
+        value = _report_paragraph(paragraph)
+        if not value:
+            continue
+        prose = re.sub(r"\s+", " ", re.sub(r"\*+", "", _SOURCE_MARKER_RE.sub("", value))).strip().casefold()
+        if prose and prose in seen_passages:
+            continue
+        if prose:
+            seen_passages.add(prose)
+        kept.append(value)
+    return "\n\n".join(kept)
 
 
 def _structured_record_text(card: dict) -> str:
@@ -993,6 +1127,7 @@ def _reconcile_summary_with_findings(
         if not evidence_ids & delivered_ids:
             continue
         finding = ""
+        finding_id = ""
         for identifier in sorted(evidence_ids & delivered_ids):
             card = by_id.get(identifier)
             if card is None:
@@ -1002,18 +1137,12 @@ def _reconcile_summary_with_findings(
             )
             if text:
                 finding = text
+                finding_id = identifier
                 break
         if not finding:
             continue
         if _summary_denies_finding(summary, finding):
-            question = str(item.get("question") or "").strip()
-            replacement = (
-                f"{'The report establishes: ' + question + ' — ' if question else ''}"
-                + finding
-            )
-            if len(replacement) > 500:
-                replacement = finding
-            return replacement
+            return f"{finding} <!-- cards: {finding_id} -->"
     return summary
 
 
@@ -1079,6 +1208,392 @@ def _salient_finding_values(finding: str) -> list[str]:
     return values[:3]
 
 
+def _chapter_digest_rows(cards: list[dict]) -> list[dict]:
+    """Render every selected card as one digest input row, untruncated.
+
+    Structured records carry their answer in ``fields`` (price, revenue,
+    guidance) with an empty ``statement``; render that answer so the digest
+    sees the figure, not a field-key dump (TODO-0). Prose cards use their
+    statement; a chart record keeps its bounded history summary.
+    """
+    from .thinking_coverage import substantive_card_text
+    rows: list[dict] = []
+    for card in cards:
+        fields = card.get("fields") if isinstance(card.get("fields"), dict) else {}
+        # Live cards carry their text in ``statement``; evidence-JSON cards (and
+        # some serialized forms) carry it in ``claim``. Read both so the digest
+        # never renders a bare card id for a card that has text.
+        statement = str(card.get("statement") or card.get("claim") or "").strip()
+        if not statement and card.get("kind") == "structured_record":
+            statement = substantive_card_text(card)
+        record = None
+        if card.get("kind") == "structured_record":
+            record = source_record_view(fields)
+            if isinstance(record, dict) and isinstance(record.get("points"), list):
+                points = [
+                    point for point in record["points"]
+                    if isinstance(point, dict) and isinstance(point.get("value"), (int, float))
+                ]
+                history = {key: record[key] for key in ("window",) if key in record}
+                history["point_count"] = len(record["points"])
+                if points:
+                    history.update({
+                        "first": points[0], "last": points[-1],
+                        "low": min(points, key=lambda point: point["value"]),
+                        "high": max(points, key=lambda point: point["value"]),
+                    })
+                record = {key: value for key, value in record.items() if key != "points"}
+                record["history_summary"] = history
+        rows.append({
+            "id": card.get("id"),
+            "claim": statement or None,
+            "record": record,
+        })
+    return rows
+
+
+def _digest_row_lines(rows: list[dict]) -> list[str]:
+    """Render digest input rows as one ``id | text`` line per card."""
+    lines = []
+    for row in rows:
+        record = row.get("record") or {}
+        record_s = json.dumps(record, ensure_ascii=True, separators=(",", ":"))[:200] if record else ""
+        lines.append(f"{row['id']} | {(row.get('claim') or record_s).strip() or record_s}")
+    return lines
+
+
+def _digest_parse_cited(text: str, real_ids: set[str]) -> set[str]:
+    """Card ids actually referenced in a digest (markers intersected with real ids)."""
+    return {
+        value.strip() for match in _SOURCE_MARKER_RE.finditer(text)
+        for value in match[1].split(",") if value.strip() in real_ids
+    }
+
+
+def _digest_batch_plan(
+    budget, all_rows: list[dict], chapter: str, questions: str,
+) -> list[int] | None:
+    """Plan the chunked digest path as a list of batch boundaries.
+
+    Returns ``[b_1, b_2, ..., b_n]`` (each ``b_i < b_{i+1}``, ``b_n == len(rows)``)
+    of **cumulative exclusive end positions** that split the rows into ``n``
+    batches — batch ``i`` is ``rows[b_{i-1} : b_i]`` with ``b_0 == 0`` — **each of
+    which is guaranteed to fit** the context budget, or ``None`` when even one
+    card cannot fit (the caller degrades to the single-path skip).
+
+    Card lengths are highly uneven — a table-row chapter clusters many short
+    rows and a few very long ones — so a fixed batch *size* cannot guarantee
+    every batch fits (a later batch can hold the long rows and overflow). The
+    plan therefore fills each batch row-by-row until the next row would push the
+    batch's prompt past the row budget, then starts a new batch. The batch size
+    is model-adaptive: a large context yields one batch (the existing
+    single-call path), a small context yields many.
+    """
+    # ``chapter`` is the chapter dict in production, but tests may pass a plain
+    # title string; normalize to the title the prompt builder expects.
+    title = chapter if isinstance(chapter, str) else (chapter.get("title", "") or "")
+    # Shared, batch-independent prompt overhead: the chunk system prompt + the
+    # user prompt, measured with the same estimator the budget uses so the plan
+    # matches what ``budget.fits`` will admit.
+    base_prompt = get_thinking_chapter_evidence_digest_chunk_prompt(title, questions, "PLACEHOLDER", 1, 1)
+    base_tokens = estimate_tokens(base_prompt) + estimate_tokens(get_thinking_user_prompt("chapter_digest"))
+    row_tokens = [estimate_tokens(line + "\n") for line in _digest_row_lines(all_rows)]
+    context = getattr(budget, "context_tokens", 0) or 0
+    if context <= 0:
+        return None
+    # Output reservation + safety headroom leave for rows. The tokenizer
+    # fallback adds a fixed 152-token message overhead (128 + 2 messages * 12,
+    # see ``count_messages``), so reserve it alongside a small margin.
+    try:
+        output_limit = budget.output_limit("chapter_digest")
+    except Exception:
+        output_limit = 1024
+    headroom = max(256, math.ceil(context * 0.08))
+    row_budget = context - headroom - output_limit - base_tokens - 152 - 64
+    if row_budget <= 0:
+        return None
+    # A batch must also fit the stage's *time* budget: the budget's ``begin``
+    # refuses a call whose estimated prefill (input tokens / prefill rate)
+    # cannot leave room for the output within the generation timeout. A large
+    # context can therefore hold a prompt that is too big to *complete in time*
+    # (e.g. 88k input tokens at the 128 tok/s fallback prefill rate ≈ 690s ≫
+    # the 120s timeout), so cap the row budget by the tokens that fit
+    # prefilling inside the timeout.
+    try:
+        timeout = budget.generation_timeout("chapter_digest")
+    except Exception:
+        timeout = None
+    if timeout is not None and timeout > 0:
+        try:
+            prefill_tps, decode_tps = budget._throughput_rates()
+        except Exception:
+            prefill_tps, decode_tps = 128.0, 40.0
+        # Each batch's input = row tokens + a fixed overhead (the chunk system
+        # prompt + user prompt, the 152-token message overhead the tokenizer
+        # fallback adds, and a 64-token margin). ``begin`` admits only while
+        # the timeout covers the prefill of that full input, the output
+        # reservation, and ``MIN_ADMITTED_CALL_SECONDS``; leave the same
+        # margins here (plus a 5% prefill headroom) so planned batches are
+        # always admitted.
+        overhead_tokens = base_tokens + 152 + 64
+        decode_seconds = max(output_limit, 128) / max(decode_tps, 1.0)
+        usable_prefill_seconds = max(
+            1.0, timeout - decode_seconds - 5.0 - 0.05 * (timeout),
+        )
+        time_row_budget = math.floor(usable_prefill_seconds * prefill_tps) - overhead_tokens
+        row_budget = min(row_budget, time_row_budget)
+        if row_budget <= 0:
+            return None
+    # Greedy fill: each batch holds the largest run of rows whose token sum
+    # stays within the row budget, so no batch's prompt can overflow the context.
+    boundaries: list[int] = []
+    running = 0
+    for index, token in enumerate(row_tokens):
+        if running and running + token > row_budget:
+            boundaries.append(index)
+            running = 0
+        running += token
+    boundaries.append(len(row_tokens))
+    # A single row longer than the whole budget cannot be digested on this
+    # context; the caller degrades to the single-path skip.
+    if len(boundaries) < 1 or any(
+        boundaries[i] - boundaries[i - 1] < 1 for i in range(1, len(boundaries))
+    ):
+        return None
+    return boundaries
+
+
+def _digest_single_call(
+    worker, job, chapter: dict, cards: list[dict], questions: str,
+    *, budget, cancelled, rows: list[dict],
+) -> tuple[str, set[str]]:
+    """One bounded ``chapter_digest`` call over the full card set (the Tier-0 fast path)."""
+    prompt = get_thinking_chapter_evidence_digest_prompt(
+        chapter.get("title", ""), questions, "\n".join(_digest_row_lines(rows)),
+    )
+    user_prompt = get_thinking_user_prompt("chapter_digest")
+    try:
+        if not budget.fits("chapter_digest", system_prompt=prompt,
+                           user_prompt=user_prompt, thinking_mode=False):
+            job.record_stage_event("chapter_digest", "skipped", "context_or_budget")
+            return "", set()
+        response = _budgeted_generate(
+            worker, budget, "chapter_digest",
+            system_prompt=prompt,
+            user_prompt=user_prompt,
+            temperature=0.0, cancel_check=cancelled,
+        ) or ""
+    except RemoteUnreachable:
+        # The digest is a best-effort compaction; a backend that cannot serve
+        # it degrades to today's behavior without disturbing the writer path
+        # (T5: empty digest preserves today's packet and Summary fallback).
+        job.record_stage_event("chapter_digest", "skipped", "backend_unavailable")
+        return "", set()
+    except (PromptOverflow, ModelBudgetExhausted):
+        job.record_stage_event("chapter_digest", "skipped", "context_or_budget")
+        return "", set()
+    except Exception as exc:
+        logger.warning("Deep-think chapter digest failed chapter=%s error_type=%s",
+                       chapter.get("id"), type(exc).__name__)
+        job.record_stage_event("chapter_digest", "failed", "model_error")
+        return "", set()
+    if not response or cancelled():
+        return "", set()
+    text = _clean_report_block(response).strip()
+    if not text:
+        return "", set()
+    real_ids = {str(card.get("id")) for card in cards}
+    cited_ids = _digest_parse_cited(text, real_ids)
+    if not cited_ids:
+        # A marker-less digest cannot bind the Summary or rank the core; treat
+        # it as a failure and degrade to today's behavior.
+        job.record_stage_event("chapter_digest", "rejected", "no_card_markers")
+        return "", set()
+    return text, cited_ids
+
+
+def _digest_chunked(
+    worker, job, chapter: dict, cards: list[dict], questions: str,
+    *, budget, cancelled, rows: list[dict],
+) -> tuple[str, set[str]]:
+    """Chunked Tier-0 digest for card sets that do not fit one call.
+
+    Splits the chapter's rows into budget-fitting batches, digests each batch
+    with its own bounded ``chapter_digest`` call, and concatenates the per-batch
+    digests (in batch order) into the chapter digest. Each batch digest is
+    card-bound, so the concatenation carries every load-bearing fact through the
+    compaction (Layer-2 carry-forward) without a separate merge pass. A batch
+    that cannot be admitted is skipped; the partial concatenation is still
+    returned so a large chapter degrades to a smaller digest rather than none.
+    """
+    boundaries = _digest_batch_plan(budget, rows, chapter.get("title", ""), questions)
+    if boundaries is None:
+        job.record_stage_event("chapter_digest", "skipped", "context_or_budget")
+        return "", set()
+    total_batches = len(boundaries)
+    user_prompt = get_thinking_user_prompt("chapter_digest")
+    real_ids = {str(card.get("id")) for card in cards}
+    title = chapter if isinstance(chapter, str) else (chapter.get("title", "") or "")
+    sections: list[str] = []
+    cited: set[str] = set()
+    skipped_batches = 0
+    # The boundaries are cumulative *exclusive end* positions (b_n == len(rows)),
+    # so batch ``i`` is ``rows[b_{i-1} : b_i]`` with ``b_0 == 0``. Prepend 0 to
+    # recover each batch's start; the old ``zip(boundaries, boundaries[1:] +
+    # [len(rows)])`` misread them as start positions, dropping the first batch
+    # and appending a trailing empty batch.
+    starts = [0] + boundaries[:-1]
+    for batch_number, (start, end) in enumerate(
+        zip(starts, boundaries, strict=True), start=1,
+    ):
+        if cancelled():
+            break
+        batch_rows = rows[start:end]
+        prompt = get_thinking_chapter_evidence_digest_chunk_prompt(
+            title, questions, "\n".join(_digest_row_lines(batch_rows)),
+            batch_number, total_batches,
+        )
+        # A transient backend hiccup (connection reset, timeout) on one batch must
+        # not discard the whole chapter's digest: retry the batch, then keep
+        # going. Hard failures (backend gone, budget exhausted, overflow) are
+        # handled below.
+        response = None
+        transient_failures = 0
+        hard_stop = False
+        skip_batch = False
+        for _attempt in range(2):
+            try:
+                if not budget.fits("chapter_digest", system_prompt=prompt,
+                                   user_prompt=user_prompt, thinking_mode=False):
+                    # This batch cannot fit; stop rather than burn the budget.
+                    skipped_batches = total_batches - batch_number + 1
+                    hard_stop = True
+                    break
+                response = _budgeted_generate(
+                    worker, budget, "chapter_digest",
+                    system_prompt=prompt,
+                    user_prompt=user_prompt,
+                    temperature=0.0, cancel_check=cancelled,
+                ) or ""
+                break
+            except RemoteUnreachable:
+                job.record_stage_event("chapter_digest", "skipped", "backend_unavailable")
+                return "", set()
+            except PromptOverflow:
+                # A batch was rejected (e.g. the global call budget ran out).
+                # Keep what the earlier batches produced; the digest is valid.
+                skipped_batches = total_batches - batch_number + 1
+                hard_stop = True
+                break
+            except ModelBudgetExhausted as exc:
+                # A time-based denial ("cannot reserve 128 output tokens")
+                # means this batch's prompt is too big to *complete in time*,
+                # not that the budget is spent: the plan caps batch size by
+                # the generation timeout, so a denial here means measured
+                # throughput is slower than the plan assumed. The prompt is
+                # deterministically too big, so retrying it is pointless — skip
+                # this batch (no retry) and keep going; the remaining batches
+                # are no larger. A genuine budget exhaustion (call/token
+                # limits) is not recoverable and still stops the loop.
+                if "reserve 128" in str(exc):
+                    logger.warning(
+                        "Deep-think chapter digest batch skipped on time budget chapter=%s batch=%d/%d",
+                        chapter.get("id"), batch_number, total_batches,
+                    )
+                    skipped_batches += 1
+                    skip_batch = True
+                    break
+                skipped_batches = total_batches - batch_number + 1
+                hard_stop = True
+                break
+            except Exception as exc:
+                transient_failures += 1
+                logger.warning(
+                    "Deep-think chapter digest batch failed chapter=%s batch=%d/%d error_type=%s",
+                    chapter.get("id"), batch_number, total_batches, type(exc).__name__,
+                )
+        if hard_stop:
+            # A hard rejection ended the inner loop via ``break``; honor it.
+            break
+        if skip_batch:
+            # A time denial: the prompt is deterministically too big, so skip
+            # this batch without retrying and continue with the next one.
+            continue
+        if transient_failures:
+            # Both attempts raised a transient error: keep the earlier batches,
+            # skip this one, and continue with the remaining batches.
+            skipped_batches += 1
+            continue
+        if response is None:
+            continue
+        text = _clean_report_block(response).strip()
+        if not text:
+            continue
+        batch_cited = _digest_parse_cited(text, real_ids)
+        if not batch_cited:
+            # A marker-less batch cannot bind anything; drop it rather than
+            # emit prose the Summary cannot cite.
+            continue
+        sections.append(text)
+        cited |= batch_cited
+    if not sections:
+        # No batch yielded a card-bound digest: degrade to today's behavior.
+        job.record_stage_event("chapter_digest", "skipped", "context_or_budget")
+        return "", set()
+    if skipped_batches:
+        logger.info(
+            "Deep-think chapter digest chunked chapter=%s batches_done=%d batches_skipped=%d",
+            chapter.get("id"), len(sections), skipped_batches,
+        )
+    return "\n".join(sections), cited
+
+
+def _chapter_evidence_digest(
+    worker, job, chapter: dict, cards: list[dict], questions: str,
+    *, budget, cancelled,
+) -> tuple[str, set[str]]:
+    """Build the Tier-0 all-cards digest for one chapter.
+
+    A bounded ``chapter_digest`` call over **every** selected card renders a
+    compact, card-bound fact list: each fact line ends with the source card id(s)
+    in ``<!-- cards: ID -->`` markers. Returns ``(text, cited_ids)`` where
+    ``cited_ids`` is the set of real card ids actually referenced in the digest.
+    On any failure — budget exhausted, overflow, empty or marker-less output —
+    returns ``("", set())`` so callers degrade to today's behavior.
+
+    The full card set is digested in one call when it fits the context budget
+    (the Tier-0 fast path). When it does not fit — a large chapter on a small
+    model — the rows are split into budget-fitting batches and each batch is
+    digested independently, then concatenated (the Option-5 chunked path). The
+    digest is a *reference* for core ranking and the Summary, never evidence:
+    the audit still checks written prose against the original cards.
+    """
+    if not cards or cancelled():
+        return "", set()
+    rows = _chapter_digest_rows(cards)
+    prompt = get_thinking_chapter_evidence_digest_prompt(
+        chapter.get("title", ""), questions, "\n".join(_digest_row_lines(rows)),
+    )
+    user_prompt = get_thinking_user_prompt("chapter_digest")
+    single_fits = False
+    try:
+        single_fits = budget.fits("chapter_digest", system_prompt=prompt,
+                                  user_prompt=user_prompt, thinking_mode=False)
+    except Exception:
+        single_fits = False
+    if single_fits:
+        return _digest_single_call(
+            worker, job, chapter, cards, questions,
+            budget=budget, cancelled=cancelled, rows=rows,
+        )
+    # The full card set does not fit one call: chunk it so a small model can
+    # still get a card-bound Tier-0 digest for the chapter.
+    return _digest_chunked(
+        worker, job, chapter, cards, questions,
+        budget=budget, cancelled=cancelled, rows=rows,
+    )
+
+
 def _concise_summary(summary: str, max_sentences: int = 4) -> str:
     """Bound a fallback summary to a short findings paragraph.
 
@@ -1096,6 +1611,14 @@ def _concise_summary(summary: str, max_sentences: int = 4) -> str:
     if not kept.endswith((".", "!", "?")):
         kept += "."
     return kept
+
+
+def _bound_cited_summary(summary: str, max_passages: int = 4) -> str:
+    """Keep whole cited passages when an audit expands a summary into a ledger."""
+    markers = list(_SOURCE_MARKER_RE.finditer(summary))
+    if len(markers) <= max_passages:
+        return summary
+    return summary[:markers[max_passages - 1].end()].rstrip()
 
 
 def _has_verified_evidence(job: BackgroundJob) -> bool:
@@ -1155,12 +1678,165 @@ def _refresh_active_manifest(job: BackgroundJob) -> dict:
     return manifest
 
 
+def _prioritize_identity_chapters(chapters: list[dict], requirements_by_chapter: dict,
+                                  context: dict) -> list[dict]:
+    """Try identity first, but do not starve other chapters once it cannot run."""
+    if not needs_subject_resolution(context) or (
+        context.get("subject_resolution") or {}
+    ).get("state") == "resolved":
+        return chapters
+    identity_chapters = [chapter for chapter in chapters if any(
+        item.get("is_subject_identity") and item.get("state") == "open"
+        for item in requirements_by_chapter.get(chapter["id"], [])
+    )]
+    return identity_chapters or chapters
+
+
+def _coverage_requirements_for_scope(requirements: list[dict], context: dict) -> list[dict]:
+    """Assess identity first within its chapter, without suppressing other chapters."""
+    if needs_subject_resolution(context) and (
+        context.get("subject_resolution") or {}
+    ).get("state") != "resolved":
+        identity = [item for item in requirements if item.get("is_subject_identity")]
+        if identity:
+            return identity
+    return requirements
+
+
+def _research_question_view(requirement: dict) -> dict:
+    """Provide a bounded, untrusted refinement hint without changing task scope."""
+    question = {
+        "question_id": requirement["identifier"], "question": requirement["question"],
+        "priority": requirement.get("importance"), "missing_facts": requirement.get("detail", ""),
+    }
+    hint = requirement.get("rephrased_question")
+    if isinstance(hint, str) and hint.strip():
+        question["refinement_hint"] = hint.strip()[:300]
+    return question
+
+
+def _chapter_research_decision_limit(chapter: dict, requirements: list[dict]) -> int:
+    """Reserve a first decision for each high-priority question in a chapter."""
+    high_count = sum(item.get("chapter_id") == chapter.get("id")
+                     and item.get("importance") == "high" for item in requirements)
+    return max(MAX_CHAPTER_RESEARCH_DECISIONS, high_count)
+
+
+def _reserve_untried_decisions(chapter: dict, requirements: list[dict], decisions: dict,
+                               current_id: str) -> bool:
+    """Do not spend a format retry on another high-priority question's first turn."""
+    untried = sum(item.get("chapter_id") == chapter.get("id") and item.get("state") == "open"
+                  and item.get("importance") == "high" and item.get("identifier") != current_id
+                  and not decisions.get(item.get("identifier")) for item in requirements)
+    remaining = _chapter_research_decision_limit(chapter, requirements) - int(chapter.get("research_decisions", 0))
+    return bool(untried and remaining <= untried)
+
+
+def _research_blocked(requirement: dict, by_id: dict, selections: list[dict],
+                      active_chapter_ids: set[str]) -> bool:
+    """Keep prerequisites for verification, while allowing independent discovery after identity fails."""
+    attempted = {item.get("requirement_id") for item in selections}
+    for identifier in requirement.get("dependencies") or []:
+        dependency = by_id.get(identifier) or {}
+        if dependency.get("state") == "resolved":
+            continue
+        if (dependency.get("is_subject_identity") and identifier in attempted
+                and dependency.get("chapter_id") not in active_chapter_ids):
+            continue
+        return True
+    return False
+
+
+def _research_target(chapters: list[dict], requirements: list[dict], selections: list[dict],
+                     decisions: dict) -> tuple[dict, dict, str] | None:
+    """Choose independent high-priority gaps before repeating an investigated one."""
+    by_id = {item.get("identifier"): item for item in requirements}
+    counts = {}
+    for selection in selections:
+        identifier = selection.get("requirement_id")
+        counts[identifier] = counts.get(identifier, 0) + 1
+    priority = {"high": 3, "medium": 2, "low": 1}
+    candidates = []
+    for chapter_index, chapter in enumerate(chapters):
+        for question_index, item in enumerate(requirements):
+            if item.get("chapter_id") != chapter.get("id") or item.get("state") != "open":
+                continue
+            if _research_blocked(item, by_id, selections, {chapter.get("id") for chapter in chapters}):
+                continue
+            identifier = item.get("identifier")
+            dispatched = counts.get(identifier, 0)
+            attempted = int(decisions.get(identifier, 0))
+            identity = bool(item.get("is_subject_identity"))
+            first = item.get("importance") == "high" and not dispatched and not attempted
+            reason = "identity_prerequisite" if identity else "breadth_first" if first else "deep_dive"
+            candidates.append(((identity, first, priority.get(item.get("importance"), 1),
+                                -dispatched, -attempted,
+                                -int(chapter.get("research_decisions", 0)),
+                                -chapter_index, -question_index), chapter, item, reason))
+    if not candidates:
+        return None
+    _, chapter, requirement, reason = max(candidates, key=lambda row: row[0])
+    return chapter, requirement, reason
+
+
+def _apply_survey_questions(job, proposals: object) -> list[dict]:
+    """Add bounded survey leads without replacing existing obligations or evidence."""
+    if not isinstance(proposals, list):
+        return []
+    chapters = {str(chapter.get("id")): chapter for chapter in job.chapter_plan}
+    existing = {" ".join(str(item.get("question") or "").casefold().split())
+                for item in job.evidence_requirements}
+    added = []
+    for proposal in proposals[:2]:
+        if not isinstance(proposal, dict):
+            continue
+        chapter = chapters.get(str(proposal.get("chapter_id") or ""))
+        text = proposal.get("question")
+        priority = proposal.get("priority")
+        query = proposal.get("query")
+        if (not chapter or not isinstance(text, str) or not 4 <= len(text.strip()) <= 180
+                or priority not in {"high", "medium", "low"} or not isinstance(query, str)
+                or not 2 <= len(query.strip()) <= 120):
+            continue
+        text = " ".join(text.split())
+        if text.casefold() in existing or len(chapter.get("questions", [])) >= 5:
+            continue
+        existing.add(text.casefold())
+        identifier = f"{chapter['id']}-survey-{len(added) + 1}"
+        if any(item.get("identifier") == identifier for item in job.evidence_requirements):
+            continue
+        question = {"id": identifier, "requirement_id": identifier, "question": text,
+                    "priority": priority, "state": "open", "supporting_card_ids": [],
+                    "missing_facts": "", "evidence_terms": [], "dependencies": []}
+        temp = {**chapter, "questions": [question]}
+        requirement = chapter_requirements([temp], job.snapshot.task, job.research_context)[0]
+        identity = next((item for item in job.evidence_requirements if item.get("is_subject_identity")), None)
+        if identity and identity.get("state") != "resolved":
+            requirement["dependencies"] = [identity["identifier"]]
+            question["dependencies"] = [identity["identifier"]]
+        contract = job.snapshot.task_record
+        requirement["typed_constraints"] = contract.get("typed_constraints") or []
+        requirement["reasoning_allowed"] = (contract.get("answer_format") or {}).get("type") == "reasoned_conversation"
+        requirement["explicit_premises"] = [value for value in contract.get("assumptions", []) if isinstance(value, str)]
+        chapter.setdefault("questions", []).append(question)
+        chapter.setdefault("queries", []).append(query.strip())
+        if chapter.get("state") in {"research_complete", "analyzed"}:
+            chapter["state"] = "planned"
+        job.evidence_requirements.append(requirement)
+        added.append(requirement)
+    return added
+
+
 def _fallback_open_gaps(job: BackgroundJob) -> list[tuple[dict, dict]]:
     """Open requirements in chapters with remaining fallback retrieval allowance."""
     gaps = []
+    by_id = {item.get("identifier"): item for item in job.evidence_requirements}
+    active = {item.get("id") for item in job.chapter_plan
+              if item.get("state") not in {"research_complete", "analyzed"}}
     task_question = " ".join(job.snapshot.task.casefold().split())
     for requirement in job.evidence_requirements:
-        if requirement.get("state") != "open":
+        if (requirement.get("state") != "open"
+                or _research_blocked(requirement, by_id, job.action_selections, active)):
             continue
         question = " ".join(str(requirement.get("question") or "").casefold().split())
         chapter_id = requirement.get("chapter_id")
@@ -1181,7 +1857,8 @@ def _fallback_open_gaps(job: BackgroundJob) -> list[tuple[dict, dict]]:
             for selection in job.action_selections
         )
         if (chapter and (not attempted or requirement.get("is_subject_identity"))
-                and int(chapter.get("research_calls", 0)) < MAX_CHAPTER_RESEARCH_DECISIONS):
+                and int(chapter.get("research_calls", 0)) < _chapter_research_decision_limit(
+                    chapter, job.evidence_requirements)):
             gaps.append((requirement, chapter))
     return gaps
 
@@ -1209,6 +1886,281 @@ def _recover_retained_evidence(job: BackgroundJob) -> bool:
         refresh_coverage(job.evidence_requirements, job.fact_cards, job.extraction_state)
         return True
     return False
+
+
+def _sync_chapter_questions(chapter: dict, requirements: list[dict]) -> None:
+    """Derive chapter navigation state from the authoritative requirements."""
+    by_id = {item.get("identifier"): item for item in requirements}
+    for question in chapter.get("questions", []):
+        requirement = by_id.get(question.get("requirement_id"))
+        if requirement is None:
+            continue
+        question["state"] = "answered" if requirement.get("state") == "resolved" else "open"
+        question["supporting_card_ids"] = list(requirement.get("evidence_ids") or [])
+        question["missing_facts"] = "" if question["state"] == "answered" else str(
+            requirement.get("detail") or "Direct answer not established by retained evidence."
+        )
+
+
+def _sync_all_chapter_questions(job: BackgroundJob) -> None:
+    """Propagate cross-chapter prerequisite changes to every navigation view."""
+    for chapter in job.chapter_plan:
+        _sync_chapter_questions(chapter, job.evidence_requirements)
+
+
+def _refinement_card_binding(card: dict) -> str:
+    """Bind a carried refinement lead to its original content and scope."""
+    fields = ("id", "statement", "fields", "provenance", "source_ids", "context",
+              "claim_identity", "temporal_role", "evidence_status", "compatibility")
+    payload = {key: card.get(key) for key in fields}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _refine_open_chapter_coverage(
+    worker: "ThinkingWorker", job: BackgroundJob, chapter: dict, budget: ThinkingBudget,
+    cancelled: Callable[[], bool], *, requirements_by_chapter: dict,
+) -> None:
+    """Answer each still-open question on a small related card subset.
+
+    The batch coverage pass hands the model the whole chapter at once; a compact
+    model frequently cannot cite one specific answer across it. This mirrors how
+    a researcher works: for each open question, read a few of the most related
+    retained cards, decide whether they answer it even closely, and if not use
+    what those cards reveal to rephrase the question for the next pass. Only
+    ``apply_supported_coverage`` decides what counts as a supported answer; this
+    pass changes which cards the model sees and how many times it is asked.
+    """
+    from .thinking_coverage import (
+        MAX_REFINEMENT_CALLS_PER_CHAPTER as _MAX_CALLS,
+    )
+    from .thinking_coverage import (
+        MAX_REFINEMENT_CARDS as _MAX_CARDS,
+    )
+    from .thinking_coverage import (
+        MAX_REFINEMENT_ROUNDS as _MAX_ROUNDS,
+    )
+
+    eligible = report_card_ledger(job.fact_cards)
+    budget_calls = budget.state["stages"].get("chapter_coverage", {}).get("calls", 0)
+    remaining = max(0, STAGE_CALL_LIMITS["chapter_coverage"] - budget_calls)
+    chapter_items = requirements_by_chapter.get(chapter["id"], [])
+    open_reqs = [
+        item for item in chapter_items
+        if item.get("state") == "open" and not item.get("is_subject_identity")
+    ]
+    if not open_reqs:
+        return
+    open_reqs.sort(
+        key=lambda item: (
+            0 if item.get("importance") == "high" else 1 if item.get("importance") == "medium" else 2,
+            chapter_items.index(item),
+        ),
+    )
+    refined = chapter.setdefault("refined_requirements", {})
+    per_chapter_calls = int(chapter.get("refinement_calls", 0))
+    by_id = {str(card.get("id")): card for card in eligible}
+
+    def record_stop(identifier, reason):
+        progress = refined.setdefault(identifier, {})
+        seen = set(progress.get("seen_card_ids") or [])
+        limits = []
+        if int(progress.get("rounds_done", 0)) >= _MAX_ROUNDS:
+            limits.append("question_round_limit")
+        if per_chapter_calls >= _MAX_CALLS:
+            limits.append("chapter_call_limit")
+        if remaining <= 0:
+            limits.append("coverage_call_limit")
+        progress.update(
+            stop_reason=reason,
+            limits_at_stop=limits,
+            eligible_card_count=len(eligible),
+            unseen_eligible_card_count=sum(str(card.get("id")) not in seen for card in eligible),
+        )
+
+    for requirement in open_reqs:
+        identifier = requirement.get("identifier")
+        if cancelled():
+            record_stop(identifier, "cancelled")
+            continue
+        if not eligible:
+            record_stop(identifier, "no_eligible_cards")
+            continue
+        if remaining <= 0:
+            record_stop(identifier, "coverage_call_limit")
+            continue
+        if per_chapter_calls >= _MAX_CALLS:
+            record_stop(identifier, "chapter_call_limit")
+            continue
+        progress = refined.get(identifier) or {}
+        rounds_done = int(progress.get("rounds_done", 0))
+        if rounds_done >= _MAX_ROUNDS:
+            record_stop(identifier, "question_round_limit")
+            continue
+        seen_ids = set(progress.get("seen_card_ids", []))
+        stop_reason = "question_round_limit"
+        for round_no in range(rounds_done + 1, _MAX_ROUNDS + 1):
+            if cancelled():
+                stop_reason = "cancelled"
+                break
+            if remaining <= 0:
+                stop_reason = "coverage_call_limit"
+                break
+            if per_chapter_calls >= _MAX_CALLS:
+                stop_reason = "chapter_call_limit"
+                break
+            subset = refinement_subsample(
+                eligible, requirement, seen_ids=seen_ids, max_cards=_MAX_CARDS,
+            )
+            if not subset:
+                stop_reason = "no_candidate_cards"
+                break
+            # Carry a few original, unchanged partial leads from earlier
+            # windows; never treat model-authored close_facts as evidence.
+            bindings = progress.get("partial_bindings")
+            bindings = bindings if isinstance(bindings, dict) else {}
+            carry = [by_id[card_id] for card_id, binding in bindings.items()
+                     if card_id in by_id and _refinement_card_binding(by_id[card_id]) == binding][:4]
+            carry_aliases: dict[str, str] = {}
+            _chapter_evidence_packet(carry, max_chars=2_000, aliases=carry_aliases)
+            carry_ids = set(carry_aliases.values())
+            carry = [card for card in carry if card["id"] in carry_ids]
+            subset = [*carry, *(card for card in subset if card["id"] not in carry_ids)]
+            subset = subset[:_MAX_CARDS]
+            aliases: dict[str, str] = {}
+            packet = _chapter_evidence_packet(subset, max_chars=6_000, aliases=aliases)
+            shown_ids = set(aliases.values())
+            shown_cards = [card for card in subset if card.get("id") in shown_ids]
+            if not shown_cards:
+                stop_reason = "no_cards_fit_packet"
+                break
+            close_facts = list(progress.get("close_facts", []))
+            close_note = json.dumps(close_facts, ensure_ascii=True, separators=(",", ":"))
+            if not isinstance(close_note, str) or len(close_note) > 1_200:
+                close_note = ""
+            prompt = get_thinking_evidence_refinement_prompt(
+                job.snapshot.task, _fixed_scope_for_prompt(job.research_context),
+                str(requirement.get("question") or ""), packet,
+                round=round_no, close_facts=close_note,
+            )
+            if not budget.fits(
+                "chapter_coverage", system_prompt=prompt,
+                user_prompt=get_thinking_user_prompt("evidence_refinement"),
+                thinking_mode=False,
+            ):
+                job.record_stage_event("chapter_coverage", "refinement_skipped", "context_or_budget")
+                stop_reason = "context_or_budget"
+                break
+            try:
+                response = _budgeted_generate(
+                    worker, budget, "chapter_coverage", system_prompt=prompt,
+                    user_prompt=get_thinking_user_prompt("evidence_refinement"),
+                    temperature=0.0, cancel_check=cancelled,
+                    response_schema=None,  # the refinement contract is parsed locally
+                ) or ""
+            except (PromptOverflow, ModelBudgetExhausted):
+                job.record_stage_event("chapter_coverage", "refinement_skipped", "budget_or_context")
+                stop_reason = "context_or_budget"
+                break
+            except Exception:
+                worker._require_backend()
+                logger.warning(
+                    "Deep-think evidence refinement failed requirement=%s error_type=%s",
+                    identifier, "exception",
+                )
+                stop_reason = "model_error"
+                break
+            remaining = max(
+                0, STAGE_CALL_LIMITS["chapter_coverage"]
+                - budget.state["stages"].get("chapter_coverage", {}).get("calls", 0),
+            )
+            per_chapter_calls += 1
+            chapter["refinement_calls"] = per_chapter_calls
+            if cancelled():
+                stop_reason = "cancelled"
+                break
+            parsed = _parse_direct_json(response)
+            if not isinstance(parsed, dict):
+                job.record_stage_event("chapter_coverage", "refinement_unparsed", identifier)
+                stop_reason = "unparsed_response"
+                break
+            card_ids = parsed.get("card_ids")
+            if isinstance(card_ids, list):
+                decoded = [aliases.get(str(value), value) if isinstance(value, str) else value
+                           for value in card_ids]
+                parsed["card_ids"] = decoded
+            partial_ids = parsed.get("partial_card_ids")
+            partial_ids = [aliases.get(value, value) for value in partial_ids
+                           if isinstance(value, str)] if isinstance(partial_ids, list) else []
+            close_facts = parsed.get("close_facts")
+            if isinstance(close_facts, list):
+                close_facts = [str(value) for value in close_facts[:8]
+                               if isinstance(value, str) and value.strip()]
+                if close_facts:
+                    existing = set(progress.get("close_facts", []))
+                    close_facts = [value for value in close_facts
+                                   if value not in existing]
+                else:
+                    close_facts = None
+            else:
+                close_facts = None
+            rephrase = parsed.get("rephrased_question")
+            if isinstance(rephrase, str):
+                rephrase = rephrase.strip()[:300]
+            else:
+                rephrase = ""
+            answer_ids = parsed.get("card_ids")
+            answered = (parsed.get("answered") is True and isinstance(answer_ids, list)
+                        and bool(answer_ids) and all(isinstance(value, str) and value in shown_ids
+                                                     for value in answer_ids))
+            if answered:
+                requirement.pop("rephrased_question", None)
+                apply_supported_coverage(
+                    [requirement], eligible,
+                    {"answers": [{
+                        "question_id": identifier, "answered": True,
+                        "answer_kind": "evidence",
+                        "answer": str(parsed.get("answer") or parsed.get("text") or "")[:2000],
+                        "card_ids": parsed["card_ids"],
+                        "missing_facts": "",
+                    }]}, dependency_requirements=job.evidence_requirements,
+                )
+            else:
+                if rephrase:
+                    requirement["rephrased_question"] = rephrase
+                missing = parsed.get("missing_facts")
+                if isinstance(missing, str) and missing.strip():
+                    requirement["detail"] = "Missing facts: " + missing.strip()[:500]
+            partial_bindings = {card_id: _refinement_card_binding(by_id[card_id])
+                                for card_id in partial_ids
+                                if card_id in shown_ids and card_id in by_id}
+            seen_ids |= {str(card.get("id")) for card in shown_cards}
+            rounds_done += 1
+            refined[identifier] = {
+                "rounds_done": rounds_done,
+                "seen_card_ids": sorted(seen_ids),
+                # This is the retained eligible inventory, not a claim that
+                # unseen cards are relevant or absent from the batch review.
+                "eligible_card_count": len(eligible),
+                "unseen_eligible_card_count": sum(
+                    str(card.get("id")) not in seen_ids for card in eligible
+                ),
+                "partial_bindings": dict(list(partial_bindings.items())[:4]),
+                "close_facts": (progress.get("close_facts", []) + (close_facts or []))[:16],
+            }
+            progress = refined[identifier]  # refresh for the next round's close_facts
+            if requirement.get("state") == "resolved":
+                break
+        requirement["close_facts"] = refined.get(identifier, {}).get("close_facts", [])
+        if requirement.get("state") == "resolved":
+            refresh_coverage(
+                job.evidence_requirements,
+                job.fact_cards, job.extraction_state,
+            )
+            _sync_all_chapter_questions(job)
+            if not any(item is chapter for item in job.chapter_plan):
+                _sync_chapter_questions(chapter, job.evidence_requirements)
+            link_chapter_cards(job.fact_cards, job.chapter_plan)
+        record_stop(identifier, "answered" if requirement.get("state") == "resolved" else stop_reason)
 
 
 def _fallback_thinking_report(task: str, evidence: list[dict], findings: str, *, cards: list[dict] | None = None, job=None) -> str:
@@ -1499,9 +2451,58 @@ def _report_support_assessments(
     return issues
 
 
+_GLOBAL_EVIDENCE_SET = (
+    r"(?:(?:(?:supplied|provided|available|retained|cited)\s+)?(?:sources|evidence)"
+    r"|(?:supplied|provided|available|retained|cited|fact|source|evidence)[ -]+cards)"
+)
+_GLOBAL_EVIDENCE_ABSENCE_RE = re.compile(
+    # The cited packet is only a subset of the research. Neither passive nor
+    # active absence claims about the entire evidence set follow from it.
+    r"\b(?:not|never)\s+(?:\w+\s+){0,3}(?:in|by|from)\s+"
+    rf"(?:any\s+of\s+)?(?:the\s+)?{_GLOBAL_EVIDENCE_SET}\b"
+    rf"|\b(?:the\s+)?{_GLOBAL_EVIDENCE_SET}\b\s+"
+    r"(?:[^.!?\n]{0,160}?\bbut\s+(?:it|they)\s+)?"
+    r"(?:do\s+not|does\s+not|don't|doesn't|never|cannot|can't)\s+"
+    r"(?:provide|include|mention|specify|state|give|identify|name|contain|verify|confirm|"
+    r"establish|indicate|show|detail)\b",
+    re.I,
+)
+_SOURCE_ABSENCE_RE = re.compile(
+    r"\b(?:not|never)\s+(?:\w+\s+){0,3}(?:in|by|from)\s+"
+    r"(?:(?:the|this|these|those|cited|provided|supplied|available|retained)\s+)*sources?\b"
+    r"|\b(?:(?:the|this|these|those|cited|provided|supplied|available|retained)\s+)+sources?\s+"
+    r"(?:do\s+not|does\s+not|don't|doesn't|never|cannot|can't)\s+"
+    r"(?:provide|include|mention|specify|state|give|identify|name|contain|verify|confirm|"
+    r"establish|indicate|show|detail|list)\b",
+    re.I,
+)
+
+
+def _unproven_source_absence(report: str, cards: list[dict]) -> bool:
+    """An excerpt cannot prove a fact is absent from the whole source."""
+    cited = {value.strip() for match in _SOURCE_MARKER_RE.finditer(report)
+             for value in match[1].split(",")}
+    visible = _SOURCE_MARKER_RE.sub("", report)
+    statements = [str(card.get("statement") or "") for card in cards
+                  if not cited or card.get("id") in cited]
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", visible):
+        sentence = sentence.strip().lstrip("- ")
+        if _SOURCE_ABSENCE_RE.search(sentence) and not any(sentence in statement for statement in statements):
+            return True
+    return False
+
+
 def _deterministic_report_audit(report: str, cards: list[dict]) -> list[str]:
     """Check card integrity and field-aware copied values without model judgment."""
     issues = ["An invalid fact card was supplied to synthesis." for card in cards if validate_fact_card(card)]
+    # Audits may receive only a passage's cited cards, not the whole research
+    # corpus. Absence from that packet cannot establish absence from all sources.
+    if _GLOBAL_EVIDENCE_ABSENCE_RE.search(_SOURCE_MARKER_RE.sub("", report)):
+        issues.append("A passage cannot establish absence from all supplied sources using a partial source packet; "
+                      "remove the broad absence claim and retain only supported findings.")
+    if _unproven_source_absence(report, cards):
+        issues.append("A cited excerpt cannot establish absence from an entire source; "
+                      "remove the source-absence claim unless the source explicitly states it.")
     ledger = json.dumps(cards, ensure_ascii=True)
     for literal in re.findall(r"\b\d{4}-\d{2}-\d{2}\b", report):
         if literal not in ledger:
@@ -2012,8 +3013,38 @@ def _unbound_factual_paragraphs(report: str, cards: list[dict]) -> list[str]:
     return missing[:6]
 
 
+def _record_chapter_compaction(job: BackgroundJob) -> None:
+    """Expose per-chapter Tier-0 digest observability in the synthesis state.
+
+    Aggregates only: whether the all-cards digest was present, how many of the
+    chapter's selected cards it bound, and whether the writer core was ranked
+    by it. Aggregates only, never digest text (TODO-6).
+    """
+    compaction = {}
+    for chapter in job.chapter_plan:
+        evidence_digest = str(chapter.get("evidence_digest") or "")
+        cited_ids = chapter.get("evidence_digest_ids") or set()
+        if not evidence_digest:
+            compaction[str(chapter.get("id"))] = {
+                "digest_present": False,
+                "digest_card_count": 0,
+                "core_ranked_by_digest": False,
+            }
+            continue
+        compaction[str(chapter.get("id"))] = {
+            "digest_present": True,
+            "digest_card_count": len(cited_ids),
+            "core_ranked_by_digest": bool(cited_ids),
+        }
+    job.synthesis_state["compaction"] = compaction
+
+
 def _record_completion_metrics(job: BackgroundJob, report: str) -> None:
     """Persist and log aggregate investigation metrics without source/user content."""
+    from .thinking_trace import card_evidence_trace, question_evidence_trace
+
+    job.synthesis_state["question_evidence_trace"] = question_evidence_trace(job)
+    job.synthesis_state["card_evidence_trace"] = card_evidence_trace(job)
     source_states: dict[str, dict] = {}
     for artifact in job.artifacts.values():
         data = artifact.get("data") if isinstance(artifact, dict) else None
@@ -2101,6 +3132,8 @@ def _record_completion_metrics(job: BackgroundJob, report: str) -> None:
             "requirement_coverage": {
                 item["identifier"]: item.get("state") for item in job.evidence_requirements
             },
+            "compaction": job.synthesis_state.get("compaction", {}),
+            "summary_source": job.synthesis_state.get("summary_source", ""),
         }
     )
     job.report_audit["metrics"] = metrics
@@ -2162,11 +3195,11 @@ class ThinkingWorker:
             return True
         state = getattr(self.model, "_fulloch_backend_state", None)
         if state is not None:
-            deadline = time.monotonic() + 5.0
-            while state == "RECOVERING" and time.monotonic() < deadline:
-                time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
-                state = getattr(self.model, "_fulloch_backend_state", None)
             healthy = state == "READY"
+            process = getattr(self.model, "_fulloch_local_process", None)
+            if process is not None and process.poll() is not None:
+                # The exit watcher may not have changed READY yet.
+                healthy = False
             # A request timeout need not kill a healthy server. An explicit
             # resume may proceed once readiness is restored in the same process.
         else:
@@ -2526,8 +3559,19 @@ class ThinkingWorker:
             self._queue_source_group(job, {"id": chapter_title or "audit"}, cards, "audit", reason=fit_reason)
             return "", [], [f"[support; report; cards: unspecified] Indivisible verification packet: {fit_reason}."], ""
         diagnostics = job.synthesis_state.setdefault("passage_reviews", [])
-        review = {"original": original, "canonical_draft": raw_report, "repairs": [], "rejections": []}
+        review = {"original": original, "canonical_draft": raw_report, "repairs": [], "rejections": [],
+                  "passage_outcomes": []}
         diagnostics.append(review)
+
+        def record_outcome(ids, outcome, issues):
+            if len(review["passage_outcomes"]) >= 128:
+                review["passage_outcomes_truncated"] = True
+                return
+            review["passage_outcomes"].append({
+                "card_ids": sorted(ids), "outcome": outcome,
+                "reason_codes": sorted({match.group(1) if (match := re.match(r"\[([\w_-]{1,40});", issue))
+                                        else "validation" for issue in issues}),
+            })
         audit_response = ""
         audit_ledger = ledger
         audit_ok = False
@@ -2648,13 +3692,22 @@ class ThinkingWorker:
                 prose = _SOURCE_MARKER_RE.sub("", passage).strip().lstrip("- ")
                 if not any(prose == str(by_id[identifier].get("statement") or "") for identifier in ids if identifier in by_id):
                     issues.append(f"[support; P{index}; cards: {', '.join(sorted(ids))}] Factual support audit unavailable.")
+            if issues and allow_revision and len(review["repairs"]) == 0:
+                # One convergence round per audit pass that dispatches revisions;
+                # validation-only passes (allow_revision=False) never count.
+                job.synthesis_state["audit_revision_rounds"] = (
+                    int(job.synthesis_state.get("audit_revision_rounds", 0)) + 1
+                )
             if not issues:
+                record_outcome(ids, "accepted", [])
                 accepted.append(passage)
                 if audit_ok and passage_key not in validated:
                     validated.append(passage_key)
                 continue
             repaired = ""
-            if allow_revision and len(review["repairs"]) < max_repairs:
+            revision_rounds = int(job.synthesis_state.get("audit_revision_rounds", 0))
+            if (allow_revision and len(review["repairs"]) < max_repairs
+                    and revision_rounds < MAX_AUDIT_REVISION_ROUNDS):
                 # Include supporting and conflicting records intact; an unknown
                 # alias never silently selects unrelated evidence for recovery.
                 supporting = [card for card in cards if card["id"] in ids]
@@ -2725,6 +3778,7 @@ class ThinkingWorker:
             else:
                 rejected.extend(issues)
                 review["rejections"].append({"passage": index, "text": passage, "reasons": issues})
+            record_outcome(ids, "repaired" if repaired else "rejected", issues)
         # Conclusions have cross-passage dependencies. If any premise was removed,
         # do not publish a report-wide conclusion based on the original draft.
         if rejected:
@@ -2756,9 +3810,11 @@ class ThinkingWorker:
                         if item.get("chapter_id") == chapter.get("id")]
         if any(not item.get("is_subject_identity") for item in requirements):
             requirements = [item for item in requirements if not item.get("is_subject_identity")]
+        selection_trace = {}
         selected, selection_reasons = select_requirement_cards(
-            cards, requirements, source_registry=job.source_registry,
+            cards, requirements, source_registry=job.source_registry, selection_trace=selection_trace,
         )
+        job.synthesis_state.setdefault("chapter_selection_decisions", {})[str(chapter.get("id") or "")] = selection_trace
         # Retrieval links are inventory, not permission to bypass selection caps.
         # Explicit supporting IDs are already prioritised by the selector, which
         # also retains whole records and conflict peers beyond its soft caps.
@@ -3111,18 +4167,33 @@ class ThinkingWorker:
     ) -> tuple[str, str]:
         """Generate summary/conclusions from compact digests, then audit cited cards."""
         by_id = {str(card.get("id")): card for card in cards}
+        # Tier-0 all-cards digest (TODO-5): each chapter's Summary facts come
+        # from ``evidence_digest`` (the card-bound compaction of EVERY selected
+        # card) when present, falling back to the writer digest for fixtures
+        # and empty-digest degradation. The *allowed* citation set is the
+        # code-side ``evidence_digest_ids`` the digest builder returned
+        # (deterministic) when present, else the marker ids re-parsed from the
+        # writer digest (today's behavior).
         digest_rows = []
         digest_ids: set[str] = set()
         for chapter in job.chapter_plan:
-            digest = str(chapter.get("digest") or "").strip()
+            evidence_digest = str(chapter.get("evidence_digest") or "").strip()
+            digest = evidence_digest or str(chapter.get("digest") or "").strip()
             if not digest:
                 continue
-            supporting = {
-                value.strip() for text in (digest,)
-                for match in _SOURCE_MARKER_RE.finditer(text)
-                for value in match[1].split(",")
-                if value.strip() in by_id
-            }
+            stored_ids = chapter.get("evidence_digest_ids")
+            if evidence_digest and stored_ids is not None:
+                supporting = {
+                    str(identifier) for identifier in stored_ids
+                    if str(identifier) in by_id
+                }
+            else:
+                supporting = {
+                    value.strip() for text in (digest,)
+                    for match in _SOURCE_MARKER_RE.finditer(text)
+                    for value in match[1].split(",")
+                    if value.strip() in by_id
+                }
             if not supporting:
                 continue
             digest_ids.update(supporting)
@@ -3187,6 +4258,20 @@ class ThinkingWorker:
                 "fingerprint": fingerprint, "state": state,
                 "summary": summary_value, "conclusions": conclusions_value,
             }
+            # TODO-6: which material the Summary was built from. "evidence_digest"
+            # when every contributing chapter had a Tier-0 digest; "writer_digest"
+            # when the writer digest was the source; "digest_fallback" when the
+            # Summary itself is the deterministic fallback.
+            if state == "digest_fallback":
+                summary_source = "digest_fallback"
+            elif all(str(chapter.get("evidence_digest") or "").strip()
+                     for chapter in job.chapter_plan
+                     if str(chapter.get("digest") or "").strip()
+                     or str(chapter.get("evidence_digest") or "").strip()):
+                summary_source = "evidence_digest"
+            else:
+                summary_source = "writer_digest"
+            job.synthesis_state["summary_source"] = summary_source
             return summary_value, conclusions_value
 
         if not digest_rows:
@@ -3256,23 +4341,34 @@ class ThinkingWorker:
                 and bool(parsed.get("summary", "").strip())
             )
 
+        def fallback_summary() -> str:
+            # Deterministic summary from the all-cards digests (Tier-0) when
+            # present, else the writer digests (today's behavior).
+            return _concise_summary(_clean_report_block(
+                "\n\n".join(
+                    _fallback_summary_text(chapter) for chapter in job.chapter_plan
+                )
+            ))
+
         if cancelled():
             save_result(
-                _clean_report_block("\n\n".join(row["digest"] for row in digest_rows)),
+                _clean_report_block(
+                    "\n\n".join(_fallback_summary_text(chapter) for chapter in job.chapter_plan),
+                ),
                 "", "digest_fallback",
             )
             return "", ""
         if not valid:
             # Chapter digests have already passed source-card audits; they are a
             # safe deterministic summary, while unsupported conclusions stay out.
-            summary = _concise_summary(_clean_report_block("\n\n".join(row["digest"] for row in digest_rows)))
+            summary = fallback_summary()
             conclusions = ""
             job.synthesis_state["final_assembly_state"] = "digest_fallback"
         else:
             summary = _clean_report_block(parsed["summary"])
             conclusions = _clean_report_block(parsed["conclusions"])
             if re.search(r"\(C\d+(?:[,;\s]+C\d+)*\)", summary + conclusions):
-                summary = _concise_summary(_clean_report_block("\n\n".join(row["digest"] for row in digest_rows)))
+                summary = fallback_summary()
                 conclusions = ""
                 job.synthesis_state["final_assembly_state"] = "digest_fallback"
             else:
@@ -3284,7 +4380,7 @@ class ThinkingWorker:
             for value in match[1].split(",")
         }
         if not (final_ids & digest_ids):
-            summary = _concise_summary(_clean_report_block("\n\n".join(row["digest"] for row in digest_rows)))
+            summary = fallback_summary()
             conclusions = ""
             final_ids = {
                 value.strip() for match in _SOURCE_MARKER_RE.finditer(summary)
@@ -3316,7 +4412,9 @@ class ThinkingWorker:
         )
         if cancelled():
             save_result(
-                _clean_report_block("\n\n".join(row["digest"] for row in digest_rows)),
+                _clean_report_block(
+                    "\n\n".join(_fallback_summary_text(chapter) for chapter in job.chapter_plan),
+                ),
                 "", "digest_fallback",
             )
             return "", ""
@@ -3338,7 +4436,9 @@ class ThinkingWorker:
         # digests or manufacture a report-wide conclusion.
         job.synthesis_state["final_assembly_audit"] = "digest_fallback"
         return save_result(
-            _clean_report_block("\n\n".join(row["digest"] for row in digest_rows)),
+            _clean_report_block(
+                "\n\n".join(_fallback_summary_text(chapter) for chapter in job.chapter_plan),
+            ),
             "", "digest_fallback",
         )
 
@@ -3353,8 +4453,10 @@ class ThinkingWorker:
         # Refresh checks before writing or reusing any cached chapter output.
         self._constraint_audit(job, cards)
         constraint_checks = self._constraint_prompt_context(job)
+        selection_trace = {}
         selected_global, reasons = select_requirement_cards(
             cards, job.evidence_requirements, source_registry=job.source_registry,
+            selection_trace=selection_trace,
         )
         conflict_keys = {_conflict_scope_key(card) for card in selected_global
                          if card.get("evidence_status") == "conflicted"}
@@ -3366,7 +4468,9 @@ class ThinkingWorker:
 
         job.synthesis_state.update({
             "selection_reasons": reasons,
+            "selection_decisions": selection_trace,
             "chapter_card_ids": {},
+            "chapter_selection_decisions": {},
             "overflow_retries": int(job.synthesis_state.get("overflow_retries", 0)),
         })
         delivered_card_ids: set[str] = set()
@@ -3436,6 +4540,19 @@ class ThinkingWorker:
                             if item.get("chapter_id") == chapter["id"] and not item.get("is_subject_identity")]
             if not requirements:
                 requirements = [item for item in job.evidence_requirements if item.get("chapter_id") == chapter["id"]]
+            # Refine still-open questions on small card subsets before the
+            # batch chapter-analysis pass. The batch pass hands the model the
+            # whole chapter at once; a compact model frequently cannot cite one
+            # specific answer across it. Running refinement first means the
+            # shared synthesis time budget is still available (a placement at
+            # the end of the chapter block is denied as
+            # insufficient_generation_time once analysis + the audit/revision
+            # loop have elapsed), and any requirement the refinement resolves
+            # here carries evidence_ids that the writer below can cite.
+            self._refine_open_chapter_coverage(
+                job, chapter, budget, cancelled,
+                requirements_by_chapter={chapter["id"]: requirements},
+            )
             compact_facts, extraction_disagreements, extraction_missing = self._extract_chapter_cards(
                 job, chapter, chapter_cards, budget, cancelled, chapter_extraction_call_limit,
             )
@@ -3455,6 +4572,34 @@ class ThinkingWorker:
                     "state": item.get("state"), "missing_facts": missing_facts,
                 })
             questions = json.dumps(chapter_questions, ensure_ascii=True, separators=(",", ":"))
+            # Tier-0 all-cards digest (TODO-1/TODO-4): one bounded chapter_digest
+            # call over EVERY selected card, cached by a fingerprint of card ids
+            # plus questions (the chapter's card set is fixed once selected).
+            # ``evidence_digest``/``evidence_digest_ids`` persist on the chapter
+            # so the core builder (TODO-3) and the Summary (TODO-5) reuse the
+            # result without recomputation. A failed/absent digest degrades to
+            # today's behavior: empty text, empty cited set.
+            digest_fingerprint = hashlib.sha256(json.dumps({
+                "card_ids": [card.get("id") for card in chapter_cards],
+                "questions": questions,
+                "scope": _fixed_scope_for_prompt(job.research_context),
+            }, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            cached_digest = chapter.get("evidence_digest_cache") or {}
+            if cached_digest.get("fingerprint") == digest_fingerprint:
+                chapter["evidence_digest"] = cached_digest.get("text", "")
+                chapter["evidence_digest_ids"] = sorted(set(cached_digest.get("ids") or ()))
+            else:
+                evidence_digest_text, evidence_digest_ids = _chapter_evidence_digest(
+                    self, job, chapter, chapter_cards, questions,
+                    budget=budget, cancelled=cancelled,
+                )
+                chapter["evidence_digest"] = evidence_digest_text
+                chapter["evidence_digest_ids"] = sorted(evidence_digest_ids)
+                chapter["evidence_digest_cache"] = {
+                    "fingerprint": digest_fingerprint,
+                    "text": evidence_digest_text,
+                    "ids": sorted(evidence_digest_ids),
+                }
             contract_fingerprint = hashlib.sha256(json.dumps({
                 "task": job.snapshot.task, "scope": _fixed_scope_for_prompt(job.research_context),
                 "constraints": constraint_checks,
@@ -3534,14 +4679,28 @@ class ThinkingWorker:
             analysis_chunks: list[list[dict]] = []
             pending_chunk: list[dict] = []
 
+            # Tier-1 verbatim core (TODO-3): the Tier-0 digest's card-bound set
+            # ranks strictly first in every writer packet, so the distinct
+            # load-bearing figures named by the digest lead the packet instead
+            # of the near-duplicate quote rows that sort first in selection
+            # order (Test 1 failure mode). An empty set (no digest) preserves
+            # today's first-fit selection order. Bound once per chapter, before
+            # the chunk loop, so the stable sort below keeps selection order
+            # within each group.
+            cited_core_ids = set(chapter.get("evidence_digest_ids") or ())
+
+            def _core_rank(_card, _cited=cited_core_ids) -> int:
+                return 0 if str(_card.get("id")) in _cited else 1
+
             def writer_prompt(
                 chunk, correction="", *, chapter=chapter, requirements=requirements,
                 compact_facts=compact_facts,
                 extraction_disagreements=extraction_disagreements,
                 extraction_missing=extraction_missing, questions=questions,
             ):
+                ordered_chunk = sorted(chunk, key=_core_rank)
                 packet = self._source_packet(
-                    job, chunk,
+                    job, ordered_chunk,
                     requirement_ids=[item["identifier"] for item in requirements],
                     reasons=job.synthesis_state.get("selection_reasons", {}),
                 )
@@ -3980,6 +5139,7 @@ class ThinkingWorker:
                 item["id"] for item in job.chapter_plan if item.get("body")
             ]
             job.synthesis_state["partial_report"] = True
+            _record_chapter_compaction(job)
             self.jobs.checkpoint(job)
 
         if cancelled():
@@ -4014,6 +5174,7 @@ class ThinkingWorker:
         # A summary intentionally overlaps its chapters. Deduplicating against
         # it used to erase the only substantive body from a partial report.
         summary = _clean_report_block(summary)
+        summary = _bound_cited_summary(summary)
         conclusions = _clean_report_block(conclusions)
         if not summary:
             safe_chapter_material = "\n\n".join(
@@ -4033,8 +5194,17 @@ class ThinkingWorker:
         report_parts = []
         rendered_chapters = []
         title_counts: dict[str, int] = {}
+        # Cross-chapter dedup: a passage already delivered by an earlier chapter
+        # is dropped from a later chapter's body. The summary intentionally
+        # overlaps its chapters and is NOT seeded here (deduping against it used
+        # to erase the only substantive body from a partial report); only
+        # chapter-to-chapter restatement is removed.
+        seen_passages: set[str] = set()
         for chapter in job.chapter_plan:
             body = _clean_report_block(chapter.get("body", ""))
+            if not body:
+                continue
+            body = _dedup_chapter_passages(seen_passages, body)
             if not body:
                 continue
             body_ids = {value.strip() for match in _SOURCE_MARKER_RE.finditer(body)
@@ -4107,6 +5277,15 @@ class ThinkingWorker:
         job.report_bindings = bindings
         _record_synthesis_omissions(job)
         return clean.strip(), bindings
+
+    def _refine_open_chapter_coverage(
+        self, job: BackgroundJob, chapter: dict, budget: ThinkingBudget,
+        cancelled: Callable[[], bool], *, requirements_by_chapter: dict,
+    ) -> None:
+        _refine_open_chapter_coverage(
+            self, job, chapter, budget, cancelled,
+            requirements_by_chapter=requirements_by_chapter,
+        )
 
     def _synthesise(
         self, job: BackgroundJob, cards: list[dict], budget: ThinkingBudget,
@@ -4617,7 +5796,51 @@ class ThinkingWorker:
         self.jobs.checkpoint(job)
         return report, job.state
 
-    def run(self, job: BackgroundJob, cancelled: Callable[[], bool]) -> tuple[str, str]:
+    def run(
+        self, job: BackgroundJob, cancelled: Callable[[], bool], *,
+        retained_assessment_only: bool = False,
+    ) -> tuple[str, str]:
+        """Resume bounded, checkpointed work only after backend readiness."""
+        self._active_job = job
+        while True:
+            if cancelled():
+                return "", job.state
+            try:
+                return self._run_once(job, cancelled, retained_assessment_only=retained_assessment_only)
+            except RemoteUnreachable as exc:
+                if cancelled():
+                    return "", job.state
+                self._checkpoint_backend_loss(exc)
+                limits = job.synthesis_state.setdefault("backend_recovery_limits", {
+                    "attempts": 0, "deadline_epoch": time.time() + BACKEND_RECOVERY_SECONDS,
+                })
+                job.synthesis_state.setdefault("backend_failure_stage", job.stage)
+                if limits["attempts"] >= BACKEND_RECOVERY_RETRIES:
+                    raise
+                limits["attempts"] += 1
+                job.stage = "Waiting for research backend recovery"
+                self.jobs.checkpoint(job)
+                # Resuming without a durable boundary could lose accepted work
+                # and replay actions after a process restart.
+                if job.checkpoint_error:
+                    raise
+                deadline = limits["deadline_epoch"]
+                while not cancelled() and time.time() < deadline:
+                    if self._backend_health_check(job):
+                        if job.checkpoint_error:
+                            raise exc
+                        break
+                    time.sleep(min(BACKEND_RECOVERY_POLL_SECONDS, max(0.0, deadline - time.time())))
+                else:
+                    if cancelled():
+                        return "", job.state
+                    raise
+
+    def _run_once(
+        self, job: BackgroundJob, cancelled: Callable[[], bool], *,
+        retained_assessment_only: bool = False,
+    ) -> tuple[str, str]:
+        """Run research, or reassess retained cards before an offline replay."""
         self._active_job = job
         if not self._backend_health_check(job):
             raise RemoteUnreachable("Research backend did not pass its bounded recovery health check")
@@ -4695,10 +5918,11 @@ class ThinkingWorker:
         )
         budget = ThinkingBudget(self.model, job.model_budget, self.context_tokens,
                                 availability_check=self._require_backend)
-        job.fact_cards = build_fact_cards(
-            job.evidence, job.artifacts, job.snapshot.task, job.research_context,
-            source_registry=job.source_registry, extraction_state=job.extraction_state,
-        )
+        if not retained_assessment_only:
+            job.fact_cards = build_fact_cards(
+                job.evidence, job.artifacts, job.snapshot.task, job.research_context,
+                source_registry=job.source_registry, extraction_state=job.extraction_state,
+            )
         if not job.chapter_plan:
             self._update_stage(job, "Planning research")
             plan_prompt = get_thinking_chapter_plan_prompt(
@@ -4716,7 +5940,10 @@ class ThinkingWorker:
                     "completed_foreground_steps": job.foreground_steps,
                     "retained_evidence": [{"tool": entry["tool"], "status": entry["status"],
                                            "scope": entry["scope"]} for entry in job.evidence],
-                }, ensure_ascii=True, separators=(",", ":")) if job.evidence or job.foreground_steps else "",
+                    "recent_conversation_unverified": _planning_conversation(
+                        job.snapshot.conversation, job.snapshot.task,
+                    ),
+                }, ensure_ascii=True, separators=(",", ":")),
             )
             planned = None
             plan_response = ""
@@ -4799,11 +6026,19 @@ class ThinkingWorker:
                 job.synthesis_state["chapter_planning"] = "deterministic_fallback"
             else:
                 job.synthesis_state["chapter_planning"] = "structured"
+                parsed_plan = _parse_direct_json(plan_response)
+                title = parsed_plan.get("report_title") if isinstance(parsed_plan, dict) else None
+                if isinstance(title, str):
+                    title = " ".join(title.split()).strip(" #*`\"'")
+                    if title and len(title) <= 160 and not is_unresolved_task_reference(title):
+                        job.title = title
             job.chapter_plan = planned
             job.evidence_requirements = chapter_requirements(
                 job.chapter_plan, job.snapshot.task, job.research_context,
             )
             job.planning_complete = True
+            if job.title:
+                self._update_stage(job, "Planning research")
         else:
             job.planning_complete = True
             if not job.evidence_requirements:
@@ -4817,7 +6052,9 @@ class ThinkingWorker:
             # conservatively while retaining the new decision counter durably.
             chapter.setdefault("research_decisions", int(chapter.get("research_calls", 0)))
         if needs_subject_resolution(job.research_context):
-            apply_subject_candidates(job.research_context, [], job.fact_cards)
+            apply_subject_candidates(
+                job.research_context, [], job.fact_cards, source_registry=job.source_registry,
+            )
             identity_question = next((question for chapter in job.chapter_plan for question in chapter["questions"]
                                       if question.get("source_requirement_id") == "subject-identity"), None)
             if identity_question is None:
@@ -4868,6 +6105,7 @@ class ThinkingWorker:
         needs_input = None
         active_requirement = None
         active_chapter = None
+        active_selection_reason = ""
 
         def normalise_action(name, args, kwargs):
             schema = self.registry._schemas.get(name or "")
@@ -4898,53 +6136,56 @@ class ThinkingWorker:
                 job.tool_budget_exhausted = True
                 return None
             gaps = _fallback_open_gaps(job)
-            if needs_subject_resolution(job.research_context) and job.research_context.get("subject_resolution", {}).get("state") != "resolved":
-                gaps = [pair for pair in gaps if pair[0].get("is_subject_identity")]
             if not gaps:
                 return None
             priority = {"high": 3, "medium": 2, "low": 1}
-            requirement, chapter = max(
-                gaps,
+            identity_open = needs_subject_resolution(job.research_context) and (
+                job.research_context.get("subject_resolution") or {}
+            ).get("state") != "resolved"
+            ordered_gaps = sorted(
+                gaps, reverse=True,
                 key=lambda pair: (
+                    bool(identity_open and pair[0].get("is_subject_identity")),
                     priority.get(pair[0].get("importance"), 1),
                     -job.chapter_plan.index(pair[1]),
                 ),
             )
-            candidates = []
-            if "external_information" in chapter.get("tools", []):
-                candidates.append("external_information")
-            candidates.extend(
-                playbook.fallback_capability for playbook in playbooks
-                if playbook.fallback_capability in chapter.get("tools", [])
-            )
-            targeted_query = searchable_gap_query(job.snapshot.task, requirement)
-            for name in dict.fromkeys(candidates):
-                if name not in capabilities or name in exhausted_capabilities:
-                    continue
-                if capability_calls.get(name, 0) >= effective_capability_call_limit(
-                    name, job.action_selections, MAX_THINKING_CAPABILITY_CALLS
-                ):
-                    continue
-                schema = self.registry._schemas.get(name)
-                if schema is None:
-                    continue
-                required = sum(param.required for param in schema.params)
-                if name == "external_information" and schema.params:
-                    args = [targeted_query]
-                elif required == 0:
-                    args = []
-                elif required == 1:
-                    args = [targeted_query]
-                else:
-                    continue
-                previous_requirement, previous_chapter = active_requirement, active_chapter
-                active_requirement, active_chapter = requirement, chapter
-                args, argument_error = normalise_action(name, args, {})
-                active_requirement, active_chapter = previous_requirement, previous_chapter
-                if argument_error or args is None:
-                    continue
-                if _thinking_action_key(name, args) not in attempted_actions:
-                    return name, args, chapter, requirement
+            for requirement, chapter in ordered_gaps:
+                candidates = []
+                if "external_information" in chapter.get("tools", []):
+                    candidates.append("external_information")
+                candidates.extend(
+                    playbook.fallback_capability for playbook in playbooks
+                    if playbook.fallback_capability in chapter.get("tools", [])
+                )
+                targeted_query = searchable_gap_query(job.snapshot.task, requirement)
+                for name in dict.fromkeys(candidates):
+                    if name not in capabilities or name in exhausted_capabilities:
+                        continue
+                    if capability_calls.get(name, 0) >= effective_capability_call_limit(
+                        name, job.action_selections, MAX_THINKING_CAPABILITY_CALLS
+                    ):
+                        continue
+                    schema = self.registry._schemas.get(name)
+                    if schema is None:
+                        continue
+                    required = sum(param.required for param in schema.params)
+                    if name == "external_information" and schema.params:
+                        args = [targeted_query]
+                    elif required == 0:
+                        args = []
+                    elif required == 1:
+                        args = [targeted_query]
+                    else:
+                        continue
+                    previous_requirement, previous_chapter = active_requirement, active_chapter
+                    active_requirement, active_chapter = requirement, chapter
+                    args, argument_error = normalise_action(name, args, {})
+                    active_requirement, active_chapter = previous_requirement, previous_chapter
+                    if argument_error or args is None:
+                        continue
+                    if _thinking_action_key(name, args) not in attempted_actions:
+                        return name, args, chapter, requirement
             return None
 
         def observe(label, text):
@@ -5025,6 +6266,7 @@ class ThinkingWorker:
                 job.action_selections, tool=name, args=args, requirement=requirement
             )
             job.action_selections[-1]["chapter_id"] = active_chapter.get("id") if active_chapter else ""
+            job.action_selections[-1]["scheduling_reason"] = active_selection_reason or "fallback"
             job.action_selections[-1]["progress_before"] = {
                 "coverage": sorted(prior_covered),
                 "synthesized": sorted({identifier for chapter in job.chapter_plan
@@ -5262,16 +6504,68 @@ class ThinkingWorker:
             for chapter in job.chapter_plan
         }
 
+        def review_survey(*, force: bool = False) -> None:
+            """One bounded review of early evidence; never replace the original plan."""
+            if (retained_assessment_only or not is_broad_analysis(job.snapshot.task)
+                    or job.synthesis_state.get("survey_review") or cancelled()):
+                return
+            threshold = min(3, max(1, len(job.chapter_plan)))
+            if sum(capability_calls.values()) < (1 if force else threshold):
+                return
+            cards = report_card_ledger(job.fact_cards)
+            if not cards:
+                return
+            state = job.synthesis_state["survey_review"] = {"state": "attempted", "added": []}
+            self.jobs.checkpoint(job)
+            chapters = [{"id": chapter["id"], "title": chapter["title"],
+                         "questions": [row.get("question") for row in chapter.get("questions", [])]}
+                        for chapter in job.chapter_plan]
+            prompt = get_thinking_survey_review_prompt(
+                job.snapshot.task, _fixed_scope_for_prompt(job.research_context),
+                json.dumps(_planning_conversation(job.snapshot.conversation, job.snapshot.task)),
+                json.dumps(chapters), _chapter_evidence_packet(cards, max_chars=4000),
+            )
+            schema = {"type": "object", "properties": {"questions": {"type": "array", "maxItems": 2,
+                "items": {"type": "object", "properties": {
+                    "chapter_id": {"type": "string", "enum": [chapter["id"] for chapter in job.chapter_plan]},
+                    "question": {"type": "string", "maxLength": 180},
+                    "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "query": {"type": "string", "maxLength": 120},
+                }, "required": ["chapter_id", "question", "priority", "query"]}}}, "required": ["questions"]}
+            try:
+                response = _budgeted_generate(
+                    self, budget, "planning", system_prompt=prompt,
+                    user_prompt=get_thinking_user_prompt("survey_review"), response_schema=schema,
+                    temperature=0.0, cancel_check=cancelled,
+                ) or ""
+            except (PromptOverflow, ModelBudgetExhausted):
+                state["state"] = "budget_or_context"
+                return
+            except Exception as exc:
+                self._require_backend()
+                state.update(state="model_error", error_type=type(exc).__name__)
+                return
+            parsed = _parse_direct_json(response)
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("questions"), list):
+                state["state"] = "invalid_output"
+                return
+            additions = _apply_survey_questions(job, parsed["questions"])
+            for item in additions:
+                requirements_by_chapter[item["chapter_id"]].append(item)
+            for section in job.section_plan:
+                section["requirement_ids"] = [item["identifier"] for item in
+                                              requirements_by_chapter.get(section["id"], [])]
+            state.update(state="completed", added=[item["identifier"] for item in additions])
+            self.jobs.checkpoint(job)
+
         def judge_chapter_coverage(chapter: dict) -> None:
             """Verify direct answers with evidence IDs, not keyword overlap."""
             self._require_backend()
             if (job.research_context.get("subject_resolution") or {}).get("state") == "resolved":
                 self._review_source_documents(job, budget, cancelled)
-            chapter_reqs = requirements_by_chapter.get(chapter["id"], [])
-            if needs_subject_resolution(job.research_context) and (
-                job.research_context.get("subject_resolution") or {}
-            ).get("state") != "resolved":
-                chapter_reqs = [item for item in chapter_reqs if item.get("is_subject_identity")]
+            chapter_reqs = _coverage_requirements_for_scope(
+                requirements_by_chapter.get(chapter["id"], []), job.research_context,
+            )
             eligible = report_card_ledger(job.fact_cards)
             if not chapter_reqs or not eligible:
                 refresh_coverage(job.evidence_requirements, job.fact_cards, job.extraction_state)
@@ -5289,7 +6583,7 @@ class ThinkingWorker:
                                     and card["id"] not in preferred_ids)]
             if not ordered:
                 job.record_stage_event("chapter_coverage", "evidence_omission", "no_question_eligible_cards")
-                refresh_coverage(chapter_reqs, job.fact_cards, job.extraction_state)
+                refresh_coverage(job.evidence_requirements, job.fact_cards, job.extraction_state)
                 return
             questions = json.dumps([{
                 "question_id": item["identifier"], "question": item["question"],
@@ -5307,6 +6601,15 @@ class ThinkingWorker:
                           for card in ordered],
             }, sort_keys=True, default=str).encode()).hexdigest()
             if chapter.get("batch_assessment_fingerprint") == assessment_fingerprint:
+                # The batch fingerprint only proves the whole-set assessment ran.
+                # A compact model can still lack the per-question evidence links,
+                # so the refinement pass below must be able to run on resume.
+                self._refine_open_chapter_coverage(
+                    job, chapter, budget, cancelled,
+                    requirements_by_chapter={chapter["id"]: chapter_reqs},
+                )
+                refresh_coverage(job.evidence_requirements, job.fact_cards, job.extraction_state)
+                _sync_all_chapter_questions(job)
                 return
             # This limit is characters, not tokens. Still check the complete
             # request against the actual context budget below.
@@ -5369,15 +6672,18 @@ class ThinkingWorker:
                              and all(identifier in shown_ids for identifier in row["card_ids"]
                                      if isinstance(identifier, str))]
                 resolution = apply_subject_candidates(
-                    job.research_context, proposals, job.fact_cards,
+                    job.research_context, proposals, job.fact_cards, source_registry=job.source_registry,
                 )
                 for item in job.evidence_requirements:
                     item["subject_resolution"] = resolution
                     if item.get("is_subject_identity"):
                         if resolution["state"] == "resolved":
+                            identity_text = f"{resolution['name']} — {resolution['date']}"
+                            if resolution.get("date_scope") == "event_window_boundary":
+                                identity_text += " (event-window boundary; not necessarily the race or start date)"
                             item.update(state="resolved", answer_coverage="evidence_scoped",
                                         evidence_ids=resolution["card_ids"], accepted_answer={
-                                            "text": f"{resolution['name']} — {resolution['date']}",
+                                            "text": identity_text,
                                             "supporting_card_ids": resolution["card_ids"],
                                         })
                         else:
@@ -5386,22 +6692,20 @@ class ThinkingWorker:
                 chapter_reqs_to_assess = [item for item in chapter_reqs if not item.get("is_subject_identity")]
             else:
                 chapter_reqs_to_assess = chapter_reqs
-            apply_supported_coverage(chapter_reqs_to_assess, shown_cards, parsed)
+            apply_supported_coverage(
+                chapter_reqs_to_assess, shown_cards, parsed,
+                dependency_requirements=job.evidence_requirements,
+            )
             apply_reasoned_coverage(chapter_reqs, parsed)
-            refresh_coverage(chapter_reqs, job.fact_cards, job.extraction_state)
-            for question in chapter.get("questions", []):
-                requirement = next((item for item in chapter_reqs
-                                    if item.get("identifier") == question.get("requirement_id")), None)
-                if requirement is None:
-                    continue
-                question["state"] = "answered" if requirement.get("state") == "resolved" else "open"
-                question["supporting_card_ids"] = list(requirement.get("evidence_ids") or [])
-                question["missing_facts"] = "" if question["state"] == "answered" else str(
-                    requirement.get("detail") or "Direct answer not established by retained evidence."
-                )
+            refresh_coverage(job.evidence_requirements, job.fact_cards, job.extraction_state)
+            _sync_all_chapter_questions(job)
             chapter["coverage_checked"] = True
             assign_batch_findings(chapter, chapter_reqs, shown_cards, parsed)
             link_chapter_cards(job.fact_cards, job.chapter_plan)
+            self._refine_open_chapter_coverage(
+                job, chapter, budget, cancelled,
+                requirements_by_chapter={chapter["id"]: chapter_reqs},
+            )
 
         def save_supported_subsection(chapter):
             """Save checked useful facts while independent questions remain open."""
@@ -5480,10 +6784,14 @@ class ThinkingWorker:
                 if all(item.get("state") == "resolved"
                        for item in requirements_by_chapter.get(chapter["id"], [])):
                     chapter["state"] = "research_complete"
-                save_supported_subsection(chapter)
-                finish_batch_progress(chapter)
+                if not retained_assessment_only:
+                    save_supported_subsection(chapter)
+                    finish_batch_progress(chapter)
 
-        priority_weight = {"high": 3, "medium": 2, "low": 1}
+        if retained_assessment_only:
+            return "", findings
+
+        question_decisions = job.synthesis_state.setdefault("question_research_decisions", {})
         while sum(capability_calls.values()) < MAX_THINKING_TOOL_CALLS:
             self._require_backend()
             if cancelled():
@@ -5492,48 +6800,47 @@ class ThinkingWorker:
             _recover_retained_evidence(job)
             for chapter in job.chapter_plan:
                 if (chapter.get("state") not in {"research_complete", "analyzed"}
-                        and int(chapter.get("research_decisions", 0)) >= MAX_CHAPTER_RESEARCH_DECISIONS
+                        and int(chapter.get("research_decisions", 0)) >= _chapter_research_decision_limit(
+                            chapter, job.evidence_requirements)
                         and any(item.get("state") == "open"
                                 for item in requirements_by_chapter.get(chapter["id"], []))):
                     chapter["state"] = "research_complete"
                     chapter["research_note"] = (
-                        f"Chapter decision allowance reached ({MAX_CHAPTER_RESEARCH_DECISIONS}); "
+                        f"Chapter decision allowance reached ({_chapter_research_decision_limit(chapter, job.evidence_requirements)}); "
                         "remaining questions are reported as open."
+                    )
+                    job.record_stage_event(
+                        "chapter_research", "skipped", "chapter_decision_limit",
+                        record_ids=[item["identifier"] for item in requirements_by_chapter.get(chapter["id"], [])
+                                    if item.get("state") == "open"],
                     )
                     observe("worker", f"{chapter['title']}: {chapter['research_note']}")
             active_chapters = [chapter for chapter in job.chapter_plan
                                if chapter.get("state") not in {"research_complete", "analyzed"}
-                               and int(chapter.get("research_decisions", 0)) < MAX_CHAPTER_RESEARCH_DECISIONS
+                               and int(chapter.get("research_decisions", 0)) < _chapter_research_decision_limit(
+                                   chapter, job.evidence_requirements)
                                and any(item.get("state") == "open"
                                         for item in requirements_by_chapter.get(chapter["id"], []))]
-            if needs_subject_resolution(job.research_context) and (
-                job.research_context.get("subject_resolution") or {}
-            ).get("state") != "resolved":
-                active_chapters = [chapter for chapter in active_chapters if any(
-                    item.get("is_subject_identity") for item in requirements_by_chapter.get(chapter["id"], []))]
+            active_chapters = _prioritize_identity_chapters(
+                active_chapters, requirements_by_chapter, job.research_context,
+            )
             if not active_chapters:
+                previous_count = len(job.evidence_requirements)
+                review_survey(force=True)
+                if len(job.evidence_requirements) > previous_count:
+                    continue
                 break
-            active_chapter = max(
-                active_chapters,
-                key=lambda chapter: (
-                    any(item.get("is_subject_identity") and item.get("state") != "resolved"
-                        for item in requirements_by_chapter.get(chapter["id"], [])),
-                    priority_weight.get(chapter.get("priority"), 1)
-                    / (1 + int(chapter.get("research_decisions", 0))),
-                    -job.chapter_plan.index(chapter),
-                ),
-            )
-            chapter_requirements_open = [item for item in requirements_by_chapter[active_chapter["id"]]
-                                          if item.get("state") == "open"]
-            if any(item.get("is_subject_identity") for item in chapter_requirements_open):
-                chapter_requirements_open = [item for item in chapter_requirements_open if item.get("is_subject_identity")]
-            if not chapter_requirements_open:
-                active_chapter["state"] = "research_complete"
-                continue
-            active_requirement = max(
-                chapter_requirements_open,
-                key=lambda item: (bool(item.get("is_subject_identity")), priority_weight.get(item.get("importance"), 1)),
-            )
+            target = _research_target(active_chapters, job.evidence_requirements,
+                                      job.action_selections, question_decisions)
+            if target is None:
+                blocked = [item["identifier"] for item in job.evidence_requirements
+                           if item.get("state") == "open" and item.get("dependencies")]
+                if blocked:
+                    job.record_stage_event("chapter_research", "skipped", "unresolved_dependencies",
+                                           record_ids=blocked)
+                break
+            active_chapter, active_requirement, active_selection_reason = target
+            chapter_requirements_open = [active_requirement]
             chapter_tools = [name for name in active_chapter.get("tools", [])
                              if name in capabilities and name not in exhausted_capabilities
                              and capability_calls.get(name, 0) < effective_capability_call_limit(
@@ -5541,6 +6848,8 @@ class ThinkingWorker:
                              )]
             if not chapter_tools:
                 active_chapter["state"] = "research_complete"
+                job.record_stage_event("chapter_research", "skipped", "no_available_capability",
+                                       record_ids=[active_requirement["identifier"]])
                 exhausted_tools = [
                     name for name in active_chapter.get("tools", [])
                     if name in capabilities and capability_calls.get(name, 0) >=
@@ -5559,10 +6868,8 @@ class ThinkingWorker:
                     )
                 continue
             chapter_reqs = requirements_by_chapter[active_chapter["id"]]
-            questions = json.dumps([{
-                "question_id": item["identifier"], "question": item["question"],
-                "priority": item.get("importance"), "missing_facts": item.get("detail", ""),
-            } for item in chapter_requirements_open], ensure_ascii=True, separators=(",", ":"))
+            questions = json.dumps([_research_question_view(item) for item in chapter_requirements_open],
+                                   ensure_ascii=True, separators=(",", ":"))
             eligible_cards = report_card_ledger(job.fact_cards)
             preferred_cards, _ = select_requirement_cards(
                 eligible_cards, chapter_requirements_open, source_registry=job.source_registry,
@@ -5592,9 +6899,10 @@ class ThinkingWorker:
                 return get_thinking_chapter_research_prompt(
                     job.snapshot.task, _fixed_scope_for_prompt(job.research_context),
                     chapter_descriptor, questions,
-                    json.dumps({"seeds": [searchable_gap_query(job.snapshot.task, active_requirement)]
-                                if (active_requirement or {}).get("is_subject_identity")
-                                else active_chapter.get("queries", []),
+                    json.dumps({"seeds": list(dict.fromkeys([
+                                    searchable_gap_query(job.snapshot.task, active_requirement),
+                                    *active_chapter.get("queries", []),
+                                ])),
                                 "already_used": prior_queries,
                                 "controller_feedback": controller_feedback,
                                 "chapter_note": active_chapter.get("research_note", "")}, ensure_ascii=True,
@@ -5618,6 +6926,8 @@ class ThinkingWorker:
                 active_chapter["research_decisions"] = int(
                     active_chapter.get("research_decisions", 0)
                 ) + 1
+                identifier = active_requirement["identifier"]
+                question_decisions[identifier] = int(question_decisions.get(identifier, 0)) + 1
                 response = _budgeted_generate(
                     self, budget, "chapter_research", user_prompt=get_thinking_user_prompt("chapter_research"),
                     system_prompt=prompt, temperature=0.2, cancel_check=cancelled,
@@ -5654,6 +6964,7 @@ class ThinkingWorker:
                 )
                 job.record_stage_event(
                     "chapter_research", "action_rejection", rejection_reason,
+                    record_ids=[active_requirement["identifier"]],
                 )
                 if rejection_reason in {"unavailable_tool", "out_of_scope_tool"}:
                     observe("worker", "The selected tool is unavailable or outside this chapter's approved tool scope.")
@@ -5671,16 +6982,24 @@ class ThinkingWorker:
                         "chapter_research", "generation_failure", "context_limit",
                     )
                     response = ""
-                elif int(active_chapter.get("research_decisions", 0)) >= MAX_CHAPTER_RESEARCH_DECISIONS:
+                elif int(active_chapter.get("research_decisions", 0)) >= _chapter_research_decision_limit(
+                    active_chapter, job.evidence_requirements
+                ):
                     job.record_stage_event(
                         "chapter_research", "action_rejection", "decision_budget",
                     )
+                    response = ""
+                elif _reserve_untried_decisions(active_chapter, job.evidence_requirements,
+                                                question_decisions, identifier):
+                    job.record_stage_event("chapter_research", "skipped", "reserved_for_untried_questions",
+                                           record_ids=[identifier])
                     response = ""
                 else:
                     try:
                         active_chapter["research_decisions"] = int(
                             active_chapter.get("research_decisions", 0)
                         ) + 1
+                        question_decisions[identifier] = int(question_decisions.get(identifier, 0)) + 1
                         response = _budgeted_generate(
                             self, budget, "chapter_research",
                             request_kind="format_retry",
@@ -5716,8 +7035,12 @@ class ThinkingWorker:
                 )
                 job.record_stage_event(
                     "chapter_research", "action_rejection", rejection_reason,
+                    record_ids=[active_requirement["identifier"]],
                 )
-                active_chapter["state"] = "research_complete"
+                siblings = [item for item in requirements_by_chapter[active_chapter["id"]]
+                            if item.get("state") == "open" and item is not active_requirement]
+                if not any(not question_decisions.get(item["identifier"]) for item in siblings):
+                    active_chapter["state"] = "research_complete"
                 active_chapter["research_note"] = (
                     "The chapter action was rejected after one format correction "
                     f"({rejection_reason})."
@@ -5725,7 +7048,12 @@ class ThinkingWorker:
                 observe("worker", active_chapter["research_note"])
                 continue
             if done:
-                active_chapter["state"] = "research_complete"
+                job.record_stage_event("chapter_research", "skipped", "model_no_action",
+                                       record_ids=[active_requirement["identifier"]])
+                siblings = [item for item in requirements_by_chapter[active_chapter["id"]]
+                            if item.get("state") == "open" and item is not active_requirement]
+                if not any(not question_decisions.get(item["identifier"]) for item in siblings):
+                    active_chapter["state"] = "research_complete"
                 active_chapter["research_note"] = "No further distinct read-only action was selected."
                 continue
             args, argument_error = normalise_action(name, args, kwargs)
@@ -5741,38 +7069,42 @@ class ThinkingWorker:
                 observe("worker", active_chapter["research_note"])
                 continue
             action_key = _thinking_action_key(name, args)
-            if action_key in attempted_actions:
-                job.duplicate_actions_avoided += 1
-                job.record_stage_event(
-                    "chapter_research", "action_rejection", "duplicate_action",
-                )
-                active_chapter["research_note"] = "The next action duplicated a prior request."
-                if not (active_requirement or {}).get("is_subject_identity"):
-                    active_chapter["state"] = "research_complete"
-                job.synthesis_state["action_feedback"] = {
-                    "tool": name, "args": args, "kind": "duplicate_action",
-                    "message": "Duplicate request rejected. Choose a distinct lookup for the still-open question.",
-                }
-                observe("worker", f"Duplicate capability request for {name}; the repeated action was not dispatched.")
-                continue
             feedback = job.synthesis_state.get("action_feedback") or {}
             corrective_retry = (feedback.get("tool") == name and bool(feedback.get("message"))
                                 and feedback.get("kind") != "duplicate_action")
-            if not corrective_retry and is_near_duplicate_action(
-                name, args, job.action_selections, active_requirement,
-            ) or (not corrective_retry and is_near_duplicate_query(name, args, job.action_selections)):
+            duplicate_reason = _duplicate_research_reason(
+                name, args, attempted_actions, job.action_selections, active_requirement,
+                corrective_retry=corrective_retry,
+            )
+            if duplicate_reason:
+                notes = {
+                    "duplicate_action": (
+                        "The next action duplicated a prior request.",
+                        "Duplicate request rejected. Choose a distinct lookup for the still-open question.",
+                        f"Duplicate capability request for {name}; the repeated action was not dispatched.",
+                    ),
+                    "near_duplicate_action": (
+                        "The next action was too similar to an earlier query.",
+                        "Near-duplicate rejected. Choose a materially distinct lookup for the still-open question.",
+                        f"Duplicate capability request for {name}; the near-repeat was not dispatched.",
+                    ),
+                    "result_set_duplicate": (
+                        "The next query's evidence was already fetched by an earlier, more specific retrieval.",
+                        "This query's result set was already collected. Choose a lookup for a "
+                        "still-open question whose evidence has not been fetched yet.",
+                        f"Result-set duplicate for {name}; the already-fetched evidence was not re-dispatched.",
+                    ),
+                }
+                note, message, observation = notes[duplicate_reason]
                 job.duplicate_actions_avoided += 1
-                job.record_stage_event(
-                    "chapter_research", "action_rejection", "near_duplicate_action",
-                )
-                active_chapter["research_note"] = "The next action was too similar to an earlier query."
-                if not (active_requirement or {}).get("is_subject_identity"):
-                    active_chapter["state"] = "research_complete"
+                job.record_stage_event("chapter_research", "action_rejection", duplicate_reason,
+                                       record_ids=[active_requirement["identifier"]])
+                active_chapter["research_note"] = note
                 job.synthesis_state["action_feedback"] = {
                     "tool": name, "args": args, "kind": "duplicate_action",
-                    "message": "Near-duplicate rejected. Choose a materially distinct lookup for the still-open question.",
+                    "message": message,
                 }
-                observe("worker", f"Duplicate capability request for {name}; the near-repeat was not dispatched.")
+                observe("worker", observation)
                 continue
             attempted_actions.add(action_key)
             active_chapter["state"] = "researching"
@@ -5788,6 +7120,7 @@ class ThinkingWorker:
                 active_chapter["state"] = "research_complete"
             save_supported_subsection(active_chapter)
             finish_batch_progress(active_chapter)
+            review_survey()
         if cancelled():
             return "", findings
         active_requirement = None
@@ -5802,6 +7135,7 @@ class ThinkingWorker:
         while not needs_input and (fallback := fallback_action()) is not None:
             fallback_name, fallback_args, fallback_chapter, fallback_requirement = fallback
             active_chapter, active_requirement = fallback_chapter, fallback_requirement
+            active_selection_reason = "fallback_unattempted"
             fallback_key = _thinking_action_key(fallback_name, fallback_args)
             attempted_actions.add(fallback_key)
             active_chapter["research_calls"] = int(active_chapter.get("research_calls", 0)) + 1
@@ -5820,6 +7154,7 @@ class ThinkingWorker:
                 judge_chapter_coverage(active_chapter)
                 save_supported_subsection(active_chapter)
                 finish_batch_progress(active_chapter)
+                review_survey()
             active_chapter, active_requirement = None, None
             if needs_input:
                 return needs_input, findings

@@ -26,7 +26,7 @@ def disk_free_gb(path: str = "./data") -> float:
 
 
 def gpu_info() -> dict:
-    """`{available, name, vram_gb}` — VRAM is total device memory in GB."""
+    """`{available, name, vram_gb}` — VRAM uses retail GPU capacity units (GiB)."""
     try:
         import torch
     except Exception:
@@ -38,7 +38,11 @@ def gpu_info() -> dict:
         return {
             "available": True,
             "name": props.name,
-            "vram_gb": round(props.total_memory / 1e9, 1),
+            # Driver-reserved memory can make a retail 16 GB card report
+            # 15.9 GiB. Compare presets against its capacity class, not that
+            # small reservation, or Pro would incorrectly fall back to Premium.
+            "vram_gb": float(round(props.total_memory / 1024**3)),
+            "vram_reported_gb": round(props.total_memory / 1024**3, 2),
         }
     except Exception as e:  # noqa: BLE001
         logger.warning("GPU probe failed: %s", e)
@@ -99,14 +103,17 @@ def tier_fit(gpu: dict, disk_gb: float, ram: Optional[dict] = None) -> list:
     """Per-tier fit badges: 'ok' | 'warn', with the reasons.
 
     The CPU stacks are GPU-free, so a missing GPU isn't a problem for them; only
-    tiers with GPU-only backends warn on a CPU-only box. A tier whose VRAM or
-    RAM estimate exceeds the device's, or whose download won't fit free disk, warns.
+    tiers with GPU-only backends warn on a CPU-only box. A tier whose GPU
+    capacity class or RAM estimate exceeds the device's, or whose download
+    won't fit free disk, warns. Model VRAM estimates are reported separately.
     """
     out = []
     vram = gpu.get("vram_gb") if gpu.get("available") else None
     ram_available = ram.get("available_gb") if ram else None
     for tier in TIER_PRESETS:
-        need_vram = _models_vram_gb(tier.models)
+        # Presets target retail GPU capacity classes, not the precise sum of
+        # weight/runtime estimates. Keep that estimate separate for diagnostics.
+        need_vram = tier.vram_class_gb
         need_disk = _models_download_gb(tier.models)
         need_ram = _models_ram_gb(tier.models)
         need_gpu = _needs_gpu(tier.models)
@@ -132,6 +139,7 @@ def tier_fit(gpu: dict, disk_gb: float, ram: Optional[dict] = None) -> list:
             {
                 "id": tier.id,
                 "vram_gb": need_vram,
+                "estimated_vram_gb": _models_vram_gb(tier.models),
                 "download_gb": need_disk,
                 "ram_gb": need_ram,
                 "badge": badge,
@@ -201,7 +209,7 @@ def check_gpu_for_models(models: dict) -> tuple[bool, str]:
     """Fail if selected GPU backends have no visible GPU or enough VRAM.
 
     Only runs when a backend actually needs a GPU — the CPU tiers never
-    trip this check, so a CPU-only box picking `cpu_local` is fine.
+    trip this check, so a CPU-only box picking `lite` is fine.
     """
     if not _needs_gpu(models):
         return True, ""

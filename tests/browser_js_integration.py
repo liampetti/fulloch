@@ -15,7 +15,12 @@ from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from server.config_schema import schema_as_dicts, tier_presets_as_dicts  # noqa: E402
+from server.config_schema import (  # noqa: E402
+    schema_as_dicts,
+    tier_presets_as_dicts,
+    wakeword_presets_as_dicts,
+)
+from server.config_store import _backends_view  # noqa: E402
 
 STATIC = ROOT / "server/static"
 
@@ -116,20 +121,14 @@ class BrowserModules(unittest.TestCase):
             field.update(value=field["default"], set=False)
         self.schema = {
             "fields": fields, "models": None, "credentials": {}, "variant": "cpu",
-            "default_backends": {"asr": "qwen", "tts": "qwen", "llm": "llama"},
+            "default_backends": {"asr": "moonshine", "tts": "kokoro-onnx", "llm": "laya"},
             "tier_presets": tier_presets_as_dicts(),
-            "wakeword_presets": [{"wakeword": "hey atticus", "pattern": "atticus",
-                                  "model": "", "label": "Hey Atticus", "recommended": True}],
-            "backends": {
-                domain: [{"backend": name, "offerable": True, "display_name": name}
-                         for name in names]
-                for domain, names in {
-                    "asr": ["qwen-onnx", "qwen"],
-                    "tts": ["pocket-tts-onnx", "kokoro-onnx", "qwen"],
-                    "llm": ["none", "external", "local"],
-                }.items()
-            },
+            "wakeword_presets": wakeword_presets_as_dicts(),
+            "backends": _backends_view(),
         }
+        for backends in self.schema["backends"].values():
+            for backend in backends:
+                backend["offerable"] = not backend["gpu_only"]
         self.status = {"phase": "READY", "state": "idle", "server_instance_id": "test"}
         self.documents = {"documents": [{"path": "Fulloch/example-report.md", "title": "example report"}]}
         self.progress = {"state": "downloading", "assets": []}
@@ -173,6 +172,51 @@ class BrowserModules(unittest.TestCase):
 
     def emit(self, event):
         self.page.evaluate("ev => boundary.streams.at(-1).emit(ev)", event)
+
+    def test_protocol_events_do_not_render_in_history_or_live_chat(self):
+        self.history.append({"type": "assistant.stand_down_after_tts", "satellite_id": "kitchen"})
+        self.open_chat()
+        self.page.get_by_role("button", name="Kitchen", exact=True).click()
+        self.page.wait_for_function("document.querySelectorAll('.msg.assistant').length === 1")
+        self.emit({"type": "assistant.stand_down_after_tts", "satellite_id": "kitchen"})
+        self.emit({"role": "assistant", "source": "proactive", "ts": 2, "content": "Reminder"})
+        self.page.wait_for_function("document.querySelectorAll('.msg.assistant').length === 2")
+        self.assertEqual(self.page.locator('.msg.undefined').count(), 0)
+        self.assertEqual(self.page.locator('.msg.assistant .bubble').all_text_contents(),
+                         ["Hello", "Reminder"])
+
+    def test_thinking_close_confirmation_and_next_job(self):
+        job = {"id": "first", "status": "RUNNING", "task": "First job"}
+        self.status["thinking_job"] = job
+        self.open_chat()
+        self.page.wait_for_function("document.querySelector('#thinking-job-task').textContent === 'First job'")
+        self.page.once("dialog", lambda dialog: dialog.dismiss())
+        self.page.locator("#thinking-job-cancel").click()
+        self.assertTrue(self.page.locator("#thinking-job-card").is_visible())
+        self.assertFalse(any(path == "/thinking/first/cancel" for path, _, _ in self.requests))
+
+        self.page.once("dialog", lambda dialog: dialog.accept())
+        self.page.locator("#thinking-job-cancel").click()
+        self.page.wait_for_function("document.querySelector('#thinking-job-card').hidden")
+        self.assertTrue(any(path == "/thinking/first/cancel" and method == "POST"
+                            for path, method, _ in self.requests))
+        # A stale status must not resurrect the cancelled card.
+        self.page.wait_for_timeout(1200)
+        self.assertTrue(self.page.locator("#thinking-job-card").is_hidden())
+        self.status["thinking_job"] = {"id": "second", "status": "RUNNING", "task": "Next job"}
+        self.page.wait_for_function("document.querySelector('#thinking-job-task').textContent === 'Next job'")
+
+    def test_thinking_close_finished_job_keeps_report(self):
+        self.status["thinking_job"] = {"id": "done", "status": "READY", "task": "Finished",
+                                       "partial_artifact_link": "/reports/Fulloch/example-report.md"}
+        self.open_chat()
+        self.page.wait_for_function("document.querySelector('#thinking-job-task').textContent === 'Finished'")
+        self.page.locator("#thinking-job-cancel").click()
+        self.assertTrue(self.page.locator("#thinking-job-card").is_hidden())
+        self.assertFalse(any(path == "/thinking/done/cancel" for path, _, _ in self.requests))
+        self.assertEqual(len(self.documents["documents"]), 1)
+        self.page.wait_for_timeout(1200)
+        self.assertTrue(self.page.locator("#thinking-job-card").is_hidden())
 
     def test_logo_idle_blinks_glances_and_teardown(self):
         self.page.clock.install()
@@ -310,15 +354,15 @@ class BrowserModules(unittest.TestCase):
     def test_thinking_card_is_concise_and_polling_recovers_final_report_without_sse(self):
         self.page.clock.install()
         job = {
-            "id": "research-1", "task": "Research F1\n\nAdditional user constraints: Official schedules",
-            "objective": "Research F1", "status": "RUNNING", "stage": "Planning research",
+            "id": "research-1", "task": "Research Solar League\n\nAdditional user constraints: Official schedules",
+            "objective": "Research Solar League", "status": "RUNNING", "stage": "Planning research",
             "job_duration_seconds": 9.8, "acknowledgement_seconds": 0.003,
             "progress": {}, "request_metrics": [{"input_tokens": 2252, "output_reservation": 2048}],
         }
         self.status["thinking_job"] = job
         self.open_chat()
         self.page.wait_for_function("document.querySelector('#thinking-job-stage').textContent === 'Planning research'")
-        self.assertEqual(self.page.locator("#thinking-job-task").inner_text(), "Research F1")
+        self.assertEqual(self.page.locator("#thinking-job-task").inner_text(), "Research Solar League")
         self.assertEqual(self.page.locator("#thinking-job-outcome").inner_text(), "Elapsed: 0:09")
         self.assertFalse(self.page.locator("#thinking-job-details").evaluate("el => el.open"))
         visible = self.page.locator("#thinking-job-card").inner_text()
@@ -340,13 +384,13 @@ class BrowserModules(unittest.TestCase):
         self.assertTrue(self.page.locator("#thinking-job-details").evaluate("el => el.open"))
 
         final = {**self.status["thinking_job"], "status": "READY", "stage": "Report ready",
-                 "job_duration_seconds": 20, "partial_artifact_link": "/reports/Fulloch/f1.md"}
+                 "job_duration_seconds": 20, "partial_artifact_link": "/reports/Fulloch/example.md"}
         self.page.route("**/thinking/research-1", lambda route: route.fulfill(json=final))
         self.status["thinking_job"] = None
         self.page.clock.run_for(5000)
         self.page.wait_for_function("document.querySelector('#thinking-job-stage').textContent === 'Report ready'")
-        self.assertEqual(self.page.locator("#thinking-job-report").get_attribute("href"), "/reports/Fulloch/f1.md")
-        self.assertFalse(self.page.locator("#thinking-job-cancel").is_visible())
+        self.assertEqual(self.page.locator("#thinking-job-report").get_attribute("href"), "/reports/Fulloch/example.md")
+        self.assertTrue(self.page.locator("#thinking-job-cancel").is_visible())
         self.assertEqual(self.page.locator(".thinking-orbit").evaluate("el => getComputedStyle(el).animationName"), "none")
         self.page.clock.run_for(10000)
         self.assertEqual(self.page.locator("#thinking-job-outcome").inner_text(),
@@ -390,7 +434,7 @@ class BrowserModules(unittest.TestCase):
 
     def test_thinking_stale_status_response_cannot_overwrite_newer_sse_progress(self):
         self.page.clock.install()
-        initial = {"id": "research-1", "task": "Research F1", "status": "RUNNING", "stage": "Planning research",
+        initial = {"id": "research-1", "task": "Research Solar League", "status": "RUNNING", "stage": "Planning research",
                    "job_duration_seconds": 1, "progress": {}}
         self.status["thinking_job"] = initial
         self.open_chat()
@@ -573,54 +617,58 @@ class BrowserModules(unittest.TestCase):
         self.page.wait_for_function("boundary.tracks.length === 2 && boundary.tracks[1].stopped")
         self.assertTrue(self.page.evaluate("boundary.contexts.every(c => c.closed)"))
 
-    def test_wizard_navigation_voice_install_progress_and_public_retry(self):
+    def test_wizard_defaults_navigation_install_progress_and_public_retry(self):
         self.status["phase"] = "NEEDS_SETUP"
         self.page.goto("http://localhost/setup")
+        self.assertEqual(self.page.locator('#tier-select').input_value(), 'lite')
+        self.assertEqual(self.page.locator('#tier-select option').count(), 1)
+        self.page.locator('#wizard-wakeword').select_option('alexa')
+        self.assertIn('not gating', self.page.locator('#wakeword-warning').inner_text())
         self.page.locator("#next1").click()
-        self.page.locator("#voice-sel").select_option("other")
-        self.page.locator(".voice-play").click()
-        self.assertFalse(self.page.evaluate("boundary.previews[0].paused"))
-        self.page.locator("#get-started").click()
-        self.assertTrue(self.page.evaluate("boundary.previews[0].paused"))
-        self.page.locator("#connect-skip").click()
+        self.page.locator('#ha-url').fill('http://ha:8123')
+        self.page.locator('#ha-next').click()
+        self.page.locator('#search-back').click()
+        self.assertEqual(self.page.locator('#ha-url').input_value(), 'http://ha:8123')
+        self.page.locator('#ha-next').click()
         self.progress.update(state="error", error="Access required", needs_hf_token=True)
-        self.page.locator("#obsidian-skip").click()
+        self.page.locator("#get-started").click()
         self.page.locator("#hf-token").fill("hf_test")
         self.page.get_by_role("button", name="Save token and retry").click()
         self.page.wait_for_timeout(50)
         self.assertTrue(any(path == "/setup/retry-download" for path, _, _ in self.requests))
         models = [json.loads(body)["models"] for path, _, body in self.requests if path == "/setup/models"]
-        self.assertEqual(models[0]["llm"]["backend"], "none")
+        self.assertEqual(models[0]["llm"]["backend"], "laya")
+        self.assertTrue(models[0]['wakeword']['model'].endswith('alexa_v0.1.onnx'))
         configs = [json.loads(body)["updates"] for path, method, body in self.requests
                    if path == "/config" and method == "PUT"]
-        self.assertEqual(configs[0]["general.voice_clone"], "other")
+        self.assertEqual(configs[0]["general.voice_clone"], "af_heart")
+        self.assertEqual(configs[0]['general.wakeword'], 'alexa')
         self.progress.update(state="done")
         self.status.update(phase="READY")
         self.page.get_by_role("button", name="Retry download", exact=True).click()
-        self.page.locator("#finish-name").wait_for()
-        self.assertTrue(self.page.get_by_text("Almost done", exact=True).is_visible())
+        self.page.wait_for_url('http://localhost/')
 
     def test_settings_cards_fields_and_model_save(self):
-        self.schema["models"] = self.schema["tier_presets"][2]["models"]
+        self.schema["models"] = next(t['models'] for t in self.schema['tier_presets'] if t['id'] == 'lite')
         self.page.goto("http://localhost/setup")
         self.page.locator("#save-cfg").wait_for()
-        self.page.wait_for_function("document.querySelector('#sec-obs-token')?.textContent === 'test-token'")
         self.page.locator("details.settings-card").evaluate_all("nodes => nodes.forEach(n => n.open = true)")
-        self.page.locator("#sm-llama-sel").select_option("external")
-        self.page.locator("#sm-oai-url").fill("localhost:11434")
-        self.page.locator("#sm-oai-model").fill("test-model")
-        self.page.locator("#save-models").click()
+        self.page.locator("#sm-ai").select_option("custom")
+        self.page.locator("#sm-ai-address").fill("localhost:11434")
+        self.page.locator("#sm-api-model").fill("test-model")
+        self.page.locator("#save-cfg").click()
         self.page.wait_for_timeout(50)
         models = [json.loads(body)["models"] for path, _, body in self.requests if path == "/setup/models"]
         self.assertEqual(models[0]["llm"]["base_url"], "http://localhost:11434/v1")
         self.assertEqual(models[0]["llm"]["model"], "test-model")
-        self.page.locator("#cf-general_voice_clone").select_option("other")
+        self.page.locator("#voice-sel").select_option("af_bella")
         self.page.locator("#save-cfg").click()
         self.page.wait_for_timeout(50)
-        self.assertTrue(any(path == "/config" and 'other' in (body or '') for path, _, body in self.requests))
+        self.assertTrue(any(path == "/config" and 'af_bella' in (body or '') for path, _, body in self.requests))
 
     def test_settings_uses_runtime_defaults_not_first_gpu_dropdown_option(self):
         self.schema["variant"] = "gpu"
+        self.schema['default_backends'] = {'asr': 'qwen', 'tts': 'qwen', 'llm': 'llama'}
         self.schema["backends"]["asr"] = [
             {"backend": "parakeet", "offerable": True, "display_name": "Parakeet"},
             {"backend": "qwen", "offerable": True, "display_name": "Qwen"},
@@ -694,17 +742,238 @@ class BrowserModules(unittest.TestCase):
         }""")
         self.assertEqual(result, {"loading": True, "finished": 0})
 
-    def test_generated_voice_url_revoked_when_leaving_step(self):
-        self.status["phase"] = "NEEDS_SETUP"
+    def test_settings_voice_preview_and_config_only_controls(self):
         self.page.goto("http://localhost/setup")
-        self.page.locator("#next1").click()
-        self.page.locator("#gen-voice").click()
-        self.page.locator("#gv-instruct").fill("A warm voice")
-        self.page.locator("#gv-generate").click()
-        self.page.wait_for_function("document.querySelector('#gv-status')?.textContent === 'Preview ready.'")
-        url = self.page.locator("#gv-audio audio").get_attribute("src")
-        self.page.locator("#back2").click()
-        self.assertTrue(self.page.evaluate("url => boundary.revoked.includes(url)", url))
+        self.page.locator('#save-cfg').wait_for()
+        self.page.locator('details.settings-card').evaluate_all('nodes => nodes.forEach(n => n.open = true)')
+        self.page.locator('.voice-play').click()
+        self.assertFalse(self.page.evaluate('boundary.previews[0].paused'))
+        self.page.locator('#voice-sel').select_option('af_bella')
+        self.assertTrue(self.page.evaluate('boundary.previews[0].paused'))
+        self.assertTrue(self.page.locator('#custom-voice').is_hidden())
+        self.assertEqual(self.page.locator('#wakeword-custom-fields, #sm-wakeword-model, #cf-general_wakeword_pattern, #sec-obs-section').count(), 0)
+        self.assertEqual(self.page.locator('[data-section="Advanced"]').count(), 0)
+        self.assertEqual(self.page.locator('[data-section]').count(), 7)
+
+    def test_cpu_settings_never_offer_gpu_models(self):
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#save-cfg').wait_for()
+        for domain, selector in [('asr', '#sm-asr'), ('tts', '#sm-tts'), ('llm', '#sm-ai')]:
+            values = self.page.locator(selector + ' option').evaluate_all('nodes => nodes.map(n => n.value)')
+            gpu = [b['backend'] for b in self.schema['backends'][domain] if b['gpu_only']]
+            self.assertFalse(set(values) & set(gpu))
+
+    def test_preset_pills_reflect_customisation_and_reapply(self):
+        self.schema['models'] = next(t['models'] for t in self.schema['tier_presets'] if t['id'] == 'lite')
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#save-cfg').wait_for()
+        pill = self.page.locator('.preset-pill[data-tier="lite"]')
+        self.assertEqual(pill.get_attribute('aria-pressed'), 'true')
+        self.assertNotIn('customised', pill.get_attribute('class'))
+        self.page.locator('[data-section="General"]').evaluate('node => node.open = true')
+        self.page.locator('#cf-notes_path').fill('/custom/notes')
+        self.assertIn('customised', pill.get_attribute('class'))
+        self.assertIn('Customised from', self.page.locator('#preset-description').inner_text())
+        pill.click()
+        self.page.wait_for_function("!document.querySelector('#save-cfg').disabled")
+        self.assertNotIn('customised', pill.get_attribute('class'))
+        self.assertEqual(self.page.locator('#cf-notes_path').input_value(), '/custom/notes')
+
+    def test_popovers_close_on_outside_click_and_escape(self):
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#save-cfg').wait_for()
+        popup = self.page.locator('.preset-heading .info-popover')
+        popup.locator('summary').click()
+        self.assertTrue(popup.get_attribute('open') is not None)
+        self.page.locator('#preset-heading').click()
+        self.assertIsNone(popup.get_attribute('open'))
+        popup.locator('summary').focus()
+        self.page.keyboard.press('Enter')
+        self.page.keyboard.press('Escape')
+        self.assertIsNone(popup.get_attribute('open'))
+
+    def test_ungated_pocket_pytorch_and_premium_need_no_token(self):
+        self.schema['variant'] = 'gpu'
+        for backends in self.schema['backends'].values():
+            for backend in backends:
+                backend['offerable'] = True
+        self.schema['models'] = next(t['models'] for t in self.schema['tier_presets'] if t['id'] == 'premium')
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#save-cfg').wait_for()
+        self.assertEqual(self.page.locator('#preset-access .access-notice').count(), 0)
+        self.page.locator('[data-section="Models"]').evaluate('node => node.open = true')
+        self.page.locator('#sm-tts').select_option('pocket-tts-pytorch')
+        self.assertEqual(self.page.locator('#model-access .access-notice').count(), 0)
+        self.page.locator('#sm-tts').select_option('pocket-tts-onnx')
+        self.assertEqual(self.page.locator('#model-access .access-notice').count(), 0)
+
+    def test_wizard_recommends_hardware_classes_and_falls_back_safely(self):
+        self.open_chat()
+        results = self.page.evaluate('''async (schema) => {
+          const {recommendedTierId} = await import('/static/js/setup-models.js');
+          schema.variant = 'gpu';
+          return [0, 6, 8, 10, 12, 16, 24, 32].map(vram => recommendedTierId(schema, {
+            gpu: {available: vram > 0, vram_gb: vram},
+            tier_fit: schema.tier_presets.map(t => ({id: t.id, badge: t.vram_class_gb <= vram ? 'ok' : 'warn'}))
+          })).concat(recommendedTierId(schema, null));
+        }''', self.schema)
+        self.assertEqual(results, ['lite', 'lite', 'economy', 'economy', 'premium', 'pro', 'pro', 'max', 'lite'])
+
+    def test_wizard_continue_only_uses_default_acoustic_wakeword(self):
+        self.status['phase'] = 'NEEDS_SETUP'
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#next1').click()
+        self.page.locator('#ha-next').click()
+        self.page.locator('#get-started').click()
+        self.page.locator('#assets').wait_for(state='attached')
+        models = [json.loads(body)['models'] for path, _, body in self.requests if path == '/setup/models'][0]
+        self.assertEqual(models['llm']['backend'], 'laya')
+        self.assertEqual(models['wakeword']['backend'], 'openwakeword')
+        self.assertIn('hey_atticus', models['wakeword']['model'])
+        self.assertNotIn('verify_asr', models['wakeword'])  # Runtime selects the safe backend default.
+        self.assertFalse(any('obsidian' in path for path, _, _ in self.requests))
+
+    def test_home_assistant_token_flow_in_wizard_and_settings(self):
+        self.page.route('**/setup/integration-token', lambda route: route.fulfill(
+            body=json.dumps({'token': 'new-fulloch-token', 'port': 8766,
+                             'enabled': True, 'bind_host': '127.0.0.1'}),
+            content_type='application/json'))
+        self.status['phase'] = 'NEEDS_SETUP'
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#next1').click()
+        self.assertIn('different from', self.page.locator('.ha-integration-card').inner_text())
+        self.page.locator('#ha-create-integration').click()
+        self.page.locator('#ha-integration-result').wait_for()
+        self.assertEqual(self.page.locator('#ha-integration-token').input_value(), 'new-fulloch-token')
+        self.assertIn('8766', self.page.locator('#ha-integration-address').inner_text())
+        self.assertIn('only on this machine', self.page.locator('#ha-integration-network').inner_text())
+        self.page.locator('#ha-next').click()
+        self.status['phase'] = 'READY'
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#save-cfg').wait_for()
+        self.page.locator('[data-section="Home Assistant"]').evaluate('node => node.open = true')
+        self.page.locator('#ha-create-integration').click()
+        self.page.locator('#ha-integration-result').wait_for()
+        self.assertEqual(self.page.locator('#ha-integration-token').input_value(), 'new-fulloch-token')
+
+    def test_wizard_does_not_install_after_preflight_reports_failure(self):
+        self.status['phase'] = 'NEEDS_SETUP'
+        self.page.route('**/setup/preflight-download', lambda route: route.fulfill(
+            body=json.dumps({'ok': False, 'errors': [{'check': 'disk', 'message': 'Not enough space'}]}),
+            content_type='application/json'))
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#next1').click()
+        self.page.locator('#ha-next').click()
+        self.page.locator('#get-started').click()
+        self.page.locator('#alert .alert-banner').wait_for()
+        self.assertIn('Not enough space', self.page.locator('#alert').inner_text())
+        self.assertFalse(self.page.locator('#get-started').is_disabled())
+        self.assertFalse(any(path in ('/setup/models', '/setup/install') for path, _, _ in self.requests))
+
+    def test_settings_api_key_change_preserves_hidden_llm_options(self):
+        self.schema['models'] = {
+            'asr': {'backend': 'moonshine'}, 'tts': {'backend': 'kokoro-onnx'},
+            'llm': {'backend': 'external', 'base_url': 'http://server:8888/v1', 'model': 'custom-model',
+                    'connect_timeout': 1.2, 'read_timeout': 321},
+        }
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#save-cfg').wait_for()
+        self.page.locator('details.settings-card').evaluate_all('nodes => nodes.forEach(n => n.open = true)')
+        self.page.locator('#sm-api-key').fill('new-key')
+        self.page.locator('#save-cfg').click()
+        self.page.wait_for_timeout(50)
+        self.assertFalse(any(path == '/setup/models' for path, _, _ in self.requests))
+        credentials = [json.loads(body) for path, _, body in self.requests if path == '/setup/credential']
+        self.assertIn({'key': 'llm_api_key', 'value': 'new-key'}, credentials)
+
+    def test_settings_preset_and_tts_changes_keep_voice_compatible(self):
+        self.schema['variant'] = 'gpu'
+        for backends in self.schema['backends'].values():
+            for backend in backends:
+                backend['offerable'] = True
+        self.schema['models'] = next(t['models'] for t in self.schema['tier_presets'] if t['id'] == 'pro')
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#save-cfg').wait_for()
+        self.page.locator('details.settings-card').evaluate_all('nodes => nodes.forEach(n => n.open = true)')
+        self.page.locator('.preset-pill[data-tier="premium"]').click()
+        self.page.wait_for_function("!document.querySelector('#save-cfg').disabled")
+        self.assertEqual(self.page.locator('#sm-asr').input_value(), 'orukeet')
+        self.assertEqual(self.page.locator('#sm-tts').input_value(), 'pocket-tts-pytorch')
+        self.assertEqual(self.page.locator('#sm-ai').input_value(), 'ornith')
+        self.assertTrue(self.page.locator('#custom-voice').is_hidden())
+        self.page.locator('#voice-sel').select_option('__custom__')
+        self.assertTrue(self.page.locator('#custom-voice').is_visible())
+        self.page.locator('#voice-reference').fill('/custom/reference.wav')
+        self.page.locator('#voice-sel').select_option('atticus')
+        self.assertTrue(self.page.locator('#custom-voice').is_hidden())
+        self.page.locator('#voice-sel').select_option('__custom__')
+        self.assertTrue(self.page.locator('#custom-voice').is_visible())
+        self.page.locator('.preset-pill[data-tier="economy"]').click()
+        self.page.wait_for_function("!document.querySelector('#save-cfg').disabled")
+        self.assertTrue(self.page.locator('#custom-voice').is_hidden())
+        self.assertEqual(self.page.locator('#voice-sel').input_value(), 'af_heart')
+        self.page.locator('#save-cfg').click()
+        self.page.wait_for_timeout(50)
+        saved = [json.loads(body)['models'] for path, _, body in self.requests if path == '/setup/models'][0]
+        self.assertEqual(saved['llm']['local_model'], 'ornith')
+        self.assertEqual(saved['asr']['backend'], 'moonshine')
+
+    def test_cpu_custom_local_model_is_rejected_without_writing(self):
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#save-cfg').wait_for()
+        self.page.locator('details.settings-card').evaluate_all('nodes => nodes.forEach(n => n.open = true)')
+        self.page.locator('#sm-ai').select_option('custom')
+        self.page.locator('#sm-ai-address').fill('/local/model.gguf')
+        self.page.locator('#save-cfg').click()
+        self.page.wait_for_timeout(50)
+        self.assertIn('require the GPU image', self.page.locator('#save-note').inner_text())
+        self.assertFalse(any(path == '/setup/models' for path, _, _ in self.requests))
+
+    def test_settings_info_popovers_are_keyboard_accessible_on_mobile(self):
+        self.page.set_viewport_size({'width': 375, 'height': 812})
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#save-cfg').wait_for()
+        help_button = self.page.locator('.preset-heading .info-popover > summary').first
+        help_button.focus()
+        help_button.press('Enter')
+        popup = self.page.locator('.preset-heading .info-popover[open] > p')
+        self.assertTrue(popup.is_visible())
+        bounds = popup.bounding_box()
+        self.assertGreaterEqual(bounds['x'], 0)
+        self.assertLessEqual(bounds['x'] + bounds['width'], 375)
+        help_button.press('Enter')
+        self.page.locator('[data-section="Models"]').evaluate('node => node.open = true')
+        self.page.locator('#sm-ai').select_option('custom')
+        help_button = self.page.locator('#sm-ai-custom label .info-popover > summary').first
+        help_button.focus()
+        help_button.press('Enter')
+        bounds = self.page.locator('#sm-ai-custom .info-popover[open] > p').bounding_box()
+        self.assertGreaterEqual(bounds['x'], 0)
+        self.assertLessEqual(bounds['x'] + bounds['width'], 375)
+
+    def test_unrelated_settings_preserve_custom_models_and_wakeword(self):
+        original = {
+            'asr': {'backend': 'moonshine-tiny', 'model': '/custom/asr'},
+            'tts': {'backend': 'kokoro-onnx', 'model': '/custom/tts'},
+            'llm': {'backend': 'laya', 'confidence_threshold': 0.99},
+            'wakeword': {'backend': 'openwakeword', 'model': '/custom/trigger.onnx',
+                         'threshold': 0.81, 'smoothing_frames': 4, 'cooldown_ms': 2000, 'verify_asr': True},
+        }
+        self.schema['models'] = original
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#save-cfg').wait_for()
+        self.page.locator('details.settings-card').evaluate_all('nodes => nodes.forEach(n => n.open = true)')
+        self.page.locator('#cf-notes_path').fill('/my/notes')
+        self.page.locator('#save-cfg').click()
+        self.page.wait_for_timeout(50)
+        self.assertFalse(any(path == '/setup/models' for path, _, _ in self.requests))
+        self.page.locator('#sm-asr').select_option('moonshine')
+        self.page.locator('#save-cfg').click()
+        self.page.wait_for_timeout(50)
+        saved = [json.loads(body)['models'] for path, _, body in self.requests if path == '/setup/models'][0]
+        self.assertEqual(saved['wakeword'], original['wakeword'])
+        self.assertEqual(saved['tts'], original['tts'])
+        self.assertEqual(saved['llm'], original['llm'])
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import re
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlparse
 
@@ -134,11 +135,18 @@ def _card_claim_identity(
         claim_type = "travel_offer"
     elif claim_type == "provider_record" and _value_present(constraints.get("location")):
         claim_type = "lodging_offer"
-    return {
+    identity = {
         "subject": subject,
         "claim_type": claim_type,
         "period": _claim_period(fields, context, temporal_role),
     }
+    if claim_type == "market_snapshot":
+        identity["constraints"] = {
+            key: _identity_value(fields.get(key) or constraints.get(key))
+            for key in ("symbol", "pair", "exchange", "currency")
+            if fields.get(key) or constraints.get(key)
+        }
+    return identity
 
 
 def _value_present(value: object) -> bool:
@@ -252,6 +260,87 @@ def validate_fact_card(card: dict) -> str | None:
         ):
             return "finding context spans must be intact original ranges"
     return None
+
+
+_BYLINE_DATE_RE = re.compile(
+    r"^(?:\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}"          # 3 Oct 2026, 10/17/2026
+    r"|\d{1,2}\s+\w{3,9}\s+\d{4}"                     # 17 October 2026
+    r"|\d{1,2}\s+\w{3,9}\s+[\d,]*\s+\d{4}"            # 17 October, 2026
+    r"|\w{3,9}\s+\d{1,2},?\s+\d{4})"                   # October 17, 2026
+)
+
+
+def is_byline_card(card: dict) -> bool:
+    """Author/date boilerplate extracted as a claim ("By Jane Doe Published …").
+
+    Such a card is non-substantive: it carries no answer content, so it must not
+    be rendered as a standalone finding bullet or dominate a Summary, while it
+    remains a valid retained card eligible to support an answer (a citation is
+    a citation). Detection is structural only: a short claim that is nothing but
+    an author byline and optional date/time/read-time.
+    """
+    statement = str(card.get("statement") or card.get("claim") or "").strip()
+    if not statement or len(statement) > 120:
+        return False
+    # Drop parenthesised qualifiers (e.g. "(updated February 2026)") before
+    # splitting: they are boilerplate, not assertion content.
+    statement = re.sub(r"\s*\([^)]*\)", "", statement).strip()
+    words = [word for word in re.split(r"[\s|•·,]+", statement.lower()) if word]
+    if not words or words[0] != "by":
+        return False
+    # Find the author-name boundary: the name is 1–5 tokens after "by" and the
+    # remainder must be empty or only date/published/read-time boilerplate.
+    # Because "published" and month names are also valid name tokens, we try
+    # each possible name length and keep the one that leaves a valid remainder.
+    for name_length in range(1, 6):
+        if 1 + name_length > len(words):
+            break
+        if not _is_name_token(words[1 + name_length - 1]):
+            break
+        remainder = words[1 + name_length:]
+        if _is_byline_remainder(remainder):
+            return True
+    return False
+
+
+def _is_byline_remainder(remainder: list[str]) -> bool:
+    """Whether the post-name tokens are only date/published/read-time boilerplate."""
+    i = 0
+    while i < len(remainder):
+        word = remainder[i]
+        if word in {"published", "updated"}:
+            i += 1
+            continue
+        if _BYLINE_DATE_RE.match(" ".join(remainder[i:i + 5])):
+            i += len(" ".join(remainder[i:i + 5]).split())
+            continue
+        if word in {"am", "pm"} or re.fullmatch(r"\d{1,2}:\d{2}", word):
+            i += 1
+            continue
+        if re.fullmatch(r"\d{1,3}", word):
+            if i + 1 < len(remainder) and remainder[i + 1] in {"min", "minute", "minutes"}:
+                i += 2
+                if i < len(remainder) and remainder[i] == "read":
+                    i += 1
+                continue
+            i += 1
+            continue
+        return False
+    return True
+
+
+def _is_name_token(word: str) -> bool:
+    """A token that looks like a personal name (initials, words, or suffixes)."""
+    if re.fullmatch(r"[a-z]\.", word):
+        return True
+    if re.fullmatch(r"[a-z][a-z0-9'-]{1,20}", word):
+        return True
+    # Allow suffixed name tokens like "jr.", "sr.", "phd", "md", "esq."
+    if re.fullmatch(r"[a-z]{1,10}\.(?:jr|sr|phd|md|esq)\.", word):
+        return True
+    if re.fullmatch(r"(?:jr|sr|phd|md|esq)\.", word):
+        return True
+    return False
 
 
 def _compact(value: Any, depth: int = 0) -> Any:
@@ -1148,6 +1237,13 @@ def _record_key(card: dict) -> str:
         # Missing temporal scope must not cause unrelated cards about the
         # same named entity to be reconciled as one claim.
         constraints = identity.get("constraints") if isinstance(identity.get("constraints"), dict) else {}
+        if claim_type == "market_snapshot":
+            fields = card.get("fields") if isinstance(card.get("fields"), dict) else {}
+            context = card.get("context") if isinstance(card.get("context"), dict) else {}
+            scope = context.get("constraints") if isinstance(context.get("constraints"), dict) else context
+            constraints = {key: _identity_value(fields.get(key) or scope.get(key) or constraints.get(key))
+                           for key in ("symbol", "pair", "exchange", "currency")
+                           if fields.get(key) or scope.get(key) or constraints.get(key)}
         invariant_parameter_property = bool(
             re.search(r"\b(?:total|active) parameters?\b|\bparameter count\b", property_key)
         )
@@ -1190,6 +1286,72 @@ def _comparison_value(card: dict) -> object:
     )
 
 
+def _market_number(value: object, *, direction: object = None) -> Decimal | None:
+    """Normalize only plainly numeric market fields, preserving reported direction."""
+    if isinstance(value, bool) or value is None:
+        return None
+    text = str(value).strip().replace(",", "")
+    match = re.fullmatch(r"(?i)\s*(?:(up|down)\s+)?(?:[A-Z]{3}\s*)?([+-]?\d+(?:\.\d+)?)\s*%?\s*", text)
+    if not match:
+        return None
+    try:
+        number = Decimal(match.group(2))
+    except InvalidOperation:
+        return None
+    sign = str(match.group(1) or direction or "").strip().casefold()
+    if sign.startswith("down") and number > 0:
+        number = -number
+    return number if number.is_finite() else None
+
+
+def _market_metrics(card: dict) -> tuple[dict[str, Decimal], str]:
+    fields = card.get("fields") if isinstance(card.get("fields"), dict) else {}
+    context = card.get("context") if isinstance(card.get("context"), dict) else {}
+    scope = context.get("constraints") if isinstance(context.get("constraints"), dict) else context
+    window = _identity_value(fields.get("window") or scope.get("window"))
+    direction = fields.get("change")
+    numeric_change = _market_number(direction)
+    values = {
+        "price": _market_number(fields.get("numeric_price")),
+        "change": numeric_change,
+        "change_percent": _market_number(
+            fields.get("change_percent"), direction="down" if numeric_change is not None and numeric_change < 0 else direction,
+        ),
+        "volume": _market_number(fields.get("volume")),
+    }
+    if values["price"] is None:
+        values["price"] = _market_number(fields.get("price"))
+    return {key: value for key, value in values.items() if value is not None}, window
+
+
+def _reconcile_market_group(group: list[dict]) -> None:
+    """Compare quote prices at the same instant and returns only within one window."""
+    if len(group) < 2:
+        return
+    for card in group:
+        card["evidence_status"] = "single_source"
+        card.pop("conflicting_fields", None)
+    for index, left in enumerate(group):
+        left_values, left_window = _market_metrics(left)
+        for right in group[index + 1:]:
+            right_values, right_window = _market_metrics(right)
+            comparable = set(left_values) & set(right_values)
+            if not left_window or left_window != right_window:
+                comparable &= {"price"}
+            conflicts = {field for field in comparable if left_values[field] != right_values[field]}
+            if conflicts:
+                for card in (left, right):
+                    card["evidence_status"] = "conflicted"
+                    card["conflicting_fields"] = sorted(set(card.get("conflicting_fields") or []) | conflicts)
+            elif (comparable and left_window and left_window == right_window
+                  and set(left_values) == set(right_values)
+                  and left.get("independence_key") and right.get("independence_key")
+                  and left["independence_key"] != right["independence_key"]):
+                for card in (left, right):
+                    if card["evidence_status"] != "conflicted":
+                        card["evidence_status"] = "confirmed"
+
+
 def _has_valid_derived_lineage(fields: dict) -> bool:
     """Check retained deterministic-tool provenance without recomputing it."""
     if fields.get("tool") not in _DERIVED_TOOL_NAMES:
@@ -1218,6 +1380,10 @@ def reconcile_fact_cards(cards: list[dict]) -> list[dict]:
         key = _record_key(card) or f"unknown-position:{index}"
         groups.setdefault(key, []).append(card)
     for group in groups.values():
+        if (group and all((card.get("claim_identity") or {}).get("claim_type") == "market_snapshot"
+                          and card.get("kind") == "structured_record" for card in group)):
+            _reconcile_market_group(group)
+            continue
         for card in group:
             fields = card.get("fields") if isinstance(card.get("fields"), dict) else {}
             if card.get("source_class") == "typed_tool_output" and _has_valid_derived_lineage(fields):
@@ -1562,6 +1728,7 @@ def serialize_synthesis_packet(
             "claim": statement if statement else None,
             "record": fields if not statement or card["kind"] == "structured_record" else None,
             "identity": identity, "status": card.get("evidence_status"),
+            "conflicting_fields": card.get("conflicting_fields"),
             "scope_id": scope_id if shared_scope else None,
             "eligibility": card.get("claim_eligibility"), "limitations": card.get("limitations"),
             "provenance": {key: value for key, value in provenance.items()
@@ -1618,12 +1785,14 @@ def _selection_quality(card: dict, source_registry: dict | None) -> tuple:
         keys = ("observed_at", "effective_at")
     timestamps = [_parse_timestamp(context.get(key) or fields.get(key)) for key in keys]
     dated = [value for value in timestamps if value is not None]
-    return not primary, not bool(dated), -max(dated) if dated else 0
+    byline = is_byline_card(card)  # non-substantive boilerplate sinks to the tail
+    return not primary, not bool(dated), int(byline), -max(dated) if dated else 0
 
 
 def select_requirement_cards(
     cards: list[dict], requirements: list[dict], *, source_registry: dict[str, dict] | None = None,
     max_cards: int = 128, per_requirement_max_cards: int | None = 24,
+    selection_trace: dict | None = None,
 ) -> tuple[list[dict], dict]:
     """Rank by named gaps, authority and identity; preserve complete records/conflicts.
 
@@ -1644,6 +1813,16 @@ def select_requirement_cards(
         else (max_cards if isinstance(max_cards, int) and max_cards > 0 else None)
     )
     scores = {}
+
+    def trace(card_id, requirement_id, reason):
+        if selection_trace is None:
+            return
+        identifier = str(card_id)
+        if identifier not in selection_trace and len(selection_trace) >= 2048:
+            return
+        per_card = selection_trace.setdefault(identifier, {})
+        if len(per_card) < 32 or str(requirement_id) in per_card:
+            per_card[str(requirement_id)] = reason
 
     has_specific_requirements = any(
         item.get("identifier") != "answer" and item.get("state") != "unavailable"
@@ -1667,6 +1846,7 @@ def select_requirement_cards(
             assigned = str(requirement.get("identifier")) in (card.get("finding") or {}).get("question_ids", [])
             relevant = bool(matches) or card["id"] in covered_ids or assigned or not terms
             if card not in eligible_cards_for_requirement([card], requirement):
+                trace(card["id"], requirement.get("identifier"), "question_ineligible")
                 continue
             # Vocabulary is a navigation score, never a relevance verdict. A
             # source can answer a question without repeating its query terms.
@@ -1676,6 +1856,7 @@ def select_requirement_cards(
                 # supported answer's source identities or invalidate saved work.
                 wanted = covered_ids if requirement.get("state") == "resolved" and covered_ids else set(reviewed) | covered_ids
                 if card["id"] not in wanted:
+                    trace(card["id"], requirement.get("identifier"), "source_review_not_selected")
                     continue  # Explicit model selection, not a lexical exclusion.
             score = 1 + score + (1_000 if card["id"] in covered_ids else 200 if assigned else 0)
             if relevant and card.get("evidence_status") == "conflicted":
@@ -1687,11 +1868,14 @@ def select_requirement_cards(
         scored.sort(key=lambda item: (-item[0], *_selection_quality(item[1], source_registry), item[1]["id"]))
         if per_requirement_limit is not None and len(scored) > per_requirement_limit:
             dropped = len(scored) - per_requirement_limit
+            for _, card, _ in scored[per_requirement_limit:]:
+                trace(card["id"], requirement.get("identifier"), "per_question_limit")
             scored = scored[:per_requirement_limit]
             reasons.setdefault("_omitted", []).append(
                 f"{requirement.get('identifier')}: {dropped} lower-ranked card(s) beyond the per-question working set"
             )
         for score, card, matches in scored:
+            trace(card["id"], requirement.get("identifier"), "selected")
             selected[card["id"]] = card
             scores[card["id"]] = max(scores.get(card["id"], 0), score)
             reasons.setdefault(card["id"], []).append(
@@ -1746,6 +1930,13 @@ def select_requirement_cards(
                 kept.append(card)
                 reasons.setdefault(card["id"], []).append("conflict peer retained beyond soft cap")
         ordered = kept
+    if selection_trace is not None:
+        kept_ids = {card["id"] for card in ordered}
+        for card_id, decisions in selection_trace.items():
+            if card_id not in kept_ids:
+                for requirement_id, reason in decisions.items():
+                    if reason == "selected":
+                        decisions[requirement_id] = "global_card_limit"
     return ordered, reasons
 
 

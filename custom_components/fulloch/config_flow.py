@@ -24,7 +24,9 @@ class FullochConfigFlow(ConfigFlow, domain=DOMAIN):
                     headers={"Authorization": f"Bearer {token}"},
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
-                    if resp.status != 200:
+                    if resp.status in (401, 403):
+                        errors["base"] = "invalid_token"
+                    elif resp.status != 200:
                         errors["base"] = "cannot_connect"
             except Exception:
                 errors["base"] = "cannot_connect"

@@ -56,6 +56,32 @@ def test_queued_job_can_be_cancelled():
     assert manager.status(first) is not None
 
 
+def test_memory_pressure_cancels_running_and_queued_jobs_without_retry():
+    started = threading.Event()
+    finished = threading.Event()
+    calls = []
+
+    def worker(job, cancelled):
+        calls.append(job.id)
+        started.set()
+        while not cancelled():
+            finished.wait(0.01)
+        return "", ""
+
+    manager = BackgroundJobManager(worker)
+    first = manager.submit("first")
+    assert started.wait(1)
+    second = manager.submit("second")
+    manager.cancel_for_memory_pressure()
+    for _ in range(100):
+        if manager.status(first)["status"] == JobStatus.CANCELLED:
+            break
+        finished.wait(0.01)
+    assert manager.status(first)["status"] == JobStatus.CANCELLED
+    assert manager.status(second)["status"] == JobStatus.CANCELLED
+    assert calls == [first]
+
+
 def test_reactive_worker_result_needs_input_without_becoming_a_report():
     done = threading.Event()
 
@@ -254,6 +280,52 @@ def test_atomic_checkpoint_restores_accepted_batch_but_excludes_unaudited_draft(
     assert seen["job"].work_queue[0]["state"] == "complete"
 
 
+def test_chapter_digest_checkpoint_roundtrip_preserves_bindings_and_runtime_state(tmp_path):
+    job = BackgroundJob("digest-job", JobSnapshot("Research"), status=JobStatus.PAUSED)
+    job.chapter_plan = [{"id": "chapter-1", "evidence_digest_ids": {"card-b", "card-a"}}]
+    job.attempted_actions = {"action-b", "action-a"}
+    job.exhausted_capabilities = {"search"}
+    job.model_budget = {"stages": {"chapter_digest": {"calls": 1}}}
+    job.fact_cards = [{"id": "card-a", "source_id": "source-1"}]
+    manager = BackgroundJobManager(lambda *_: ("unused", ""), checkpoint_dir=tmp_path)
+
+    manager.checkpoint(job)
+    saved = json.loads((tmp_path / "digest-job.json").read_text())
+    restored = BackgroundJob.from_checkpoint(saved)
+
+    assert saved["chapter_plan"][0]["evidence_digest_ids"] == ["card-a", "card-b"]
+    assert job.chapter_plan[0]["evidence_digest_ids"] == {"card-a", "card-b"}
+    assert restored.chapter_plan == saved["chapter_plan"]
+    assert restored.attempted_actions == job.attempted_actions
+    assert restored.exhausted_capabilities == job.exhausted_capabilities
+    assert restored.model_budget == job.model_budget
+    assert restored.fact_cards == job.fact_cards
+    assert not job.checkpoint_error
+
+
+def test_checkpoint_failure_preserves_last_good_file_and_reports_recovery(tmp_path, caplog):
+    job = BackgroundJob("failure-job", JobSnapshot("Research"))
+    manager = BackgroundJobManager(lambda *_: ("unused", ""), checkpoint_dir=tmp_path)
+    manager.checkpoint(job)
+    path = tmp_path / "failure-job.json"
+    original = path.read_bytes()
+    job.synthesis_state["unexpected_set"] = {"not silently discarded"}
+
+    with caplog.at_level(logging.INFO, logger="core.background_jobs"):
+        manager.checkpoint(job)
+        manager.checkpoint(job)
+        assert job.view()["checkpoint_error"] is True
+        assert path.read_bytes() == original
+        assert caplog.text.count("Could not persist thinking job checkpoint") == 1
+        del job.synthesis_state["unexpected_set"]
+        job.status = JobStatus.FAILED
+        manager.checkpoint(job)
+
+    assert not job.checkpoint_error
+    assert json.loads(path.read_text())["status"] == "FAILED"
+    assert "checkpoint persistence recovered" in caplog.text
+
+
 def test_lifecycle_keeps_queued_delivery_pending_and_reports_partial_terminal_assessment():
     done = threading.Event()
     seen = {}
@@ -310,6 +382,33 @@ def test_worker_failure_persists_actual_stage_and_exception_reason(tmp_path):
         "ValueError: source record failed schema validation"
     )
     assert job.snapshot.task_record["delivery_status"] == "blocked"
+
+
+def test_worker_failure_does_not_deliver_unaudited_draft(tmp_path):
+    done = threading.Event()
+
+    def worker(job, _cancelled):
+        job.report_draft = "Unsupported claim awaiting audit"
+        job.report_bindings = [{"card_id": "C1"}]
+        job.synthesis_state["partial_report"] = True
+        raise RuntimeError("backend lost")
+
+    def notify(job):
+        if job.status == JobStatus.FAILED:
+            done.set()
+
+    manager = BackgroundJobManager(worker, status_listener=notify, checkpoint_dir=tmp_path)
+    job_id = manager.submit("Research")
+    assert done.wait(2)
+    job = manager._jobs[job_id]
+    assert job.summary == ""
+    assert "partial_report" not in job.synthesis_state
+    assert job.snapshot.task_record["delivery_status"] == "blocked"
+    for _ in range(100):
+        if not (tmp_path / f"{job_id}.json").exists():
+            break
+        threading.Event().wait(0.01)
+    assert not (tmp_path / f"{job_id}.json").exists()
 
 
 def test_status_separates_acknowledgement_latency_from_active_job_duration():
@@ -380,3 +479,78 @@ def test_stage_diagnostics_checkpoint_safe_codes_without_logging_prompts_or_sour
     for _ in range(140):
         job.record_stage_event("synthesis", "evidence_omission", "not_synthesized")
     assert len(job.checkpoint()["stage_log"]) == 128
+
+
+def test_terminal_checkpoints_are_archived_not_rerun(tmp_path):
+    """A restart must not re-run jobs that already reached a terminal state.
+
+    Checkpoints for READY/FAILED/CANCELLED jobs are recorded for status
+    lookups and archived (file removed) so a fresh process does not spam the
+    dashboard with stale "I couldn't complete that report" messages.
+    In-flight jobs are re-queued instead.
+    """
+    def terminal_job(job_id, status, *, error="", execution_status=""):
+        job = BackgroundJob(job_id, JobSnapshot("Research something"), status=status)
+        job.error = error
+        job.stage = "Thinking" if status is JobStatus.FAILED else "Report ready"
+        if execution_status:
+            job.snapshot.task_record["execution_status"] = execution_status
+        return job
+
+    writer = BackgroundJobManager(lambda *_: ("unused", ""), checkpoint_dir=tmp_path)
+    writer.checkpoint(terminal_job("done-job", JobStatus.READY))
+    writer.checkpoint(terminal_job(
+        "failed-job", JobStatus.FAILED,
+        error="RuntimeError: local language model is not loaded",
+        execution_status="failed",
+    ))
+    writer.checkpoint(terminal_job("cancelled-job", JobStatus.CANCELLED, execution_status="cancelled"))
+    # An in-flight job left RUNNING by a crashed process must resume, not archive.
+    writer.checkpoint(terminal_job("queued-job", JobStatus.RUNNING, execution_status="running"))
+
+    done = threading.Event()
+    seen = {}
+
+    def worker(restored, _cancelled):
+        seen[restored.id] = restored
+        done.set()
+        return "resumed", "state"
+
+    manager = BackgroundJobManager(worker, checkpoint_dir=tmp_path)
+    assert done.wait(1)
+    assert list(seen) == ["queued-job"], "terminal jobs must not be re-queued"
+
+    # In-flight job was re-queued and ran.
+    assert manager.status("queued-job")["status"] == JobStatus.READY
+    # Terminal jobs are visible to status() for lookups...
+    assert manager.status("failed-job")["status"] == JobStatus.FAILED
+    assert manager.status("failed-job")["error"] == "RuntimeError: local language model is not loaded"
+    assert manager.status("done-job")["status"] == JobStatus.READY
+    assert manager.status("cancelled-job")["status"] == JobStatus.CANCELLED
+    # ...and their checkpoint files are archived away.
+    assert not (tmp_path / "done-job.json").exists()
+    assert not (tmp_path / "failed-job.json").exists()
+    assert not (tmp_path / "cancelled-job.json").exists()
+
+
+def test_running_checkpoint_is_requeued_on_restart(tmp_path):
+    """A job interrupted mid-run (checkpoint left RUNNING) resumes on restart."""
+    writer = BackgroundJobManager(lambda *_: ("unused", ""), checkpoint_dir=tmp_path)
+    job = BackgroundJob("inflight-job", JobSnapshot("Research something"), status=JobStatus.RUNNING)
+    writer.checkpoint(job)
+
+    done = threading.Event()
+
+    def worker(restored, _cancelled):
+        done.set()
+        return "resumed", "state"
+
+    manager = BackgroundJobManager(worker, checkpoint_dir=tmp_path)
+    assert done.wait(1)
+    assert manager.status("inflight-job")["status"] == JobStatus.READY
+    # Once the resumed job finishes, its working checkpoint is removed.
+    for _ in range(100):
+        if not (tmp_path / "inflight-job.json").exists():
+            break
+        threading.Event().wait(0.01)
+    assert not (tmp_path / "inflight-job.json").exists()

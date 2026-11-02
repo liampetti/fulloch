@@ -126,10 +126,9 @@ def _synthesize_fragment(text: str) -> np.ndarray:
 
 def set_voice(voice_name: str):
     """Set the clone reference and restart the warm server for that voice."""
-    txt_path = Path(VOICES_DIR) / f"{voice_name}.txt"
-    if not txt_path.is_file():
-        txt_path = Path(VOICES_DIR) / "default.txt"
-    ref_audio = Path(VOICES_DIR) / f"{voice_name}.wav"
+    from .voice_reference import voice_reference
+
+    ref_audio, txt_path = voice_reference(voice_name, VOICES_DIR)
     if not ref_audio.is_file() or not txt_path.is_file():
         raise FileNotFoundError(f"Missing Higgs voice reference for {voice_name}")
     global _voice_prompt, _worker

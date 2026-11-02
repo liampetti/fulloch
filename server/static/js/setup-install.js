@@ -4,7 +4,7 @@ import {
 } from './setup-common.js';
 import { createLifetime } from './browser-lifetime.js';
 
-export function createInstallProgress({ state, chosenModels, boot, stepFinish }) {
+export function createInstallProgress({ state, chosenModels, boot }) {
   const lifetime = createLifetime();
   let pollGeneration = 0;
   const stopPolling = () => { pollGeneration++; lifetime.clearTimers(); };
@@ -14,46 +14,55 @@ async function doInstall() {
   const btn = $('get-started');
   if (btn) btn.disabled = true;
   clearAlert();
-  // Blocking preflight before the model download starts: disk space,
-  // network reach to the model hub, and (for GPU tiers) an NVIDIA GPU
-  // being visible. Each failed check becomes one bullet in the error
-  // pane so the user knows exactly which to fix.
-  // docs/ease-of-use-tasks.md.
-  const models = chosenModels();
-  const pre = await postJSON('/setup/preflight-download', { models });
-  const preBody = await pre.json().catch(() => ({ ok: true, errors: [] }));
-  if (!pre.ok) {
-    showPreflightErrors(preBody.errors || []);
+  try {
+    // Check disk, model-hub access and GPU availability before writing setup.
+    const models = chosenModels();
+    const pre = await postJSON('/setup/preflight-download', { models });
+    const preBody = await pre.json().catch(() => ({ ok: false, errors: [] }));
+    if (!pre.ok || preBody.ok === false) {
+      if (preBody.errors?.length) showPreflightErrors(preBody.errors);
+      else showAlert('Could not check system requirements. Please try again.');
+      return;
+    }
+    const saveModels = await postJSON('/setup/models', { models });
+    if (!saveModels.ok) throw new Error('Could not save the model selection. Please go back and try again.');
+    const wakeword = state.schema.wakeword_presets.find(p => p.id === sel.wakeword_id);
+    const tts = models.tts?.backend;
+    const voice = tts === 'kokoro-onnx'
+      ? (state.schema.models?.tts?.backend === tts && sel.voice_clone ? sel.voice_clone : 'af_heart')
+      : (sel.voice_clone && state.schema.models?.tts?.backend !== 'kokoro-onnx' ? sel.voice_clone : 'atticus');
+    const updates = { 'general.voice_clone': voice };
+    if (wakeword) {
+      updates['general.wakeword'] = wakeword.wakeword;
+      updates['general.wakeword_pattern'] = wakeword.pattern;
+    }
+    if (sel.ha.url || sel.clear_integrations) updates['home_assistant.url'] = sel.ha.url;
+    if (sel.search_url || sel.clear_integrations) updates['search.searxng_url'] = sel.search_url;
+    const saveConfig = await putJSON('/config', { updates });
+    if (!saveConfig.ok) throw new Error('Could not save setup settings. Please try again.');
+    // Tokens go to credentials.json, not config.yml.
+    if (sel.ha.token) {
+      const credential = await postJSON('/setup/credential', { key: 'ha_token', value: sel.ha.token });
+      if (!credential.ok) throw new Error('Could not save the Home Assistant token. Please try again.');
+    }
+    const r = await postJSON('/setup/install');
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      throw new Error('Could not start setup: ' + (e.detail || r.status));
+    }
+    state.cameViaWizard = true;
+    showProgress();
+  } catch (e) {
+    showAlert(e.message || 'Setup could not be saved. Please try again.');
+  } finally {
     if (btn) btn.disabled = false;
-    return;
   }
-  await postJSON('/setup/models', { models });
-  const updates = {
-    'general.wakeword': sel.wakeword,
-    'general.wakeword_pattern': sel.wakeword_pattern || '',
-    'general.voice_clone': sel.voice_clone || '',
-  };
-  if (sel.ha.url || sel.clear_integrations) updates['home_assistant.url'] = sel.ha.url;
-  if (sel.search_url || sel.clear_integrations) updates['search.searxng_url'] = sel.search_url;
-  await putJSON('/config', { updates });
-  // Tokens go to credentials.json, not config.yml.
-  if (sel.ha.token) await postJSON('/setup/credential', { key: 'ha_token', value: sel.ha.token });
-  if (sel.openai && sel.openai.api_key) await postJSON('/setup/credential', { key: 'llm_api_key', value: sel.openai.api_key });
-  const r = await postJSON('/setup/install');
-  if (!r.ok) {
-    const e = await r.json().catch(() => ({}));
-    alert('Could not start setup: ' + (e.detail || r.status));
-    if (btn) btn.disabled = false;
-    return;
-  }
-  state.cameViaWizard = true;
-  showProgress();
 }
 
 // ---- download progress ----------------------------------------------------
 function showProgress() {
   stopPolling();
-  state.curStep = 2; renderSteps(2);
+  state.curStep = 3; renderSteps(3);
   clearAlert();
   screen().innerHTML = `<div class="card"><h2>Downloading models</h2>
     <p class="lead">Pulling model weights. You can leave this page open.</p>
@@ -131,11 +140,11 @@ let loadSeenSeq = 0;
 
 function showLoading() {
   stopPolling();
-  state.curStep = 3;
+  state.curStep = 4;
   loadSeenSeq = 0;
   clearAlert();
   $('subtitle').textContent = state.cameViaWizard ? 'First-run setup' : 'Starting up';
-  renderSteps(3, state.cameViaWizard ? undefined : 'settings');
+  renderSteps(4, state.cameViaWizard ? undefined : 'settings');
   screen().innerHTML = `<div class="card"><h2>Starting up</h2>
     <p class="lead">Loading models and warming up prompts — the assistant will be ready shortly.</p>
     <div id="term" class="term" aria-live="polite"></div>
@@ -208,7 +217,7 @@ async function pollLoading(generation = pollGeneration) {
   if (lifetime.destroyed || generation !== pollGeneration) return;
   streamLogLines(s.log);
   $('load-detail') && ($('load-detail').textContent = s.detail || '');
-  if (s.phase === 'READY') { return state.cameViaWizard ? stepFinish() : (location.href = '/'); }
+  if (s.phase === 'READY') { location.href = '/'; return; }
   if (s.phase === 'ERROR') { return boot(); }
   lifetime.setTimeout(() => pollLoading(generation), 900);
 }

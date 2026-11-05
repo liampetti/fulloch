@@ -47,11 +47,11 @@ def test_load_tts_uses_cuda_bfloat16(monkeypatch):
     tts.load_tts()
 
     assert calls["processor"] == (
-        "Edge0/Audio8-TTS-Preview-0.6b",
+        "Edge0/Audio8-TTS-Realistic-Air",
         {"trust_remote_code": True, "revision": None},
     )
     assert calls["model"] == (
-        "Edge0/Audio8-TTS-Preview-0.6b",
+        "Edge0/Audio8-TTS-Realistic-Air",
         {"trust_remote_code": True, "dtype": "bf16", "revision": None},
     )
 
@@ -106,3 +106,35 @@ def test_audio8_stream_decodes_and_chunks_pcm(monkeypatch):
     assert calls["generate"]["max_new_tokens"] == 1024
     np.testing.assert_allclose(chunks[0], [0.1, 0.2])
     np.testing.assert_allclose(chunks[1], [0.3])
+
+
+def test_audio8_fragments_are_bounded_without_dropping_text(monkeypatch):
+    monkeypatch.setattr(tts, "_MAX_SYNTHESIS_CHARS", 20)
+    text = "First sentence. " + "longword " * 15 + "End. " + "中" * 55
+    fragments = list(tts._synthesis_fragments(text))
+
+    assert fragments[0] == "First sentence."
+    assert all(0 < len(fragment) <= 20 for fragment in fragments)
+    assert "".join("".join(fragments).split()) == "".join(text.split())
+
+
+def test_audio8_cancellation_stops_generation_and_skips_decode(monkeypatch):
+    session = tts.TtsSession()
+
+    class Model:
+        device = "cuda"
+
+        def generate(self, **kwargs):
+            criterion = kwargs["stopping_criteria"][0]
+            assert not criterion(None, None)
+            session.stop()
+            assert criterion(None, None)
+            return SimpleNamespace(codes="partial")
+
+        def decode_audio(self, _codes):
+            raise AssertionError("Cancelled audio must not be decoded")
+
+    monkeypatch.setattr(tts, "_processor", lambda **_kwargs: {})
+    monkeypatch.setattr(tts, "_model", Model())
+    monkeypatch.setattr(tts, "_torch", SimpleNamespace(inference_mode=nullcontext))
+    assert list(tts._stream("Hello", (Path("voice.wav"), "Reference"), session)) == []

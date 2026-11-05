@@ -71,6 +71,25 @@ input[type=text], input[type=number], input[type=password], input[type=url], sel
   border: 1px solid var(--border); background: var(--bg); color: var(--text); }
 textarea { resize: vertical; min-height: 4rem; }
 .help { font-size: 0.78rem; color: var(--text-muted); margin-top: 0.2rem; }
+.language-select { margin: 0.3rem 0 0.7rem; }
+.language-picker { border: 1px solid var(--border); background: var(--bg); border-radius: 8px; }
+.language-picker > summary { display: flex; align-items: center; gap: 0.5rem; cursor: pointer;
+  padding: 0.45rem 0.6rem; list-style: none; }
+.language-picker > summary::-webkit-details-marker { display: none; }
+.connect-section .language-picker > summary::before { content: none; }
+.language-picker > summary[aria-disabled="true"] { opacity: 0.6; cursor: wait; }
+.language-pills { display: flex; flex: 1; flex-wrap: wrap; gap: 0.35rem; }
+.language-pill { font-size: 0.78rem; background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 99px; padding: 0.15rem 0.55rem; }
+.language-chevron { color: var(--text-muted); }
+.language-picker fieldset { border: 0; border-top: 1px solid var(--border); margin: 0; padding: 0.5rem; }
+.language-picker legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.language-options { max-height: 13rem; overflow-y: auto; }
+.language-options .language-option { display: flex; align-items: center; gap: 0.5rem;
+  font-weight: 400; margin: 0; padding: 0.35rem; cursor: pointer; }
+.language-option:hover { background: var(--surface-2); border-radius: 5px; }
+.language-option input { accent-color: var(--primary); }
+.language-validation:empty { display: none; }
 .dashboard-preferences fieldset { border: 0; margin: 0; padding: 0; }
 .dashboard-preferences legend { font-size: 0.85rem; font-weight: 600; margin-bottom: 0.3rem; }
 .dashboard-preferences fieldset label, .checkbox-row { display: inline-flex; align-items: center;

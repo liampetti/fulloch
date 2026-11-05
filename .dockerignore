@@ -63,6 +63,7 @@ data/models/*
 !data/models/grammars/
 !data/models/grammars/agent.gbnf
 !third_party/openwakeword-models/NOTICE.md
+!third_party/home-assistant-intents/NOTICE.md
 !data/models/wakeword/
 !data/models/wakeword/hey_atticus_v*.onnx
 # The image seeds these repository-owned starter references on first run.
@@ -72,6 +73,9 @@ data/voices/*
 !data/voices/*.wav
 !data/voices/*.txt
 data/cache/
+# Runtime packs and custom files must never enter the build context.
+data/intents/*/*
+!data/intents/*/fulloch-responses.yaml
 *.gguf
 
 # =============================================================================

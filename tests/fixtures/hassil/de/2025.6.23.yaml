@@ -1,0 +1,911 @@
+language: de
+settings:
+  filter_with_regex: false
+lists:
+  color:
+    values:
+    - in: wei(ß|ss)
+      out: white
+    - in: schwarz
+      out: black
+    - in: rot
+      out: red
+    - in: orange
+      out: orange
+    - in: gelb
+      out: yellow
+    - in: grün
+      out: green
+    - in: blau
+      out: blue
+    - in: violett
+      out: purple
+    - in: braun
+      out: brown
+  brightness:
+    range:
+      type: percentage
+      from: 0
+      to: 100
+  brightness_level:
+    values:
+    - in: (max[imal[e]|imum]|höchste|volle)
+      out: 100
+    - in: (min[imal[e]|imum]|niedrigste)
+      out: 1
+  cover_states:
+    values:
+    - in: (offen|auf|oben|geöffnet)
+      out: open
+    - in: (geschlossen|zu|unten)
+      out: closed
+    - in: ([am ]öffnen|öffnet)
+      out: opening
+    - in: ([am ]schlie(ß|ss)en|schlie(ß|ss)t)
+      out: closing
+  cover_classes:
+    values:
+    - in: (Markise[n]|Beschattung[en])
+      out: awning
+    - in: (Jalousie[n]|Rollo[s])
+      out: blind
+    - in: (Gardine[n]|Vorhang|Vorhänge)
+      out: curtain
+    - in: Tür[e|en]
+      out: door
+    - in: (Garagentür[e|en]|Garagentor[e])
+      out: garage
+    - in: Tor[e]
+      out: gate
+    - in: Schirm[e]
+      out: shade
+    - in: (Roll[l](a|ä)den)
+      out: shutter
+    - in: Fenster
+      out: window
+  lock_domains:
+    values:
+    - in: (Schloss|Schlösser|Tür[e|en]|Tor[e])
+      out: lock
+  lock_states:
+    values:
+    - in: (([ab|zu]ge|ver)(schlossen|sperrt)|verriegelt)
+      out: locked
+    - in: (nicht (([ab|zu]ge|ver)(schlossen|sperrt)|verriegelt)|ent(riegelt|sperrt)|aufge(sperrt|schlossen))
+      out: unlocked
+  on_off_domains:
+    values:
+    - in: (Lampe[n]|Licht[er]|Leuchte[n]|Beleuchtung[en])
+      out: light
+    - in: (Ventilator[en]|Lüfter)
+      out: fan
+    - in: Schalter
+      out: switch
+  on_off_states:
+    values:
+    - in: ((an|ein)[geschaltet]|auf)
+      out: 'on'
+    - in: ((aus|ab)[geschaltet]|zu)
+      out: 'off'
+  temperature:
+    range:
+      type: temperature
+      from: 0
+      to: 100
+  bs_battery_states:
+    values:
+    - in: (niedrig|gering|schwach)
+      out: 'on'
+    - in: normal
+      out: 'off'
+  bs_battery_charging_states:
+    values:
+    - in: (lädt|[auf][ge]laden)[ auf]
+      out: 'on'
+    - in: (lädt nicht|nicht[ auf][ge]laden|laden nicht)[ auf]
+      out: 'off'
+  bs_carbon_monoxide_states:
+    values:
+    - in: <erkannt>
+      out: 'on'
+    - in: (klar|rein|sauber|sicher)
+      out: 'off'
+  bs_cold_states:
+    values:
+    - in: kalt
+      out: 'on'
+    - in: normal
+      out: 'off'
+  bs_connectivity_states:
+    values:
+    - in: verbunden
+      out: 'on'
+    - in: getrennt
+      out: 'off'
+  bs_door_states:
+    values:
+    - in: (auf|offen|geöffnet)
+      out: 'on'
+    - in: (zu|geschlossen)
+      out: 'off'
+  bs_garage_door_states:
+    values:
+    - in: (auf|offen|geöffnet|oben)
+      out: 'on'
+    - in: (zu|geschlossen|unten)
+      out: 'off'
+  bs_window_states:
+    values:
+    - in: (auf|offen|geöffnet|gekippt)
+      out: 'on'
+    - in: (zu|geschlossen)
+      out: 'off'
+  bs_gas_states:
+    values:
+    - in: <erkannt>
+      out: 'on'
+    - in: (klar|rein|sauber|sicher)
+      out: 'off'
+  bs_heat_states:
+    values:
+    - in: hei(ß|ss)
+      out: 'on'
+    - in: normal
+      out: 'off'
+  bs_light_states:
+    values:
+    - in: <erkannt>
+      out: 'on'
+    - in: kein Licht
+      out: 'off'
+  bs_problem_states:
+    values:
+    - in: <erkannt>
+      out: 'on'
+    - in: (ok[ay]|normal)
+      out: 'off'
+  bs_safety_states:
+    values:
+    - in: (unsicher|gefährlich)
+      out: 'on'
+    - in: (sicher|ungefährlich)
+      out: 'off'
+  shopping_list_item:
+    wildcard: true
+  zone:
+    wildcard: true
+  position:
+    range:
+      type: percentage
+      from: 0
+      to: 100
+  position_level:
+    values:
+    - in: (max[imal[e]|imum]|höchste)
+      out: 100
+    - in: (min[imal[e]|imum]|niedrigste)
+      out: 1
+  volume_level:
+    range:
+      type: percentage
+      from: 0
+      to: 100
+  volume_mapping:
+    values:
+    - in: (max[imal[e]|imum]|höchste|volle)
+      out: 100
+    - in: (min[imal[e]|imum]|niedrigste)
+      out: 1
+  timer_seconds:
+    range:
+      from: 1
+      to: 100
+  timer_minutes:
+    range:
+      from: 1
+      to: 100
+  timer_hours:
+    range:
+      from: 1
+      to: 100
+  timer_name:
+    wildcard: true
+  timer_command:
+    wildcard: true
+  message:
+    wildcard: true
+  search_query:
+    wildcard: true
+expansion_rules:
+  artikel_bestimmt: '[(der|die|das|dem|den|des)]'
+  artikel_unbestimmt: '[(ein|eine|eines|einer|einem|einen)]'
+  artikel: '[<artikel_bestimmt>|<artikel_unbestimmt>]'
+  name: <artikel_bestimmt> {name}
+  area: '[in|an|auf|bei][ (<artikel_bestimmt>|im|am|<von_dem>)] {area}[s]'
+  floor: '[in|auf][ (<artikel_bestimmt>|im|<von_dem>)] {floor}[ Geschoss]'
+  area_floor: (<area>|<floor>)
+  an: (an|ein|auf)
+  aus: (aus|ab|zu)
+  auf: (auf|hoch|[he]rauf|nach oben)
+  zu: (zu|[he]runter|nach unten)
+  von_dem: (von[ dem]|vom)
+  zu_dem: (zu[ dem]|zum)
+  alle: ((alle|sämtliche)[r]|jede[r|s|n]|(die|der) (ganze|komplette|sämtliche)[n])[
+    der]
+  schliessen: (schlie(ß|ss)[e|en]|zumachen|zu machen)
+  öffnen: (öffne[n]|aufmachen|auf machen)
+  schalten: (schalt[e|en|et])
+  machen: (mach[e|en|t])
+  fahren: (fahr[e|en|t])
+  setzen: (setz[e|en]|stell[e|en]|einstellen|änder[e|n]|veränder[e|n])
+  abdeckung: '[(das|die|der|den) ](Rollo[s]|Abdeckung[en]|Roll[l](a|ä)den|Jalousie[n]|Raffstore[s]|Markise[n]|Vorh(a|ä)ng[e]|Beschattung[en])'
+  alle_abdeckungen: <alle> (Rollos|Abdeckungen|Roll[l](a|ä)den|Jalousien|Raffstores|Markisen|Vorhänge|Beschattungen)
+  garage: '[(die|das) ](Garage[n]|Garagentor[e])'
+  alle_garagen: <alle> (Garagen[tore])
+  tor: '[(das|die) ]Tor[e]'
+  alle_tore: <alle> (Tore|Garagentore)
+  luefter: '[(der|die|den) ](Ventilator[en]|Lüfter)'
+  alle_luefter: <alle> (Ventilatoren|Lüfter)
+  brightness: '{brightness}[ (Prozent|%)]'
+  temperature: '{temperature}[ ][°|Grad]'
+  licht: '[(das|die) ](Licht|Lampe|Beleuchtung)'
+  lichtes: ([des ](Lichts|Lichtes)|[der ](Lampe|Beleuchtung))
+  lichter: '[(die|der|von den) ](Lichter|Lichtern|Lampen|Leuchten|Beleuchtungen)'
+  alle_lichter: (<alle> (<lichter>|Beleuchtung)|von allen[ (Lichtern|Lampen|Leuchten|Beleuchtungen)])
+  leuchten_lassen: ([er]leuchten lassen|[ein]färben)
+  tuer: '[die ]Tür[e|en]'
+  schloss: '[(das|die) ](Schloss|Schlösser)'
+  sperren: (sperr|schlie(ss|ß))[e|en]
+  entsperren: ((ent|auf)<sperren>|öffne|entrieg(el|le))[n]
+  absperren: (zu|ab)<sperren>|verrieg(el|le)[n]
+  aktivieren: aktivier[e|en]
+  deaktivieren: de<aktivieren>
+  ausfuehren: (start[e|en]|ausführen)
+  szene: '[die ]Szene'
+  skript: '[das ]Skript'
+  batterie: '[(der|des) ](Batterie[n]|Akku[s])'
+  irgend: (irgend(<artikel_unbestimmt>[s]|welche[s]|wo)|(einige|manche)[s]|<artikel_unbestimmt>[s])
+    <artikel_bestimmt>
+  etwas: '[irgend][et]was'
+  welche: (welche[r|s|n]|was für[ <artikel_unbestimmt>[s]]) <artikel_bestimmt>
+  wieviel: (wie[ ]viel[e]|welche Anzahl[ (an|von)])
+  ladestand: '[der][ Lade][zu]Stand'
+  co: Kohlen[stoff]monoxid
+  co_sensor: <co>[-]Sensor[en]
+  gas_sensor: Gas[-]Sensor[en]
+  ding: ((Ding|Gerät)[e|en]|Sensor[en]|Gegenstand|Gegenstände[n])
+  erkannt: (entdeckt|ausgelöst|erkannt|an)
+  ist_wurde: (ist|wurde)
+  sind_wurden: (sind|wurden)
+  position: '{position}[ (Prozent|%)]'
+  volume: '{volume_level}[ (Prozent|%)]'
+  im_bereich: '[((in|auf)[ <artikel_bestimmt>]|im)] {zone:state}'
+  im_zuhause: (zu Hause|[im ]Zuhause)
+  timer_set: (starte|setze|stelle|erstelle)
+  timer_cancel: (beende|stopp[e]|lösch[e])
+  timer_duration_seconds: '{timer_seconds:seconds} Sekunde[n]'
+  timer_duration_minutes: '{timer_minutes:minutes} Minute[n][ [und]{timer_seconds:seconds}
+    Sekunde[n]]'
+  timer_duration_hours: '{timer_hours:hours} Stunde[n][ [und]{timer_minutes:minutes}
+    Minute[n]][ [und]{timer_seconds:seconds} Sekunde[n]]'
+  timer_duration: <timer_duration_seconds>|<timer_duration_minutes>|<timer_duration_hours>
+  timer_start_seconds: '{timer_seconds:start_seconds} Sekunde[n]'
+  timer_start_minutes: '{timer_minutes:start_minutes} Minute[n][ [und]{timer_seconds:start_seconds}
+    Sekunde[n]]'
+  timer_start_hours: '{timer_hours:start_hours} Stunde[n][ [und]{timer_minutes:start_minutes}
+    Minute[n]][ [und]{timer_seconds:start_seconds} Sekunde[n]]'
+  timer_start: <timer_start_seconds>|<timer_start_minutes>|<timer_start_hours>
+  naechster: nächste[r|s|n]
+  vorheriger_letzter: (vorherige|letzte)[r|s|n]
+  starte: (starte|spiele)
+  wiederhole: (wiederhole[ <artikel_bestimmt>]|zurück <zu_dem>)
+  song: (Titel|Lied|Song|Track|Stück)
+  media_type: (musik|[fernseh]sendung|gerät[e])
+skip_words:
+- bitte
+- danke
+- gefälligst
+- jetzt
+- sofort
+- gleich
+- gerade
+- momentan
+- im Moment
+- mal
+- eben
+- kannst du
+- könntest du
+- würdest du
+- du sollst
+- ähm
+- äh
+intents:
+  HassClimateSetTemperature:
+    data:
+    - sentences:
+      - <setzen>[ <area>] [die ]Temperatur auf <temperature>
+      - <setzen> [die ]Temperatur <von_dem> <name> auf <temperature>
+      - <setzen> [die ]Temperatur <name>[s] auf <temperature>
+  HassTurnOff:
+    data:
+    - sentences:
+      - <schliessen> <name>
+      - <name> <schliessen>
+      - (<machen>|<fahren>) <name> <zu>
+      - <name> <zu>[(<machen>|<fahren>)]
+      requires_context:
+        domain: cover
+      slots:
+        domain: cover
+      response: cover
+    - sentences:
+      - <schliessen> <area_floor> (<abdeckung>|<tor>|<garage>)
+      - <schliessen> (<abdeckung>|<tor>|<garage>) <area_floor>
+      - (<abdeckung>|<tor>|<garage>) <area_floor> <schliessen>
+      - (<machen>|<fahren>) <area_floor> (<abdeckung>|<tor>|<garage>) <zu>
+      - (<machen>|<fahren>) (<abdeckung>|<tor>|<garage>) <area_floor> <zu>
+      - (<abdeckung>|<tor>|<garage>) <area_floor> <zu>[ (<machen>|<fahren>)]
+      slots:
+        domain: cover
+      response: cover
+    - sentences:
+      - <schliessen>[ <area_floor>] (<alle_abdeckungen>|<alle_tore>|<alle_garagen>)
+      - <schliessen> (<alle_abdeckungen>|<alle_tore>|<alle_garagen>)[ <area_floor>]
+      - (<machen>|<fahren>)[ <area_floor>] (<alle_abdeckungen>|<alle_tore>|<alle_garagen>)
+        <zu>
+      - (<machen>|<fahren>) (<alle_abdeckungen>|<alle_tore>|<alle_garagen>)[ <area_floor>]
+        <zu>
+      slots:
+        domain: cover
+      response: close_all
+    - sentences:
+      - <schalten> <luefter> <area> <aus>
+      - <schalten> <area> <luefter> <aus>
+      - stoppe <luefter> <area>[ <aus>]
+      - stoppe <area> <luefter>[ <aus>]
+      - <machen> <luefter> <area> <aus>
+      - <machen> <area> <luefter> <aus>
+      - <luefter> <area> <aus>[<schalten>|<machen>]
+      - <area> <luefter> <aus>[<schalten>|<machen>]
+      - <schalten> <alle_luefter>[ <area>] <aus>
+      - <schalten> <area> <alle_luefter> <aus>
+      - stoppe <alle_luefter>[ <area>][ <aus>]
+      - stoppe[ <area>] <alle_luefter>[ <aus>]
+      - <machen> <alle_luefter>[ <area>] <aus>
+      - <machen> <area> <alle_luefter> <aus>
+      - <alle_luefter>[ <area>] <aus>[<schalten>|<machen>]
+      - <area> <alle_luefter> <aus>[<schalten>|<machen>]
+      slots:
+        domain: fan
+      response: fan_all
+    - sentences:
+      - (<schalten>|<machen>) <name>[ <area>] <aus>
+      - stoppe <name>[ <area>]
+      - <deaktivieren> <name>[ <area>]
+      - <name>[ <area>] <deaktivieren>
+      - <name>[ <area>] <aus>[<schalten>|<machen>]
+      excludes_context:
+        domain:
+        - binary_sensor
+        - cover
+        - lock
+        - scene
+        - script
+        - sensor
+    - sentences:
+      - <schalten> (<licht>|<lichter>|<alle_lichter>) <area> <aus>
+      - <schalten> <area> (<licht>|<lichter>|<alle_lichter>) <aus>
+      - (<licht>|<lichter>|<alle_lichter>) <area> <aus>[<schalten>]
+      - (<licht>|<lichter>|<alle_lichter>) <aus>[<schalten>] <area>
+      - <area> (<licht>|<lichter>|<alle_lichter>) <aus>[<schalten>]
+      - <machen> <area> (<licht>|<lichter>|<alle_lichter>) <aus>
+      - <machen> (<licht>|<lichter>|<alle_lichter>) <area> <aus>
+      - (<licht>|<lichter>|<alle_lichter>) <area> <aus><machen>
+      - <area> (<licht>|<lichter>|<alle_lichter>) <aus><machen>
+      - <schalten> <alle_lichter>[ <area>] <aus>
+      - <schalten>[ <area>] <alle_lichter> <aus>
+      - <alle_lichter>[ <area>] <aus>[<schalten>]
+      - '[<area> ]<alle_lichter> <aus>[<schalten>]'
+      - <machen>[ <area>] <alle_lichter> <aus>
+      - <machen> <alle_lichter>[ <area>] <aus>
+      - '[<area> ]<alle_lichter> <aus><machen>'
+      - <alle_lichter>[ <area>] <aus><machen>
+      response: light
+      slots:
+        domain: light
+    - sentences:
+      - <schalten> (<licht>|<lichter>)[ hier] <aus>
+      - <schalten>[ hier] (<licht>|<lichter>) <aus>
+      - (<licht>|<lichter>)[ hier] <aus>[<schalten>]
+      - '[hier ](<licht>|<lichter>) <aus>[<schalten>]'
+      - <machen> (<licht>|<lichter>)[ hier] <aus>
+      - <machen>[ hier] (<licht>|<lichter>) <aus>
+      - '[hier ](<licht>|<lichter>) <aus><machen>'
+      - (<licht>|<lichter>)[ hier] <aus><machen>
+      response: light
+      slots:
+        domain: light
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <schalten> (<licht>|<lichter>|<alle_lichter>) <floor> <aus>
+      - <schalten> <floor> (<licht>|<lichter>|<alle_lichter>) <aus>
+      - (<licht>|<lichter>|<alle_lichter>) <floor> <aus>[<schalten>]
+      - (<licht>|<lichter>|<alle_lichter>) <aus>[<schalten>] <floor>
+      - <floor> (<licht>|<lichter>|<alle_lichter>) <aus>[<schalten>]
+      - <machen> <floor> (<licht>|<lichter>|<alle_lichter>) <aus>
+      - <machen> (<licht>|<lichter>|<alle_lichter>) <floor> <aus>
+      - (<licht>|<lichter>|<alle_lichter>) <floor> <aus><machen>
+      - <floor> (<licht>|<lichter>|<alle_lichter>) <aus><machen>
+      response: light
+      slots:
+        domain: light
+    - sentences:
+      - <entsperren> <name>[ <area>]
+      - <entsperren> <area> <name>
+      - (<sperren>|<machen>) <name>[ <area>] auf
+      - (<sperren>|<machen>) <area> <name> auf
+      - <name>[ <area>] (auf[machen]|<entsperren>)
+      - <area> <name> (auf[machen]|<entsperren>)
+      requires_context:
+        domain: lock
+      response: lock
+    - sentences:
+      - <entsperren>[ <alle>] (<tuer>|<schloss>) <area>
+      - <entsperren> <area>[ <alle>] (<tuer>|<schloss>)
+      - (<sperren>|<machen>)[ <alle>] (<tuer>|<schloss>) <area> auf
+      - (<sperren>|<machen>) <area>[ <alle>] (<tuer>|<schloss>) auf
+      - '[<alle> ](<tuer>|<schloss>) <area> (auf[machen]|<entsperren>)'
+      - <area>[ <alle>] (<tuer>|<schloss>) (auf[machen]|<entsperren>)
+      requires_context:
+        domain: lock
+      response: lock
+    - sentences:
+      - <schliessen> <name>
+      - <name> <schliessen>
+      - <name> (zu<machen>|[zu|ab][ ]drehen)
+      requires_context:
+        domain: valve
+      slots:
+        domain: valve
+      response: valve
+  HassTurnOn:
+    data:
+    - sentences:
+      - <öffnen> <name>
+      - <name> <öffnen>
+      - (<machen>|<fahren>) <name> <auf>
+      - <name> <auf>[(<machen>|<fahren>)]
+      requires_context:
+        domain: cover
+      slots:
+        domain: cover
+      response: cover
+    - sentences:
+      - <öffnen> <area_floor> (<abdeckung>|<tor>|<garage>)
+      - <öffnen> (<abdeckung>|<tor>|<garage>) <area_floor>
+      - (<abdeckung>|<tor>|<garage>) <area_floor> <öffnen>
+      - (<machen>|<fahren>) <area_floor> (<abdeckung>|<tor>|<garage>) <auf>
+      - (<machen>|<fahren>) (<abdeckung>|<tor>|<garage>) <area_floor> <auf>
+      - (<abdeckung>|<tor>|<garage>) <area_floor> <auf>[ (<machen>|<fahren>)]
+      slots:
+        domain: cover
+      response: cover
+    - sentences:
+      - <öffnen> <area_floor> (<alle_tore>|<alle_garagen>)
+      - <öffnen> (<alle_tore>|<alle_garagen>) <area_floor>
+      - (<machen>|<fahren>) <area_floor> (<alle_tore>|<alle_garagen>) <auf>
+      - (<machen>|<fahren>) (<alle_tore>|<alle_garagen>) <area_floor> <auf>
+      - <öffnen>[ <area_floor>] (<alle_abdeckungen>|<alle_tore>|<alle_garagen>)
+      - <öffnen> (<alle_abdeckungen>|<alle_tore>|<alle_garagen>)[ <area_floor>]
+      - (<machen>|<fahren>)[ <area_floor>] (<alle_abdeckungen>|<alle_tore>|<alle_garagen>)
+        <auf>
+      - (<machen>|<fahren>) (<alle_abdeckungen>|<alle_tore>|<alle_garagen>)[ <area_floor>]
+        <auf>
+      slots:
+        domain: cover
+      response: open_all
+    - sentences:
+      - <schalten> <luefter> <area> <an>
+      - <schalten> <area> <luefter> <an>
+      - starte <luefter> <area>[ <an>]
+      - starte <area> <luefter>[ <an>]
+      - <machen> <luefter> <area> <an>
+      - <machen> <area> <luefter> <an>
+      - <luefter> <area> <an>[<schalten>|<machen>]
+      - <area> <luefter> <an>[<schalten>|<machen>]
+      - starte <alle_luefter>[ <area>][ <an>]
+      - starte[ <area>] <alle_luefter>[ <an>]
+      - <schalten> <alle_luefter>[ <area>] <an>
+      - <schalten> <area> <alle_luefter> <an>
+      - <machen> <alle_luefter>[ <area>] <an>
+      - <machen> <area> <alle_luefter> <an>
+      - <alle_luefter>[ <area>] <an>[<schalten>|<machen>]
+      - <area> <alle_luefter> <an>[<schalten>|<machen>]
+      slots:
+        domain: fan
+      response: fan_all
+    - sentences:
+      - (<schalten>|<machen>) <name>[ <area>] <an>
+      - starte <name>[ <area>]
+      - <aktivieren> <name>[ <area>]
+      - <name>[ <area>] <aktivieren>
+      - <name>[ <area>] <an>[<schalten>|<machen>]
+      excludes_context:
+        domain:
+        - binary_sensor
+        - cover
+        - lock
+        - scene
+        - script
+        - sensor
+        - vacuum
+        - valve
+    - sentences:
+      - <schalten> (<licht>|<lichter>|<alle_lichter>) <area> <an>
+      - <schalten> <area> (<licht>|<lichter>|<alle_lichter>) <an>
+      - (<licht>|<lichter>|<alle_lichter>) <area> <an>[<schalten>]
+      - (<licht>|<lichter>|<alle_lichter>) <an>[<schalten>] <area>
+      - <area> (<licht>|<lichter>|<alle_lichter>) <an>[<schalten>]
+      - <machen> <area> (<licht>|<lichter>|<alle_lichter>) <an>
+      - <machen> (<licht>|<lichter>|<alle_lichter>) <area> <an>
+      - (<licht>|<lichter>|<alle_lichter>) <area> <an><machen>
+      - <area> (<licht>|<lichter>|<alle_lichter>) <an><machen>
+      - <schalten> <alle_lichter>[ <area>] <an>
+      - <schalten>[ <area>] <alle_lichter> <an>
+      - <alle_lichter>[ <area>] <an>[<schalten>]
+      - '[<area> ]<alle_lichter> <an>[<schalten>]'
+      - <machen>[ <area>] <alle_lichter> <an>
+      - <machen> <alle_lichter>[ <area>] <an>
+      - '[<area> ]<alle_lichter> <an><machen>'
+      - <alle_lichter>[ <area>] <an><machen>
+      response: light
+      slots:
+        domain: light
+    - sentences:
+      - <schalten> (<licht>|<lichter>)[ hier] <an>
+      - <schalten>[ hier] (<licht>|<lichter>) <an>
+      - (<licht>|<lichter>)[ hier] <an>[<schalten>]
+      - '[hier ](<licht>|<lichter>) <an>[<schalten>]'
+      - <machen>[ hier] (<licht>|<lichter>) <an>
+      - <machen> (<licht>|<lichter>)[ hier] <an>
+      - '[hier ](<licht>|<lichter>) <an><machen>'
+      - (<licht>|<lichter>)[ hier] <an><machen>
+      response: light
+      slots:
+        domain: light
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <schalten> (<licht>|<lichter>|<alle_lichter>) <floor> <an>
+      - <schalten> <floor> (<licht>|<lichter>|<alle_lichter>) <an>
+      - (<licht>|<lichter>|<alle_lichter>) <floor> <an>[<schalten>]
+      - (<licht>|<lichter>|<alle_lichter>) <an>[<schalten>] <floor>
+      - <floor> (<licht>|<lichter>|<alle_lichter>) <an>[<schalten>]
+      - <machen> <floor> (<licht>|<lichter>|<alle_lichter>) <an>
+      - <machen> (<licht>|<lichter>|<alle_lichter>) <floor> <an>
+      - (<licht>|<lichter>|<alle_lichter>) <floor> <an><machen>
+      - <floor> (<licht>|<lichter>|<alle_lichter>) <an><machen>
+      response: light
+      slots:
+        domain: light
+    - sentences:
+      - (<sperren>|<machen>) <name>[ <area>][ (zu|ab)]
+      - (<sperren>|<machen>) <area> <name>[ (zu|ab)]
+      - <name>[ <area>] (zu[machen]|<absperren>)
+      - <area> <name> (zu[machen]|<absperren>)
+      - <absperren> <name>[ <area>]
+      - <absperren> <area> <name>
+      requires_context:
+        domain: lock
+      response: lock
+    - sentences:
+      - (<sperren>|<machen>)[ <alle>] (<tuer>|<schloss>) <area>[ (zu|ab)]
+      - (<sperren>|<machen>) <area>[ <alle>] (<tuer>|<schloss>)[ (zu|ab)]
+      - '[<alle> ](<tuer>|<schloss>) <area> (zu[machen]|<absperren>)'
+      - <area>[ <alle>] (<tuer>|<schloss>) (zu[machen]|<absperren>)
+      - <absperren>[ <alle>] (<tuer>|<schloss>) <area>
+      - <absperren> <area>[ <alle>] (<tuer>|<schloss>)
+      requires_context:
+        domain: lock
+      response: lock
+    - sentences:
+      - '[<szene> ]<name>[(<aktivieren>|<ausfuehren>|<an>)]'
+      - <name> <szene> (<aktivieren>|<ausfuehren>|<an>)
+      - führe[ <szene>] <name> aus
+      - führe <name> <szene> aus
+      - <aktivieren>[ <szene>] <name>
+      - <aktivieren> <name> <szene>
+      requires_context:
+        domain: scene
+      slots:
+        domain: scene
+      response: scene
+    - sentences:
+      - '[<szene> ]<name> <area>[ (<aktivieren>|<ausfuehren>|<an>)]'
+      - <name> <szene> <area> (<aktivieren>|<ausfuehren>|<an>)
+      - führe[ <szene>] <name> <area> aus
+      - führe <name> <szene> <area> aus
+      - <aktivieren>[ <szene>] <name> <area>
+      - <aktivieren> <name> <szene> <area>
+      slots:
+        domain: scene
+      response: scene
+    - sentences:
+      - '[<skript> ]<name> (<ausfuehren>|<aktivieren>)'
+      - <name> <skript> (<ausfuehren>|<aktivieren>)
+      - führe[ <skript>] <name> aus
+      - führe <name> <skript> aus
+      - <aktivieren>[ <skript>] <name>
+      - <aktivieren> <name> <skript>
+      requires_context:
+        domain: script
+      slots:
+        domain: script
+      response: script
+    - sentences:
+      - <öffnen> <name>
+      - <name> <öffnen>
+      - <name> auf(<machen>|[ ]drehen)
+      requires_context:
+        domain: valve
+      slots:
+        domain: valve
+      response: valve
+  HassCancelTimer:
+    data:
+    - sentences:
+      - <timer_cancel>[ (den|meinen)] Timer
+      - <timer_cancel>[ (den|meinen)] <timer_start> Timer
+      - <timer_cancel>[ (den|meinen)] Timer für <timer_start>
+      - <timer_cancel>[ (den|meinen)] {area} Timer
+      - <timer_cancel>[ (den|meinen)] Timer <area>
+      - <timer_cancel>[ (den|meinen)] {timer_name:name} Timer
+      - <timer_cancel>[ (den|meinen)] Timer für {timer_name:name}
+  HassGetCurrentDate:
+    data:
+    - sentences:
+      - <welche> (tag|datum) (ist|haben wir) heute
+      - (nenn[e]|gib|gebe) mir das[ (heutige|aktuelle)] datum
+  HassGetCurrentTime:
+    data:
+    - sentences:
+      - wie spät ist es
+      - (wie viel|wieviel) uhr (ist es|haben wir)[ jetzt]
+      - (nenn[e]|gib|gebe) mir die uhrzeit
+  HassSetPosition:
+    data:
+    - sentences:
+      - <setzen> [die ]Position[ von] <name>[ auf] <position>[ ein]
+      - '[die ]Position[ von] <name>[ auf] <position>[ <setzen>]'
+      - <name>[ (auf|zu)] <position>[ <setzen>]
+      - <name> Position[ (auf|zu)] <position>[ <setzen>]
+      requires_context:
+        domain:
+        - cover
+        - valve
+    - sentences:
+      - <setzen> <name> auf [(die|das) ]{position_level:position}[ (Position|Stufe)][
+        ein]
+      - <setzen> [die ]Position[ <von_dem>] <name> auf [(die|das) ]{position_level:position}[
+        Stufe][ ein]
+      - '[die ]Position[ <von_dem>] <name> auf [(die|das) ]{position_level:position}[
+        Stufe] <setzen>'
+      - <name> auf [(die|das) ]{position_level:position}[ (Position|Stufe)] <setzen>
+      requires_context:
+        domain:
+        - cover
+        - valve
+  HassStartTimer:
+    data:
+    - sentences:
+      - <timer_duration> Timer
+      - Timer[ (auf|für)] <timer_duration>
+      - <timer_duration> Timer für {timer_name:name}
+      - Timer[ (auf|für)] <timer_duration> (namens|für) {timer_name:name}
+      - '{timer_name:name} Timer[ (auf|für)] <timer_duration>'
+      - <timer_set>[ einen] <timer_duration> Timer
+      - <timer_set>[ einen] Timer (auf|für) <timer_duration>
+      - <timer_set>[ einen][ Timer (auf|für)] <timer_duration>[ Timer] namens {timer_name:name}
+      - <timer_set>[ einen][ Timer namens] {timer_name:name}[ Timer] (auf|für) <timer_duration>
+    - sentences:
+      - '{timer_command:conversation_command} in <timer_duration>'
+      - in <timer_duration> {timer_command:conversation_command}
+      response: command
+  HassTimerStatus:
+    data:
+    - sentences:
+      - Timer Status
+      - Status (des|meines) Timers
+      - wie lange läuft (der|mein) Timer noch
+      - was macht (der|mein) Timer
+      - <timer_start> Timer Status
+      - Status (des|meines) <timer_start> Timers
+      - wie lange läuft (der|mein) <timer_start> Timer noch
+      - was macht (der|mein) <timer_start> Timer
+      - '{area} Timer Status'
+      - Status (des|meines) {area} Timers
+      - Status (des|meines) Timers <area>
+      - wie lange läuft (der|mein) {area} Timer noch
+      - wie lange läuft (der|mein) Timer <area> noch
+      - was macht (der|mein) {area} Timer
+      - was macht (der|mein) Timer <area>
+      - '{timer_name:name} Timer Status'
+      - Status (des|meines) {timer_name:name} Timers
+      - wie lange läuft (der|mein) {timer_name:name} Timer noch
+      - was macht (der|mein) {timer_name:name} Timer
+  HassLightSet:
+    data:
+    - sentences:
+      - <setzen> [die ]Helligkeit[ von] <name>[ auf] <brightness>[ ein]
+      - '[die ]Helligkeit[ von] <name>[ auf] <brightness>[ <setzen>]'
+      - dimme[ [die ]Helligkeit[ von]] <name>[ (auf|zu)] <brightness>
+      - <name>[ (auf|zu)] <brightness>[ dimmen]
+      - <name> Helligkeit[ (auf|zu)] <brightness>
+      requires_context:
+        domain: light
+      response: brightness
+    - sentences:
+      - '[<setzen> ][die ]Helligkeit[ (<licht>|<lichtes>|<lichter>|<alle_lichter>)][
+        <area>][ auf] <brightness>[ ein]'
+      - '[die ]Helligkeit[ (<licht>|<lichtes>|<lichter>|<alle_lichter>)][ <area>]
+        auf <brightness> <setzen>'
+      - dimme[ (<licht>|<lichter>|<alle_lichter>)][ <area>][ (auf|zu)] <brightness>
+      - '[<licht>|<lichter>|<alle_lichter>][ <area>][ (auf|zu)] <brightness> dimmen'
+      response: brightness
+    - sentences:
+      - '[<setzen> ][die ]Helligkeit [<hier> ]auf <brightness>'
+      - '[die ]Helligkeit [<hier> ]auf <brightness> dimmen'
+      expansion_rules:
+        hier: (hier|im Raum)
+      response: brightness
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - '[<setzen> ][die ][ Farbe][ von] <name>[ (auf|zu)] {color}'
+      - '[die ][ Farbe][ von] <name>[ (auf|zu)] {color} <setzen>'
+      - <name>[ Farbe][ (auf|zu)] {color}[ <setzen>]
+      - Lass[e] <name> {color}[ er]leuchten
+      - <name> {color} <leuchten_lassen>
+      - <name> {color} <leuchten_lassen>
+      - Färbe <name> {color}[ ein]
+      requires_context:
+        domain: light
+      response: color
+    - sentences:
+      - '[<setzen> ][die ][ Farbe][ (<licht>|<lichtes>|<lichter>|<alle_lichter>)][
+        <area>][ (auf|zu)] {color}'
+      - '[die ]Farbe[ (<licht>|<lichtes>|<lichter>|<alle_lichter>)][ <area>][ (auf|zu)]
+        {color} <setzen>'
+      - '[<licht>|<lichtes>|<lichter>|<alle_lichter>][ <area>] Farbe[ (auf|zu)] {color}[
+        <setzen>]'
+      - '[<licht>|<lichter>|<alle_lichter>][ <area>][ Farbe][ (auf|zu)] {color} <leuchten_lassen>'
+      - Färbe[ (<licht>|<lichter>|<alle_lichter>)][ <area>] {color}[ ein]
+      response: color
+    - sentences:
+      - <setzen> <name> auf [(die|das) ]{brightness_level:brightness}[ (Helligkeit|Stufe)][
+        ein]
+      - <setzen> [die ]Helligkeit[ <von_dem>] <name> auf [(die|das) ]{brightness_level:brightness}[
+        Stufe][ ein]
+      - '[die ]Helligkeit[ <von_dem>] <name> auf [(die|das) ]{brightness_level:brightness}[
+        Stufe] <setzen>'
+      - <name> auf [(die|das) ]{brightness_level:brightness}[ (Helligkeit|Stufe)]
+        <setzen>
+      requires_context:
+        domain: light
+      response: brightness
+  HassMediaNext:
+    data:
+    - sentences:
+      - '[<starte> ]<naechster>[ <song>][ (<an>|am)] <name>'
+      requires_context:
+        domain: media_player
+    - sentences:
+      - '[<starte> ]<naechster>[ <song>]'
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - '[<starte> ]<naechster>[ <song>] <area>'
+  HassMediaPause:
+    data:
+    - sentences:
+      - (pausiere|pause) <name>
+      - halte <name> an
+      - <name> (pausieren|pause|anhalten|stopp|halt)
+      requires_context:
+        domain: media_player
+    - sentences:
+      - (pausiere[n]|pause|anhalten|stopp|halt[e an])
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - pausiere[ (die|das|mein|meine)] <media_type> <area>
+  HassMediaPrevious:
+    data:
+    - sentences:
+      - '[(<starte>|<wiederhole>) ]<vorheriger_letzter>[ <song>][ (<an>|am)] <name>'
+      requires_context:
+        domain: media_player
+    - sentences:
+      - '[(<starte>|<wiederhole>) ]<vorheriger_letzter>[ <song>]'
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - '[(<starte>|<wiederhole>) ]<vorheriger_letzter>[ <song>] <area>'
+  HassMediaSearchAndPlay:
+    data:
+    - sentences:
+      - spiel[e] {search_query}[ ab]
+      - '{search_query} abspielen'
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - spiel[e] {search_query} <area>[ ab]
+      - '{search_query} <area> abspielen'
+    - sentences:
+      - spiel[e] {search_query} [ (<an>|am)] <name>[ <area>][ ab]
+      - '{search_query} [ (<an>|am)] <name>[ <area>] abspielen'
+      requires_context:
+        domain: media_player
+  HassMediaUnpause:
+    data:
+    - sentences:
+      - <name> weiter[ (<machen>|laufen lassen)]
+      - <name> fortsetzen
+      requires_context:
+        domain: media_player
+    - sentences:
+      - fortsetzen|weiter[ (<machen>|laufen lassen)]
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - '[(die|das|mein|meine) ]<media_type>[ (im|in)] <area> (fortsetzen|weiter[
+        (<machen>|laufen lassen)])'
+  HassSetVolume:
+    data:
+    - sentences:
+      - <setzen> [die ]Lautstärke[ von] <name>[ auf] <volume>[ ein]
+      - '[die ]Lautstärke[ von] <name>[ auf] <volume>[ <setzen>]'
+      - <name>[ (auf|zu)] <volume>[ <setzen>]
+      - <name> Lautstärke[ (auf|zu)] <volume>[ <setzen>]
+      requires_context:
+        domain: media_player
+    - sentences:
+      - <setzen> <name> auf [(die|das) ]{volume_mapping:volume_level}[ (Lautstärke|Stufe)][
+        ein]
+      - <setzen> [die ]Lautstärke[ <von_dem>] <name> auf [(die|das) ]{volume_mapping:volume_level}[
+        Stufe][ ein]
+      - '[die ]Lautstärke[ <von_dem>] <name> auf [(die|das) ]{volume_mapping:volume_level}[
+        Stufe] <setzen>'
+      - <name> auf [(die|das) ]{volume_mapping:volume_level}[ (Lautstärke|Stufe)]
+        <setzen>
+      requires_context:
+        domain: media_player
+    - sentences:
+      - <setzen> [die ]Lautstärke[ auf] <volume>[ ein]
+      - '[die ]Lautstärke[ auf] <volume>[ <setzen>]'
+      - Lautstärke[ (auf|zu)] <volume>[ <setzen>]
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <setzen> [die ]Lautstärke[ (in|im)] <area>[ auf] <volume>[ ein]
+      - '[die ]Lautstärke[ (in|im)] <area>[ auf] <volume>[ <setzen>]'
+  HassGetWeather:
+    data:
+    - sentences:
+      - wie ist[ das] Wetter
+    - sentences:
+      - wie ist[ das] Wetter[ (für|in) <name>]
+      - wie ist[ das] <name>[er|s] Wetter
+      - was für[ ein] Wetter (ist|hat es) in <name>
+      requires_context:
+        domain: weather

@@ -35,6 +35,302 @@ def _host(**overrides):
     return types.SimpleNamespace(**base)
 
 
+def test_dashboard_localized_time_uses_verified_outcome_and_preserves_raw(monkeypatch):
+    from datetime import datetime, timezone
+
+    import core.agent_loop as al
+    from tools import ha_client, time_tools
+    from utils.hassil_fastpath import HassilFastPath
+
+    monkeypatch.setattr(ha_client, "_loaded", False)
+    monkeypatch.setattr(ha_client, "HA_TOKEN", "")
+    monkeypatch.setattr(time_tools._local_time, "now", lambda: datetime(2026, 11, 5, 14, 30, tzinfo=timezone.utc))
+    root = Path(__file__).parent.parent
+    matcher = HassilFastPath(["de"], str(root / "tests/fixtures/hassil"))
+    history = []
+    events = []
+    host = _host(
+        llm_enabled=False,
+        _hassil_fastpath=matcher,
+        _hassil_intents_dir=str(root / "data/intents"),
+        _history_for=lambda _: history,
+        _emit_agent_event=lambda kind, payload, **_: events.append((kind, payload)),
+        _record_spoken=lambda _: None,
+    )
+    result = al.AgentLoop(host, source="text").run("wie spät ist es")
+    assert result == "Es ist 14:30 Uhr."
+    observation = next(payload for kind, payload in events if kind == "observation")
+    assert observation["result"] == result
+    assert "twenty twenty-six" in observation["raw_result"]
+    assert any(entry.get("content") == observation["raw_result"] for entry in history)
+
+
+def test_llm_enabled_dashboard_fastpath_localizes_without_model_or_second_dispatch(monkeypatch):
+    from datetime import datetime, timezone
+
+    import core.agent_loop as al
+    from tools import ha_client, time_tools
+    from utils.hassil_fastpath import HassilFastPath
+
+    monkeypatch.setattr(ha_client, "_loaded", False)
+    monkeypatch.setattr(ha_client, "HA_TOKEN", "")
+    monkeypatch.setattr(time_tools._local_time, "now", lambda: datetime(2026, 11, 5, 14, 30, tzinfo=timezone.utc))
+    dispatch = Mock(wraps=al.intents.handle_action)
+    monkeypatch.setattr(al.intents, "handle_action", dispatch)
+    root = Path(__file__).parent.parent
+    events, history = [], []
+    generate = Mock(side_effect=AssertionError("fast-path must not call the model"))
+    host = _host(
+        llm_enabled=True,
+        _hassil_fastpath=HassilFastPath(["de"], str(root / "tests/fixtures/hassil")),
+        _hassil_intents_dir=str(root / "data/intents"),
+        _history_for=lambda _: history,
+        _emit_agent_event=lambda kind, payload, **_: events.append((kind, payload)),
+        _record_spoken=lambda _: None,
+        _generate_with_context_recovery=generate,
+        web_search_stall_cache=[], note_write_stall_cache=[],
+    )
+    result = al.AgentLoop(host, source="text").run("wie spät ist es")
+    assert result == "Es ist 14:30 Uhr."
+    dispatch.assert_called_once()
+    generate.assert_not_called()
+    observation = next(payload for kind, payload in events if kind == "observation")
+    assert observation["result"] == result
+    assert "twenty twenty-six" in observation["raw_result"]
+    assert any(entry.get("content") == observation["raw_result"] for entry in history)
+
+
+def test_voice_turn_allows_localized_text_for_selected_tts(monkeypatch):
+    from datetime import datetime, timezone
+
+    import core.agent_loop as al
+    from tools import ha_client, time_tools
+    from utils.hassil_fastpath import HassilFastPath
+
+    monkeypatch.setattr(ha_client, "_loaded", False)
+    monkeypatch.setattr(ha_client, "HA_TOKEN", "")
+    monkeypatch.setattr(time_tools._local_time, "now", lambda: datetime(2026, 11, 5, 14, 30, tzinfo=timezone.utc))
+    root = Path(__file__).parent.parent
+    host = _host(
+        llm_enabled=False,
+        _hassil_fastpath=HassilFastPath(["de"], str(root / "tests/fixtures/hassil")),
+        _hassil_intents_dir=str(root / "data/intents"),
+        _record_spoken=lambda _: None,
+    )
+    for backend in ("pocket-tts-pytorch", "pocket-tts-onnx", "custom-model"):
+        host._tts_backend = backend
+        result = al.AgentLoop(host, source="voice").run("wie spät ist es")
+        assert result == "Es ist 14:30 Uhr."
+
+
+def test_dashboard_does_not_localize_unverified_failure(monkeypatch):
+    import core.agent_loop as al
+    from tools import ha_client
+    from tools.tool_registry import OutcomeText
+    from utils.hassil_fastpath import HassilFastPath
+
+    monkeypatch.setattr(ha_client, "_loaded", False)
+    monkeypatch.setattr(ha_client, "HA_TOKEN", "")
+    monkeypatch.setattr(al.intents, "handle_action", lambda _: OutcomeText("Clock failed.", success=False, code="clock_failed"))
+    root = Path(__file__).parent.parent
+    host = _host(
+        llm_enabled=False,
+        _hassil_fastpath=HassilFastPath(["de"], str(root / "tests/fixtures/hassil")),
+        _hassil_intents_dir=str(root / "data/intents"),
+        _record_spoken=lambda _: None,
+    )
+    assert al.AgentLoop(host, source="text").run("wie spät ist es") == "Clock failed."
+
+
+def test_dashboard_light_localization_requires_actual_success(monkeypatch):
+    import requests
+
+    import core.agent_loop as al
+    from tools import ha_client, ha_devices
+    from utils.hassil_fastpath import HassilFastPath
+
+    monkeypatch.setattr(ha_client, "_loaded", True)
+    monkeypatch.setattr(ha_client, "HA_TOKEN", "token")
+    monkeypatch.setattr(ha_client, "_ENTITY_ALIASES", {"küchenlicht": "light.kitchen"})
+    monkeypatch.setattr(ha_client, "_ENTITY_ALIASES_MULTI", {"küchenlicht": ["light.kitchen"]})
+    monkeypatch.setattr(ha_client, "_AREA_MAP", {})
+    monkeypatch.setattr(ha_client, "_FLOOR_MAP", {})
+    monkeypatch.setattr(ha_client, "_DENIED_ENTITIES", frozenset())
+    post = Mock()
+    monkeypatch.setattr(ha_client, "_post", post)
+    monkeypatch.setattr(al.intents, "handle_action", lambda action: ha_devices.turn_on(action["args"][0]))
+    root = Path(__file__).parent.parent
+    events = []
+    host = _host(
+        llm_enabled=False,
+        _hassil_fastpath=HassilFastPath(["de"], str(root / "tests/fixtures/hassil")),
+        _hassil_intents_dir=str(root / "data/intents"),
+        _record_spoken=lambda _: None,
+        _emit_agent_event=lambda kind, payload, **_: events.append((kind, payload)),
+    )
+    text = "schalte das küchenlicht ein"
+    result = al.AgentLoop(host, source="text").run(text)
+    assert result == "Befehl zum Einschalten der Beleuchtung gesendet."
+    post.assert_called_once()
+    observation = next(payload for kind, payload in events if kind == "observation")
+    assert observation["result"] == result
+    assert observation["raw_result"] != result
+
+    post.side_effect = requests.exceptions.ConnectionError()
+    result = al.AgentLoop(host, source="text").run(text)
+    assert result == "Ich konnte Home Assistant nicht erreichen."
+
+
+def test_dashboard_light_denied_after_match_never_localizes_success(monkeypatch):
+    import core.agent_loop as al
+    from tools import ha_client, ha_devices
+    from utils.hassil_fastpath import HassilFastPath
+
+    monkeypatch.setattr(ha_client, "_loaded", True)
+    monkeypatch.setattr(ha_client, "HA_TOKEN", "token")
+    monkeypatch.setattr(ha_client, "_ENTITY_ALIASES", {"küchenlicht": "light.kitchen"})
+    monkeypatch.setattr(ha_client, "_ENTITY_ALIASES_MULTI", {"küchenlicht": ["light.kitchen"]})
+    monkeypatch.setattr(ha_client, "_AREA_MAP", {})
+    monkeypatch.setattr(ha_client, "_FLOOR_MAP", {})
+    monkeypatch.setattr(ha_client, "_DENIED_ENTITIES", frozenset())
+    post = Mock()
+    monkeypatch.setattr(ha_client, "_post", post)
+
+    def dispatch(action):
+        monkeypatch.setattr(ha_client, "_DENIED_ENTITIES", frozenset({"light.kitchen"}))
+        return ha_devices.turn_on(action["args"][0])
+
+    monkeypatch.setattr(al.intents, "handle_action", dispatch)
+    root = Path(__file__).parent.parent
+    host = _host(
+        llm_enabled=False,
+        _hassil_fastpath=HassilFastPath(["de"], str(root / "tests/fixtures/hassil")),
+        _hassil_intents_dir=str(root / "data/intents"),
+        _record_spoken=lambda _: None,
+    )
+    result = al.AgentLoop(host, source="text").run("schalte das küchenlicht ein")
+    assert "isn't available for voice control" in result
+    post.assert_not_called()
+
+
+def test_dashboard_timer_localizes_and_retains_language_for_completion(monkeypatch):
+    import core.agent_loop as al
+    from core.satellite_context import current_timer_response_language
+    from tests.test_time_tools import _Timer
+    from tools import ha_client, time_tools
+    from utils.hassil_fastpath import HassilFastPath
+
+    monkeypatch.setattr(ha_client, "_loaded", False)
+    monkeypatch.setattr(ha_client, "HA_TOKEN", "")
+    monkeypatch.setattr(time_tools.threading, "Timer", _Timer)
+    monkeypatch.setattr(time_tools, "active_timers", {})
+    spoken = []
+    monkeypatch.setattr(time_tools, "_speak_proactive", lambda text, **_: spoken.append(text))
+    root = Path(__file__).parent.parent
+    events = []
+    host = _host(
+        llm_enabled=False,
+        _hassil_fastpath=HassilFastPath(["de"], str(root / "tests/fixtures/hassil")),
+        _hassil_intents_dir=str(root / "data/intents"),
+        _record_spoken=lambda _: None,
+        _emit_agent_event=lambda kind, payload, **_: events.append((kind, payload)),
+    )
+    result = al.AgentLoop(host, source="text").run("stelle einen timer auf fünf minuten")
+    assert result == "Timer für 5 Minuten gestartet."
+    timer = next(iter(time_tools.active_timers.values()))
+    assert timer.response_language == "de"
+    assert current_timer_response_language.get() == "en"
+    observation = next(payload for kind, payload in events if kind == "observation")
+    assert observation["result"] == result
+    assert observation["raw_result"] == "Timer started for 5 minutes"
+    assert observation["artifact"]["type"] == "timers"
+    timer.function(*timer.args)
+    assert spoken == ["Dein Timer ist abgelaufen."]
+
+
+def test_voice_timer_uses_selected_language_with_any_tts_backend(monkeypatch):
+    import core.agent_loop as al
+    from tests.test_time_tools import _Timer
+    from tools import ha_client, time_tools
+    from utils.hassil_fastpath import HassilFastPath
+
+    monkeypatch.setattr(ha_client, "_loaded", False)
+    monkeypatch.setattr(ha_client, "HA_TOKEN", "")
+    monkeypatch.setattr(time_tools.threading, "Timer", _Timer)
+    monkeypatch.setattr(time_tools, "active_timers", {})
+    spoken = []
+    monkeypatch.setattr(time_tools, "_speak_proactive", lambda text, **_: spoken.append(text))
+    root = Path(__file__).parent.parent
+    host = _host(
+        llm_enabled=False,
+        _tts_backend="custom-model",
+        _hassil_fastpath=HassilFastPath(["fr"], str(root / "tests/fixtures/hassil")),
+        _hassil_intents_dir=str(root / "data/intents"),
+        _record_spoken=lambda _: None,
+    )
+    result = al.AgentLoop(host, source="voice").run("minuteur de cinq minutes")
+    assert result == "Minuteur lancé pour 5 minutes."
+    timer = next(iter(time_tools.active_timers.values()))
+    assert timer.response_language == "fr"
+    timer.function(*timer.args)
+    assert spoken == ["Votre minuteur est terminé."]
+
+
+def test_dashboard_timer_cancellation_localizes_only_after_actual_cancel(monkeypatch):
+    import core.agent_loop as al
+    from tests.test_time_tools import _Timer
+    from tools import ha_client, time_tools
+    from utils.hassil_fastpath import HassilFastPath
+
+    monkeypatch.setattr(ha_client, "_loaded", False)
+    monkeypatch.setattr(ha_client, "HA_TOKEN", "")
+    monkeypatch.setattr(time_tools.threading, "Timer", _Timer)
+    monkeypatch.setattr(time_tools, "active_timers", {})
+    time_tools.start_countdown("60")
+    timer = next(iter(time_tools.active_timers.values()))
+    root = Path(__file__).parent.parent
+    events = []
+    host = _host(
+        llm_enabled=False,
+        _hassil_fastpath=HassilFastPath(["de"], str(root / "tests/fixtures/hassil")),
+        _hassil_intents_dir=str(root / "data/intents"),
+        _record_spoken=lambda _: None,
+        _emit_agent_event=lambda kind, payload, **_: events.append((kind, payload)),
+    )
+    text = "stoppe den timer"
+    assert al.AgentLoop(host, source="text").run(text) == "Timer abgebrochen."
+    assert timer.cancelled
+    assert not time_tools.active_timers
+    observation = next(payload for kind, payload in events if kind == "observation")
+    assert "cancelled" in observation["raw_result"]
+    assert observation["artifact"] == {"type": "timers", "timers": []}
+    assert al.AgentLoop(host, source="text").run(text) == "Es sind keine Timer aktiv."
+
+
+def test_german_brightness_fastpath_localizes_actual_service_value(monkeypatch):
+    import core.agent_loop as al
+    from tools import ha_client, ha_devices
+    from utils.hassil_fastpath import HassilFastPath
+
+    monkeypatch.setattr(ha_client, "_loaded", True)
+    monkeypatch.setattr(ha_client, "HA_TOKEN", "token")
+    monkeypatch.setattr(ha_client, "_ENTITY_ALIASES", {"küchenlicht": "light.kitchen"})
+    monkeypatch.setattr(ha_client, "_ENTITY_ALIASES_MULTI", {"küchenlicht": ["light.kitchen"]})
+    monkeypatch.setattr(ha_client, "_AREA_MAP", {})
+    monkeypatch.setattr(ha_client, "_FLOOR_MAP", {})
+    monkeypatch.setattr(ha_client, "_DENIED_ENTITIES", frozenset())
+    post = Mock()
+    monkeypatch.setattr(ha_client, "_post", post)
+    monkeypatch.setattr(al.intents, "handle_action", lambda action: ha_devices.set_ha_brightness(*action["args"]))
+    root = Path(__file__).parent.parent
+    host = _host(llm_enabled=False,
+                 _hassil_fastpath=HassilFastPath(["de"], str(root / "tests/fixtures/hassil")),
+                 _hassil_intents_dir=str(root / "data/intents"), _record_spoken=lambda _: None)
+    result = al.AgentLoop(host, source="text").run("dimme küchenlicht auf 25 prozent")
+    assert result == "Die Helligkeit wurde auf 25 Prozent eingestellt."
+    assert post.call_args.kwargs["json"]["brightness"] == 63
+
+
 def test_local_llm_failure_label_names_llama_server():
     assert _llm_unavailable_label(_host(llm_backend="local")) == "Local llama-server unavailable"
 

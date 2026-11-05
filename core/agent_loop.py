@@ -11,13 +11,14 @@ import re
 import threading
 import time
 import uuid
+from dataclasses import replace
 from typing import Optional
 
 from tools import notes
 from tools.capabilities import native_access_class, native_requires_deep_think
-from tools.tool_registry import tool_registry
+from tools.tool_registry import OperationOutcome, tool_registry
 from utils import intents
-from utils.intent_catch import catchAll, is_contextual_web_search_request
+from utils.intent_catch import catch_with_hassil, catchAll, is_contextual_web_search_request
 from utils.intents import MAX_AGENT_CALLS_PER_TURN, NOTE_WRITE_TOOLS, StepKind
 from utils.phrases import ACK_PHRASES
 from utils.prompts import (
@@ -49,6 +50,7 @@ from .satellite_context import (
 from .satellite_context import (
     current_satellite_id as _current_satellite_id,
 )
+from .satellite_context import current_timer_response_intents_dir, current_timer_response_language
 from .slm import ContextExhaustedError, RemoteUnreachable
 from .telemetry import event as telemetry_event
 from .thinking_context import reset_handoff, set_handoff
@@ -59,6 +61,53 @@ logger = logging.getLogger(__name__)
 # Tool intents that count as "context retrieval" for the stats panel. The
 # chunk count is surfaced by the semantic paths via notes.last_retrieval.
 NOTE_SEARCH_INTENTS = frozenset({"search_notes", "search_notes_semantic", "read_note"})
+
+
+def _localized_fastpath_step(host, source, user_prompt, emission, action, step):
+    """Localize a verified observation without restricting the chosen TTS backend."""
+    metadata = getattr(emission, "metadata", None)
+    matcher = getattr(host, "_hassil_fastpath", None)
+    if (metadata is None or matcher is None
+            or metadata.intent not in {"HassGetCurrentTime", "HassGetCurrentDate", "HassTurnOn", "HassTurnOff", "HassStartTimer", "HassCancelTimer", "HassTimerStatus", "HassLightSet", "HassClimateSetTemperature", "HassSetPosition", "HassSetVolume"}
+            or emission.get("actions") != [action]
+            or not isinstance(step.operation_outcome, OperationOutcome)
+            or step.kind is not StepKind.NORMAL or step.should_replan):
+        return step
+    if (metadata.intent == "HassStartTimer" and step.operation_outcome.success is True
+            and step.operation_outcome.values.get("response_language") != metadata.language):
+        return step
+    if not matcher.response_language_confirmed(user_prompt, emission):
+        return step
+    from utils.fastpath_responses import select_fastpath_response
+
+    localized = select_fastpath_response(
+        metadata, step.operation_outcome, step.text,
+        getattr(host, "_hassil_intents_dir", "./data/intents"), language_confirmed=True,
+    )
+    return replace(step, text=localized, raw_text=step.text) if localized != step.text else step
+
+
+def _dispatch_with_timer_language(host, source, prompt, emission, action):
+    """Bind a timer's language to this dispatch, never to another turn."""
+    metadata = getattr(emission, "metadata", None)
+    matcher = getattr(host, "_hassil_fastpath", None)
+    language = None
+    if (metadata is not None and matcher is not None
+            and metadata.intent == "HassStartTimer" and metadata.language in {"en", "fr", "de"}
+            and emission.get("actions") == [action]
+            and matcher.response_language_confirmed(prompt, emission)):
+        from utils.fastpath_responses import load_responses, render_response
+
+        responses = load_responses(getattr(host, "_hassil_intents_dir", "./data/intents"), metadata.language)
+        if render_response(responses, "timer_started", "success", {"duration": "1"}):
+            language = metadata.language
+    token = current_timer_response_language.set(language or "en")
+    dir_token = current_timer_response_intents_dir.set(getattr(host, "_hassil_intents_dir", "./data/intents"))
+    try:
+        return intents.handle_action(action)
+    finally:
+        current_timer_response_intents_dir.reset(dir_token)
+        current_timer_response_language.reset(token)
 
 
 def _contextual_turn_onoff(
@@ -230,11 +279,13 @@ class AgentLoop:
             task_reply = task_follow_up(self.satellite_id, user_prompt)
             if task_reply:
                 return task_reply
+        matcher = getattr(host, "_hassil_fastpath", None)
+        catch_intent = (lambda text: catch_with_hassil(text, matcher)) if matcher else catchAll
         report_route = route_report_follow_up(
             user_prompt, satellite_id=self.satellite_id, cancel_check=cancel_check, stats=stats,
             consume_report=getattr(host, "consume_completed_thinking_report", None),
             answer_report=getattr(host, "answer_completed_thinking_report", None),
-            active_task=getattr(host, "active_thinking_task", None), catch_intent=catchAll,
+            active_task=getattr(host, "active_thinking_task", None), catch_intent=catch_intent,
         )
         if report_route.reply:
             return report_route.reply
@@ -758,7 +809,9 @@ class AgentLoop:
                     # the rest of the loop routes on the kind, not the raw text.
                     handoff_token = set_handoff(plan.handoff(research_task)) if intent_name == "deep_think" else None
                     try:
-                        step = intents.classify_step(intents.handle_action(action))
+                        step = intents.classify_step(_dispatch_with_timer_language(
+                            host, source, user_prompt, first_emission if iteration == 0 else None, action
+                        ))
                     finally:
                         if handoff_token is not None:
                             reset_handoff(handoff_token)
@@ -819,6 +872,9 @@ class AgentLoop:
                         step = search.accept(search_query, summary, step)
                         web_summarised = True
 
+                history_text = step.text
+                if iteration == 0 and first_emission is not None and not reused:
+                    step = _localized_fastpath_step(host, source, user_prompt, first_emission, action, step)
                 plan.record(planned_step, step, reused=reused)
                 if not reused:
                     evidence.record({**action, "intent": intent_name}, step)
@@ -826,11 +882,13 @@ class AgentLoop:
                     {
                         "role": "tool",
                         "name": action.get("intent", "?"),
-                        "content": step.text,
+                        "content": history_text,
                         **({"ha_area": self.ha_area} if intent_name in {"turn_on", "turn_off"} else {}),
                     }
                 )
                 observation = {"intent": action.get("intent", "?"), "result": step.text}
+                if step.text != history_text:
+                    observation["raw_result"] = history_text
                 if step.artifact is not None:
                     observation["artifact"] = step.artifact
                 host._emit_agent_event("observation", observation, source=source)
@@ -1003,8 +1061,11 @@ class AgentLoop:
                 step = intents.StepResult(StepKind.ERROR, "Research requires an available language model.", False)
                 needs_model = True
             else:
-                step = plan.cached(planned_step) or intents.classify_step(intents.handle_action(action))
+                step = plan.cached(planned_step) or intents.classify_step(
+                    _dispatch_with_timer_language(host, source, user_prompt, first_emission, action)
+                )
             observed_text = step.text
+            step = _localized_fastpath_step(host, source, user_prompt, first_emission, action, step)
             if step.kind is StepKind.WEB_SEARCH:
                 # Raw source blobs cannot be spoken without a summariser.
                 step = intents.StepResult(StepKind.ERROR, "Web findings require an available summariser.", False,
@@ -1021,7 +1082,9 @@ class AgentLoop:
                     **({"ha_area": self.ha_area} if intent_name in {"turn_on", "turn_off"} else {}),
                 }
             )
-            observation = {"intent": intent_name, "result": observed_text}
+            observation = {"intent": intent_name, "result": step.text}
+            if step.raw_text is not None:
+                observation["raw_result"] = step.raw_text
             if step.artifact is not None:
                 observation["artifact"] = step.artifact
             host._emit_agent_event("observation", observation, source=source)

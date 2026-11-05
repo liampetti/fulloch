@@ -184,6 +184,15 @@ def test_hot_apply_voice_live_on_pocket_tts():
     obj._rerender_phrase_caches.assert_called_once()
 
 
+def test_hot_apply_voice_live_on_audio8_small():
+    obj = _make_assistant(backend="audio8-small")
+    obj._tts_module.set_voice.return_value = "new-prompt"
+    applied = obj.apply_hot_config([{"path": "general.voice_clone", "value": "atticus"}])
+    assert applied == {"general.voice_clone"}
+    obj._tts_module.set_voice.assert_called_once_with("atticus")
+    obj._rerender_phrase_caches.assert_called_once()
+
+
 def test_hot_apply_whisper_gain_clamps_to_valid_pcm_range():
     obj = _make_assistant()
     applied = obj.apply_hot_config([{"path": "general.whisper_gain", "value": 1.5}])

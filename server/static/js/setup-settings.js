@@ -3,6 +3,7 @@ import { getJSON, postJSON, putJSON, $, el, screen, normalizeEndpointUrl, credPl
 import { clone, escapeHtml as esc, offeredTiers, matchingTier, selectedWakeword,
   applyWakewordPreset, wakewordOptions, wakewordWarning, info, gatedNotice } from './setup-models.js';
 import { integrationCard, wireIntegrationCard } from './setup-ha-integration.js';
+import { createLanguageSelect } from './language-select.js';
 
 // Deliberately allowlisted UI. The complete config schema remains available to
 // config.yml users; editing these controls must not reset their hidden options.
@@ -10,6 +11,7 @@ export function createSettings({ state, voice, doRestart, doRestartToHttps }) {
   let models, initialModels, initialFields, initialWakeword, customAiChanged = false;
   let restartPending = false;
   let voiceGeneration = 0;
+  let languageSaving = false, settingsSaving = false, languageSelect = null;
   let selectedTier = null, presetBaseline = null;
   const field = (path, fallback = '') => {
     const f = state.schema.fields.find(f => f.path === path);
@@ -58,7 +60,10 @@ export function createSettings({ state, voice, doRestart, doRestartToHttps }) {
       <p class="preset-intro">Pick the stack that suits your hardware. Fine-tune it below.</p>
       <div class="preset-pills" role="group" aria-label="Hardware presets">${tiers.map(t => `<button type="button" class="preset-pill" data-tier="${esc(t.id)}" aria-pressed="false"><span class="preset-pill-name">${esc(t.label.split(' — ')[0])}</span><span class="preset-pill-detail">${t.vram_class_gb ? `${t.vram_class_gb} GB` : 'No GPU'}</span></button>`).join('')}</div>
       <p class="preset-status" id="preset-description" aria-live="polite"></p><div id="preset-access"></div></section>`));
-    config.appendChild(section('General', 'Notes storage and conversation history. Other tuning remains in config.yml.',
+    config.appendChild(section('General', 'Home Assistant languages, notes storage and conversation history. Other tuning remains in config.yml.',
+      `<label>Home Assistant intent languages ${info('Choose the languages used to match Home Assistant commands. Your speech recognition and spoken response languages depend on your speech models. New language tables are downloaded once; changes save immediately.')}</label>
+      <div id="settings-intent-languages"></div><p id="intent-language-status" class="help" role="status" aria-live="polite"></p>` +
+      input('general.asr_language', 'Speech recognition language override', 'Leave blank for automatic detection where supported. Enter a single language name, such as French, only if your ASR backend supports it. Independent of intent languages; restart required.') +
       input('notes.path', 'Notes directory', 'A directory on the Fulloch host/container for Markdown notes. It does not need to be an Obsidian vault.') + `
       <label>Delete conversation history ${info('Clears the dashboard and active conversation context, not saved notes or reports.')}</label>
       <button class="danger" id="delete-conversation">Delete conversation history</button>`));
@@ -105,6 +110,8 @@ export function createSettings({ state, voice, doRestart, doRestartToHttps }) {
       <select id="wakeword-preset">${wakewordOptions(state.schema, initialWakeword, !initialWakeword)}</select>
       <p id="wakeword-warning" class="help warning"></p><p id="wakeword-license" class="help"></p>`));
     config.appendChild(section('Voice', 'Choose a voice and play its sample. Custom reference audio appears only for cloning-capable TTS.', `
+      <div id="tts-language-field" hidden><label for="tts-language">TTS model language ${info('Select pretrained language weights for supported models. French uses a larger, slower model. Independent of speech recognition and Home Assistant languages. Downloads may be required; restart to apply.')}</label>
+      <select id="tts-language" data-path="general.tts_language"></select></div>
       <label for="voice-sel">Voice ${info('Preview plays the reference sample. Synthesized output depends on the selected TTS model.')}</label>
       <div class="voice-row"><select id="voice-sel"></select></div>
       <div id="custom-voice" hidden><label for="voice-reference">Custom WAV path ${info('Use a WAV file on the server with a matching .txt transcript alongside it. Only use voices you have permission to clone. For bundled samples choose the dropdown instead.')}</label>
@@ -118,8 +125,37 @@ export function createSettings({ state, voice, doRestart, doRestartToHttps }) {
     config.appendChild(section('Web Search', 'Optional current information through SearXNG.',
       input('search.searxng_url', 'URL', 'A SearXNG-compatible JSON search endpoint. A general search-provider homepage is not compatible.')));
     screen().appendChild(el('<div class="card settings-save"><p id="save-note" role="status"></p><div class="actions"><button id="cfg-back" class="back">Go back</button><button id="save-cfg" class="primary">Save changes</button></div></div>'));
+    let savedLanguages = [...field('general.intent_languages', ['en'])];
+    const languageStatus = $('intent-language-status');
+    languageSelect = createLanguageSelect({ options: state.schema.intent_languages, value: savedLanguages,
+      onChange: async languages => {
+        languageSaving = true; languageSelect.setDisabled(true); $('save-cfg').disabled = true;
+        languageStatus.textContent = 'Saving and preparing languages…';
+        try {
+          const response = await putJSON('/config', { updates: { 'general.intent_languages': languages } });
+          const result = await response.json();
+          if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Could not save languages.');
+          savedLanguages = [...languages];
+          const spec = state.schema.fields.find(f => f.path === 'general.intent_languages');
+          if (spec) { spec.value = [...languages]; spec.set = true; }
+          restartPending ||= !!result.restart_required;
+          languageStatus.textContent = result.restart_required ? 'Saved. Restart Fulloch to apply the language change. ' : 'Languages saved.';
+          if (result.restart_required) {
+            const restartButton = el('<button type="button">Restart now</button>');
+            restartButton.addEventListener('click', doRestart); languageStatus.appendChild(restartButton);
+          }
+        } catch (error) {
+          languageSelect.setValue(savedLanguages);
+          languageStatus.textContent = `Language save failed: ${error.message}`;
+        } finally {
+          languageSaving = false; languageSelect.setDisabled(settingsSaving);
+          const button = $('save-cfg'); if (button) button.disabled = settingsSaving;
+        }
+      } });
+    $('settings-intent-languages').appendChild(languageSelect.element);
     $('cfg-back').addEventListener('click', () => location.href = '/');
     wireIntegrationCard();
+    refreshTtsLanguage();
     initialFields = {};
     document.querySelectorAll('[data-path]').forEach(n => initialFields[n.dataset.path] = n.value);
     document.querySelectorAll('.preset-pill').forEach(button => button.addEventListener('click', async () => {
@@ -127,7 +163,7 @@ export function createSettings({ state, voice, doRestart, doRestartToHttps }) {
       selectedTier = tier.id;
       for (const domain of ['asr', 'tts', 'llm']) models[domain] = clone(tier.models[domain]);
       $('sm-asr').value = backend('asr'); $('sm-tts').value = backend('tts'); $('sm-ai').value = backend('llm');
-      customAiChanged = false; syncAi(); refreshWakeword(); refreshAccess();
+      customAiChanged = false; syncAi(); refreshWakeword(); refreshAccess(); refreshTtsLanguage();
       await refreshVoices(true);
       presetBaseline = settingsSnapshot(); renderPreset();
     }));
@@ -135,7 +171,7 @@ export function createSettings({ state, voice, doRestart, doRestartToHttps }) {
       if (e.target.value === '__configured__') return;
       models[domain] = { backend: e.target.value };
       refreshWakeword(); refreshAccess();
-      if (domain === 'tts') refreshVoices(true);
+      if (domain === 'tts') { refreshTtsLanguage(); refreshVoices(true); }
     }));
     $('sm-ai').addEventListener('change', () => {
       const selected = $('sm-ai').value;
@@ -215,6 +251,16 @@ export function createSettings({ state, voice, doRestart, doRestartToHttps }) {
     $('preset-access').innerHTML = tier ? gatedNotice(state.schema, tier.models) : '';
   }
 
+  function refreshTtsLanguage() {
+    const languages = state.schema.tts_model_languages?.[backend('tts')] || [];
+    const select = $('tts-language');
+    const current = select.value || field('general.tts_language', 'english');
+    $('tts-language-field').hidden = !languages.length;
+    // Keep the configured value intact when switching to an unsupported model.
+    const values = languages.includes(current) ? languages : [current, ...languages];
+    select.innerHTML = values.map(value => `<option value="${esc(value)}"${value === current ? ' selected' : ''}>${esc(value.charAt(0).toUpperCase() + value.slice(1))}</option>`).join('');
+  }
+
   function syncAi() {
     const custom = $('sm-ai').value === 'custom';
     $('sm-ai-custom').hidden = !custom;
@@ -250,7 +296,7 @@ export function createSettings({ state, voice, doRestart, doRestartToHttps }) {
     $('voice-reference').value = custom ? current : '';
     $('custom-voice').hidden = !custom;
     document.querySelector('.voice-play').disabled = custom;
-    $('save-cfg').disabled = false;
+    $('save-cfg').disabled = languageSaving || settingsSaving;
   }
 
   function applyTheme() {
@@ -270,6 +316,7 @@ export function createSettings({ state, voice, doRestart, doRestartToHttps }) {
 
   async function saveAllSettings() {
     const note = $('save-note'), button = $('save-cfg');
+    settingsSaving = true; languageSelect?.setDisabled(true);
     button.disabled = true;
     try {
       const next = clone(models);
@@ -334,7 +381,7 @@ export function createSettings({ state, voice, doRestart, doRestartToHttps }) {
         restartButton.addEventListener('click', doRestart); note.appendChild(restartButton);
       }
     } catch (e) { note.textContent = 'Save failed: ' + e.message; }
-    finally { button.disabled = false; }
+    finally { settingsSaving = false; languageSelect?.setDisabled(languageSaving); button.disabled = languageSaving; }
   }
 
   return { openSettings };

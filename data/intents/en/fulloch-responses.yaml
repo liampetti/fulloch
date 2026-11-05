@@ -1,0 +1,60 @@
+language: en
+schema_version: 1
+source_revision: "2025.6.23"
+provenance: "Fulloch-specific responses; not copied from Home Assistant."
+responses:
+  time:
+    success:
+      - "The time is {time}."
+  date:
+    success:
+      - "Today is {date}."
+  timer_started:
+    success:
+      - "Timer started for {duration}."
+  timer_cancelled:
+    success:
+      - "Timer cancelled."
+  timer_completed:
+    success:
+      - "Your timer is up."
+  timer_status:
+    success: ["The timer has {duration} remaining."]
+  timer_status_multiple:
+    success: ["The timers have {durations} remaining, respectively."]
+  timer_none:
+    success: ["There are no active timers."]
+    error: ["There are no active timers."]
+  timer_ambiguous:
+    error: ["Multiple timers are active. Specify which timer to cancel."]
+  timer_limit:
+    error: ["There are too many active timers. Cancel one before starting another."]
+  timer_too_long:
+    error: ["Timers can be at most seven days."]
+  timer_invalid_duration:
+    error: ["I couldn't understand the timer duration."]
+  light_brightness:
+    success: ["The light brightness was set to {value} percent."]
+  climate_temperature:
+    success: ["The temperature was set to {value} degrees."]
+  cover_position:
+    success: ["The position was set to {value} percent."]
+  media_volume:
+    success: ["The volume was set to {value} percent."]
+  ha_unreachable:
+    error: ["I couldn't reach Home Assistant."]
+  ha_timeout:
+    error: ["Home Assistant didn't respond in time."]
+  ha_not_configured:
+    error: ["Home Assistant isn't set up."]
+  voice_denied:
+    error: ["That device isn't available for voice control. No command was sent."]
+  light_on:
+    success:
+      - "Sent the command to turn on the lights."
+  light_off:
+    success:
+      - "Sent the command to turn off the lights."
+  operation_failed:
+    error:
+      - "Sorry, I couldn't complete that."

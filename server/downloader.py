@@ -1,7 +1,11 @@
 """Background model downloader with per-asset setup-wizard progress."""
 
+import hashlib
+import io
 import logging
 import os
+import tarfile
+import tempfile
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -11,6 +15,104 @@ from typing import Callable, Optional
 from core.backends import DOMAINS
 
 logger = logging.getLogger(__name__)
+
+# The release predates the upstream slot-combination format migration, so its
+# top-level sentence files are directly compatible with HassIL. Pin both source
+# and digest: packs must not silently change when upstream updates a branch.
+HASSIL_REVISION = "2025.6.23"
+HASSIL_ARCHIVE_URL = "https://codeload.github.com/OHF-Voice/intents/tar.gz/1f727256a51a587e2978f5f5e5fa259051b48913"
+HASSIL_ARCHIVE_SHA256 = "9ddc29928bf2310a74bec093765375a1135b21317ac5bddf0ed7e8ff979d6707"
+HASSIL_ARCHIVE_MAX_BYTES = 16 * 1024 * 1024
+_hassil_lock = threading.Lock()
+
+
+def _hassil_archive() -> bytes:
+    """Download a bounded, integrity-checked upstream snapshot."""
+    import requests
+
+    with requests.get(HASSIL_ARCHIVE_URL, stream=True, timeout=(10, 60)) as response:
+        response.raise_for_status()
+        data = bytearray()
+        for chunk in response.iter_content(65536):
+            data.extend(chunk)
+            if len(data) > HASSIL_ARCHIVE_MAX_BYTES:
+                raise ValueError("Home Assistant intent archive is too large")
+    if hashlib.sha256(data).hexdigest() != HASSIL_ARCHIVE_SHA256:
+        raise ValueError("Home Assistant intent archive checksum mismatch")
+    return bytes(data)
+
+
+def _hassil_pack(archive: bytes, language: str) -> bytes:
+    """Merge the release's legacy top-level language YAML into one HassIL file."""
+    import yaml
+    from hassil import Intents
+    from hassil.util import merge_dict
+
+    source_code = {"pt-BR": "pt-br", "zh-CN": "zh-cn", "zh-HK": "zh-hk", "zh-TW": "zh-tw"}.get(language, language)
+    merged: dict = {}
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        members = sorted(tar.getmembers(), key=lambda member: member.name)
+        for member in members:
+            parts = member.name.split("/")
+            if not (member.isfile() and len(parts) == 4 and parts[1:3] == ["sentences", source_code] and parts[3].endswith(".yaml")):
+                continue
+            if member.size > 2 * 1024 * 1024:
+                raise ValueError(f"Intent source file too large: {member.name}")
+            source = tar.extractfile(member)
+            if source is None:
+                raise ValueError(f"Cannot read intent source: {member.name}")
+            doc = yaml.safe_load(source)
+            if not isinstance(doc, dict):
+                raise ValueError(f"Invalid intent source: {member.name}")
+            merge_dict(merged, doc)
+    if not merged.get("intents") or not merged.get("language"):
+        raise ValueError(f"No usable intent sentences for {language}")
+    Intents.from_dict(merged)  # Fail before publishing an unusable pack.
+    return yaml.safe_dump(merged, allow_unicode=True, sort_keys=False).encode("utf-8")
+
+
+def _write_hassil_pack(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".intents-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(content)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def ensure_hassil_intents(languages: list[str], intents_dir: str = "./data/intents") -> list[Path]:
+    """Install missing pinned language packs atomically; return their paths.
+
+    English is bundled in the image and source tree, so it never requires a
+    network request. Calls are serialized to avoid duplicate downloads.
+    """
+    from utils.locale import intent_languages
+
+    if not isinstance(languages, list) or any(not isinstance(code, str) for code in languages):
+        raise ValueError("intent languages must be a list of language codes")
+    unknown = set(languages) - intent_languages().keys()
+    if unknown:
+        raise ValueError(f"Unsupported intent languages: {', '.join(sorted(unknown))}")
+    paths = [Path(intents_dir) / code / f"{HASSIL_REVISION}.yaml" for code in dict.fromkeys(languages)]
+    with _hassil_lock:
+        missing = [path for path in paths if not path.is_file()]
+        english = next((path for path in missing if path.parent.name == "en"), None)
+        if english:
+            candidates = [Path(os.environ.get("FULLOCH_SEED_DIR", "/app/seed")) / "intents/en" / english.name,
+                          Path(__file__).resolve().parent.parent / "third_party/home-assistant-intents/en" / english.name]
+            source = next((path for path in candidates if path.is_file()), None)
+            if source is None:
+                raise FileNotFoundError("Bundled English intent pack is missing")
+            _write_hassil_pack(english, source.read_bytes())
+            missing.remove(english)
+        if missing:
+            archive = _hassil_archive()
+            for path in missing:
+                _write_hassil_pack(path, _hassil_pack(archive, path.parent.name))
+    return paths
 
 GRAMMAR_URL = "https://raw.githubusercontent.com/ggml-org/llama.cpp/master/grammars/json.gbnf"
 BGE_REPO = "BAAI/bge-small-en-v1.5"
@@ -128,7 +230,12 @@ def plan_assets(resolved: dict, models_dir: str = "./data/models") -> list:
         if not (spec.hf_repo or spec.hf_file or spec.hf_files or spec.hf_snapshots):
             continue
         if spec.hf_snapshots:
-            for index, (repo, allow, revision) in enumerate(spec.hf_snapshots):
+            if spec.backend == "pocket-tts-pytorch":
+                from core.backends import pocket_pytorch_snapshots
+                snapshots = pocket_pytorch_snapshots(cfg["opts"].get("language", "english_2026-04"))
+            else:
+                snapshots = spec.hf_snapshots
+            for index, (repo, allow, revision) in enumerate(snapshots):
                 assets.append(
                     Asset(
                         key=f"{domain}:{spec.backend}"
@@ -142,7 +249,7 @@ def plan_assets(resolved: dict, models_dir: str = "./data/models") -> list:
                         repo=repo,
                         allow=list(allow),
                         revision=revision,
-                        size_gb=spec.download_size_gb if index == 0 else None,
+                        size_gb=(0.75 if spec.backend == "pocket-tts-pytorch" and cfg["opts"].get("language") == "french_24l" else spec.download_size_gb) if index == 0 else None,
                     )
                 )
             continue
@@ -194,8 +301,13 @@ def plan_assets(resolved: dict, models_dir: str = "./data/models") -> list:
                     kind="dir_snapshot",
                     dest=str(model),
                     repo=spec.hf_repo,
-                    allow=list(spec.hf_allow) or None,
-                    size_gb=spec.download_size_gb,
+                    allow=(["pocket_tts_onnx.py"] + [
+                        f"onnx/{cfg['opts'].get('language', 'english_2026-04')}/{name}"
+                        for name in ("bundle.json", "tokenizer.model", "bos_before_voice.npy",
+                                     "mimi_encoder.onnx", "text_conditioner.onnx",
+                                     "flow_lm_main_int8.onnx", "flow_lm_flow_int8.onnx", "mimi_decoder_int8.onnx")]
+                           if spec.backend == "pocket-tts-onnx" else list(spec.hf_allow) or None),
+                    size_gb=(0.4 if spec.backend == "pocket-tts-onnx" and cfg["opts"].get("language") == "french_24l" else spec.download_size_gb),
                 )
             )
         elif spec.hf_file:
@@ -484,6 +596,10 @@ def _already_present(asset: Asset) -> bool:
     if asset.kind == "file":
         return (Path(asset.dest) / asset.filename).is_file()
     if asset.kind == "dir_snapshot":
+        if asset.repo == "KevinAHM/pocket-tts-onnx" and asset.allow:
+            from core.setup import pocket_onnx_bundle_present
+            language = asset.allow[1].split("/")[1]
+            return pocket_onnx_bundle_present(asset.dest, language)
         d = Path(asset.dest)
         if not d.is_dir():
             return False

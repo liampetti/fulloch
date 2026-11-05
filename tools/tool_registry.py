@@ -31,6 +31,25 @@ class ArtifactText(str):
         return value
 
 
+@dataclass(frozen=True)
+class OperationOutcome:
+    """Verified tool result, independent of agent replan/sentinel semantics."""
+
+    success: bool
+    code: str
+    values: dict
+
+
+class OutcomeText(ArtifactText):
+    """A backwards-compatible observation carrying a structured outcome."""
+
+    def __new__(cls, text: str, *, success: bool, code: str, values: Optional[dict] = None,
+                artifact: Optional[dict] = None):
+        result = super().__new__(cls, text, artifact=artifact)
+        result.operation_outcome = OperationOutcome(success, code, values or {})
+        return result
+
+
 class ThinkingResult(ArtifactText):
     """Standard evidence envelope for a deep-think-capable tool.
 

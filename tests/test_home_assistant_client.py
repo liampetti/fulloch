@@ -2,8 +2,67 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+import requests
+
 from tests.ha_fixtures import loaded_ha  # noqa: F401
 from tools import ha_client as client
+
+
+@pytest.mark.parametrize("error, expected", [
+    (requests.exceptions.ConnectionError(), "ha_unreachable"),
+    (requests.exceptions.Timeout(), "ha_timeout"),
+    (requests.exceptions.HTTPError(response=MagicMock(status_code=404, text="missing")), "ha_target_rejected"),
+    (requests.exceptions.HTTPError(response=MagicMock(status_code=500, text="error")), "ha_service_error"),
+])
+def test_service_outcomes_report_actual_ha_failures(monkeypatch, error, expected):
+    from utils.intents import classify_step
+
+    monkeypatch.setattr(client, "HA_TOKEN", "token")
+    monkeypatch.setattr(client, "_ENTITY_ALIASES", {"kitchen": "light.kitchen"})
+    monkeypatch.setattr(client, "_ENTITY_ALIASES_MULTI", {})
+    monkeypatch.setattr(client, "_DENIED_ENTITIES", frozenset())
+    monkeypatch.setattr(client, "_post", MagicMock(side_effect=error))
+    result = client._call_service("light", "turn_on", "light.kitchen", success_message="Lights on")
+    assert not classify_step(result).operation_outcome.success
+    assert result.operation_outcome.code == expected
+    assert str(result) != "Lights on"
+
+
+def test_service_outcome_only_succeeds_after_post_and_denylist(monkeypatch):
+    from utils.intents import classify_step
+
+    monkeypatch.setattr(client, "HA_TOKEN", "token")
+    monkeypatch.setattr(client, "_ENTITY_ALIASES", {"kitchen": "light.kitchen"})
+    monkeypatch.setattr(client, "_ENTITY_ALIASES_MULTI", {})
+    monkeypatch.setattr(client, "_DENIED_ENTITIES", frozenset({"light.kitchen"}))
+    post = MagicMock()
+    monkeypatch.setattr(client, "_post", post)
+    denied = client._call_service("light", "turn_on", "light.kitchen", success_message="Lights on")
+    assert not denied.operation_outcome.success
+    assert denied.operation_outcome.code == "voice_denied"
+    post.assert_not_called()
+    monkeypatch.setattr(client, "_DENIED_ENTITIES", frozenset())
+    ok = client._call_service("light", "turn_on", "light.kitchen", success_message="Lights on")
+    assert ok == "Lights on"
+    assert classify_step(ok).operation_outcome.success
+    assert ok.operation_outcome.values["entity_id"] == "light.kitchen"
+    post.assert_called_once()
+
+
+def test_service_outcome_rejects_unverified_target(monkeypatch):
+    monkeypatch.setattr(client, "HA_TOKEN", "token")
+    monkeypatch.setattr(client, "_ENTITY_ALIASES", {})
+    monkeypatch.setattr(client, "_ENTITY_ALIASES_MULTI", {})
+    monkeypatch.setattr(client, "_DENIED_ENTITIES", frozenset())
+    monkeypatch.setattr(client, "_get_state", lambda _: None)
+    post = MagicMock()
+    monkeypatch.setattr(client, "_post", post)
+    result = client._call_service("light", "turn_on", "light.missing")
+    assert result.operation_outcome.code == "target_unverified"
+    assert not result.operation_outcome.success
+    assert result.startswith("Reactive question:")
+    post.assert_not_called()
 
 
 def _patch_aliases(aliases: dict):

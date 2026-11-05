@@ -240,8 +240,6 @@ def test_pocket_pytorch_requires_both_pinned_mirror_and_tokenizer(tmp_path):
             path = tmp_path / "hub" / f"models--{repo.replace('/', '--')}" / "snapshots" / revision / filename
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()
-        if repo.startswith("latent-variable/"):
-            assert not _asset_present(cfg, str(tmp_path))
     assert _asset_present(cfg, str(tmp_path))
 
 

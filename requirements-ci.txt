@@ -24,6 +24,7 @@ requests>=2.31
 beautifulsoup4>=4.12
 Markdown>=3.10
 word2number>=1.1
+hassil>=2.1.0
 simpleeval>=1.0
 pint>=0.24
 python-dateutil>=2.9

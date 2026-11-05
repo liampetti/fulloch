@@ -88,7 +88,7 @@ class BackendSpec:
         return self.domain == TTS and self.backend in {
             "qwen", "qwen-small", "qwen-gguf", "qwen-gguf-small",
             "pocket-tts-onnx", "pocket-tts-pytorch", "pocket-tts-gguf",
-            "higgs-gguf", "breeze-tts-2-gguf", "audio8",
+            "higgs-gguf", "breeze-tts-2-gguf", "audio8", "audio8-small",
         }
 
     @property
@@ -118,18 +118,41 @@ _register(
         backend="audio8",
         gpu_only=True,
         experimental=True,
-        display_name="Audio8 TTS 0.6B (GPU voice clone)",
+        display_name="Audio8 TTS Realistic Air 0.6B (GPU voice clone)",
         loader="core.tts_audio8:load_tts",
-        default_model="Edge0/Audio8-TTS-Preview-0.6b",
+        default_model="Edge0/Audio8-TTS-Realistic-Air",
         hf_snapshots=(
-            ("Edge0/Audio8-TTS-Preview-0.6b", (), "f07040f3d151f1ba0253bfb92cb2f5dd38b44594"),
+            ("Edge0/Audio8-TTS-Realistic-Air", (), "23c305cc013fde378edb459f538317043c993a74"),
         ),
         download_size_gb=1.5,
         vram_gb=3.0,
         deps=("transformers",),
         notes="Experimental 44.1 kHz Apache-2.0 zero-shot voice clone. Requires an exact "
         "data/voices/<name>.txt transcript beside the reference WAV; sentence-fragment PCM streaming.",
-        extra={"revision": "f07040f3d151f1ba0253bfb92cb2f5dd38b44594"},
+        extra={"revision": "23c305cc013fde378edb459f538317043c993a74"},
+    )
+)
+
+_register(
+    BackendSpec(
+        domain=TTS,
+        backend="audio8-small",
+        gpu_only=True,
+        experimental=True,
+        display_name="Audio8 TTS Preview 0.1B (GPU; community license)",
+        loader="core.tts_audio8:load_tts",
+        default_model="Edge0/Audio8-TTS-Preview-0.1b",
+        hf_snapshots=(
+            ("Edge0/Audio8-TTS-Preview-0.1b", (), "8c837020ab800498834038363dea06757872afda"),
+        ),
+        download_size_gb=1.7,
+        vram_gb=2.0,
+        deps=("transformers",),
+        notes="Experimental 44.1 kHz voice clone; exact reference transcript required. "
+        "Audio8 Community License: commercial use by entities with annual revenue of "
+        "$2M or more requires a separate license. English and Chinese primary; "
+        "other languages experimental. Sentence-fragment PCM streaming.",
+        extra={"revision": "8c837020ab800498834038363dea06757872afda"},
     )
 )
 
@@ -485,29 +508,24 @@ _register(
     BackendSpec(
         domain=TTS,
         backend="pocket-tts-pytorch",
-        gpu_only=True,
+        cpu_ok=True,
         experimental=True,
-        display_name="Pocket TTS PyTorch (GPU voice clone)",
+        display_name="Pocket TTS PyTorch (CPU/GPU voice clone)",
         loader="core.tts_pocket:load_tts",
-        default_model="latent-variable/pocket-tts-cloning-en",
+        default_model="lunahr/pocket-tts-ungated",
         hf_snapshots=(
             (
-                "latent-variable/pocket-tts-cloning-en",
-                ("languages/english/model.safetensors",),
-                "ead4edebb72d7dd41468bbf8456f2822b3aa3fb1",
-            ),
-            (
-                "kyutai/pocket-tts-without-voice-cloning",
-                ("languages/english_2026-04/tokenizer.model",),
-                "d29db7978e464fb90cb3359ee0c69a273b9142cc",
+                "lunahr/pocket-tts-ungated",
+                ("languages/english_2026-04/model.safetensors", "languages/english_2026-04/tokenizer.model"),
+                "d03cd73415a8d46d8eb115c7b524aebb0a729f4a",
             ),
         ),
         download_size_gb=0.5,
         vram_gb=1.0,
+        ram_gb=1.5,
         deps=("pocket_tts",),
-        notes="Kyutai PyTorch CUDA backend with native PCM streaming; cloning weights use a "
-        "pinned public mirror, no Hugging Face login required. "
-        "English one-shot cloning from data/voices/<name>.wav.",
+        notes="Kyutai PyTorch CPU/GPU backend with native PCM streaming; multilingual cloning weights use a "
+        "pinned third-party public mirror, no Hugging Face login required.",
     )
 )
 
@@ -771,6 +789,7 @@ def list_backends(domain: str) -> list[BackendSpec]:
             "qwen-gguf-small",
             "pocket-tts-pytorch",
             "audio8",
+            "audio8-small",
             "pocket-tts-gguf",
             "qwen",
             "qwen-small",
@@ -838,7 +857,27 @@ def get_module(domain: str, backend: str):
 _DEFAULT_BACKENDS = {ASR: "qwen", TTS: "qwen", LLM: "llama"}
 
 
-def resolve_models(config_models: Optional[dict]) -> dict:
+TTS_MODEL_LANGUAGES = {
+    "pocket-tts-onnx": {
+        "english": "english_2026-04", "french": "french_24l", "german": "german", "italian": "italian",
+        "portuguese": "portuguese", "spanish": "spanish",
+    },
+    "pocket-tts-pytorch": {
+        "english": "english_2026-04", "french": "french_24l", "german": "german",
+        "italian": "italian", "portuguese": "portuguese", "spanish": "spanish",
+    },
+}
+
+
+def pocket_pytorch_snapshots(language: str) -> tuple:
+    if language not in TTS_MODEL_LANGUAGES["pocket-tts-pytorch"].values():
+        raise ValueError(f"Unsupported Pocket TTS language {language!r}")
+    return (("lunahr/pocket-tts-ungated",
+             (f"languages/{language}/model.safetensors", f"languages/{language}/tokenizer.model"),
+             "d03cd73415a8d46d8eb115c7b524aebb0a729f4a"),)
+
+
+def resolve_models(config_models: Optional[dict], tts_language: Optional[str] = None) -> dict:
     """Resolve a `models:` config block into a fully-defaulted spec per domain.
 
     Returns `{domain: {"backend", "model", "n_context", "spec", "opts"}}`.
@@ -885,6 +924,11 @@ def resolve_models(config_models: Optional[dict]) -> dict:
         n_context = block.pop("n_context", None) or spec.n_context
         opts = dict(spec.extra)
         opts.update(block)  # Explicit config overrides registry loader defaults.
+        if domain == TTS and backend in TTS_MODEL_LANGUAGES:
+            language = tts_language or "english"
+            if language not in TTS_MODEL_LANGUAGES[backend]:
+                raise ValueError(f"Unsupported TTS language {language!r} for {backend}")
+            opts["language"] = TTS_MODEL_LANGUAGES[backend][language]
         resolved[domain] = {
             "backend": backend,
             "model": model,

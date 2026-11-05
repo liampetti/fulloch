@@ -16,6 +16,8 @@
 numpy==2.2.6
 setuptools==80.9.0
 word2number==1.1
+hassil>=2.1.0
+requests==2.32.5
 
 # Calculator / date-resolver / unit-conversion tool (all local, no network)
 simpleeval==1.0.7

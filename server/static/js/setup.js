@@ -26,6 +26,7 @@ const state = {
   sel: {
     tier: 'pro', models: null,
     wakeword: 'hey atticus', wakeword_pattern: '', wakeword_id: '', voice_clone: '',
+    intent_languages: ['en'], tts_language: 'english', tts_language_manual: false,
     openai: { base_url: '', model: '', api_key: '' },
     ha: { url: '', token: '' }, search_url: '', clear_integrations: false,
   },
@@ -83,6 +84,13 @@ async function boot() {
   // Seed voice from any existing config
   const voiceF = state.schema.fields.find(f => f.path === 'general.voice_clone');
   if (voiceF && voiceF.value) sel.voice_clone = voiceF.value;
+  const languagesF = state.schema.fields.find(f => f.path === 'general.intent_languages');
+  sel.intent_languages = [...(languagesF?.value || languagesF?.default || ['en'])];
+  const ttsLanguageF = state.schema.fields.find(f => f.path === 'general.tts_language');
+  if (state.schema.models && ttsLanguageF?.set && ttsLanguageF.value) {
+    sel.tts_language = ttsLanguageF.value;
+    sel.tts_language_manual = true;
+  }
   // Seed integration fields from existing config
   const haUrl = state.schema.fields.find(f => f.path === 'home_assistant.url');
   if (haUrl && haUrl.value) sel.ha.url = haUrl.value;

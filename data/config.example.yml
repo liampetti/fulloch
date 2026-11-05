@@ -13,8 +13,10 @@
 general:
   wakeword: "hey atticus"        # also the fallback if wakeword_pattern fails to compile
   # wakeword_pattern: '\b(?:hey|hay|hi)\W+[ao][dtl]{1,2}i?c\W*u[sz]\b'  # auto-built from wakeword when blank
-
-  asr_language: "English"        # English only for now
+  intent_languages: ["en"]       # e.g. ["en", "fr", "de"]
+  asr_language: null              # Optional single-language override, e.g. "French"; restart required.
+  # Leave unset for automatic detection where the selected ASR supports it.
+  # Some ASR models support only certain languages or ignore this override.
   log_level: "info"              # debug | info | warning | error
   persistent_logging_enabled: false # Save application and local llama-server logs under data/logs/ (restart required).
   telemetry_enabled: false        # Write local content-free performance events to data/logs/telemetry.jsonl (restart required).
@@ -28,6 +30,8 @@ general:
 
   # === Voice ================================================================
   voice_clone: "atticus"         # Qwen/Pocket/Audio8: data/voices/<name> clone. Kokoro: built-in name.
+  tts_language: "english"        # Pocket TTS ONNX/PyTorch: english | french | german | italian | portuguese | spanish; ignored by other models. Restart required.
+  # French uses a larger, slower 24-layer model; other languages use standard-size weights.
   # Cloning backends also accept a custom /path/reference.wav with a matching reference.txt.
   tts_speed: 1.0                 # Kokoro only; Qwen/Pocket/Audio8 pace comes from the reference clip.
   whisper_gain: 0.30             # Volume for explicit whisper/quiet requests (0.0-1.0; applies to every TTS backend).
@@ -44,7 +48,7 @@ general:
   vad_threshold: 0.6             # raise toward 0.7 in noisy rooms.
   vad_endpoint_silence_ms: 1500  # low-VAD duration before end-of-speech.
   vad_min_speech_ms: 300         # filter coughs/taps the VAD scores as speech.
-  vad_soft_endpoint_silence_ms: 500  # early-commit pause; 0 disables. Locks/media/timers always wait for the hard endpoint.
+  vad_soft_endpoint_silence_ms: 100  # early-commit pause; 0 disables. Locks/media/timers always wait for the hard endpoint.
 
   # === Dashboard ============================================================
   dashboard_theme: "auto"       # auto | dark | light; auto follows the browser/OS preference.
@@ -93,8 +97,9 @@ general:
 #     # breeze-tts-2-gguf        # Breeze TTS 2 Q4_K GGUF (GPU voice clone with English audio tags)
 #     # qwen-gguf                # Qwen3 1.7B GGUF (GPU)
 #     # qwen-gguf-small          # Qwen3 0.6B GGUF (GPU)
-#     # pocket-tts-pytorch       # Pocket TTS PyTorch (GPU streaming English voice clone; ungated mirror, no token)
-#     # audio8                   # Audio8 0.6B (GPU 44.1 kHz Apache-2.0 voice clone; requires <name>.wav + exact <name>.txt)
+#     # pocket-tts-pytorch       # Pocket TTS PyTorch (CPU/GPU multilingual streaming voice clone; ungated mirror, no token)
+#     # audio8                   # Audio8 Realistic Air 0.6B (GPU 44.1 kHz Apache-2.0 voice clone; requires <name>.wav + exact <name>.txt)
+#     # audio8-small             # Audio8 Preview 0.1B (GPU voice clone; revenue-capped community license; see MODELS.md)
 #     # pocket-tts-gguf          # Pocket TTS Q8_0 GGUF (GPU English voice clone)
 #     # qwen-small               # Qwen3 0.6B PyTorch (GPU)
 #     # kokoro-onnx              # Kokoro 82M (CPU built-in voices)

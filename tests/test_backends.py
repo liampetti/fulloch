@@ -106,7 +106,7 @@ def test_gpu_only_flags():
     assert b.get_spec("tts", "kokoro-onnx").gpu_only is False
     assert b.get_spec("tts", "pocket-tts-onnx").gpu_only is False
     assert b.get_spec("tts", "pocket-tts-gguf").gpu_only is True
-    assert b.get_spec("tts", "pocket-tts-pytorch").gpu_only is True
+    assert b.get_spec("tts", "pocket-tts-pytorch").gpu_only is False
     assert b.get_spec("tts", "audio8").gpu_only is True
     assert b.get_spec("llm", "openai").gpu_only is False
     assert b.get_spec("asr", "qwen-gguf").gpu_only is True
@@ -164,10 +164,10 @@ def test_pocket_gguf_backend_metadata_and_cpu_gating():
 def test_pocket_pytorch_backend_metadata_and_cpu_gating():
     pocket = b.get_spec("tts", "pocket-tts-pytorch")
     assert pocket.loader == "core.tts_pocket:load_tts"
-    assert pocket.hf_snapshots[0][0] == "latent-variable/pocket-tts-cloning-en"
-    assert pocket.hf_snapshots[0][1] == ("languages/english/model.safetensors",)
+    assert pocket.hf_snapshots[0][0] == "lunahr/pocket-tts-ungated"
+    assert pocket.hf_snapshots[0][1] == ("languages/english_2026-04/model.safetensors", "languages/english_2026-04/tokenizer.model")
     assert b.is_offerable(pocket, "gpu") is True
-    assert b.is_offerable(pocket, "cpu") is False
+    assert b.is_offerable(pocket, "cpu") is True
 
 
 def test_orukeet_backend_metadata_and_cpu_gating():
@@ -185,10 +185,21 @@ def test_orukeet_backend_metadata_and_cpu_gating():
 def test_audio8_backend_metadata_and_cpu_gating():
     audio8 = b.get_spec("tts", "audio8")
     assert audio8.loader == "core.tts_audio8:load_tts"
-    assert audio8.hf_snapshots[0][0] == "Edge0/Audio8-TTS-Preview-0.6b"
+    assert audio8.hf_snapshots[0][0] == "Edge0/Audio8-TTS-Realistic-Air"
     assert audio8.extra["revision"] == audio8.hf_snapshots[0][2]
     assert b.is_offerable(audio8, "gpu") is True
     assert b.is_offerable(audio8, "cpu") is False
+
+    small = b.get_spec("tts", "audio8-small")
+    assert small.loader == "core.tts_audio8:load_tts"
+    assert small.default_model == "Edge0/Audio8-TTS-Preview-0.1b"
+    assert small.extra["revision"] == small.hf_snapshots[0][2]
+    assert small.voice_cloning is True
+    assert b.is_offerable(small, "gpu") is True
+    assert b.is_offerable(small, "cpu") is False
+    resolved = b.resolve_models({"tts": {"backend": "audio8-small"}})["tts"]
+    assert resolved["model"] == small.default_model
+    assert resolved["opts"]["revision"] == small.extra["revision"]
 
 
 def test_small_gguf_backend_metadata():
@@ -359,6 +370,7 @@ def test_asr_and_tts_options_have_stable_user_facing_order():
         "qwen-gguf-small",
         "pocket-tts-pytorch",
         "audio8",
+        "audio8-small",
         "pocket-tts-gguf",
         "qwen",
         "qwen-small",

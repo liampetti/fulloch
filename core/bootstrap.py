@@ -3,6 +3,7 @@
 import logging
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -12,11 +13,41 @@ _SUBDIRS = (
     "models/grammars",
     "models/hub",
     "models/wakeword",
+    "intents/en",
     "voices",
     "notes",
     "certs",
     "wav",
 )
+
+
+def _seed_response_files(data: Path, seed: Path, *, native_fallback: bool) -> None:
+    """Publish bundled defaults only when missing, without replacing edits."""
+    source_root = seed / "intents"
+    if native_fallback and not source_root.is_dir():
+        source_root = Path(__file__).resolve().parent.parent / "data" / "intents"
+    for language in ("en", "fr", "de"):
+        source = source_root / language / "fulloch-responses.yaml"
+        target = data / "intents" / language / "fulloch-responses.yaml"
+        if target.exists() or not source.is_file():
+            continue
+        temporary = None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".response-", delete=False) as output:
+                temporary = Path(output.name)
+                with source.open("rb") as source_file:
+                    shutil.copyfileobj(source_file, output)
+            # Atomic no-replace publication even across simultaneous startups.
+            os.link(temporary, target)
+            logger.info("Seeded response file into %s", target)
+        except FileExistsError:
+            pass  # Another startup or user created it first.
+        except OSError as exc:
+            logger.warning("Could not seed response file %s: %s", target, exc)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
 
 def _seed_https_cert(data: Path) -> None:
@@ -85,6 +116,19 @@ def ensure_scaffolding(data_dir: str = "./data", seed_dir: str = None) -> bool:
             if not dst.is_file():
                 shutil.copy2(src, dst)
                 logger.info("Seeded wakeword model into %s", dst)
+
+    # English sentence packs are image assets; preserve any existing pack.
+    seed_intents = seed / "intents" / "en"
+    if seed_intents.is_dir():
+        for src in seed_intents.glob("*.yaml"):
+            if src.name == "fulloch-responses.yaml":
+                continue
+            dst = data / "intents" / "en" / src.name
+            if not dst.exists():
+                shutil.copy2(src, dst)
+                logger.info("Seeded English intent pack into %s", dst)
+
+    _seed_response_files(data, seed, native_fallback=seed_dir is None and not os.environ.get("FULLOCH_SEED_DIR"))
 
     # Timer alert tone (core/assistant.py: ALARM_WAV_PATH) — same reasoning
     # as the grammar above: it's an app asset, not something the wizard

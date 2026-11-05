@@ -40,6 +40,10 @@ ha_test/
 data/thinking-jobs
 data/thinking-sources
 data/research-tasks.json
+/data/intents/*
+!/data/intents/*/
+/data/intents/*/*
+!/data/intents/*/fulloch-responses.yaml
 
 # =============================================================================
 # IDE and Editors

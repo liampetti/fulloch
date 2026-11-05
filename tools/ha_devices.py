@@ -15,8 +15,14 @@ from core.satellite_context import (
 from utils.value_parsing import parse_percentage
 
 from . import ha_client as client
+from .tool_registry import OutcomeText
 
 logger = logging.getLogger(__name__)
+
+
+def _failure(text: str, code: str, **values) -> OutcomeText:
+    """Report a rejected operation without changing its existing observation."""
+    return OutcomeText(text, success=False, code=code, values=values)
 
 # Spoken color name → RGB. Hoisted out of `set_color` so the dict isn't
 # rebuilt on every call.
@@ -109,19 +115,19 @@ def _bare_light_area_entities(entity: str) -> Optional[tuple[list, str] | str]:
     area_id = client._resolve_area(ha_area) or ha_area
     if client._AREA_MAP and area_id not in client._AREA_MAP:
         logger.debug("Satellite HA area %r is not in the loaded HA area map", ha_area)
-        return "I couldn't find the selected room. No command was sent. Please select the room again."
+        return _failure("I couldn't find the selected room. No command was sent. Please select the room again.", "area_not_found", area=ha_area)
 
     raw = client._render_template(f"{{{{ area_entities({area_id!r}) | list | tojson }}}}")
     if raw is None:
         logger.debug("Could not list HA entities for satellite area %r", area_id)
-        return "I couldn't look up the lights in the selected room. No command was sent."
+        return _failure("I couldn't look up the lights in the selected room. No command was sent.", "area_lookup_failed", area=area_id)
     try:
         entity_ids = json.loads(raw)
     except (ValueError, TypeError):
         logger.debug("Could not parse HA area entities for satellite area %r: %r", area_id, raw)
-        return "I couldn't read the lights in the selected room. No command was sent."
+        return _failure("I couldn't read the lights in the selected room. No command was sent.", "area_lookup_invalid", area=area_id)
     if not isinstance(entity_ids, list) or not all(isinstance(eid, str) for eid in entity_ids):
-        return "I couldn't read the lights in the selected room. No command was sent."
+        return _failure("I couldn't read the lights in the selected room. No command was sent.", "area_lookup_invalid", area=area_id)
 
     lights = [
         eid
@@ -130,7 +136,7 @@ def _bare_light_area_entities(entity: str) -> Optional[tuple[list, str] | str]:
     ]
     if not lights:
         logger.debug("Satellite HA area %r has no controllable lights", area_id)
-        return "I couldn't find any lights available for control in the selected room. No command was sent."
+        return _failure("I couldn't find any lights available for control in the selected room. No command was sent.", "area_no_lights", area=area_id)
     area_name = client._AREA_MAP.get(area_id, ha_area)
     return lights, area_name
 
@@ -243,7 +249,7 @@ def set_ha_brightness(entity: str, brightness: int | str) -> str:
     try:
         brightness = parse_percentage(brightness)
     except ValueError:
-        return "I couldn't read that brightness percentage."
+        return _failure("I couldn't read that brightness percentage.", "invalid_brightness", entity=entity)
     brightness_255 = int((brightness / 100) * 255)
 
     area_lights = _bare_light_area_entities(entity)
@@ -272,6 +278,43 @@ def set_ha_brightness(entity: str, brightness: int | str) -> str:
 
 
 @client.tool(
+    name="ha_hassil_area",
+    description="Control supported devices in one Home Assistant area or floor",
+)
+def hassil_area(scope: str, location: str, domain: str, operation: str, value=None) -> str:
+    """Execute an explicitly scoped, allowlisted area/floor intent."""
+    if domain not in {"light", "switch", "fan", "climate"}:
+        return _failure("That device type is not supported. No command was sent.", "unsupported_domain", domain=domain)
+    if scope == "area" and location in client._AREA_MAP:
+        entities = client._area_entities(location, domain)
+    elif scope == "floor" and location in client._FLOOR_MAP:
+        entities = client._floor_entities(location, domain)
+    else:
+        return _failure("I couldn't find that room or floor. No command was sent.", "location_not_found", scope=scope, location=location)
+    denied = client.get_denylist()
+    entities = list(dict.fromkeys(e for e in entities if client._domain_of(e) == domain and e not in denied))
+    if not entities:
+        return _failure("I couldn't find any available devices there. No command was sent.", "location_no_devices", scope=scope, location=location, domain=domain)
+    data = None
+    if operation in {"on", "off"} and domain in {"light", "switch", "fan"}:
+        service = f"turn_{operation}"
+    elif operation == "brightness" and domain == "light":
+        try:
+            data = {"brightness": int(parse_percentage(value) * 255 / 100)}
+        except ValueError:
+            return _failure("I couldn't read that brightness percentage. No command was sent.", "invalid_brightness", location=location)
+        service = "turn_on"
+    elif operation == "temperature" and domain == "climate":
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not -50 <= value <= 100:
+            return _failure("I couldn't read that temperature. No command was sent.", "invalid_temperature", location=location)
+        data = {"temperature": value}
+        service = "set_temperature"
+    else:
+        return _failure("That operation is not supported. No command was sent.", "unsupported_operation", operation=operation)
+    return client._call_service(domain, service, entities, data, "Done.")
+
+
+@client.tool(
     name="ha_set_color",
     description="Set the color of a light in Home Assistant using color name or RGB",
     aliases=["ha_color", "change_light_color"],
@@ -292,11 +335,11 @@ def set_color(entity: str, color: str) -> str:
         try:
             rgb = [int(c.strip()) for c in color.split(",")]
             if len(rgb) != 3:
-                return "I need three numbers for an RGB colour."
+                return _failure("I need three numbers for an RGB colour.", "invalid_color", entity=entity)
         except ValueError:
-            return f"I couldn't read the colour {color}."
+            return _failure(f"I couldn't read the colour {color}.", "invalid_color", entity=entity)
     else:
-        return f"I don't know the colour {color}."
+        return _failure(f"I don't know the colour {color}.", "invalid_color", entity=entity)
 
     friendly = client._friendly_for(entity_id)
     return client._call_service(

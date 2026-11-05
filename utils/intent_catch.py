@@ -751,7 +751,7 @@ _INTENT_RULES = [
 ]
 
 
-def extract_compound_actions(command: str) -> Optional[list[dict]]:
+def extract_compound_actions(command: str, rules=None) -> Optional[list[dict]]:
     """Return ordered actions when every conjunction clause is independently safe.
 
     Reusing the single-command rules keeps compound handling conservative: any
@@ -767,7 +767,7 @@ def extract_compound_actions(command: str) -> Optional[list[dict]]:
     clauses[0] = _LEADING_DISCOURSE_RE.sub("", clauses[0]).strip()
     actions = []
     for clause in clauses:
-        for extract, build in _INTENT_RULES:
+        for extract, build in _INTENT_RULES if rules is None else rules:
             value = extract(clause)
             if value is not None:
                 actions.append(build(value))
@@ -775,6 +775,28 @@ def extract_compound_actions(command: str) -> Optional[list[dict]]:
         else:
             return None
     return actions
+
+
+# Preserve local/system and media rules while replacing HA device regexes in
+# the live router. The legacy public catchAll remains for isolated callers.
+_HA_DEVICE_EXTRACTORS = frozenset({
+    extract_light_brightness, extract_dim_brighten, extract_color,
+    extract_lock, extract_cover, extract_turn_onoff, extract_toggle,
+})
+_LOCAL_RULES = [(extract, build) for extract, build in _INTENT_RULES if extract not in _HA_DEVICE_EXTRACTORS]
+
+
+def catch_with_hassil(user_message: str, matcher):
+    """Prefer local rules, then try the multilingual device matcher."""
+    if extract_note_delete(user_message) and not _obsidian_edit_enabled():
+        return {"reply": _NOTE_DELETE_REPLY}
+    if actions := extract_compound_actions(user_message, _LOCAL_RULES):
+        return {"actions": actions}
+    for extract, build in _LOCAL_RULES:
+        value = extract(user_message)
+        if value is not None:
+            return {"actions": [build(value)]}
+    return matcher.match(user_message) or user_message
 
 
 def catchAll(user_message: str):

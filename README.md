@@ -26,7 +26,7 @@ Fulloch is your privacy-focused local voice assistant running on your own PC or 
 
 > **Higgs TTS 3:** The optional Higgs GPU backend is available only under Boson AI's Research and Non-Commercial License, not Fulloch's MIT license. It requires explicit consent for every voice reference. See [Model Sources and Licenses](MODELS.md#higgs-tts-3-license).
 
-> **Pocket TTS PyTorch:** Premium uses Kyutai's GPU streaming runtime with a pinned, ungated mirror of its English voice-cloning weights. No Hugging Face account or token is required. Only clone voices with explicit, lawful consent. See [Model Sources and Licenses](MODELS.md#pocket-tts-pytorch-provenance-and-consent).
+> **Pocket TTS PyTorch:** Premium uses Kyutai's streaming runtime with a pinned, ungated third-party mirror of its multilingual voice-cloning weights. It also runs on CPU. No Hugging Face account or token is required. Only clone voices with explicit, lawful consent. See [Model Sources and Licenses](MODELS.md#pocket-tts-pytorch-provenance-and-consent).
 
 > **openWakeWord feature extractors:** The optional wakeword gate includes unmodified pre-trained feature extractor models from openWakeWord v0.5.1 under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/), not Fulloch's MIT license. See [Model Sources and Licenses](MODELS.md#wakeword).
 
@@ -38,8 +38,14 @@ Install Docker Desktop (or Docker Engine) first. The first run downloads the sel
 
 ### CPU (mac/linux/windows)
 
+The published CPU image targets **linux/amd64**. The command below selects that
+platform explicitly, so Apple Silicon Macs use Docker Desktop's x86-64
+emulation. Performance may be slower on ARM hosts; a native ARM64 image is not
+currently published.
+
 ```bash
 docker run -d \
+  --platform linux/amd64 \
   --name fulloch-ai \
   --restart unless-stopped \
   --log-opt max-size=10m \
@@ -65,8 +71,8 @@ docker run -d \
   --restart unless-stopped \
   --log-opt max-size=10m \
   --log-opt max-file=5 \
-  --memory=10g \
-  --memory-swap=10g \
+  --memory=16g \
+  --memory-swap=16g \
   --gpus all \
   -p 8765:8765 \
   -p 8766:8766 \
@@ -75,7 +81,7 @@ docker run -d \
   ghcr.io/liampetti/fulloch:latest
 ```
 
-The example limits container **system RAM** to 10 GiB and disables container
+The example limits container **system RAM** to 16 GiB and disables container
 swap (`--memory-swap` equals `--memory`); `--gpus all` does not cap GPU VRAM.
 Choose a limit appropriate to your models and leave sufficient RAM for the host
 and other services. Too low a limit can kill model processes. Fulloch detects
@@ -123,7 +129,7 @@ targets 32 GB.
 | Component | CPU options | GPU options |
 | -- | -- | -- |
 | Speech recognition (ASR) | Qwen3-ASR ONNX 1.7B or 0.6B; Parakeet TDT v3 ONNX 0.6B; Moonshine Base or Tiny | Qwen3-ASR PyTorch 1.7B or 0.6B; Qwen3-ASR GGUF 1.7B or 0.6B; NVIDIA Parakeet TDT 0.6B; Orukeet 0.6B |
-| Text to speech (TTS) | Kokoro 82M; Pocket TTS ONNX voice cloning | Qwen3-TTS PyTorch 1.7B or 0.6B; Qwen3-TTS GGUF 1.7B or 0.6B; Pocket TTS PyTorch or GGUF; Audio8; Higgs TTS 3; Breeze TTS 2 |
+| Text to speech (TTS) | Kokoro 82M; Pocket TTS ONNX or PyTorch voice cloning | Qwen3-TTS PyTorch 1.7B or 0.6B; Qwen3-TTS GGUF 1.7B or 0.6B; Pocket TTS PyTorch or GGUF; Audio8; Higgs TTS 3; Breeze TTS 2 |
 | Language and command routing | Regex-only commands; Laya semantic commands; an external OpenAI-compatible endpoint | Local Qwen3.5 9B MTP, Gemma 4 12B, Ornith 1.5 9B, Qwen3.8 27B IQ4_XS (32 GB full stack), or a custom GGUF; an external OpenAI-compatible endpoint |
 
 Choose **Hey Atticus**, **Alexa**, or **Hey Jarvis** in the wizard's preset step
@@ -222,6 +228,8 @@ Voices in `data/voices/`:
 - **`All Kokoro voices`** - generated with [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) (Apache-2.0)
 
 Pocket TTS uses a selected `data/voices/<name>.wav` reference for one-shot cloning; use only voices you have permission to reproduce. The experimental official PyTorch backend streams PCM as it generates; the GGUF and ONNX options use independent conversions.
+
+Pocket TTS ONNX and PyTorch support English, French, German, Italian, Portuguese and Spanish model weights. Choose the TTS model language in Settings → Voice or set `general.tts_language` in `data/config.yml`; changing it requires a restart and may download a new bundle. French uses a larger, slower model. The setting is independent of recognition and intent languages and is ignored by other TTS backends; selecting a TTS language does not translate responses.
 
 ## Development Disclosure
 

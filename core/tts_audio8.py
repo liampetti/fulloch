@@ -1,8 +1,8 @@
 """Audio8 TTS PyTorch adapter for CUDA voice cloning.
 
-Audio8 currently returns a completed waveform per generation.  The worker keeps
-that CUDA work serial and synthesizes the first sentence independently so the
-browser receives audio as soon as that first fragment completes.
+Audio8 Realistic Air returns a completed waveform per generation, not live
+codec frames. The worker serializes CUDA work and sends each completed sentence
+fragment as PCM while the next fragment is synthesized.
 """
 
 import logging
@@ -33,7 +33,7 @@ _torch = None
 _voice: Optional[tuple[Path, str]] = None
 
 
-def load_tts(model_id: str = "Edge0/Audio8-TTS-Preview-0.6b", device: str = "cuda", **opts):
+def load_tts(model_id: str = "Edge0/Audio8-TTS-Realistic-Air", device: str = "cuda", **opts):
     """Load Audio8 on CUDA; the model's remote code owns codec decoding."""
     global _model, _processor, _torch
     import torch
@@ -81,29 +81,38 @@ def set_speed(speed) -> None:
         logger.warning("Audio8 TTS has no speed control; tts_speed=%s ignored", speed)
 
 
+def _split_bounded(text: str):
+    remaining = text.strip()
+    while len(remaining) > _MAX_SYNTHESIS_CHARS:
+        cut = remaining.rfind(" ", 0, _MAX_SYNTHESIS_CHARS + 1)
+        if cut <= 0:
+            cut = _MAX_SYNTHESIS_CHARS
+        yield remaining[:cut].strip()
+        remaining = remaining[cut:].strip()
+    if remaining:
+        yield remaining
+
+
 def _synthesis_fragments(text: str):
-    """Keep first-audio latency low without making every clause a model call."""
+    """Send the first sentence promptly and keep all later fragments bounded."""
     sentences = list(split_sentences(text)) or [text]
     pending = ""
     for index, sentence in enumerate(sentences):
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        if index == 0:
-            yield sentence[:_MAX_SYNTHESIS_CHARS]
-            pending = sentence[_MAX_SYNTHESIS_CHARS:].strip()
-        elif not pending:
-            pending = sentence
-        elif len(pending) + len(sentence) + 1 <= _MAX_SYNTHESIS_CHARS:
-            pending = f"{pending} {sentence}"
-        else:
-            yield pending
-            pending = sentence
+        for fragment in _split_bounded(sentence):
+            if index == 0 and not pending:
+                yield fragment
+            elif not pending:
+                pending = fragment
+            elif len(pending) + len(fragment) + 1 <= _MAX_SYNTHESIS_CHARS:
+                pending = f"{pending} {fragment}"
+            else:
+                yield pending
+                pending = fragment
     if pending:
         yield pending
 
 
-def _stream(text: str, voice: tuple[Path, str]):
+def _stream(text: str, voice: tuple[Path, str], session: Optional[TtsSession] = None):
     if _model is None or _processor is None or _torch is None:
         raise RuntimeError("Audio8 TTS is not loaded")
     wav_path, transcript = voice
@@ -118,6 +127,11 @@ def _stream(text: str, voice: tuple[Path, str]):
         for name, value in inputs.items()
     }
     with InferenceWatchdog("Audio8 TTS generation"), _torch.inference_mode():
+        if session is not None and session.cancelled:
+            return
+        # The model checks Transformers stopping criteria once per generated
+        # frame. Do not decode or emit a partial waveform after cancellation.
+        stopping = {"stopping_criteria": [lambda _ids, _scores: session.cancelled]} if session else {}
         output = _model.generate(
             **inputs,
             max_new_tokens=1024,
@@ -126,7 +140,10 @@ def _stream(text: str, voice: tuple[Path, str]):
             top_k=50,
             do_sample=True,
             return_dict_in_generate=True,
+            **stopping,
         )
+        if session is not None and session.cancelled:
+            return
         waveforms, lengths = _model.decode_audio(output.codes)
     length = int(lengths[0])
     pcm = waveforms[0, :length].float().cpu().numpy().reshape(-1)
@@ -164,7 +181,7 @@ def _worker_loop() -> None:
             for fragment in _synthesis_fragments(job.text):
                 if job.session.cancelled:
                     break
-                for chunk in _stream(fragment, job.voice):
+                for chunk in _stream(fragment, job.voice, job.session):
                     if job.session.cancelled or not _put(
                         job.out, (chunk, SAMPLE_RATE), job.session
                     ):

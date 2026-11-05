@@ -19,6 +19,7 @@ import utils.local_time as _local_tz
 from core.url_utils import normalize_url
 
 from ._config import config
+from .tool_registry import OutcomeText
 from .tool_registry import tool as _register_tool
 
 logger = logging.getLogger(__name__)
@@ -416,28 +417,34 @@ def _call_service(
     `entity_id` is normally a single entity_id string, but may be a list —
     used by the per-satellite lights area-default (#14 6b) to target every
     light entity in a room with one service call. Callers passing a list
-    must have already filtered out denylisted entities themselves (e.g. via
-    `_bare_light_area_entities`) — the single-entity denylist backstop below
-    only applies to the string case, and always passing `success_message`
-    for the list case avoids needing a `_friendly_for` that understands lists.
+    should filter denylisted entities themselves (e.g. via
+    `_bare_light_area_entities`); the service boundary also refuses a list if
+    any member is denied. List callers should supply `success_message`.
     """
+    values = {"domain": domain, "service": service, "entity_id": entity_id, "data": data}
+
+    def result(text, success, code):
+        return OutcomeText(text, success=success, code=code, values=values)
+
     if not HA_TOKEN:
-        return "Home Assistant isn't set up."
+        return result("Home Assistant isn't set up.", False, "ha_not_configured")
 
     if data and "entity_id" in data and data["entity_id"] != entity_id:
-        return (
+        return result(
             "Reactive question: Service data cannot override the selected entity. "
-            "No command was sent. Use the entity argument to select the target."
+            "No command was sent. Use the entity argument to select the target.",
+            False, "target_override",
         )
 
     # Enforcement backstop: even if a deny-listed entity_id reaches here (e.g.
     # the SLM emitted it verbatim, bypassing the filtered alias map), refuse it
     # outright rather than replanning — we don't want the agent retrying under a
     # different name to slip the control through.
-    if isinstance(entity_id, str) and entity_id in _DENIED_ENTITIES:
-        friendly = _friendly_for(entity_id)
+    blocked = [target for target in ([entity_id] if isinstance(entity_id, str) else entity_id) if target in _DENIED_ENTITIES]
+    if blocked:
+        friendly = _friendly_for(blocked[0])
         logger.info(f"Refused voice control of deny-listed entity {entity_id}")
-        return f"Sorry, {friendly} isn't available for voice control."
+        return result(f"Sorry, {friendly} isn't available for voice control.", False, "voice_denied")
 
     # A syntactically plausible ID is not evidence that the target exists.
     # Known IDs cost no I/O; check cache misses against HA before a service can
@@ -449,9 +456,10 @@ def _call_service(
     targets = [entity_id] if isinstance(entity_id, str) else entity_id
     for target in targets:
         if target not in known_ids and _get_state(target) is None:
-            return (
+            return result(
                 f"Reactive question: I couldn't verify the Home Assistant target {target!r}. "
-                "No command was sent. Ask the user to clarify the target or use a lookup."
+                "No command was sent. Ask the user to clarify the target or use a lookup.",
+                False, "target_unverified",
             )
 
     path = f"/api/services/{domain}/{service}"
@@ -464,11 +472,11 @@ def _call_service(
     try:
         response = _post(path, json=payload)
         response.raise_for_status()
-        return success_message if success_message is not None else "OK"
+        return result(success_message if success_message is not None else "OK", True, "service_called")
     except requests.exceptions.ConnectionError:
-        return "I couldn't reach Home Assistant."
+        return result("I couldn't reach Home Assistant.", False, "ha_unreachable")
     except requests.exceptions.Timeout:
-        return "Home Assistant didn't respond in time."
+        return result("Home Assistant didn't respond in time.", False, "ha_timeout")
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code
         logger.warning(f"HA {domain}.{service} on {entity_id} failed: {status} {e.response.text}")
@@ -477,14 +485,15 @@ def _call_service(
             # the agent replan loop so the next agent call can try a different
             # name or ask the user to clarify, instead of speaking a dead-end
             # "Sorry, I couldn't find X" line directly.
-            return (
+            return result(
                 f"Reactive question: Couldn't find an entity matching "
-                f"{entity_id!r}. Try a different name or be more specific."
+                f"{entity_id!r}. Try a different name or be more specific.",
+                False, "ha_target_rejected",
             )
-        return f"Couldn't {action} {friendly}."
+        return result(f"Couldn't {action} {friendly}.", False, "ha_service_error")
     except Exception as e:
         logger.warning(f"HA {domain}.{service} on {entity_id} failed: {e}")
-        return f"Couldn't {action} {friendly}."
+        return result(f"Couldn't {action} {friendly}.", False, "ha_service_error")
 
 
 def _call_service_with_response(

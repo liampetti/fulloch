@@ -51,6 +51,71 @@ def test_seeds_wakeword_models_without_overwriting_a_replacement(tmp_path):
     assert wakeword.read_bytes() == b"user replacement"
 
 
+def test_seeds_english_intents_without_overwriting_existing(tmp_path):
+    seed = _make_seed(tmp_path)
+    (seed / "intents" / "en").mkdir(parents=True)
+    (seed / "intents" / "en" / "pack.yaml").write_text("seed")
+    data = tmp_path / "data"
+    ensure_scaffolding(str(data), seed_dir=str(seed))
+    target = data / "intents" / "en" / "pack.yaml"
+    assert target.read_text() == "seed"
+    target.write_text("existing")
+    ensure_scaffolding(str(data), seed_dir=str(seed))
+    assert target.read_text() == "existing"
+
+
+def test_response_defaults_seed_all_languages_preserving_edits_and_packs(tmp_path):
+    seed = _make_seed(tmp_path)
+    data = tmp_path / "data"
+    for language in ("en", "fr", "de"):
+        source = seed / "intents" / language / "fulloch-responses.yaml"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(f"default-{language}")
+        target = data / "intents" / language
+        target.mkdir(parents=True)
+        (target / "2025.6.23.yaml").write_text("downloaded-pack")
+    (data / "intents" / "fr" / "fulloch-responses.yaml").write_text("custom")
+
+    ensure_scaffolding(str(data), seed_dir=str(seed))
+    assert (data / "intents" / "en" / "fulloch-responses.yaml").read_text() == "default-en"
+    assert (data / "intents" / "de" / "fulloch-responses.yaml").read_text() == "default-de"
+    assert (data / "intents" / "fr" / "fulloch-responses.yaml").read_text() == "custom"
+    (seed / "intents" / "en" / "fulloch-responses.yaml").write_text("updated-default")
+    ensure_scaffolding(str(data), seed_dir=str(seed))
+    for language in ("en", "fr", "de"):
+        assert (data / "intents" / language / "2025.6.23.yaml").read_text() == "downloaded-pack"
+    assert (data / "intents" / "en" / "fulloch-responses.yaml").read_text() == "default-en"
+
+
+def test_native_response_seed_fallback(tmp_path):
+    from core.bootstrap import _seed_response_files
+
+    data = tmp_path / "data"
+    _seed_response_files(data, tmp_path / "absent", native_fallback=True)
+    for language in ("en", "fr", "de"):
+        assert (data / "intents" / language / "fulloch-responses.yaml").is_file()
+
+
+def test_response_seed_race_does_not_overwrite_user_file(tmp_path, monkeypatch):
+    from core import bootstrap
+
+    source = tmp_path / "seed" / "intents" / "en" / "fulloch-responses.yaml"
+    source.parent.mkdir(parents=True)
+    source.write_text("default")
+    data = tmp_path / "data"
+    target = data / "intents" / "en" / "fulloch-responses.yaml"
+    real_link = bootstrap.os.link
+
+    def concurrent_edit(src, dst):
+        target.write_text("user edit")
+        return real_link(src, dst)
+
+    monkeypatch.setattr(bootstrap.os, "link", concurrent_edit)
+    bootstrap._seed_response_files(data, tmp_path / "seed", native_fallback=False)
+    assert target.read_text() == "user edit"
+    assert not list(target.parent.glob(".response-*"))
+
+
 def test_seeds_bundled_voice_references_without_overwriting_user_voices(tmp_path):
     seed = _make_seed(tmp_path)
     (seed / "voices").mkdir()

@@ -33,7 +33,7 @@ _voice: Optional[Path] = None
 
 
 def load_tts(model_id: str = DEFAULT_MODEL_DIR, **opts):
-    """Load the English INT8 Pocket TTS bundle on the CPU."""
+    """Load the selected INT8 Pocket TTS bundle on the CPU."""
     global _model
     root = Path(model_id)
     wrapper = root / "pocket_tts_onnx.py"
@@ -46,13 +46,13 @@ def load_tts(model_id: str = DEFAULT_MODEL_DIR, **opts):
     spec.loader.exec_module(module)
     _model = module.PocketTTSOnnx(
         models_dir=str(root / "onnx"),
-        language="english_2026-04",
+        language=opts.get("language", "english_2026-04"),
         precision="int8",
         device="cpu",
         temperature=float(opts.get("temperature", 0.7)),
         lsd_steps=int(opts.get("lsd_steps", 1)),
     )
-    logger.info("Loaded Pocket TTS ONNX English INT8 bundle from %s", root)
+    logger.info("Loaded Pocket TTS ONNX %s INT8 bundle from %s", opts.get("language", "english_2026-04"), root)
     return _model
 
 

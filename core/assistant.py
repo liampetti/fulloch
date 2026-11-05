@@ -330,6 +330,7 @@ _MODEL_LOAD_ESTIMATES = {
     (TTS, "pocket-tts-gguf"): "usually 5-15 seconds",
     (TTS, "pocket-tts-pytorch"): "usually 5-15 seconds",
     (TTS, "audio8"): "usually 10-25 seconds",
+    (TTS, "audio8-small"): "usually 10-25 seconds",
 }
 
 
@@ -351,6 +352,7 @@ class Assistant:
         wakeword_pattern: Optional[str] = None,
         voice_clone: Optional[str] = None,
         tts_speed: Optional[float] = None,
+        tts_language: Optional[str] = None,
         whisper_gain: float = 0.30,
         personality: str = "balanced",
         personality_custom: str = "",
@@ -441,6 +443,8 @@ class Assistant:
         self.personality = personality
         self.personality_custom = personality_custom
         self.asr_language = asr_language
+        self._hassil_fastpath = None
+        self._hassil_intents_dir = "./data/intents"
         self.asr_context_hint = asr_context_hint
         self.asr_context_terms = asr_context_terms or []
         # Flat pool of every token that appears in any `asr_context_terms`
@@ -558,7 +562,7 @@ class Assistant:
                 requested_slots,
                 self.thinking_server_slots,
             )
-        self._models = resolve_models(models)
+        self._models = resolve_models(models, tts_language)
         self.thinking_jobs = BackgroundJobManager(
             self._run_background_thinking_job,
             self._on_thinking_job_status,
@@ -2467,6 +2471,7 @@ class Assistant:
     _HOT_CONFIG_PATHS = frozenset(
         {
             "general.log_level",
+            "general.intent_languages",
             "general.barge_in",
             "general.conversation_mode_default",
             "general.follow_up_time",
@@ -2524,6 +2529,7 @@ class Assistant:
             "pocket-tts-gguf",
             "pocket-tts-pytorch",
             "audio8",
+            "audio8-small",
         }
         for ch in changes:
             path, value = ch["path"], ch["value"]
@@ -2535,6 +2541,8 @@ class Assistant:
                     if lvl is None:
                         continue
                     logging.getLogger().setLevel(lvl)
+                elif path == "general.intent_languages":
+                    self.configure_hassil(value or ["en"], self._hassil_intents_dir)
                 elif path == "general.barge_in":
                     self.barge_in = value
                 elif path == "general.conversation_mode_default":
@@ -2578,6 +2586,20 @@ class Assistant:
             except Exception as e:  # noqa: BLE001 — one bad field mustn't block the rest
                 logger.warning("Hot-apply of %s failed: %s", path, e)
         return applied
+
+    def configure_hassil(self, languages: list[str], intents_dir: str = "./data/intents") -> None:
+        """Load a complete replacement before publishing it to turn threads."""
+        from server.downloader import ensure_hassil_intents
+        from utils.hassil_fastpath import HassilFastPath
+
+        ensure_hassil_intents(languages, intents_dir)
+        matcher = HassilFastPath(languages, intents_dir)
+        self._hassil_intents_dir = intents_dir
+        self._hassil_fastpath = matcher
+
+        # HA discovery can retry for tens of seconds. Start it off-thread and
+        # let the matcher read the shared cache after it has loaded.
+        matcher.start_discovery()
 
     def handle_text_turn(self, text: str, *, ha_area: Optional[str] = None) -> str:
         """Run a typed input through the full intent/SLM/tool pipeline.
@@ -4249,7 +4271,14 @@ class Assistant:
                 # and let the buffer grow to the hard endpoint, which re-runs
                 # this path on the full utterance.
                 if provisional:
-                    if not should_commit_provisional(user_prompt, catchAll(user_prompt)):
+                    matcher = getattr(self, "_hassil_fastpath", None)
+                    if matcher:
+                        from utils.intent_catch import catch_with_hassil
+
+                        caught = catch_with_hassil(user_prompt, matcher)
+                    else:
+                        caught = catchAll(user_prompt)
+                    if not should_commit_provisional(user_prompt, caught):
                         logger.debug(f"Provisional held (awaiting hard endpoint): {user_prompt!r}")
                         continue
                     if capture_id is None:

@@ -118,6 +118,7 @@ class StepResult:
     artifact: Optional[dict] = None
     outcome: Optional[dict] = None
     raw_text: Optional[str] = None  # original tool observation, never a generated summary
+    operation_outcome: Optional[object] = None
 
     @property
     def should_replan(self) -> bool:
@@ -149,8 +150,10 @@ def classify_step(raw: Optional[object]) -> StepResult:
     stripped = raw.lstrip()
     for prefix, kind in _SENTINEL_KINDS:
         if stripped.startswith(prefix):
-            return StepResult(kind, raw, in_output=True, artifact=getattr(raw, "artifact", None), outcome=outcome)
-    return StepResult(StepKind.NORMAL, raw, in_output=True, artifact=getattr(raw, "artifact", None), outcome=outcome)
+            return StepResult(kind, raw, in_output=True, artifact=getattr(raw, "artifact", None), outcome=outcome,
+                              operation_outcome=getattr(raw, "operation_outcome", None))
+    return StepResult(StepKind.NORMAL, raw, in_output=True, artifact=getattr(raw, "artifact", None), outcome=outcome,
+                      operation_outcome=getattr(raw, "operation_outcome", None))
 
 
 # Sentences in a reactive message that instruct the (absent) agent rather than

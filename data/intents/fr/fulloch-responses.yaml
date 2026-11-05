@@ -1,0 +1,60 @@
+language: fr
+schema_version: 1
+source_revision: "2025.6.23"
+provenance: "Fulloch-specific responses; not copied from Home Assistant."
+responses:
+  time:
+    success:
+      - "Il est {time}."
+  date:
+    success:
+      - "Nous sommes le {date}."
+  timer_started:
+    success:
+      - "Minuteur lancé pour {duration}."
+  timer_cancelled:
+    success:
+      - "Minuteur annulé."
+  timer_completed:
+    success:
+      - "Votre minuteur est terminé."
+  timer_status:
+    success: ["Il reste {duration} au minuteur."]
+  timer_status_multiple:
+    success: ["Il reste respectivement {durations} aux minuteurs."]
+  timer_none:
+    success: ["Aucun minuteur n'est actif."]
+    error: ["Aucun minuteur n'est actif."]
+  timer_ambiguous:
+    error: ["Plusieurs minuteurs sont actifs. Précisez lequel annuler."]
+  timer_limit:
+    error: ["Il y a trop de minuteurs actifs. Annulez-en un avant d'en démarrer un autre."]
+  timer_too_long:
+    error: ["Un minuteur ne peut pas dépasser sept jours."]
+  timer_invalid_duration:
+    error: ["Je n'ai pas compris la durée du minuteur."]
+  light_brightness:
+    success: ["La luminosité a été réglée à {value} pour cent."]
+  climate_temperature:
+    success: ["La température a été réglée à {value} degrés."]
+  cover_position:
+    success: ["La position a été réglée à {value} pour cent."]
+  media_volume:
+    success: ["Le volume a été réglé à {value} pour cent."]
+  ha_unreachable:
+    error: ["Je n'ai pas pu joindre Home Assistant."]
+  ha_timeout:
+    error: ["Home Assistant n'a pas répondu à temps."]
+  ha_not_configured:
+    error: ["Home Assistant n'est pas configuré."]
+  voice_denied:
+    error: ["Cet appareil n'est pas disponible pour la commande vocale. Aucune commande n'a été envoyée."]
+  light_on:
+    success:
+      - "Commande d'allumage des lumières envoyée."
+  light_off:
+    success:
+      - "Commande d'extinction des lumières envoyée."
+  operation_failed:
+    error:
+      - "Désolé, je n'ai pas pu effectuer cette action."

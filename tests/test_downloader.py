@@ -220,7 +220,36 @@ def test_plan_downloads_pocket_tts_english_bundle_only():
     )
     pocket = next(a for a in dl.plan_assets(resolved) if a.key == "tts:pocket-tts-onnx")
     assert pocket.kind == "dir_snapshot"
-    assert pocket.allow == ["pocket_tts_onnx.py", "onnx/english_2026-04/*"]
+    assert "pocket_tts_onnx.py" in pocket.allow
+    assert "onnx/english_2026-04/flow_lm_main_int8.onnx" in pocket.allow
+    assert all("flow_lm_main.onnx" not in item for item in pocket.allow)
+
+
+def test_pocket_french_bundle_download_and_presence(tmp_path):
+    import json
+
+    from core.setup import _asset_present
+
+    root = tmp_path / "pocket"
+    models = {"tts": {"backend": "pocket-tts-onnx", "model": str(root)}}
+    resolved = resolve_models(models, "french")
+    asset = next(a for a in dl.plan_assets(resolved) if a.key == "tts:pocket-tts-onnx")
+    assert resolved["tts"]["opts"]["language"] == "french_24l"
+    assert "onnx/french_24l/flow_lm_main_int8.onnx" in asset.allow
+    root.mkdir()
+    (root / ".fulloch_complete").touch()
+    (root / "pocket_tts_onnx.py").touch()
+    bundle = root / "onnx" / "french_24l"
+    bundle.mkdir(parents=True)
+    (bundle / "bundle.json").write_text(json.dumps({"tokenizer_file": "tokenizer.model", "bos_before_voice_file": "bos_before_voice.npy"}))
+    assert not dl._already_present(asset)
+    assert not _asset_present(resolved["tts"], str(tmp_path))
+    for name in ("tokenizer.model", "bos_before_voice.npy", "mimi_encoder.onnx", "text_conditioner.onnx",
+                 "flow_lm_main_int8.onnx", "flow_lm_flow_int8.onnx", "mimi_decoder_int8.onnx"):
+        (bundle / name).touch()
+    assert dl._already_present(asset)
+    assert _asset_present(resolved["tts"], str(tmp_path))
+    assert not _asset_present(resolve_models(models, "german")["tts"], str(tmp_path))
 
 
 def test_plan_downloads_pocket_tts_gguf_file():
@@ -246,19 +275,33 @@ def test_plan_downloads_pocket_tts_pytorch_weights_into_hub_cache():
     )
     assets = [a for a in dl.plan_assets(resolved) if a.key.startswith("tts:pocket-tts-pytorch")]
 
-    assert len(assets) == 2
-    assert {asset.repo for asset in assets} == {
-        "latent-variable/pocket-tts-cloning-en",
-        "kyutai/pocket-tts-without-voice-cloning",
-    }
+    assert len(assets) == 1
+    assert assets[0].repo == "lunahr/pocket-tts-ungated"
+    assert assets[0].allow == ["languages/english_2026-04/model.safetensors", "languages/english_2026-04/tokenizer.model"]
     assert all(asset.kind == "snapshot" for asset in assets)
     assert all(asset.revision for asset in assets)
+
+
+def test_pocket_pytorch_download_and_presence_follow_language(tmp_path):
+    from core.setup import _asset_present
+
+    resolved = resolve_models({"tts": {"backend": "pocket-tts-pytorch"}}, "french")
+    asset = next(a for a in dl.plan_assets(resolved, models_dir=str(tmp_path)) if a.key == "tts:pocket-tts-pytorch")
+    assert asset.allow == ["languages/french_24l/model.safetensors", "languages/french_24l/tokenizer.model"]
+    assert not _asset_present(resolved["tts"], str(tmp_path))
+    snapshot = tmp_path / "hub" / "models--lunahr--pocket-tts-ungated" / "snapshots" / asset.revision
+    for filename in asset.allow:
+        path = snapshot / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    assert _asset_present(resolved["tts"], str(tmp_path))
+    assert not _asset_present(resolve_models({"tts": {"backend": "pocket-tts-pytorch"}}, "german")["tts"], str(tmp_path))
 
 
 def test_pinned_snapshot_does_not_accept_another_revision_or_missing_files(tmp_path):
     resolved = resolve_models({"tts": {"backend": "pocket-tts-pytorch"}})
     asset = next(a for a in dl.plan_assets(resolved, models_dir=str(tmp_path))
-                 if a.repo == "kyutai/pocket-tts-without-voice-cloning")
+                 if a.repo == "lunahr/pocket-tts-ungated")
     root = Path(asset.dest) / f"models--{asset.repo.replace('/', '--')}"
     root.mkdir(parents=True)
     (root / dl.COMPLETE_SENTINEL).touch()
@@ -266,6 +309,9 @@ def test_pinned_snapshot_does_not_accept_another_revision_or_missing_files(tmp_p
     file = root / "snapshots" / asset.revision / asset.allow[0]
     file.parent.mkdir(parents=True)
     file.touch()
+    assert not dl._already_present(asset)
+    tokenizer = root / "snapshots" / asset.revision / asset.allow[1]
+    tokenizer.touch()
     assert dl._already_present(asset)
 
 
@@ -281,8 +327,17 @@ def test_plan_downloads_audio8_checkpoint_into_hub_cache():
     audio8 = next(asset for asset in dl.plan_assets(resolved) if asset.key == "tts:audio8")
 
     assert audio8.kind == "snapshot"
-    assert audio8.repo == "Edge0/Audio8-TTS-Preview-0.6b"
-    assert audio8.revision == "f07040f3d151f1ba0253bfb92cb2f5dd38b44594"
+    assert audio8.repo == "Edge0/Audio8-TTS-Realistic-Air"
+    assert audio8.revision == "23c305cc013fde378edb459f538317043c993a74"
+
+
+def test_plan_downloads_small_audio8_checkpoint_into_hub_cache():
+    resolved = resolve_models({"tts": {"backend": "audio8-small"}})
+    audio8 = next(asset for asset in dl.plan_assets(resolved) if asset.key == "tts:audio8-small")
+
+    assert audio8.kind == "snapshot"
+    assert audio8.repo == "Edge0/Audio8-TTS-Preview-0.1b"
+    assert audio8.revision == "8c837020ab800498834038363dea06757872afda"
 
 
 def test_plan_downloads_pinned_orukeet_checkpoint_into_hub_cache():

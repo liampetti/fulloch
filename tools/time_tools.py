@@ -5,9 +5,13 @@ import time
 from typing import Dict, Optional
 
 import utils.local_time as _local_time
+from core.satellite_context import (
+    current_timer_response_intents_dir,
+    current_timer_response_language,
+)
 from utils.duration import parse_duration
 
-from .tool_registry import ArtifactText, tool
+from .tool_registry import OutcomeText, tool
 
 MAX_ACTIVE_TIMERS = 32
 MAX_TIMER_SECONDS = 7 * 24 * 60 * 60
@@ -177,7 +181,10 @@ def get_current_time() -> str:
         time_part = f"at {hour_word} oh {_num_words(minute)} {ampm}"
     else:
         time_part = f"at {hour_word} {_num_words(minute)} {ampm}"
-    return f"{day_name} {month_name} {day_word} {year_word} {time_part}"
+    return OutcomeText(
+        f"{day_name} {month_name} {day_word} {year_word} {time_part}",
+        success=True, code="current_time", values={"datetime": now},
+    )
 
 
 @tool(
@@ -199,10 +206,17 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
         message:  Optional reminder text spoken after the beeps fire.
     """
 
-    def on_timer_complete(timer_id: str, reminder: Optional[str]):
+    def on_timer_complete(timer_id: str, reminder: Optional[str], language: str, intents_dir: str):
         with _timers_lock:
             active_timers.pop(timer_id, None)
         text = reminder or "Your timer is up."
+        if not reminder and language != "en":
+            try:
+                from utils.fastpath_responses import load_responses, render_response
+
+                text = render_response(load_responses(intents_dir, language), "timer_completed", "success", {}) or text
+            except Exception:  # noqa: BLE001 — never suppress an alarm due to localization
+                pass
         if _speak_proactive:
             try:
                 _speak_proactive(text, alarm=True)
@@ -214,23 +228,30 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
     try:
         seconds = _parse_duration(duration)
         if seconds > MAX_TIMER_SECONDS:
-            return "Error: Timers can be at most 7 days."
+            return OutcomeText("Error: Timers can be at most 7 days.", success=False, code="duration_too_long")
         with _timers_lock:
             if len(active_timers) >= MAX_ACTIVE_TIMERS:
-                return "Error: Too many active timers. Cancel one before starting another."
+                return OutcomeText("Error: Too many active timers. Cancel one before starting another.",
+                                   success=False, code="timer_limit")
             timer_id = f"timer_{time.monotonic_ns()}"
-            timer = threading.Timer(seconds, on_timer_complete, args=[timer_id, message])
+            language = current_timer_response_language.get()
+            intents_dir = current_timer_response_intents_dir.get()
+            timer = threading.Timer(seconds, on_timer_complete, args=[timer_id, message, language, intents_dir])
             timer.daemon = True
             timer.start_time = time.time()
             timer.reminder = message
+            # Persist on the timer itself: its thread has a different context.
+            timer.response_language = language
             active_timers[timer_id] = timer
             timer.start()
 
         text = f"Timer started for {_format_duration(seconds)}"
-        return ArtifactText(text, _timer_artifact())
+        return OutcomeText(text, success=True, code="timer_started",
+                           values={"timer_id": timer_id, "duration_seconds": seconds,
+                                   "response_language": timer.response_language}, artifact=_timer_artifact())
 
     except ValueError as e:
-        return f"Error: {str(e)}"
+        return OutcomeText(f"Error: {str(e)}", success=False, code="invalid_duration")
 
 
 @tool(
@@ -250,15 +271,18 @@ def cancel_timer(timer_id: Optional[str] = None) -> str:
     with _timers_lock:
         if timer_id is None:
             if not active_timers:
-                return "No active timers"
+                return OutcomeText("No active timers", success=False, code="no_active_timers")
             if len(active_timers) > 1:
-                return "Multiple timers are active. Say cancel timer followed by its ID."
+                return OutcomeText("Multiple timers are active. Say cancel timer followed by its ID.",
+                                   success=False, code="ambiguous_timer")
             timer_id = next(iter(active_timers))
         timer = active_timers.pop(timer_id, None)
     if timer is not None:
         timer.cancel()
-        return ArtifactText(f"Timer {timer_id} cancelled", _timer_artifact())
-    return f"Timer {timer_id} not found"
+        return OutcomeText(f"Timer {timer_id} cancelled", success=True, code="timer_cancelled",
+                           values={"timer_id": timer_id}, artifact=_timer_artifact())
+    return OutcomeText(f"Timer {timer_id} not found", success=False, code="timer_not_found",
+                       values={"timer_id": timer_id})
 
 
 @tool(
@@ -271,20 +295,23 @@ def extend_timer(timer_id: str, duration: str) -> str:
     try:
         seconds = _parse_duration(duration)
     except ValueError as exc:
-        return f"Error: {exc}"
+        return OutcomeText(f"Error: {exc}", success=False, code="invalid_duration")
     with _timers_lock:
         timer = active_timers.get(timer_id)
         if timer is None:
-            return f"Timer {timer_id} not found"
+            return OutcomeText(f"Timer {timer_id} not found", success=False, code="timer_not_found",
+                               values={"timer_id": timer_id})
         remaining = max(0, timer.interval - (time.time() - timer.start_time))
         timer.cancel()
         extended = threading.Timer(remaining + seconds, timer.function, args=timer.args)
         extended.daemon = True
         extended.start_time = time.time()
         extended.reminder = getattr(timer, "reminder", None)
+        extended.response_language = getattr(timer, "response_language", "en")
         active_timers[timer_id] = extended
         extended.start()
-    return ArtifactText(f"Timer {timer_id} extended by {duration}", _timer_artifact())
+    return OutcomeText(f"Timer {timer_id} extended by {duration}", success=True, code="timer_extended",
+                       values={"timer_id": timer_id, "duration_seconds": seconds}, artifact=_timer_artifact())
 
 
 @tool(
@@ -321,22 +348,28 @@ def get_timer_status(timer_id: Optional[str] = None) -> str:
     with _timers_lock:
         timers = dict(active_timers)
     if not timers:
-        return "No active timers"
+        return OutcomeText("No active timers", success=True, code="no_active_timers", values={"timers": []})
 
     if timer_id:
         if timer_id not in timers:
-            return f"Timer {timer_id} not found"
+            return OutcomeText(f"Timer {timer_id} not found", success=False, code="timer_not_found",
+                               values={"timer_id": timer_id})
 
         timer = timers[timer_id]
         remaining = max(0, timer.interval - (time.time() - timer.start_time))
         time_str = format_time_remaining(remaining)
-        return ArtifactText(f"Timer {timer_id} has {time_str} remaining", _timer_artifact())
+        return OutcomeText(f"Timer {timer_id} has {time_str} remaining", success=True, code="timer_status",
+                           values={"timers": [{"timer_id": timer_id, "remaining_seconds": remaining}]},
+                           artifact=_timer_artifact())
 
     # Show status of all timers
     statuses = []
+    timer_values = []
     for tid, timer in timers.items():
         remaining = max(0, timer.interval - (time.time() - timer.start_time))
         time_str = format_time_remaining(remaining)
         statuses.append(f"{tid}: {time_str}")
+        timer_values.append({"timer_id": tid, "remaining_seconds": remaining})
 
-    return ArtifactText("Timer status:\n" + "\n".join(statuses), _timer_artifact())
+    return OutcomeText("Timer status:\n" + "\n".join(statuses), success=True, code="timer_status",
+                       values={"timers": timer_values}, artifact=_timer_artifact())

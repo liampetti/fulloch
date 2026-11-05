@@ -43,9 +43,21 @@ const satellite = createBrowserSatellite({
   const thinkingJobDetails = document.getElementById('thinking-job-details');
   const thinkingJobDiagnostics = document.getElementById('thinking-job-diagnostics');
   let thinkingJob = null;
-  const dismissedThinkingJobs = new Set();
+  const dismissedThinkingJobsKey = 'fulloch.dismissed_thinking_jobs_v1';
+  let dismissedThinkingJobs;
+  try {
+    const saved = JSON.parse(localStorage.getItem(dismissedThinkingJobsKey) || '[]');
+    dismissedThinkingJobs = new Set(Array.isArray(saved) ? saved : []);
+  } catch { dismissedThinkingJobs = new Set(); }
+  const dismissThinkingJob = id => {
+    dismissedThinkingJobs.add(id);
+    try { localStorage.setItem(dismissedThinkingJobsKey, JSON.stringify([...dismissedThinkingJobs])); } catch {}
+    if (thinkingJob?.id === id) renderThinkingJob(null);
+  };
   let thinkingReceivedAt = 0;
   let thinkingOutcomeTimer = null;
+  let thinkingDismissTimer = null;
+  let thinkingDismissDeadline = null;
   const terminalThinkingJob = job => ['READY', 'FAILED', 'CANCELLED'].includes(job?.status);
   const renderThinkingOutcome = () => {
     if (!thinkingJob || !thinkingJobOutcome) return;
@@ -69,7 +81,26 @@ const satellite = createBrowserSatellite({
   const renderThinkingJob = (job) => {
     if (job?.id && dismissedThinkingJobs.has(job.id)) return;
     const changedJob = thinkingJob?.id !== job?.id;
+    if (changedJob || !['READY', 'FAILED'].includes(job?.status)) {
+      if (thinkingDismissTimer !== null) lifetime.clearTimeout(thinkingDismissTimer);
+      thinkingDismissTimer = null;
+      thinkingDismissDeadline = null;
+    }
     thinkingJob = job || null;
+    if (job?.id && ['READY', 'FAILED'].includes(job.status)) {
+      const finishedAt = Number(job.finished_at || job.updated_at);
+      const deadline = Number.isFinite(finishedAt) && finishedAt > 0
+        ? finishedAt * 1000 + 300000 : Date.now() + 300000;
+      if (thinkingDismissDeadline === null || deadline < thinkingDismissDeadline) {
+        if (thinkingDismissTimer !== null) lifetime.clearTimeout(thinkingDismissTimer);
+        thinkingDismissDeadline = deadline;
+        if (deadline <= Date.now()) {
+          dismissThinkingJob(job.id);
+          return;
+        }
+        thinkingDismissTimer = lifetime.setTimeout(() => dismissThinkingJob(job.id), deadline - Date.now());
+      }
+    }
     thinkingReceivedAt = Date.now();
     if (thinkingJob?.status === 'RUNNING' && thinkingOutcomeTimer === null) {
       thinkingOutcomeTimer = lifetime.setInterval(renderThinkingOutcome, 1000);
@@ -150,8 +181,7 @@ const satellite = createBrowserSatellite({
           }
         }
       }
-      dismissedThinkingJobs.add(job.id);
-      if (thinkingJob?.id === job.id) renderThinkingJob(null);
+      dismissThinkingJob(job.id);
       pollStatus();
     } catch (e) {
       window.alert('Could not cancel the Deep Think job. Please try again.');

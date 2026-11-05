@@ -4,10 +4,30 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 
+from babel import Locale
 from babel.core import get_global
 from babel.numbers import get_territory_currencies
 
 from utils import local_time
+
+# Sentence directories in the pinned OHF-Voice/intents 2025.6.23 release.
+# Coverage varies by language; regional codes use canonical casing here.
+_INTENT_LANGUAGE_CODES = (
+    "af ar bg bn ca cs da de-CH de el en es et eu fa fi fr ga gl gu he hi hr hu "
+    "id is it ja ka kn ko kw lb lt lv ml mn mr ms nb ne nl pl pt-BR pt ro ru "
+    "sk sl sr-Latn sr sv sw te th tr uk ur vi zh-CN zh-HK zh-TW"
+).split()
+
+
+def intent_languages() -> dict[str, str]:
+    """Return upstream sentence language codes with native and English names."""
+    names = {}
+    for code in _INTENT_LANGUAGE_CODES:
+        locale = Locale.parse(code, sep="-")
+        native = locale.get_display_name(locale).capitalize()
+        english = locale.get_display_name("en").capitalize()
+        names[code] = native if native.casefold() == english.casefold() else f"{native} ({english})"
+    return names
 
 
 @dataclass(frozen=True)

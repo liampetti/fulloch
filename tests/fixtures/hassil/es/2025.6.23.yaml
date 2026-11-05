@@ -1,0 +1,924 @@
+language: es
+lists:
+  color:
+    values:
+    - in: blanco
+      out: white
+    - in: negro
+      out: black
+    - in: rojo
+      out: red
+    - in: (naranja|anaranjado)
+      out: orange
+    - in: amarillo
+      out: yellow
+    - in: verde
+      out: green
+    - in: azul
+      out: blue
+    - in: (lila|morado|púrpura)
+      out: purple
+    - in: marrón
+      out: brown
+    - in: (rosa|rosado)
+      out: pink
+  brightness:
+    range:
+      type: percentage
+      from: 0
+      to: 100
+  temperature:
+    range:
+      type: temperature
+      from: 0
+      to: 100
+  brightness_level:
+    values:
+    - in: (máxim(o|a)|[l(o|a)] más alt(a|o)|tope)
+      out: 100
+    - in: (mínim(o|a)|[l(o|a)] más baj(o|a))
+      out: 1
+  on_off_states:
+    values:
+    - in: (encendid|prendid|conectad)(o|a)[s]
+      out: 'on'
+    - in: (apagad|desconectad)(o|a)[s]
+      out: 'off'
+  on_off_domains:
+    values:
+    - in: (luz|luces)
+      out: light
+    - in: (ventilador[es]|abanico[s])
+      out: fan
+    - in: (interruptor[es]|conmutador[es]|llave[s])
+      out: switch
+  cover_states:
+    values:
+    - in: abiert(o|a)[s]
+      out: open
+    - in: cerrad(o|a)[s]
+      out: closed
+    - in: abriéndose
+      out: opening
+    - in: cerrándose
+      out: closing
+  cover_classes:
+    values:
+    - in: toldo[s]
+      out: awning
+    - in: persiana[s]
+      out: blind
+    - in: cortina[s]
+      out: curtain
+    - in: puerta[s]
+      out: door
+    - in: (puerta[s]|cancela[s]|portón|portones) de garaje
+      out: garage
+    - in: verja[s]|cancela[s]|portón|portones
+      out: gate
+    - in: estor[es]
+      out: shade
+    - in: (contraventana[s]|veneciana[s])
+      out: shutter
+    - in: ventana[s]
+      out: window
+  lock_states:
+    values:
+    - in: (cerrad|echad)(o|a)[s] [con (llave|pestillo|cerrojo|cerradura)]
+      out: locked
+    - in: abiert(o|a)[s]
+      out: unlocked
+  bs_battery_states:
+    values:
+    - in: baj(o|a)[s]
+      out: 'on'
+    - in: (normal|cargad(o|a)[s])
+      out: 'off'
+  bs_battery_charging_states:
+    values:
+    - in: cargando|cargándose|en carga
+      out: 'on'
+    - in: no (cargando|cargándose|en carga)
+      out: 'off'
+  bs_carbon_monoxide_states:
+    values:
+    - in: (detectad|activ[ad])(o|a)[s]
+      out: 'on'
+    - in: (despejad|no detectad|(no |in|des)activ[ad])(o|a)[s]
+      out: 'off'
+  bs_cold_states:
+    values:
+    - in: frí(o|a)[s]
+      out: 'on'
+    - in: normal
+      out: 'off'
+  bs_connectivity_states:
+    values:
+    - in: conectad(o|a)[s]
+      out: 'on'
+    - in: (no |des)conectad(o|a)[s]
+      out: 'off'
+  bs_door_states:
+    values:
+    - in: abiert(o|a)[s]
+      out: 'on'
+    - in: cerrad(o|a)[s]
+      out: 'off'
+  bs_garage_door_states:
+    values:
+    - in: abiert(o|a)[s]
+      out: 'on'
+    - in: cerrad(o|a)[s]
+      out: 'off'
+  bs_gas_states:
+    values:
+    - in: (detectad|activ[ad])(o|a)[s]
+      out: 'on'
+    - in: (despejad|no detectad|(no |in|des)activ[ad])(o|a)[s]
+      out: 'off'
+  bs_heat_states:
+    values:
+    - in: caliente
+      out: 'on'
+    - in: normal
+      out: 'off'
+  bs_light_states:
+    values:
+    - in: (activ[ad]|encendid|detectad)(o|a)[s]
+      out: 'on'
+    - in: (((no |in|des)activ[ad]|apagad)(o|a)[s]|sin luz)
+      out: 'off'
+  bs_lock_states:
+    values:
+    - in: abiert(o|a)[s]
+      out: 'on'
+    - in: cerrad(o|a)[s] [con (llave|cerrojo|pestillo|cerradura)]
+      out: 'off'
+  bs_moisture_states:
+    values:
+    - in: (húmed|mojad|inundad|activ[ad])(o|a)[s]
+      out: 'on'
+    - in: (sec|(no |in|des)activad[ad])(o|a)[s]
+      out: 'off'
+  bs_motion_states:
+    values:
+    - in: (activ[ad]|detectad)(o|a)[s]
+      out: 'on'
+    - in: ((no |in|des)activ[ad]|despejad)(o|a)[s]
+      out: 'off'
+  bs_occupancy_states:
+    values:
+    - in: (detectad|activ[ad]|ocupad)(o|a)[s]
+      out: 'on'
+    - in: ((no |in|des)activ[ad]|despejad)(o|a)[s]
+      out: 'off'
+  bs_opening_states:
+    values:
+    - in: abiert(o|a)[s]
+      out: 'on'
+    - in: cerrad(o|a)[s]
+      out: 'off'
+  bs_plug_states:
+    values:
+    - in: enchufad(o|a)[s]
+      out: 'on'
+    - in: desenchufad(o|a)[s]
+      out: 'off'
+  bs_power_states:
+    values:
+    - in: (alimentad|conectad|encendid|activ[ad])(o|a)[s]
+      out: 'on'
+    - in: (desconectad|apagad|(no |in|des)activ[ad])(o|a)[s]
+      out: 'off'
+  bs_presence_states:
+    values:
+    - in: (en casa|presente)
+      out: 'on'
+    - in: (fuera|no presente)
+      out: 'off'
+  bs_problem_states:
+    values:
+    - in: detectad(o|a)[s]
+      out: 'on'
+    - in: correcto|ok
+      out: 'off'
+  bs_running_states:
+    values:
+    - in: (ejecutándose|en ejecución|en marcha|funcionando)
+      out: 'on'
+    - in: (no ejecutándose|(parad|detenid)(o|a)[s])
+      out: 'off'
+  bs_safety_states:
+    values:
+    - in: insegur(o|a)[s]
+      out: 'on'
+    - in: segur(o|a)[s]
+      out: 'off'
+  bs_smoke_states:
+    values:
+    - in: (activ[ad]|detectad)(o|a)[s]
+      out: 'on'
+    - in: ((no |in|des)activ[ad]|despejad)(o|a)[s]
+      out: 'off'
+  bs_sound_states:
+    values:
+    - in: (activ[ad]|detectad|disparad)(o|a)[s]
+      out: 'on'
+    - in: ((no |in|des)activ[ad]|despejad)(o|a)[s]
+      out: 'off'
+  bs_tamper_states:
+    values:
+    - in: (detectad|manipulad)(o|a)[s]
+      out: 'on'
+    - in: despejad(o|a)[s]
+      out: 'off'
+  bs_update_states:
+    values:
+    - in: actualizable[s]|con actualización disponible
+      out: 'on'
+    - in: actualizad(o|a)[s]
+      out: 'off'
+  bs_vibration_states:
+    values:
+    - in: (activ[ad]|detectad)(o|a)[s]|vibrando
+      out: 'on'
+    - in: ((no |in|des)activ[ad]|despejad)(o|a)[s]
+      out: 'off'
+  bs_window_states:
+    values:
+    - in: abiert(o|a)[s]
+      out: 'on'
+    - in: cerrad(o|a)[s]
+      out: closed
+  shopping_list_item:
+    wildcard: true
+  zone:
+    wildcard: true
+  position:
+    range:
+      type: percentage
+      from: 0
+      to: 100
+  volume:
+    range:
+      type: percentage
+      from: 0
+      to: 100
+  timer_seconds:
+    range:
+      from: 1
+      to: 100
+  timer_words_seconds:
+    values:
+    - in: un|una
+      out: 1
+  timer_minutes:
+    range:
+      from: 1
+      to: 100
+  timer_words_minutes:
+    values:
+    - in: un|una
+      out: 1
+  timer_hours:
+    range:
+      from: 1
+      to: 100
+  timer_words_hours:
+    values:
+    - in: un|una
+      out: 1
+  timer_half:
+    values:
+    - in: medi(o|a)
+      out: 30
+    - in: 1/2
+      out: 30
+    - in: '[un|1] cuarto [de]'
+      out: 15
+    - in: (tres|3) cuartos [de]
+      out: 45
+    - in: 1/4
+      out: 15
+    - in: 3/4
+      out: 45
+  timer_name:
+    wildcard: true
+  timer_command:
+    wildcard: true
+expansion_rules:
+  abre: (abr(a|e|ir|í)|<sube>)
+  ahora: '[ahora [mismo]|actual[mente]|en este momento]'
+  anterior: (anterior|últim(o|a))
+  añadir: (añad(a|e|ir|í)|apunt[a|e|ar|á]|pon[ga|er|é]|sum(e|a|ar|á))
+  apaga: (apag(a|ue|ar|á)|desconect(a|e|ar|á)|desactiv(a|e|ar|á))
+  en_el: '[[en|de] [el|la]|del]'
+  area: <en_el> {area}
+  area_planta: (<area>|<planta>)
+  baja: (baj(a|e|ar|á)|redu(ce|zca|cir|cí)|decrement(a|e|ar|á)|disminu(ye|ya|ir|í))
+  porciento: (%|por[ ]cien[to])
+  brightness: '{brightness} [<porciento>]'
+  cancela: cancel(a[r]|á|e|ación)
+  cancelar_temporizador: (<cancela>|<para>)
+  cambia: (cambi(a[r]|á|e|o)|(muev[a|e]|mov[er|é]))
+  cerrables: '[de] [(el|la|l(a|o)s|mi[s])] (cancela[s]|cierre[s]|cerradura[s]|cerrojo[s]|llave[s]|pestillo[s]|puerta[s]
+    [de garaje]|port(ón|ones)|ventana[s])'
+  cierra: (cierr(a|e)|cerr(ar|á)|<baja>)
+  continúa: (contin(úa|úe|uar|uá)|(sig(ue|a)|segu(ir|í))|(reactiv(a|e|ar|á)))
+  crea: (cre(a|e|ar|á))
+  cuantos: (cu(a|á)nt(a|o)[s])
+  cual_es: (cu(a|á)l es [el |la ]|cu(a|á)les son [los |las ]|c(o|ó)mo (va|está|marcha|se
+    encuentra)[n] [el |la |los |las ])
+  de_aqui: '[(de|en)] (aquí|acá|(el|la) <habitación>)'
+  dime: (sab(es|é)|dime|dec(ir|í|id)[me]|ind(i|í)(ca|que|car|cá)[me])
+  dime_si: <dime> si
+  donde_se_encuentra: dónde <se_encuentra>
+  enciende: (enc[i]end(a|e|er|é)|conect(a|e|ar|á)|activ(a|e|ar|á)|prend(a|e|er|é))
+  ejecuta: (<enciende>|ejecut(a|e|ar|á)|inici(a|e|ar|á))
+  elimina: (elimin(a|e|ar|á)|borr(a|e|ar|á))
+  establece: (pon[ga|er|é]|estable[z]c(a|e|er|é)|ajust(a|e|ar|á)|configur(a|e|ar|á)|cambi(a[r]|á|e))
+  establece_abre_cierra: (<establece>|<abre>|<cierra>)
+  establece_sube_baja: (<establece>|<enciende>|<sube>|<baja>)
+  inicia: (inici(a|e|ar|á)|com[i]en(za|ce|zar|zá)|emp[i]e(za|ce|zar|zá))
+  luces: '[el|la|los|las] (luz|luces|lámpara[s]|bombill(a|o)[s]|ampolleta[s]|luminaria[s]|lamparilla[s]|foco[s]|interruptor[es]|llave[s][
+    de la luz])'
+  mide: '[que ]([es|está] (mid(e|ie)|medi|indica|marca)[ndo|d(a|o)]|tiene|hay) [por|en]'
+  name: '[el|la|los|las] {name}'
+  otra_vez: (otra vez|de nuevo|una vez más)
+  pausa: (paus(a|ar|e|á)|<para>)
+  para: (par(a|ar|e|á))|det(én|ener|enga|ené)
+  planta: <en_el> [planta|piso] {floor}|<en_el> {floor} [planta|piso]
+  pista: '[el|la] (pista|canción|medio|vídeo|video|elemento|tema)'
+  posición: '{position} [<porciento>]'
+  puerta: '[el|la] (puerta|portón|cancela|verja|reja|compuerta|portillo)'
+  quita: quit(a|e|ar|á)
+  reproduce: (reprodu(ce|cir|cí|zca)|escuchar|o(i|í)r|ver|visualizar)
+  resta: (rest(a|e|ar|á))
+  salta: (salt(a|e|ar|á))
+  se_encuentra: (se (encuentra|localiza|ubica)|está|mora)
+  sube: (sub(a|e|ir|í)|levant(a|e|ar|á)|aument(a|e|ar|á)|increment(a|e|ar|á))
+  temp: '[el|la] (temperatura|calor|grados)'
+  temperature: '{temperature}[([ ]°)|( grados)]'
+  temporizador: '[el|la] (temporizador|cuenta atrás)'
+  temporizadores: '[el|la|los|las] (temporizador[es]|cuenta[s] atrás)'
+  volumen: '{volume:volume_level} [<porciento>]'
+  vuelve: ((vuelve|vuelva|volver|volvé)|(regres(a|e|ar|á))|(retorn(a|e|ar|á))|(retroced(e|a|er|é)))
+  habitación: (habitaci(ón|ones)|pieza[s]|cuarto[s]|aposento[s]|sala[s]|[re]cámara[s])
+  todos: (tod(a|o)s [los|las]|cada [un(a|o) de l(a|o)s]|tod(a|o)s y cada un(a|o) de
+    l(a|o)s)
+  casa: (casa|apartamento|departamento|piso)
+  todas_partes: '[en|de] (todas [las] partes|todos los sitios|todos [los] lados|<todos>
+    <habitación>|[<todos> <habitación> [de|en]] [del|el|la] <casa>)'
+  aquí: '[en|de] (aquí|est(a|e) (habitación|pieza|cuarto))'
+  cual_es_la_medida_del_sensor: (<cual_es>|qu(e|é)|<cuantos>) [(la (cantidad|medida)|el
+    nivel) de] [<class> (de|del|en|desde|por|<mide>)] [[el] (sensor|medidor) [de]]
+    <name> [<area>]
+  timer_set: (<establece>|<inicia>|<crea>)
+  timer_cancel: (<cancela>|<elimina>)
+  nb_seconds: ({timer_seconds:seconds}|{timer_words_seconds:seconds})
+  nb_minutes: ({timer_minutes:minutes}|{timer_words_minutes:minutes})
+  nb_hours: ({timer_hours:hours}|{timer_words_hours:hours})
+  nb_start_seconds: ({timer_seconds:start_seconds}|{timer_words_seconds:start_seconds})
+  nb_start_minutes: ({timer_minutes:start_minutes}|{timer_words_minutes:start_minutes})
+  nb_start_hours: ({timer_hours:start_hours}|{timer_words_hours:start_hours})
+  timer_duration_seconds: <nb_seconds> segundo[s]
+  timer_duration_minutes: ((<nb_minutes> minuto[s] [[y] <timer_duration_seconds>])|(<nb_minutes>
+    minuto[s] y {timer_half:seconds})|({timer_half:seconds} minuto))
+  timer_duration_hours: (<nb_hours> hora[s] [[y] <timer_duration_minutes>]|(<nb_hours>
+    hora[s] y {timer_half:minutes}[ y (<timer_duration_seconds>|{timer_half:seconds}
+    minuto)])|({timer_half:minutes} hora[ y (<timer_duration_seconds>|{timer_half:seconds}
+    minuto)]))
+  timer_duration: <timer_duration_seconds>|<timer_duration_minutes>|<timer_duration_hours>
+  timer_start_seconds: <nb_start_seconds> segundo[s]
+  timer_start_minutes: <nb_start_minutes> minuto[s] [[y] <nb_start_seconds> segundo[s]]
+  timer_start_hours: <nb_start_hours> hora[s] [[y] <nb_start_minutes> minuto[s]] [[y]
+    <nb_start_seconds> segundo[s]]
+  timer_start: (<timer_start_seconds>|<timer_start_minutes>|<timer_start_hours>)
+skip_words:
+- por favor
+- porfa
+- gracias
+- podrías
+- podría
+- puedes
+- podés
+- me podrías
+- me podría
+- me puedes
+- me podés
+- te importaría
+- te importa
+- le importa
+- le importaría
+- te animas a
+- te animás a
+intents:
+  HassClimateSetTemperature:
+    data:
+    - sentences:
+      - <establece_sube_baja> <temp> a <temperature>
+      - <establece_sube_baja> <temp> <area> a <temperature>
+      - <establece_sube_baja> <area> <temp> a <temperature>
+      - <establece_sube_baja> <temp> a <temperature> <area>
+  HassSetPosition:
+    data:
+    - sentences:
+      - <establece_abre_cierra> [[la ]posición [de[l]] ]<name> a[l] <posición>
+      requires_context:
+        domain: cover
+      slots:
+        domain: cover
+    - sentences:
+      - <establece_abre_cierra> [[la ]posición [de[l] ]][el|l(a[s]|os) ]{cover_classes:device_class}
+        (a[l] <posición>;<area>)
+      - <establece_abre_cierra> [[la ]posición [de[l] ]][el|l(a[s]|os) ]{cover_classes:device_class}
+        (<area>;a[l] <posición>)
+      - <establece_abre_cierra> <area> [[la ]posición [de[l] ]][el|l(a[s]|os) ]{cover_classes:device_class}
+        a[l] <posición>
+      slots:
+        domain: cover
+    - sentences:
+      - <establece_abre_cierra> [[la ]posición [de[l]]] <name> a[l] <posición>
+      requires_context:
+        domain: valve
+      slots:
+        domain: valve
+  HassTurnOff:
+    data:
+    - sentences:
+      - <cierra> <name> [<area>]
+      requires_context:
+        domain: cover
+      response: cover
+    - sentences:
+      - <cierra> <puerta> [(del|de|de la)] (garaje|cochera)
+      slots:
+        device_class: garage
+        domain: cover
+      response: cover_device_class
+    - sentences:
+      - <cierra> [ el | la | los | las ] {cover_classes:device_class} <area>
+      slots:
+        domain: cover
+      response: cover_device_class
+    - sentences:
+      - <cierra> [ el | la | los | las ] {cover_classes:device_class} [<de_aqui>]
+      slots:
+        domain: cover
+      response: cover_device_class
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <apaga> [todos] [el|los] (ventilador[es]|abanico[s]) <area>
+      slots:
+        domain: fan
+        name: all
+      response: fans_area
+    - sentences:
+      - <apaga> todos los (ventiladores|abanicos)
+      response: light_all
+      slots:
+        domain: fan
+        name: all
+    - sentences:
+      - <apaga> [todos] [el|los] (ventilador[es]|abanico[s]) <de_aqui>
+      - <apaga> [el|los] (ventilador[es]|abanico[s]) [<de_aqui>]
+      response: fans_area
+      slots:
+        domain: fan
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <apaga> <name>
+      excludes_context:
+        domain:
+        - binary_sensor
+        - cover
+        - light
+        - lock
+        - scene
+        - script
+        - sensor
+        - valve
+    - sentences:
+      - <apaga> [[el|la|los|las] (luz|luces|(interruptor[es]|llave[s] de [la luz]))]
+        [de|del] <name>
+      response: light
+      requires_context:
+        domain: light
+    - sentences:
+      - <apaga> [<todos>] <luces> <area>
+      - <apaga> <area>
+      slots:
+        domain: light
+      response: lights_area
+    - sentences:
+      - <apaga> [<todos>] <luces> <todas_partes>
+      - <apaga> <todos> <luces>
+      response: light_all
+      slots:
+        domain: light
+        name: all
+    - sentences:
+      - <apaga> [<todos>] <luces> <de_aqui>
+      - <apaga> <luces>
+      response: lights_area
+      slots:
+        domain: light
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <apaga> [<todos>] <luces> <planta>
+      - <apaga> <planta>
+      response: lights_floor
+      slots:
+        domain: light
+    - sentences:
+      - abr(e|a|í|ir) [el|la[s]|los] [(cerradura|cerrojo|candado|llave|cierre)[s]
+        [de]] <name>[ <area>]
+      - quit(a|e|á|ar) [el|la[s]|los] (cerradura|cerrojo|candado|llave|cierre)[s]
+        [en|de] <name>[ <area>]
+      requires_context:
+        domain: lock
+      response: lock
+    - sentences:
+      - abr(e|a|í|ir) [todas|todos] [los|las] (cierres|cerraduras|cerrojos|candados|llaves)
+        [[de ]<cerrables> ]<area>
+      - quit(a|e|á|ar) [tod(a|o)s] [los|las] (cierres|cerraduras|cerrojos|candados|llaves)
+        [[de ]<cerrables> ]<area>
+      slots:
+        domain: lock
+        name: all
+      response: lock_area
+    - sentences:
+      - <cierra> <name>
+      requires_context:
+        domain: valve
+      slots:
+        domain: valve
+      response: valve
+  HassTurnOn:
+    data:
+    - sentences:
+      - <abre> <name> [<area>]
+      requires_context:
+        domain: cover
+      response: cover
+    - sentences:
+      - <abre> <puerta> [(del|de|de la)] (garaje|cochera)
+      slots:
+        domain: cover
+        device_class: garage
+      response: cover_device_class
+    - sentences:
+      - <abre> [el | la | los | las] {cover_classes:device_class} <area>
+      slots:
+        domain: cover
+      response: cover_device_class
+    - sentences:
+      - <abre> [el | la | los | las] {cover_classes:device_class}[<de_aqui>]
+      slots:
+        domain: cover
+      response: cover_device_class
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <enciende> [todos] [los|el] (ventilador[es]|abanico[s]) <area>
+      slots:
+        domain: fan
+        name: all
+      response: fans_area
+    - sentences:
+      - <enciende> [todos] [los|el] (ventilador[es]|abanico[s]) [<de_aqui>]
+      response: fans_area
+      slots:
+        domain: fan
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <enciende> <name>
+      excludes_context:
+        domain:
+        - binary_sensor
+        - cover
+        - light
+        - lock
+        - scene
+        - script
+        - sensor
+        - vacuum
+        - valve
+    - sentences:
+      - <enciende> <name>
+      response: light
+      requires_context:
+        domain: light
+    - sentences:
+      - <enciende> <luces> [de [l(a|o)[s]]|del] <name>
+      response: light
+      requires_context:
+        domain: light
+    - sentences:
+      - <enciende> [<todos>] <luces> <area>
+      - <enciende> <area>
+      slots:
+        domain: light
+      response: lights_area
+    - sentences:
+      - <enciende> [<todos>] <luces> <todas_partes>
+      - <enciende> <todos> <luces>
+      response: light_all
+      slots:
+        domain: light
+    - sentences:
+      - <enciende> [<todos>] <luces> <de_aqui>
+      - <enciende> <luces>
+      response: lights_area
+      slots:
+        domain: light
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <enciende> [<todos>] <luces> <planta>
+      - <enciende> <planta>
+      response: lights_floor
+      slots:
+        domain: light
+    - sentences:
+      - (cierr(a|e)|cerr(á|ar)) [con|el|la[s]|los] (llave|cerrojo|pestillo|cerradura|candado|cierre)[s]
+        [de] <name> [ <area>]
+      - (ech(a|e|á|ar)|(cierr(a|e)|cerr(á|ar))) [el|la[s]|los] (llave|cerrojo|pestillo|cerradura|candado|cierre)[s]
+        (en|de) <name> [ <area>]
+      requires_context:
+        domain: lock
+      response: lock
+    - sentences:
+      - (cierr(a|e)|cerr(á|ar)) con (llave|cerrojo|pestillo|cerradura|candado|cierre)
+        [tod(o|a)s ][los |las ]<cerrables> <area>
+      - (ech(a|e|á|ar)|(cierr(a|e)|cerr(á|ar))) [el|la[s]|los] (llave|cerrojo|pestillo|cerradura|candado|cierre)[s]
+        (en|de) [tod(o|a)s] <cerrables> <area>
+      - (ech(a|e|á|ar)|(cierr(a|e)|cerr(á|ar))) [tod(o|a)s] [los|las] (llaves|cerrojos|pestillos|cerraduras|candados|cierres)
+        <area>
+      slots:
+        domain: lock
+      response: lock_area
+    - sentences:
+      - '[<enciende>|<cambia> a[l]] [[la] escena|[el] escenario] [de|del] [el|la]
+        <name>'
+      requires_context:
+        domain: scene
+      slots:
+        domain: scene
+      response: scene
+    - sentences:
+      - '[<enciende>|<cambia> a[l]] [[la] escena|[el] escenario] [de|del] [el|la]
+        <name> <area>'
+      - '[<enciende> <area>|<cambia> <area> a[l]|<area>] [[la] escena|[el] escenario]
+        [de|del] [el|la] <name>'
+      slots:
+        domain: scene
+      response: scene
+    - sentences:
+      - <ejecuta> [script] <name>
+      requires_context:
+        domain: script
+      slots:
+        domain: script
+      response: script
+    - sentences:
+      - <abre> <name>
+      requires_context:
+        domain: valve
+      slots:
+        domain: valve
+      response: valve
+  HassCancelTimer:
+    data:
+    - sentences:
+      - <timer_cancel> [mi] <temporizador>
+      - <timer_cancel> [mi] <temporizador> [de|de los|para] <timer_start>
+      - <timer_cancel> [mi] <temporizador> <area>
+      - <timer_cancel> [mi] <temporizador> [de|con nombre|llamad(o|a)|denominad(o|a)]
+        {timer_name:name}
+  HassGetCurrentDate:
+    data:
+    - sentences:
+      - '[<dime> ]qué (día|fecha) es[ hoy]'
+      - '[<dime> ](a|en) qué (día|fecha) estamos[ hoy]'
+      - <dime> la fecha
+  HassGetCurrentTime:
+    data:
+    - sentences:
+      - '[<dime> ]qué hora es[ ahora]'
+      - <dime> la hora[ actual]
+  HassStartTimer:
+    data:
+    - sentences:
+      - '[<timer_set> ][un[a] |mi]<temporizador>[[ dentro] de| en| para] <timer_duration>'
+      - '[<timer_set> ][un[a] |mi]<temporizador>[ de| con nombre| llamad(o|a)| denominad(o|a)|
+        para] {timer_name:name}[[ dentro] de| en| para] <timer_duration>'
+      - '[<timer_set> ][un[a] |mi]<temporizador>[[ dentro] de| en| para] <timer_duration>[
+        de| con nombre| llamad(o|a)| denominad(o|a)| para] {timer_name:name}'
+      requires_context:
+        area:
+          slot: false
+    - sentences:
+      - '{timer_command:conversation_command} (en|dentro de) <timer_duration>'
+      - (dentro de|en) <timer_duration> {timer_command:conversation_command}
+      response: command
+  HassTimerStatus:
+    data:
+    - sentences:
+      - ([<cual_es> ](estado[s]|tiempo restante)|<cual_es>)[ de[l]| para][ mi[s]]
+        <temporizadores>
+      - (cu(a|á)nto|qu(e|é)) [tiempo ][le ](falta|queda|resta) (para|a[l]|de[l])[
+        mi[s]] <temporizadores>
+      - ([<cual_es> ](estado|tiempo restante)|<cual_es>)[ de[l]| para][ mi] <temporizador>
+        [de ]<timer_start>
+      - (cu(a|á)nto|qu(é|e)) [tiempo ][le ](falta|queda|resta) (para|a[l]|de[l])[
+        mi] <temporizador> [de ]<timer_start>
+      - ([<cual_es> ](estado|tiempo restante)|<cual_es>)[ de[l]| para][ mi] <temporizador>
+        <area>
+      - (cu(a|á)nto|qu(é|e)) [tiempo ][le ](falta|queda|resta) (para|a[l]|de[l])[
+        mi] <temporizador> <area>
+      - ([<cual_es> ](estado| tiempo restante)|<cual_es>)[ de[l]| para][ mi] <temporizador>[
+        de| con nombre| llamad(o|a)| denominad(o|a)| para][ el| la| los| las] {timer_name:name}
+      - (cu(a|á)nto|qu(é|e)) [tiempo ][le ](falta|queda|resta) (para|a[l]|de[l])[
+        mi] <temporizador>[ de| con nombre| llamad(o|a)| denominad(o|a)| para][ el|
+        la| los| las] {timer_name:name}
+  HassLightSet:
+    data:
+    - sentences:
+      - <establece_sube_baja> [el] brillo [de] <name> [a|al|en] <brightness>
+      - <establece_sube_baja> <name> [a | al | con] brillo <brightness>
+      - <establece_sube_baja> <name> [a|al] <brightness>
+      - <establece_sube_baja> <name> con brillo [al|a|en] <brightness>
+      response: brightness
+      requires_context:
+        domain: light
+    - sentences:
+      - <establece_sube_baja> [el] brillo <area_planta> [a|al] <brightness>
+      - <establece_sube_baja> <area_planta> [a|al] brillo <brightness>
+      - <establece_sube_baja> <area_planta> [a|al] <brightness>
+      response: brightness
+    - sentences:
+      - '[<establece_sube_baja>] [el] brillo [a|al] <brightness>'
+      - '[<establece_sube_baja>] [la] luz [a|al] <brightness>'
+      - '[<establece_sube_baja>] [el] brillo (<de_aqui>;[a|al] <brightness>)'
+      response: brightness
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - '[<establece_sube_baja>] [el] brillo [de] <name> a[l] {brightness_level:brightness}'
+      - '[<establece_sube_baja>] <name> [a[l]|el] brillo [a[l]] {brightness_level:brightness}'
+      - '[<establece_sube_baja>] <name> [a[l]|el] {brightness_level:brightness} [de]
+        brillo'
+      requires_context:
+        domain: light
+      response: brightness
+    - sentences:
+      - '[<establece_sube_baja>] [el] brillo <area_planta> [a[l]] {brightness_level:brightness}'
+      - '[<establece_sube_baja>] <area_planta> [a[l]|el] brillo [a[l]] {brightness_level:brightness}'
+      - '[<establece_sube_baja>] <area_planta> [a[l]|el] {brightness_level:brightness}
+        [de] brillo'
+      response: brightness
+    - sentences:
+      - '[<establece_sube_baja>] [el] brillo [a[l]|el] {brightness_level:brightness}'
+      - '[<establece_sube_baja>] [el] brillo (<de_aqui>;[a[l]] {brightness_level:brightness})'
+      response: brightness
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <establece> <name> [a | al | en] [color] {color}
+      - <establece> [[el] color [de]] <name> (a | al | en) {color}
+      requires_context:
+        domain: light
+      response: color
+    - sentences:
+      - <establece> [[el] color de] (<area_planta> | [todas] las luces <area>) [a
+        | al | en] {color}
+      - <establece> (<area> | [todas] las luces <area_planta>) [a | al | en] [color]
+        {color}
+      response: color
+    - sentences:
+      - '[<establece>] [[el] color de] [todas] las luces [a|al|en] {color}'
+      - '[<establece>] [[el] color de] [todas] las luces (<de_aqui>;[a|al|en] {color})'
+      response: color
+      requires_context:
+        area:
+          slot: true
+  HassMediaNext:
+    data:
+    - sentences:
+      - '[<reproduce>] ([<pista> ]siguiente|siguiente <pista>) [en |para ]<name>'
+      - <salta>[ (a[l] [el |la ](siguiente [<pista>]|<pista> siguiente)|[est[a|e]
+        ]<pista>|est[a|e|o])] [en |para ]<name>
+      requires_context:
+        domain: media_player
+    - sentences:
+      - (siguiente [<pista>]|<pista> siguiente)
+      - <salta>[ (a[l] [el |la ](siguiente [<pista>]|<pista> siguiente)|[est[a|e]
+        ]<pista>|est[a|e|o])]
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - (siguiente [<pista>]|<pista> siguiente) <area>
+      - <salta>[ (a[l] [el |la ](siguiente [<pista>]|<pista> siguiente)|[est[a|e]
+        ]<pista>|est[a|e|o])] <area>
+  HassMediaPause:
+    data:
+    - sentences:
+      - (<pausa>;<name>)
+      requires_context:
+        domain: media_player
+    - sentences:
+      - <pausa>
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <pausa>[ [la |el |mi ](música|programa|vídeo|video|reproducción|reproductor)
+        ] <area>
+      - <pausa> <area> [la |el |mi ](música|programa|vídeo|video|reproducción|reproductor)
+  HassMediaPrevious:
+    data:
+    - sentences:
+      - ([<reproduce>] [<otra_vez> ][el |la ]([<pista> ]<anterior>|<anterior> <pista>)[
+        <otra_vez>]|<reproduce> <otra_vez>) [en |para ]<name>
+      - (<salta>|<vuelve>) a[l] [<reproduce> ][<otra_vez> ][el |la ](<anterior> [<pista>]|<pista>
+        <anterior>)[ <otra_vez>] [en |para ]<name>
+      requires_context:
+        domain: media_player
+    - sentences:
+      - ([<reproduce>] [<otra_vez> ][el |la ](<pista> <anterior>|<anterior> <pista>)[
+        <otra_vez>]|<reproduce> <otra_vez>)
+      - (<salta>|<vuelve>) a[l] [<reproduce> ][<otra_vez> ][el |la ](<anterior> [<pista>]|<pista>
+        <anterior>)[ <otra_vez>]
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - ([<reproduce>] [<otra_vez> ][el |la ]([<pista> ]<anterior>|<anterior> <pista>)[
+        <otra_vez>]|<reproduce> <otra_vez>) <area>
+      - <area> ([<reproduce>] [<otra_vez> ][el |la ]([<pista> ]<anterior>|<anterior>
+        <pista>)[ <otra_vez>]|<reproduce> <otra_vez>)
+      - (<reproduce> <area> [<otra_vez> ][el |la ]([<pista> ]<anterior>|<anterior>
+        <pista>)[ <otra_vez>]|<reproduce> <area> <otra_vez>)
+      - <reproduce> <otra_vez> <area> [el |la ]([<pista> ]<anterior>|<anterior> <pista>)[
+        <otra_vez>]
+      - (<salta>|<vuelve>) a[l] [<reproduce> ][<otra_vez> ][el |la ](<anterior> [<pista>]|<pista>
+        <anterior>)[ <otra_vez>] <area>
+      - <area> (<salta>|<vuelve>) a[l] [a <reproduce> ][<otra_vez> ][el |la ](<anterior>
+        [<pista>]|<pista> <anterior>)[ <otra_vez>]
+      - (<salta>|<vuelve>) a[l] [<reproduce> ]<area> [<otra_vez> ][el |la ](<anterior>
+        [<pista>]|<pista> <anterior>)[ <otra_vez>]
+  HassMediaUnpause:
+    data:
+    - sentences:
+      - (<continúa>;<name>)
+      requires_context:
+        domain: media_player
+    - sentences:
+      - <continúa>
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <continúa>[ [con ][la |el |mi ](música|programa|vídeo|video|reproducción|reproductor)
+        ] <area>
+      - <continúa> <area> [con ][la |el |mi ](música|programa|vídeo|video|reproducción|reproductor)
+  HassSetVolume:
+    data:
+    - sentences:
+      - <establece_sube_baja> [[el ]volumen de] <name> a[l] <volumen>
+      - en <name> <establece_sube_baja> [el ]volumen a[l] <volumen>
+      - <establece_sube_baja> [el ]volumen a[l] <volumen> en <name>
+      requires_context:
+        domain: media_player
+    - sentences:
+      - <establece_sube_baja> [el ]volumen a[l] <volumen>
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <establece_sube_baja> <area> [el ]volumen a[l] <volumen>
+      - <establece_sube_baja> [el ]volumen <area> a[l] <volumen>
+      - <establece_sube_baja> [el ]volumen a[l] <volumen> <area>
+      - <area> <establece_sube_baja> [el ]volumen a[l] <volumen>
+  HassGetWeather:
+    data:
+    - sentences:
+      - qué tiempo hace
+    - sentences:
+      - qué tiempo hace en <name>
+      requires_context:
+        domain: weather

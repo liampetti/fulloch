@@ -14,6 +14,54 @@ from tools import ha_client as client
 from tools import ha_devices as devices
 
 
+@pytest.mark.parametrize("raw, code", [
+    (None, "area_lookup_failed"),
+    ("not json", "area_lookup_invalid"),
+    ("[]", "area_no_lights"),
+    ('["light.blocked"]', "area_no_lights"),
+])
+def test_light_area_failures_have_structured_outcomes(monkeypatch, raw, code):
+    from utils.intents import classify_step
+
+    monkeypatch.setattr(devices, "_current_satellite_ha_area", lambda: "kitchen")
+    monkeypatch.setattr(client, "_AREA_MAP", {"kitchen": "Kitchen"})
+    monkeypatch.setattr(client, "_DENIED_ENTITIES", frozenset({"light.blocked"}))
+    monkeypatch.setattr(client, "_render_template", lambda *_: raw)
+    monkeypatch.setattr(client, "_ensure_loaded", lambda: None)
+    service = MagicMock()
+    monkeypatch.setattr(client, "_call_service", service)
+    result = devices.turn_on("lights")
+    assert not classify_step(result).operation_outcome.success
+    assert result.operation_outcome.code == code
+    service.assert_not_called()
+
+
+def test_light_validation_failures_do_not_call_service(monkeypatch):
+    monkeypatch.setattr(client, "_ensure_loaded", lambda: None)
+    monkeypatch.setattr(client, "_resolve_entity", lambda entity, **_: entity)
+    service = MagicMock()
+    monkeypatch.setattr(client, "_call_service", service)
+    brightness = devices.set_ha_brightness("light.kitchen", "nonsense")
+    color = devices.set_color("light.kitchen", "ultraviolet")
+    assert brightness.operation_outcome.code == "invalid_brightness"
+    assert color.operation_outcome.code == "invalid_color"
+    assert not brightness.operation_outcome.success and not color.operation_outcome.success
+    service.assert_not_called()
+
+
+def test_hassil_area_unavailable_devices_is_typed_failure(monkeypatch):
+    monkeypatch.setattr(client, "_ensure_loaded", lambda: None)
+    monkeypatch.setattr(client, "_AREA_MAP", {"kitchen": "Kitchen"})
+    monkeypatch.setattr(client, "_area_entities", lambda *_: ["light.blocked"])
+    monkeypatch.setattr(client, "_DENIED_ENTITIES", frozenset({"light.blocked"}))
+    service = MagicMock()
+    monkeypatch.setattr(client, "_call_service", service)
+    result = devices.hassil_area("area", "kitchen", "light", "on")
+    assert result.operation_outcome.code == "location_no_devices"
+    assert not result.operation_outcome.success
+    service.assert_not_called()
+
+
 class TestIsBareLightPhrase:
     @pytest.mark.parametrize(
         "phrase",

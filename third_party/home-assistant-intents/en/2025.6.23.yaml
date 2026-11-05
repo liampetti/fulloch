@@ -1,0 +1,2685 @@
+language: en
+responses:
+  errors:
+    no_intent: Sorry, I couldn't understand that
+    handle_error: An unexpected error occurred
+    no_area: Sorry, I am not aware of any area called {{ area }}
+    no_floor: Sorry, I am not aware of any floor called {{ floor }}
+    no_domain: Sorry, I am not aware of any {{ domain }}
+    no_domain_in_area: Sorry, I am not aware of any {{ domain }} in the {{ area }}
+      area
+    no_domain_in_floor: Sorry, I am not aware of any {{ domain }} on the {{ floor
+      }} floor
+    no_device_class: Sorry, I am not aware of any {{ device_class }}
+    no_device_class_in_area: Sorry, I am not aware of any {{ device_class }} in the
+      {{ area }} area
+    no_device_class_in_floor: Sorry, I am not aware of any {{ device_class }} in the
+      {{ floor }} floor
+    no_entity: Sorry, I am not aware of any device called {{ entity }}
+    no_entity_in_area: Sorry, I am not aware of any device called {{ entity }} in
+      the {{ area }} area
+    no_entity_in_floor: Sorry, I am not aware of any device called {{ entity }} in
+      the {{ floor }} floor
+    entity_wrong_state: Sorry, no device is {{ state | lower }}
+    feature_not_supported: Sorry, no device supports the required features
+    no_entity_exposed: Sorry, {{ entity }} is not exposed
+    no_entity_in_area_exposed: Sorry, {{ entity }} in the {{ area }} area is not exposed
+    no_entity_in_floor_exposed: Sorry, {{ entity }} in the {{ floor }} floor is not
+      exposed
+    no_domain_exposed: Sorry, no {{ domain }} is exposed
+    no_domain_in_area_exposed: Sorry, no {{ domain }} in the {{ area }} area is exposed
+    no_domain_in_floor_exposed: Sorry, no {{ domain }} in the {{ floor }} floor is
+      exposed
+    no_device_class_exposed: Sorry, no {{ device_class }} is exposed
+    no_device_class_in_area_exposed: Sorry, no {{ device_class }} in the {{ area }}
+      area is exposed
+    no_device_class_in_floor_exposed: Sorry, no {{ device_class }} in the {{ floor
+      }} floor is exposed
+    duplicate_entities: Sorry, there are multiple devices called {{ entity }}
+    duplicate_entities_in_area: Sorry, there are multiple devices called {{ entity
+      }} in the {{ area }} area
+    duplicate_entities_in_floor: Sorry, there are multiple devices called {{ entity
+      }} in the {{ floor }} floor
+    timer_not_found: Sorry, I couldn't find that timer
+    multiple_timers_matched: Sorry, I am unable to target multiple timers
+    no_timer_support: Sorry, timers are not supported on this device
+lists:
+  color:
+    values:
+    - white
+    - black
+    - red
+    - orange
+    - yellow
+    - green
+    - blue
+    - purple
+    - brown
+    - pink
+    - turquoise
+  brightness:
+    range:
+      type: percentage
+      from: 0
+      to: 100
+  temperature:
+    range:
+      type: temperature
+      from: 0
+      to: 100
+      fractions: halves
+  brightness_level:
+    values:
+    - in: (max|maximum|highest)
+      out: 100
+    - in: (min|minimum|lowest)
+      out: 1
+  on_off_states:
+    values:
+    - in: 'on'
+      out: 'on'
+    - in: 'off'
+      out: 'off'
+  on_off_domains:
+    values:
+    - in: light[s]
+      out: light
+    - in: fan[s]
+      out: fan
+    - in: switch[es]
+      out: switch
+  cover_states:
+    values:
+    - in: open
+      out: open
+    - in: (closed|shut)
+      out: closed
+    - in: opening
+      out: opening
+    - in: (closing|shutting)
+      out: closing
+  cover_classes:
+    values:
+    - in: awning[s]
+      out: awning
+    - in: blind[s]
+      out: blind
+    - in: curtain[s]
+      out: curtain
+    - in: door[s]
+      out: door
+    - in: garage door[s]
+      out: garage
+    - in: gate[s]
+      out: gate
+    - in: shade[s]
+      out: shade
+    - in: shutter[s]
+      out: shutter
+    - in: window[s]
+      out: window
+  lock_states:
+    values:
+    - in: '[securely] locked'
+      out: locked
+    - in: unlocked
+      out: unlocked
+  bs_battery_states:
+    values:
+    - in: low
+      out: 'on'
+    - in: (normal|charged)
+      out: 'off'
+  bs_battery_charging_states:
+    values:
+    - in: charging
+      out: 'on'
+    - in: not charging
+      out: 'off'
+  bs_carbon_monoxide_states:
+    values:
+    - in: (detected|triggered|on)
+      out: 'on'
+    - in: clear
+      out: 'off'
+  bs_cold_states:
+    values:
+    - in: cold
+      out: 'on'
+    - in: normal
+      out: 'off'
+  bs_connectivity_states:
+    values:
+    - in: connected
+      out: 'on'
+    - in: disconnected
+      out: 'off'
+  bs_door_states:
+    values:
+    - in: open
+      out: 'on'
+    - in: (closed|shut)
+      out: 'off'
+  bs_garage_door_states:
+    values:
+    - in: open
+      out: 'on'
+    - in: (closed|shut)
+      out: 'off'
+  bs_gas_states:
+    values:
+    - in: (detected|triggered|on)
+      out: 'on'
+    - in: clear
+      out: 'off'
+  bs_heat_states:
+    values:
+    - in: hot
+      out: 'on'
+    - in: normal
+      out: 'off'
+  bs_light_states:
+    values:
+    - in: detected
+      out: 'on'
+    - in: no light
+      out: 'off'
+  bs_lock_states:
+    values:
+    - in: unlocked
+      out: 'on'
+    - in: locked
+      out: 'off'
+  bs_moisture_states:
+    values:
+    - in: wet
+      out: 'on'
+    - in: dry
+      out: 'off'
+  bs_motion_states:
+    values:
+    - in: (detected|triggered|on)
+      out: 'on'
+    - in: clear
+      out: 'off'
+  bs_occupancy_states:
+    values:
+    - in: (detected|triggered|on)
+      out: 'on'
+    - in: clear
+      out: 'off'
+  bs_opening_states:
+    values:
+    - in: open
+      out: 'on'
+    - in: (closed|shut)
+      out: 'off'
+  bs_plug_states:
+    values:
+    - in: plugged in
+      out: 'on'
+    - in: unplugged
+      out: 'off'
+  bs_power_states:
+    values:
+    - in: (powered [on]|power detected)
+      out: 'on'
+    - in: (not powered|powered off)
+      out: 'off'
+  bs_presence_states:
+    values:
+    - in: (home|present)
+      out: 'on'
+    - in: (away|not (home|present)|gone)
+      out: 'off'
+  bs_problem_states:
+    values:
+    - in: detected
+      out: 'on'
+    - in: ok
+      out: 'off'
+  bs_running_states:
+    values:
+    - in: running
+      out: 'on'
+    - in: not running
+      out: 'off'
+  bs_safety_states:
+    values:
+    - in: unsafe
+      out: 'on'
+    - in: safe
+      out: 'off'
+  bs_smoke_states:
+    values:
+    - in: (detected|triggered|on)
+      out: 'on'
+    - in: clear
+      out: 'off'
+  bs_sound_states:
+    values:
+    - in: (detected|triggered|on)
+      out: 'on'
+    - in: clear
+      out: 'off'
+  bs_tamper_states:
+    values:
+    - in: (detected|tampered with)
+      out: 'on'
+    - in: clear
+      out: 'off'
+  bs_update_states:
+    values:
+    - in: update available
+      out: 'on'
+    - in: (up to date|up-to-date)
+      out: 'off'
+  bs_vibration_states:
+    values:
+    - in: (detected|vibrating)
+      out: 'on'
+    - in: (clear|not vibrating)
+      out: 'off'
+  bs_window_states:
+    values:
+    - in: open
+      out: 'on'
+    - in: (closed|shut)
+      out: 'off'
+  shopping_list_item:
+    wildcard: true
+  todo_list_item:
+    wildcard: true
+  zone:
+    wildcard: true
+  position:
+    range:
+      type: percentage
+      from: 0
+      to: 100
+  volume:
+    range:
+      type: percentage
+      from: 0
+      to: 100
+  timer_seconds:
+    range:
+      from: 1
+      to: 100
+  timer_minutes:
+    range:
+      from: 1
+      to: 100
+  timer_hours:
+    range:
+      from: 1
+      to: 100
+  timer_half:
+    values:
+    - in: half
+      out: 30
+    - in: 1/2
+      out: 30
+  timer_name:
+    wildcard: true
+  timer_command:
+    wildcard: true
+  message:
+    wildcard: true
+  search_query:
+    wildcard: true
+  media_class:
+    values:
+    - in: artist
+      out: artist
+    - in: album
+      out: album
+    - in: (track|song)
+      out: track
+    - in: playlist
+      out: playlist
+    - in: podcast
+      out: podcast
+    - in: movie
+      out: movie
+    - in: '[tv] show'
+      out: tv_show
+expansion_rules:
+  the: (the|my|our)
+  name: '[<the>] {name}'
+  area: '[<the>] {area}'
+  floor: '[<the>] {floor} [floor]'
+  area_floor: (<area>|<floor>)
+  in_area_floor: '[<in>] <area_floor>'
+  what_is: (what's|whats|what is|tell me) [<the>]
+  lockable: '[<the>] (lock|door|window|gate|garage door|shutter)[s]'
+  where_is: (where's|wheres|where is)
+  which: (which|what) [of <the>]
+  is: (is|are) [(there|<the>)]
+  are: <is>
+  any: (any|some) [of <the>]
+  are_any: '[<are>] <any>'
+  how_many: how many [of <the>]
+  brightness: '{brightness}[([ ]%)| percent]'
+  light: (light|lights|lighting|lamp|lamps)
+  turn: (turn|switch|change|bring)
+  temp: (temp|temperature)
+  temperature: '{temperature}[([ ]°)|( degree[s])]'
+  open: (open|raise|lift) [up]
+  close: (close|shut|lower) [(up|down)]
+  set: (set|make|change|turn)
+  numeric_value_set: (set|change|turn [(up|down)]|increase|decrease|make)
+  in: (in|on|at|of|across|around|throughout)
+  position: '{position}[([ ]%)| percent]'
+  volume: '{volume:volume_level}[([ ]%)| percent]'
+  currently: (currently|presently|right now|at the moment)
+  state: '[(present|current)] (state|status)'
+  clean: (vacuum|clean)
+  all: (all [[of] <the>]|every [single]|each [and every])
+  are_all: '[<are>] <all>'
+  home: (home|house|apartment|flat)
+  everywhere: (everywhere|all over|[<in>] <the> [(entire|whole)] <home>|[<in>] <all>
+    (room|area|floor)[s])
+  here: ([in] here|[in] (this|<the>) (room|area|space))
+  what_is_the_class_of_name: (<what_is> the <class> (of|in|from|(indicated|measured)
+    by) <name> [in <area>]|<what_is> <name>['s] <class> [in <area>]|<what_is> <area>
+    <name>['s] <class>)
+  timer_set: (start|set|create)
+  timer_cancel: (cancel|stop)
+  timer_duration_seconds: '{timer_seconds:seconds} second[s]'
+  timer_duration_minutes: ({timer_minutes:minutes} minute[s] [[and] {timer_seconds:seconds}
+    second[s]])|({timer_minutes:minutes} and [a] {timer_half:seconds} minute[s])|({timer_half:seconds}
+    a minute[s])
+  timer_duration_hours: ({timer_hours:hours} hour[s] [[and] {timer_minutes:minutes}
+    minute[s]] [[and] {timer_seconds:seconds} second[s]])|({timer_hours:hours} and
+    [a] {timer_half:minutes} hour[s])|({timer_half:minutes} an hour[s])
+  timer_duration: <timer_duration_seconds>|<timer_duration_minutes>|<timer_duration_hours>
+  timer_start_seconds: '{timer_seconds:start_seconds} second[s]'
+  timer_start_minutes: '{timer_minutes:start_minutes} minute[s] [[and] {timer_seconds:start_seconds}
+    second[s]]'
+  timer_start_hours: '{timer_hours:start_hours} hour[s] [[and] {timer_minutes:start_minutes}
+    minute[s]] [[and] {timer_seconds:start_seconds} second[s]]'
+  timer_start: <timer_start_seconds>|<timer_start_minutes>|<timer_start_hours>
+skip_words:
+- please
+- can you
+- could you
+- would you
+- for me
+- i'd like
+- i'd like to
+- i want
+intents:
+  HassBroadcast:
+    data:
+    - sentences:
+      - (broadcast|announce) [everywhere] [that] {message}
+  HassGetState:
+    data:
+    - sentences:
+      - (is|are) <name> [battery] {bs_battery_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: battery
+      slots:
+        domain: binary_sensor
+        device_class: battery
+    - sentences:
+      - (is|are) any batter(y|ies) {bs_battery_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: battery
+    - sentences:
+      - are all [the] batter(y|ies) {bs_battery_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: battery
+    - sentences:
+      - (which|what) batter(y|ies) (is|are) {bs_battery_states:state} [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: battery
+    - sentences:
+      - how many batter(y|ies) (is|are) {bs_battery_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: battery
+    - sentences:
+      - (is|are) <name> [battery] {bs_battery_charging_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: battery_charging
+      slots:
+        domain: binary_sensor
+        device_class: battery_charging
+    - sentences:
+      - (is|are) any batter(y|ies) {bs_battery_charging_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: battery_charging
+    - sentences:
+      - are all [the] batter(y|ies) {bs_battery_charging_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: battery_charging
+    - sentences:
+      - (which|what) batter(y|ies) (is|are) {bs_battery_charging_states:state} [in
+        <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: battery_charging
+    - sentences:
+      - how many batter(y|ies) (is|are) {bs_battery_charging_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: battery_charging
+    - sentences:
+      - (is|are) <name> {bs_carbon_monoxide_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: carbon_monoxide
+      slots:
+        domain: binary_sensor
+        device_class: carbon_monoxide
+    - sentences:
+      - (is|are) any carbon monoxide sensor[s] {bs_carbon_monoxide_states:state} [in
+        <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: carbon_monoxide
+    - sentences:
+      - is there [any] carbon monoxide in <area>
+      - is [there] [any] carbon monoxide detected in <area>
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: carbon_monoxide
+        state: 'on'
+    - sentences:
+      - are all [the] carbon monoxide sensors {bs_carbon_monoxide_states:state} [in
+        <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: carbon_monoxide
+    - sentences:
+      - (which|what) carbon monoxide sensor[s] (is|are) {bs_carbon_monoxide_states:state}
+        [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: carbon_monoxide
+    - sentences:
+      - how many carbon monoxide sensors (is|are) {bs_carbon_monoxide_states:state}
+        [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: carbon_monoxide
+    - sentences:
+      - (is|are) <name> {bs_cold_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: cold
+      slots:
+        domain: binary_sensor
+        device_class: cold
+    - sentences:
+      - (is|are) any[ ](thing|sensor)[s] cold [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: cold
+        state: 'on'
+    - sentences:
+      - (which|what) (thing|sensor)[s] (is|are) cold [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: cold
+        state: 'on'
+    - sentences:
+      - how many (thing|sensor)[s] (is|are) cold [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: cold
+        state: 'on'
+    - sentences:
+      - (is|are) <name> {bs_connectivity_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: connectivity
+      slots:
+        domain: binary_sensor
+        device_class: connectivity
+    - sentences:
+      - (is|are) any device[s] {bs_connectivity_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: connectivity
+    - sentences:
+      - are all [the] device[s] {bs_connectivity_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: connectivity
+    - sentences:
+      - (which|what) device[s] (is|are) {bs_connectivity_states:state} [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: connectivity
+    - sentences:
+      - how many device[s] (is|are) {bs_connectivity_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: connectivity
+    - sentences:
+      - (is|are) <name> {bs_door_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: door
+      slots:
+        domain: binary_sensor
+        device_class: door
+    - sentences:
+      - (is|are) <name> {bs_garage_door_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: garage_door
+      slots:
+        domain: binary_sensor
+        device_class: garage_door
+    - sentences:
+      - (is|are) <name> {bs_gas_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: gas
+      slots:
+        domain: binary_sensor
+        device_class: gas
+    - sentences:
+      - (is|are) any gas sensor[s] {bs_gas_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: gas
+    - sentences:
+      - is there [any] gas in <area>
+      - is [there] [any] gas detected in <area>
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: gas
+        state: 'on'
+    - sentences:
+      - are all [the] gas sensor[s] {bs_gas_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: gas
+    - sentences:
+      - (which|what) gas sensor[s] (is|are) {bs_gas_states:state} [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: gas
+    - sentences:
+      - how many gas sensor[s] (is|are) {bs_gas_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: gas
+    - sentences:
+      - (is|are) <name> {bs_heat_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: heat
+      slots:
+        domain: binary_sensor
+        device_class: heat
+    - sentences:
+      - (is|are) any[ ](thing|sensor)[s] hot [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: heat
+        state: 'on'
+    - sentences:
+      - (which|what) (thing|sensor)[s] (is|are) hot [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: heat
+        state: 'on'
+    - sentences:
+      - how many (thing|sensor)[s] (is|are) hot [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: heat
+        state: 'on'
+    - sentences:
+      - (is|are) <name> {bs_light_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: light
+      slots:
+        domain: binary_sensor
+        device_class: light
+    - sentences:
+      - (is|are) any light[s] {bs_light_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: light
+    - sentences:
+      - are all [the] light[s] {bs_light_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: light
+    - sentences:
+      - (which|what) light[s] (is|are) {bs_light_states:state} [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: light
+    - sentences:
+      - how many light[s] (is|are) {bs_light_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: light
+    - sentences:
+      - (is|are) <name> {bs_lock_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: lock
+      slots:
+        domain: binary_sensor
+        device_class: lock
+    - sentences:
+      - (is|are) <name> {bs_moisture_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: moisture
+      slots:
+        domain: binary_sensor
+        device_class: moisture
+    - sentences:
+      - (is|are) any water sensor[s] {bs_moisture_states:state} [in <area>]
+      - is (it|the (floor|[(water [leak[ing]]|leak[ing]|flood[ing])] sensor)) {bs_moisture_states:state}
+        [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: moisture
+    - sentences:
+      - is [there] a[ny] (flood|leak) [detected] [in <area>]
+      - is <area> flooded
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: moisture
+        state: 'on'
+    - sentences:
+      - are all [the] water sensor[s] {bs_moisture_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: moisture
+    - sentences:
+      - (which|what) water sensor[s] (is|are) {bs_moisture_states:state} [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: moisture
+    - sentences:
+      - how many water sensor[s] (is|are) {bs_moisture_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: moisture
+    - sentences:
+      - (is|are) <name> {bs_motion_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: motion
+      slots:
+        domain: binary_sensor
+        device_class: motion
+    - sentences:
+      - (is|are) (any|the) motion sensor[s] {bs_motion_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: motion
+    - sentences:
+      - is [there] [any] motion detected [in <area>]
+      - is there [any] motion [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: motion
+        state: 'on'
+    - sentences:
+      - are all [the] motion sensor[s] {bs_motion_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: motion
+    - sentences:
+      - (which|what) motion sensor[s] (is|are) {bs_motion_states:state} [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: motion
+    - sentences:
+      - how many motion sensor[s] (is|are) {bs_motion_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: motion
+    - sentences:
+      - (is|are) <name> {bs_occupancy_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: occupancy
+      slots:
+        domain: binary_sensor
+        device_class: occupancy
+    - sentences:
+      - (is|are) any occupancy sensor[s] {bs_occupancy_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: occupancy
+    - sentences:
+      - is [there] any occupancy detected [in <area>]
+      - is <area> occupied
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: occupancy
+        state: 'on'
+    - sentences:
+      - are all [the] occupancy sensor[s] {bs_occupancy_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: occupancy
+    - sentences:
+      - (which|what) occupancy sensor[s] (is|are) {bs_occupancy_states:state} [in
+        <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: occupancy
+    - sentences:
+      - how many occupancy sensor[s] (is|are) {bs_occupancy_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: occupancy
+    - sentences:
+      - (is|are) <name> {bs_opening_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: opening
+      slots:
+        domain: binary_sensor
+        device_class: opening
+    - sentences:
+      - (is|are) any opening[s] {bs_opening_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: opening
+    - sentences:
+      - are all [the] opening[s] {bs_opening_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: opening
+    - sentences:
+      - (which|what) opening[s] (is|are) {bs_opening_states:state} [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: opening
+    - sentences:
+      - how many opening[s] (is|are) {bs_opening_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: opening
+    - sentences:
+      - (is|are) <name> {bs_plug_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: plug
+      slots:
+        domain: binary_sensor
+        device_class: plug
+    - sentences:
+      - (is|are) any (thing[s]|device[s]) {bs_plug_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: plug
+    - sentences:
+      - are all [the] (thing[s]|device[s]) {bs_plug_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: plug
+    - sentences:
+      - (which|what) (thing[s]|device[s]) (is|are) {bs_plug_states:state} [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: plug
+    - sentences:
+      - how many (thing[s]|device[s]) (is|are) {bs_plug_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: plug
+    - sentences:
+      - (is|are) <name> {bs_power_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: power
+      slots:
+        domain: binary_sensor
+        device_class: power
+    - sentences:
+      - (is|are) any (thing[s]|device[s]) {bs_power_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: power
+    - sentences:
+      - are all [the] (thing[s]|device[s]) {bs_power_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: power
+    - sentences:
+      - (which|what) (thing[s]|device[s]) (is|are) {bs_power_states:state} [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: power
+    - sentences:
+      - how many (thing[s]|device[s]) (is|are) {bs_power_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: power
+    - sentences:
+      - (is|are) <name> {bs_presence_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: presence
+      slots:
+        domain: binary_sensor
+        device_class: presence
+    - sentences:
+      - (is|are) any (thing[s]|device[s]) {bs_presence_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: presence
+    - sentences:
+      - are all [the] (thing[s]|device[s]) {bs_presence_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: presence
+    - sentences:
+      - (which|what) (thing[s]|device[s]) (is|are) {bs_presence_states:state} [in
+        <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: presence
+    - sentences:
+      - how many (thing[s]|device[s]) (is|are) {bs_presence_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: presence
+    - sentences:
+      - are there [any] problems with <name> [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: problem
+      slots:
+        domain: binary_sensor
+        device_class: problem
+        state: 'on'
+    - sentences:
+      - (is|are) <name> {bs_running_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: running
+      slots:
+        domain: binary_sensor
+        device_class: running
+    - sentences:
+      - (is|are) any (thing[s]|device[s]) {bs_running_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: running
+    - sentences:
+      - are all [the] (thing[s]|device[s]) {bs_running_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: running
+    - sentences:
+      - (which|what) (thing[s]|device[s]) (is|are) {bs_running_states:state} [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: running
+    - sentences:
+      - how many (thing[s]|device[s]) (is|are) {bs_running_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: running
+    - sentences:
+      - (is|are) <name> {bs_safety_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: safety
+      slots:
+        domain: binary_sensor
+        device_class: safety
+    - sentences:
+      - (is|are) <name> {bs_smoke_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: smoke
+      slots:
+        domain: binary_sensor
+        device_class: smoke
+    - sentences:
+      - (is|are) any smoke sensor[s] {bs_smoke_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: smoke
+    - sentences:
+      - is [there] [any] smoke in <area>
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: smoke
+        state: 'on'
+    - sentences:
+      - are all [the] smoke sensor[s] {bs_smoke_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: smoke
+    - sentences:
+      - (which|what) smoke sensor[s] (is|are) {bs_smoke_states:state} [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: smoke
+    - sentences:
+      - how many smoke sensor[s] (is|are) {bs_smoke_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: smoke
+    - sentences:
+      - (is|are) <name> {bs_sound_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: sound
+      slots:
+        domain: binary_sensor
+        device_class: sound
+    - sentences:
+      - (is|are) any (noise|sound) sensor[s] {bs_sound_states:state} [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: sound
+    - sentences:
+      - is [there] [any] noise in <area>
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: sound
+        state: 'on'
+    - sentences:
+      - are all [the] (noise|sound) sensor[s] {bs_sound_states:state} [in <area>]
+      response: all
+      slots:
+        domain: binary_sensor
+        device_class: sound
+    - sentences:
+      - (which|what) (noise|sound) sensor[s] (is|are) {bs_sound_states:state} [in
+        <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: sound
+    - sentences:
+      - how many (noise|sound) sensor[s] (is|are) {bs_sound_states:state} [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: sound
+    - sentences:
+      - (is|are) <name> {bs_tamper_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: tamper
+      slots:
+        domain: binary_sensor
+        device_class: tamper
+    - sentences:
+      - (is|are) <name> {bs_update_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: update
+      slots:
+        domain: binary_sensor
+        device_class: update
+    - sentences:
+      - are [there] any [(firmware|software)] updates [available] [in <area>]
+      response: any
+      slots:
+        domain: binary_sensor
+        device_class: update
+        state: 'on'
+    - sentences:
+      - (which|what) [(firmware|software)] updates are (there|available) [in <area>]
+      response: which
+      slots:
+        domain: binary_sensor
+        device_class: update
+        state: 'on'
+    - sentences:
+      - how many [(firmware|software)] updates are (there|available) [in <area>]
+      response: how_many
+      slots:
+        domain: binary_sensor
+        device_class: update
+        state: 'on'
+    - sentences:
+      - (is|are) <name> {bs_vibration_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: vibration
+      slots:
+        domain: binary_sensor
+        device_class: vibration
+    - sentences:
+      - is anything vibrating [in <area>]
+      response: any
+      requires_context:
+        domain: binary_sensor
+        device_class: vibration
+      slots:
+        domain: binary_sensor
+        device_class: vibration
+        state: 'on'
+    - sentences:
+      - (is|are) <name> {bs_window_states:state} [in <area>]
+      response: one_yesno
+      requires_context:
+        domain: binary_sensor
+        device_class: window
+      slots:
+        domain: binary_sensor
+        device_class: window
+    - sentences:
+      - <is> <name> {cover_states:state} [<in_area_floor>]
+      response: one_yesno
+      requires_context:
+        domain: cover
+      slots:
+        domain: cover
+    - sentences:
+      - <what_is> <state> of <name> [<in_area_floor>]
+      response: one
+      requires_context:
+        domain: cover
+      slots:
+        domain: cover
+    - sentences:
+      - <are_any> {cover_classes:device_class} {cover_states:state} [<in_area_floor>]
+      - <are_any> <area_floor> {cover_classes:device_class} {cover_states:state}
+      response: any
+      slots:
+        domain: cover
+    - sentences:
+      - <are_all> {cover_classes:device_class} {cover_states:state} [<in_area_floor>]
+      - <are_all> <area_floor> {cover_classes:device_class} {cover_states:state}
+      response: all
+      slots:
+        domain: cover
+    - sentences:
+      - <which> {cover_classes:device_class} <is> {cover_states:state} [<in_area_floor>]
+      - <which> <area_floor> {cover_classes:device_class} <is> {cover_states:state}
+      response: which
+      slots:
+        domain: cover
+    - sentences:
+      - <how_many> {cover_classes:device_class} <is> {cover_states:state} [<in_area_floor>]
+      - <how_many> <area_floor> {cover_classes:device_class} <is> {cover_states:state}
+      response: how_many
+      slots:
+        domain: cover
+    - sentences:
+      - (do you know|tell me|<what_is>) [the [current] (state|value) of] <name> [<in_area_floor>]
+      response: one
+      excludes_context:
+        domain:
+        - scene
+        - script
+    - sentences:
+      - is [the] [state of] <name> {on_off_states:state} [<in_area_floor>]
+      response: one_yesno
+      excludes_context:
+        domain:
+        - cover
+        - binary_sensor
+    - sentences:
+      - (is|are) [there] any {on_off_domains:domain} {on_off_states:state} [<in_area_floor>]
+      - (do you know|tell me) if there are any {on_off_domains:domain} {on_off_states:state}
+        [<in_area_floor>]
+      response: any
+    - sentences:
+      - are all [the] {on_off_domains:domain} [(switched|turned|set [to])] {on_off_states:state}
+        [<in_area_floor>]
+      - are all [the] {on_off_domains:domain} <in_area_floor> [(switched|turned|set
+        [to])] {on_off_states:state}
+      response: all
+    - sentences:
+      - '[do you know] (which|what) {on_off_domains:domain} (is|are) {on_off_states:state}
+        [<in_area_floor>]'
+      response: which
+    - sentences:
+      - '[tell me] how many {on_off_domains:domain} (is|are) {on_off_states:state}
+        [<in_area_floor>]'
+      response: how_many
+    - sentences:
+      - (is|are) <name> ([<currently>];{lock_states:state} [in <area>])
+      response: one_yesno
+      requires_context:
+        domain: lock
+      slots:
+        domain: lock
+    - sentences:
+      - ((is|are) [there]|do I have) any <lockable> ([<currently>];{lock_states:state}
+        [in <area>])
+      - ((is|are) [there]|do I have) any ([<currently>];{lock_states:state} <lockable>
+        [in <area>])
+      response: any
+      slots:
+        domain: lock
+    - sentences:
+      - are all <lockable> ([<currently>];{lock_states:state} [in <area>])
+      response: all
+      slots:
+        domain: lock
+    - sentences:
+      - (which|what) <lockable> (is|are) ([<currently>];{lock_states:state} [in <area>])
+      response: which
+      slots:
+        domain: lock
+    - sentences:
+      - how many <lockable> (is|are) ([<currently>];{lock_states:state} [in <area>])
+      response: how_many
+      slots:
+        domain: lock
+    - sentences:
+      - tell me the [current] status of <name> [in <area>] [<currently>]
+      response: one
+      requires_context:
+        domain: lock
+      slots:
+        domain: lock
+    - sentences:
+      - <where_is> <name>
+      response: where
+      requires_context:
+        domain: person
+      slots:
+        domain: person
+    - sentences:
+      - is <name> [<in>] [the] {zone:state}
+      response: one_yesno
+      requires_context:
+        domain: person
+      slots:
+        domain: person
+    - sentences:
+      - is anyone [<in>] [the] {zone:state}
+      response: any
+      slots:
+        domain: person
+    - sentences:
+      - is everyone [<in>] [the] {zone:state}
+      response: all
+      slots:
+        domain: person
+    - sentences:
+      - who is [<in>] [the] {zone:state}
+      response: which
+      slots:
+        domain: person
+    - sentences:
+      - how many people are [<in>] [the] {zone:state}
+      response: how_many
+      slots:
+        domain: person
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: apparent_power
+      slots:
+        domain: sensor
+        device_class: apparent_power
+      expansion_rules:
+        class: apparent power
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: aqi
+      slots:
+        domain: sensor
+        device_class: aqi
+      expansion_rules:
+        class: (AQI|air quality [index])
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: atmospheric_pressure
+      slots:
+        domain: sensor
+        device_class: atmospheric_pressure
+      expansion_rules:
+        class: (atmospheric|air) pressure
+    - sentences:
+      - <what_is_the_class_of_name>
+      - how much battery (does <name> have [left]|has <name> got [left]|is left in
+        <name>)
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: battery
+      slots:
+        domain: sensor
+        device_class: battery
+      expansion_rules:
+        class: '[remaining] battery [level]'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: carbon_dioxide
+      slots:
+        domain: sensor
+        device_class: carbon_dioxide
+      expansion_rules:
+        class: (carbon dioxide|CO2) (level|concentration)
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: carbon_monoxide
+      slots:
+        domain: sensor
+        device_class: carbon_monoxide
+      expansion_rules:
+        class: (carbon monoxide|CO) (level|concentration)
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: current
+      slots:
+        domain: sensor
+        device_class: current
+      expansion_rules:
+        class: '[amount of] [electric[al]] current'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: data_rate
+      slots:
+        domain: sensor
+        device_class: data_rate
+      expansion_rules:
+        class: '[(download|upload|data)] (rate|speed)'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: data_size
+      slots:
+        domain: sensor
+        device_class: data_size
+      expansion_rules:
+        class: ([data] size|(amount|size) of [the] data)
+    - sentences:
+      - <what_is_the_class_of_name>
+      - when ((is|was) <name>|will <name> be|(will|did) <name> happen)
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: date
+      slots:
+        domain: sensor
+        device_class: date
+      expansion_rules:
+        class: '[calendar[istic]] date'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: distance
+      slots:
+        domain: sensor
+        device_class: distance
+      expansion_rules:
+        class: distance
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: duration
+      slots:
+        domain: sensor
+        device_class: duration
+      expansion_rules:
+        class: duration
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: energy
+      slots:
+        domain: sensor
+        device_class: energy
+      expansion_rules:
+        class: '[amount of] energy'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: energy_storage
+      slots:
+        domain: sensor
+        device_class: energy_storage
+      expansion_rules:
+        class: '[[total] amount of] [stored] energy'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: frequency
+      slots:
+        domain: sensor
+        device_class: frequency
+      expansion_rules:
+        class: frequency
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: gas
+      slots:
+        domain: sensor
+        device_class: gas
+      expansion_rules:
+        class: '[amount of] gas [volume]'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: humidity
+      slots:
+        domain: sensor
+        device_class: humidity
+      expansion_rules:
+        class: '[(air|atmospheric)] [relative] humidity'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: illuminance
+      slots:
+        domain: sensor
+        device_class: illuminance
+      expansion_rules:
+        class: ([amount of] illuminance|(light|brightness) level)
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: irradiance
+      slots:
+        domain: sensor
+        device_class: irradiance
+      expansion_rules:
+        class: ([amount of] irradiance|[ir]radiation level)
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: moisture
+      slots:
+        domain: sensor
+        device_class: moisture
+      expansion_rules:
+        class: ([relative] moisture|(percentage|ratio) of water)
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: monetary
+      slots:
+        domain: sensor
+        device_class: monetary
+      expansion_rules:
+        class: '[amount of] (money|cash|cost)'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: nitrogen_dioxide
+      slots:
+        domain: sensor
+        device_class: nitrogen_dioxide
+      expansion_rules:
+        class: (nitrogen dioxide|NO2) (level|concentration)
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: nitrogen_monoxide
+      slots:
+        domain: sensor
+        device_class: nitrogen_monoxide
+      expansion_rules:
+        class: (nitrogen monoxide|NO) (level|concentration)
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: nitrous_oxide
+      slots:
+        domain: sensor
+        device_class: nitrous_oxide
+      expansion_rules:
+        class: (nitrous oxide|N2O) (level|concentration)
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: ozone
+      slots:
+        domain: sensor
+        device_class: ozone
+      expansion_rules:
+        class: (ozone|O3) level
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: pm1
+      slots:
+        domain: sensor
+        device_class: pm1
+      expansion_rules:
+        class: ((level|concentration) [of] PM1 [particles]|PM1 [particles] [level|concentration])
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: pm25
+      slots:
+        domain: sensor
+        device_class: pm25
+      expansion_rules:
+        class: ((level|concentration) [of] PM2.5 [particles]|PM2.5 [particles] [level|concentration])
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: pm10
+      slots:
+        domain: sensor
+        device_class: pm10
+      expansion_rules:
+        class: ((level|concentration) [of] PM10 [particles]|PM10 [particles] [level|concentration])
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: power_factor
+      slots:
+        domain: sensor
+        device_class: power_factor
+      expansion_rules:
+        class: power factor
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: power
+      slots:
+        domain: sensor
+        device_class: power
+      expansion_rules:
+        class: power
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: precipitation
+      slots:
+        domain: sensor
+        device_class: precipitation
+      expansion_rules:
+        class: '[accumulated] (precipitation|(rain|snow)[fall]) [level|quantity]'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: precipitation_intensity
+      slots:
+        domain: sensor
+        device_class: precipitation_intensity
+      expansion_rules:
+        class: (precipitation|(rain|snow)[fall]) (intensity|rate)
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: pressure
+      slots:
+        domain: sensor
+        device_class: pressure
+      expansion_rules:
+        class: pressure
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: reactive_power
+      slots:
+        domain: sensor
+        device_class: reactive_power
+      expansion_rules:
+        class: reactive power
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: signal_strength
+      slots:
+        domain: sensor
+        device_class: signal_strength
+      expansion_rules:
+        class: signal strength
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: sound_pressure
+      slots:
+        domain: sensor
+        device_class: sound_pressure
+      expansion_rules:
+        class: (sound|acoustic) pressure
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: speed
+      slots:
+        domain: sensor
+        device_class: speed
+      expansion_rules:
+        class: (speed|velocity)
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: sulphur_dioxide
+      slots:
+        domain: sensor
+        device_class: sulphur_dioxide
+      expansion_rules:
+        class: (sulphur dioxide|SO2) (level|concentration)
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: temperature
+      slots:
+        domain: sensor
+        device_class: temperature
+      expansion_rules:
+        class: temperature
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: volatile_organic_compounds
+      slots:
+        domain: sensor
+        device_class: volatile_organic_compounds
+      expansion_rules:
+        class: '[concentration of] (VOC[s]|[volatile] organic compound[s])'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: volatile_organic_compounds_parts
+      slots:
+        domain: sensor
+        device_class: volatile_organic_compounds_parts
+      expansion_rules:
+        class: '[(concentration|ratio) of] (VOC[s]|[volatile] organic compound[s])'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: voltage
+      slots:
+        domain: sensor
+        device_class: voltage
+      expansion_rules:
+        class: voltage [drop]
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: volume
+      slots:
+        domain: sensor
+        device_class: volume
+      expansion_rules:
+        class: volume
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: volume_storage
+      slots:
+        domain: sensor
+        device_class: volume_storage
+      expansion_rules:
+        class: '[total] [stored] volume'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: water
+      slots:
+        domain: sensor
+        device_class: water
+      expansion_rules:
+        class: '[total] ([amount of] [consumed] water|water consumption)'
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: weight
+      slots:
+        domain: sensor
+        device_class: weight
+      expansion_rules:
+        class: (weight|mass)
+    - sentences:
+      - <what_is_the_class_of_name>
+      response: one
+      requires_context:
+        domain: sensor
+        device_class: wind_speed
+      slots:
+        domain: sensor
+        device_class: wind_speed
+      expansion_rules:
+        class: '[wind] (speed|velocity)'
+  HassClimateGetTemperature:
+    data:
+    - sentences:
+      - <what_is> [the] [current] <temp> [<here>]
+      - how (hot|cold|warm|cool) is it [<here>]
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <what_is> [the] [current] <temp> [of] <name>
+      - <what_is> [the] [current] <temp> <in> <area>
+      - <what_is> <area> [current] <temp>
+      - <what_is> <name> [current] <temp>
+      - how (hot|cold|warm|cool) is (<name>|[it <in>] <area>)
+  HassClimateSetTemperature:
+    data:
+    - sentences:
+      - (<numeric_value_set>|adjust) [the] <temp> to <temperature>
+    - sentences:
+      - (<numeric_value_set>|adjust) [the] <temp> in <area> to <temperature>
+      - (<numeric_value_set>|adjust) <area> <temp> to <temperature>
+    - sentences:
+      - (<numeric_value_set>|adjust) [the] <temp> (of|on) <floor> to <temperature>
+      - (<numeric_value_set>|adjust) <floor> <temp> to <temperature>
+    - sentences:
+      - (<numeric_value_set>|adjust) [the] <temp> of <name> to <temperature>
+      - (<numeric_value_set>|adjust) <name> [<temp>] to <temperature>
+      requires_context:
+        domain: climate
+  HassSetPosition:
+    data:
+    - sentences:
+      - (<numeric_value_set>|<open>|<close>) <name> [position] to <position>
+      requires_context:
+        domain: cover
+      slots:
+        domain: cover
+    - sentences:
+      - (<numeric_value_set>|<open>|<close>) [the] {cover_classes:device_class} [position]
+        (to <position>;in <area>)
+      - (<numeric_value_set>|<open>|<close>) <area> {cover_classes:device_class} [position]
+        to <position>
+      slots:
+        domain: cover
+    - sentences:
+      - (<numeric_value_set>) [the] {cover_classes:device_class} [position] [<in_here>]
+        to <position>
+      - (<open>|<close>) [the] {cover_classes:device_class} [<in_here>] to <position>
+      expansion_rules:
+        in_here: '[in] here'
+      slots:
+        domain: cover
+      response: cover_device_class
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - (<numeric_value_set>|<open>|<close>) <name> [position] to <position>
+      requires_context:
+        domain: valve
+      slots:
+        domain: valve
+  HassTurnOff:
+    data:
+    - sentences:
+      - <close> <name> [in <area>]
+      requires_context:
+        domain: cover
+      response: cover
+    - sentences:
+      - <close> [the] garage door
+      slots:
+        domain: cover
+        device_class: garage
+      response: cover_device_class
+    - sentences:
+      - <close> [the] {cover_classes:device_class} in <area>
+      - <close> <area> {cover_classes:device_class}
+      slots:
+        domain: cover
+      response: cover_device_class
+    - sentences:
+      - <close> [the] {cover_classes:device_class} [<in_here>]
+      expansion_rules:
+        in_here: '[in] here'
+      slots:
+        domain: cover
+      response: cover_device_class
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <turn> off [all] [the] fan[s] in <area>
+      - <turn> off <area> fan[s]
+      - '[<turn>] [all] <area> fan[s] off'
+      - '[<turn>] [all] [the] fan[s] [in] <area> off'
+      - deactivate [all] [the] fan[s] [in] <area>
+      - deactivate [all] <area> [the] fan[s]
+      slots:
+        domain: fan
+        name: all
+      response: fans_area
+    - sentences:
+      - '[<turn>] (all [the] fan[s] off|[the] fan[s] off everywhere)'
+      - deactivate (all [the] fan[s]|[the] fan[s] everywhere)
+      response: light_all
+      slots:
+        domain: fan
+        name: all
+    - sentences:
+      - <turn> off [all] [the] fan[s] [<in_here>]
+      - <turn> [all] [the] fan[s] (off;<in_here>)
+      - <turn> [all] [the] fan[s] off
+      response: fans_area
+      expansion_rules:
+        in_here: '[in] here'
+      slots:
+        domain: fan
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <turn> off (<area> <name>|<name> [in <area>])
+      - '[<turn>] (<area> <name>|<name> [in <area>]) [to] off'
+      - deactivate (<area> <name>|<name> [in <area>])
+      excludes_context:
+        domain:
+        - binary_sensor
+        - cover
+        - lock
+        - scene
+        - script
+        - sensor
+    - sentences:
+      - <turn> off <area_floor> <name> <light>
+      - <turn> off <name> <light> [<in_area_floor>]
+      - '[<turn>] <area_floor> <name> <light> [to] off'
+      - '[<turn>] <name> <light> [<in_area_floor>] [to] off'
+      - deactivate <area_floor> <name> <light>
+      - deactivate <name> <light> [<in_area_floor>]
+      requires_context:
+        domain: light
+    - sentences:
+      - <area> <light> (off|out)
+      - <light> (off|out) [<in>] <area>
+      - <turn> (off|out) [<all>] <area> <light>
+      - <turn> (off|out) [(<all>|<the>)] <light> <in> <area>
+      - '[<turn>] [<all>] <area> <light> (off|out)'
+      - '[<turn>] [(<all>|<the>)] <light> <in> <area> (off|out)'
+      - '[<turn>] [(<all>|<the>)] <light> (off|out) <in> <area>'
+      - deactivate [<all>] <area> <light>
+      - deactivate [(<all>|<the>)] <light> <in> <area>
+      slots:
+        domain: light
+      response: lights_area
+    - sentences:
+      - <floor> <light> (off|out)
+      - <light> (off|out) [<in>] <floor>
+      - <turn> (off|out) [<all>] <floor> <light>
+      - <turn> (off|out) [(<all>|<the>)] <light> [<in>] <floor>
+      - '[<turn>] [<all>] <floor> <light> (off|out)'
+      - '[<turn>] [(<all>|<the>)] <light> [<in>] <floor> (off|out)'
+      - '[<turn>] [(<all>|<the>)] <light> (off|out) [<in>] <floor>'
+      - deactivate [<all>] <floor> <light>
+      - deactivate [(<all>|<the>)] <light> [<in>] <floor>
+      response: lights_floor
+      slots:
+        domain: light
+    - sentences:
+      - <turn> <all> <light> (off|out) [<everywhere>]
+      - <turn> [<the>] <light> (off|out) <everywhere>
+      - <turn> (off|out) <all> <light> [<everywhere>]
+      - <turn> (off|out) [<the>] <light> <everywhere>
+      - <turn> (off|out) [<all>] [the] <home> <light> <everywhere>
+      - deactivate <all> <light> [<everywhere>]
+      - deactivate [<the>] <light> <everywhere>
+      - get every <light> (off|out) [<everywhere>]
+      - make sure <all> <light> <is> (off|out)
+      response: light_all
+      slots:
+        domain: light
+    - sentences:
+      - <turn> [(<all>|<the>)] <light> (off|out) <here>
+      - <turn> [(<all>|<the>)] <light> <here> (off|out)
+      - <turn> (off|out) [(<all>|<the>)] <light> <here>
+      - deactivate [(<all>|<the>)] <light> <here>
+      - '[<all>] [<the>] <light> (off|out) <here>'
+      - <turn> [<the>] <light> (off|out) [<here>]
+      - <turn> [<the>] <light> [<here>] (off|out)
+      - <turn> (off|out) [<the>] <light> [<here>]
+      - deactivate [<the>] <light> [<here>]
+      - <light> (off|out) [<here>]
+      response: lights_area
+      slots:
+        domain: light
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - unlock <name> [in <area>]
+      requires_context:
+        domain: lock
+      response: lock
+    - sentences:
+      - unlock [all] <lockable> [in] <area>
+      - unlock [all] <area> [<lockable>]
+      slots:
+        domain: lock
+        name: all
+      response: lock
+    - sentences:
+      - <close> <name>
+      requires_context:
+        domain: valve
+      slots:
+        domain: valve
+      response: valve
+  HassTurnOn:
+    data:
+    - sentences:
+      - <open> <name> [in <area>]
+      requires_context:
+        domain: cover
+      response: cover
+    - sentences:
+      - <open> [the] garage door
+      slots:
+        domain: cover
+        device_class: garage
+      response: cover_device_class
+    - sentences:
+      - <open> [the] {cover_classes:device_class} in <area>
+      - <open> <area> {cover_classes:device_class}
+      slots:
+        domain: cover
+      response: cover_device_class
+    - sentences:
+      - <open> [the] {cover_classes:device_class} [<in_here>]
+      expansion_rules:
+        in_here: '[in] here'
+      slots:
+        domain: cover
+      response: cover_device_class
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <turn> on [all] [the] fan[s] in <area>
+      - <turn> on <area> fan[s]
+      - '[<turn>] [all] <area> fan[s] on'
+      - activate [all] <area> fan[s]
+      - activate [all] fan[s] [in] <area>
+      slots:
+        domain: fan
+        name: all
+      response: fans_area
+    - sentences:
+      - <turn> on [all] [the] fan[s] [<in_here>]
+      - <turn> [all] [the] fan[s] (on;<in_here>)
+      - <turn> [all] [the] fan[s] on
+      response: fans_area
+      expansion_rules:
+        in_here: '[in] here'
+      slots:
+        domain: fan
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <turn> on (<area> <name>|<name> [in <area>])
+      - '[<turn>] (<area> <name>|<name> [in <area>]) [to] on'
+      - activate (<area> <name>|<name> [in <area>])
+      excludes_context:
+        domain:
+        - binary_sensor
+        - cover
+        - lock
+        - scene
+        - script
+        - sensor
+        - valve
+    - sentences:
+      - <turn> on <area_floor> <name> <light>
+      - <turn> on <name> <light> [<in_area_floor>]
+      - '[<turn>] <area_floor> <name> <light> [to] on'
+      - '[<turn>] <name> <light> [<in_area_floor>] [to] on'
+      - activate <area_floor> <name> <light>
+      - activate <name> <light> [<in_area_floor>]
+      - light up <area_floor> <name> <light>
+      - light up <name> <light> [<in_area_floor>]
+      requires_context:
+        domain: light
+    - sentences:
+      - (light up|illuminate) <area>
+      - <area> <light> on
+      - <light> on [in] <area>
+      - <turn> on [<all>] <area> <light>
+      - <turn> on [(<all>|<the>)] <light> <in> <area>
+      - '[<turn>] [<all>] <area> <light> on'
+      - '[<turn>] [(<all>|<the>)] <light> <in> <area> on'
+      - '[<turn>] [(<all>|<the>)] <light> on <in> <area>'
+      - activate [<all>] <area> <light>
+      - activate [(<all>|<the>)] <light> <in> <area>
+      slots:
+        domain: light
+      response: lights_area
+    - sentences:
+      - (light up|illuminate) <floor>
+      - <floor> <light> on
+      - <light> on [<in>] <floor>
+      - <turn> on [<all>] <floor> <light>
+      - <turn> on [(<all>|<the>)] <light> [<in>] <floor>
+      - '[<turn>] [<all>] <floor> <light> on'
+      - '[<turn>] [(<all>|<the>)] <light> [<in>] <floor> on'
+      - '[<turn>] [(<all>|<the>)] <light> on [<in>] <floor>'
+      - activate [<all>] <floor> <light>
+      - activate [(<all>|<the>)] <light> [<in>] <floor>
+      response: lights_floor
+      slots:
+        domain: light
+    - sentences:
+      - (light up|activate|illuminate) <all> <light> <everywhere>
+      - (light up|illuminate) <everywhere> [<everywhere>]
+      - <turn> <all> <light> on [<everywhere>]
+      - <turn> [<the>] <light> on <everywhere>
+      - <turn> on <all> <light> [<everywhere>]
+      - <turn> on [<the>] <light> <everywhere>
+      - <turn> on [(<all>|<the>)] <home> <light> <everywhere>
+      - activate <all> <light> [<everywhere>]
+      - activate [<the>] <light> <everywhere>
+      - get <all> <light> on [<everywhere>]
+      - illuminate <all> areas [<everywhere>]
+      - make sure <all> <light> <is> on
+      response: light_all
+      slots:
+        domain: light
+    - sentences:
+      - <turn> [(<all>|<the>)] <light> on <here>
+      - <turn> [(<all>|<the>)] <light> <here> on
+      - <turn> on [(<all>|<the>)] <light> <here>
+      - activate [(<all>|<the>)] <light> <here>
+      - '[(<all>|<the>)] <light> on <here>'
+      - <turn> [<the>] <light> on [<here>]
+      - <turn> [<the>] <light> [<here>] on
+      - <turn> on [<the>] <light> [<here>]
+      - activate [<the>] <light> [<here>]
+      - <light> on [<here>]
+      - light (it|<here>) up
+      - light up [<here>]
+      response: lights_area
+      slots:
+        domain: light
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - lock <name> [in <area>]
+      requires_context:
+        domain: lock
+      response: lock
+    - sentences:
+      - lock [all] <lockable> [in] <area>
+      - lock [all] <area> [<lockable>]
+      - lock all [of] <lockable>
+      slots:
+        domain: lock
+      response: lock
+    - sentences:
+      - '[activate] <name> [scene]'
+      - <name> on
+      - <turn> (<name> [scene];on)
+      - (change|transition) to (<name> [scene]|scene <name>)
+      requires_context:
+        domain: scene
+      slots:
+        domain: scene
+      response: scene
+    - sentences:
+      - '[activate] <area> <name> [scene]'
+      - <area> <name> on
+      - <turn> (<area> <name> [scene];on)
+      - '[activate] <name> [scene] <in> <area>'
+      - <turn> (<name> [scene] <in> <area>;on)
+      - (change|transition) ([to] <area> <name>|<area> to <name>) [scene]
+      - (change|transition) to <name> [scene] <in> <area>
+      requires_context:
+        domain: scene
+      slots:
+        domain: scene
+      response: scene
+    - sentences:
+      - '[activate|run|start|<turn>] <name> [script] [on]'
+      requires_context:
+        domain: script
+      slots:
+        domain: script
+      response: script
+    - sentences:
+      - <open> <name>
+      requires_context:
+        domain: valve
+      slots:
+        domain: valve
+      response: valve
+  HassCancelAllTimers:
+    data:
+    - sentences:
+      - <timer_cancel> all [[of ](the|my)] timers
+    - sentences:
+      - <timer_cancel> all [[of ](the|my)] {area} timers
+      - <timer_cancel> all [[of ](the|my)] timers in <area>
+      response: area
+  HassCancelTimer:
+    data:
+    - sentences:
+      - <timer_cancel> [the|my] timer
+      - <timer_cancel> [the|my] <timer_start> timer
+      - <timer_cancel> [the|my] timer for <timer_start>
+      - <timer_cancel> [the|my] {area} timer
+      - <timer_cancel> [the|my] timer in <area>
+      - <timer_cancel> [the|my] {timer_name:name} timer
+      - <timer_cancel> [the|my] timer for {timer_name:name}
+  HassDecreaseTimer:
+    data:
+    - sentences:
+      - remove <timer_duration> from [the|my] timer
+      - remove <timer_duration> from [the|my] <timer_start> timer
+      - remove <timer_duration> from [the|my] timer for <timer_start>
+      - remove <timer_duration> from [the|my] {area} timer
+      - remove <timer_duration> from [the|my] timer in <area>
+      - remove <timer_duration> from [the|my] {timer_name:name} timer
+      - remove <timer_duration> from [the|my] timer (named|called|for) {timer_name:name}
+    - sentences:
+      - take <timer_duration> [from|off] [the|my] timer
+      - take <timer_duration> [from|off] [the|my] <timer_start> timer
+      - take <timer_duration> [from|off] [the|my] timer for <timer_start>
+      - take <timer_duration> [from|off] [the|my] {area} timer
+      - take <timer_duration> [from|off] [the|my] timer in <area>
+      - take <timer_duration> [from|off] [the|my] {timer_name:name} timer
+      - take <timer_duration> [from|off] [the|my] timer (named|called|for) {timer_name:name}
+    - sentences:
+      - decrease [the|my] timer by <timer_duration>
+      - decrease [the|my] <timer_start> timer by <timer_duration>
+      - decrease [the|my] timer for <timer_start> by <timer_duration>
+      - decrease [the|my] {area} timer by <timer_duration>
+      - decrease [the|my] timer in <area> by <timer_duration>
+      - decrease [the|my] {timer_name:name} timer by <timer_duration>
+      - decrease [the|my] timer (named|called|for) {timer_name:name} by <timer_duration>
+  HassGetCurrentDate:
+    data:
+    - sentences:
+      - <what_is> (todays|today's|the current) date
+      - <what_is> the date [today]
+  HassGetCurrentTime:
+    data:
+    - sentences:
+      - <what_is> the [current] time
+      - what time is it [[right] now]
+  HassIncreaseTimer:
+    data:
+    - sentences:
+      - add <timer_duration> to [the|my] timer
+      - add <timer_duration> to [the|my] <timer_start> timer
+      - add <timer_duration> to [the|my] timer for <timer_start>
+      - add <timer_duration> to [the|my] {area} timer
+      - add <timer_duration> to [the|my] timer in <area>
+      - add <timer_duration> to [the|my] {timer_name:name} timer
+      - add <timer_duration> to [the|my] timer (named|called|for) {timer_name:name}
+    - sentences:
+      - increase [the|my] timer by <timer_duration>
+      - increase [the|my] <timer_start> timer by <timer_duration>
+      - increase [the|my] timer for <timer_start> by <timer_duration>
+      - increase [the|my] {area} timer by <timer_duration>
+      - increase [the|my] timer in <area> by <timer_duration>
+      - increase [the|my] {timer_name:name} timer by <timer_duration>
+      - increase [the|my] timer (named|called|for) {timer_name:name} by <timer_duration>
+  HassNevermind:
+    data:
+    - sentences:
+      - nevermind
+      - never mind
+  HassPauseTimer:
+    data:
+    - sentences:
+      - pause [the|my] timer
+      - pause [the|my] <timer_start> timer
+      - pause [the|my] timer for <timer_start>
+      - pause [the|my] {area} timer
+      - pause [the|my] timer in <area>
+      - pause [the|my] {timer_name:name} timer
+      - pause [the|my] timer (named|called|for) {timer_name:name}
+  HassRespond:
+    data:
+    - sentences:
+      - (hello|hi) [home assistant]
+      response: hello
+    - sentences:
+      - are you always (listening|recording)
+      response: listening
+    - sentences:
+      - where does (my|the) data go [to]
+      response: data
+    - sentences:
+      - what can I (say|ask)
+      response: commands
+    - sentences:
+      - who (made|created) you
+      response: creator
+  HassStartTimer:
+    data:
+    - sentences:
+      - timer for <timer_duration>
+      - timer for <timer_duration> (named|called) {timer_name:name}
+      - <timer_duration> timer
+      - <timer_duration> timer for {timer_name:name}
+      - <timer_set> [a|the|my] timer for <timer_duration>
+      - <timer_set> [a|an|the|my] <timer_duration> timer (named|called|for) {timer_name:name}
+      - <timer_set> [a|an|the|my] <timer_duration> timer
+      - <timer_set> [a|the|my] timer (named|called) {timer_name:name} for <timer_duration>
+      - <timer_set> [a|the|my] timer for <timer_duration> (named|called) {timer_name:name}
+    - sentences:
+      - '{timer_command:conversation_command} in <timer_duration>'
+      - in <timer_duration> {timer_command:conversation_command}
+      response: command
+  HassTimerStatus:
+    data:
+    - sentences:
+      - <timer_start> timer status
+      - timer[s] status
+      - '{area} timer status'
+      required_keywords:
+      - timer
+      - timers
+      - status
+    - sentences:
+      - '[how much] time [is] left on [the|my] timer[s]'
+      - '[how much] time [is] left on [the|my] <timer_start> timer'
+      - '[how much] time [is] left on [the|my] {area} timer'
+      - '[how much] time [is] left on [the|my] timer[s] in <area>'
+      required_keywords:
+      - timer
+      - timers
+      - left
+    - sentences:
+      - how long [is] left on [the|my] timer[s]
+      - how long [is] left on [the|my] <timer_start> timer
+      - how long [is] left on [the|my] {area} timer
+      - how long [is] left on [the|my] timer[s] in <area>
+      required_keywords:
+      - timer
+      - timers
+      - left
+    - sentences:
+      - status of [the|my] timer[s]
+      - status of [the|my] <timer_start> timer
+      - status of [the|my] {area} timer[s]
+      - status of [the|my] timer[s] in <area>
+      required_keywords:
+      - timer
+      - timers
+    - sentences:
+      - '{timer_name:name} timer status'
+      - '[how much] time [is] left on [the|my] {timer_name:name} timer'
+      - status of [the|my] {timer_name:name} timer[s]
+      - how long [is] left on [the|my] {timer_name:name} timer
+      required_keywords:
+      - timer
+      - timers
+  HassUnpauseTimer:
+    data:
+    - sentences:
+      - (resume|continue) [the|my] timer
+      - (resume|continue) [the|my] <timer_start> timer
+      - (resume|continue) [the|my] timer for <timer_start>
+      - (resume|continue) [the|my] {area} timer
+      - (resume|continue) [the|my] timer in <area>
+      - (resume|continue) [the|my] timer (named|called|for) {timer_name:name}
+      - (resume|continue) [the|my] {timer_name:name} timer
+  HassLightSet:
+    data:
+    - sentences:
+      - '[<numeric_value_set>] <name> brightness [to] <brightness>'
+      - '[<numeric_value_set>] [the] brightness [of] <name> [to] <brightness>'
+      - '[<numeric_value_set>] <name> [to] <brightness> [brightness]'
+      response: brightness
+      requires_context:
+        domain: light
+    - sentences:
+      - <numeric_value_set> <name> to <brightness>
+      requires_context:
+        domain: light
+      response: brightness
+    - sentences:
+      - '[<numeric_value_set>] [the] brightness in <area> to <brightness>'
+      - '[<numeric_value_set>] [the] brightness of <area> to <brightness>'
+      - '[<numeric_value_set>] <area> brightness [to] <brightness>'
+      - '[<numeric_value_set>] <area> [to] <brightness> brightness'
+      - '[<numeric_value_set>] <area> [to] <brightness>'
+      - '[<numeric_value_set>] [(<all>|<the>)] <light> [<in>] <area> to <brightness>
+        [brightness]'
+      response: brightness
+    - sentences:
+      - <numeric_value_set> <area> to <brightness>
+      response: brightness
+    - sentences:
+      - '[<numeric_value_set>] [the] brightness to <brightness>'
+      - '[<numeric_value_set>] [the] brightness (<in_here>;to <brightness>)'
+      expansion_rules:
+        in_here: '[in] here'
+      response: brightness
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - '[<numeric_value_set>] <name> brightness to [the] {brightness_level:brightness}'
+      - '[<numeric_value_set>] [the] brightness of <name> to [the] {brightness_level:brightness}'
+      - '[<numeric_value_set>] <name> [to] [the] {brightness_level:brightness} brightness'
+      requires_context:
+        domain: light
+      response: brightness
+    - sentences:
+      - '[<numeric_value_set>] [the] brightness in <area> to [the] {brightness_level:brightness}'
+      - '[<numeric_value_set>] [the] brightness of <area> to [the] {brightness_level:brightness}'
+      - '[<numeric_value_set>] <area> brightness to [the] {brightness_level:brightness}'
+      - '[<numeric_value_set>] <area> [to] [the] {brightness_level:brightness} brightness'
+      response: brightness
+    - sentences:
+      - '[<numeric_value_set>] [the] brightness to [the] {brightness_level:brightness}'
+      - '[<numeric_value_set>] [the] brightness (<in_here>;to [the] {brightness_level:brightness})'
+      expansion_rules:
+        in_here: '[in] here'
+      response: brightness
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - '[<numeric_value_set>] <floor> brightness [to] <brightness>'
+      response: brightness
+    - sentences:
+      - '[<set>] <name> [color] [to] {color}'
+      - '[<set>] [[the] color of] <name> to {color}'
+      requires_context:
+        domain: light
+      response: color
+    - sentences:
+      - '[<set>] [[the] color of] (<area> | [<all>] lights in <area> | [all] <area>
+        lights) [to] {color}'
+      - '[<set>] (<area> | [all] lights in <area> | [all] <area> lights) [color] [to]
+        {color}'
+      response: color
+    - sentences:
+      - '[<set>] [[the] color of] [(<all>|<the>)] <light> [to] {color}'
+      - '[<set>] [[the] color of] [(<all>|<the>)] <light> (<in_here>;[to] {color})'
+      expansion_rules:
+        in_here: '[in] here'
+      response: color
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - '[<set>] <floor> [color] [to] {color}'
+      response: color
+  HassMediaNext:
+    data:
+    - sentences:
+      - next [track|item] [on|for] <name>
+      - (skip [(to [the] next [(song|track)]|([the] (song|track)|this [(song|track)])
+        )];[on] <name>)
+      requires_context:
+        domain: media_player
+    - sentences:
+      - next [track|item]
+      - (skip [(to [the] next [(song|track)]|([the] (song|track)|this [(song|track)]))])
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - next [track|item] [in] <area>
+      - (skip [(to [the] next [(song|track)]|([the] (song|track)|this [(song|track)])
+        )];[in] <area>)
+  HassMediaPause:
+    data:
+    - sentences:
+      - (pause;<name>)
+      requires_context:
+        domain: media_player
+    - sentences:
+      - pause
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - pause [[the|my] (music|[tv] show[s]|media [player[s]])] [in] <area>
+      - pause <area> (music|[tv] show[s]|media [player[s]])
+  HassMediaPrevious:
+    data:
+    - sentences:
+      - previous (track|item) [on|for] <name>
+      - (go back [to the (previous|last) (song|track)];[on] <name>)
+      - replay [the (previous|last) (song|track)] on <name>
+      - <name> (play|replay) [the] (previous|last) [(song|track)] [again]
+      requires_context:
+        domain: media_player
+    - sentences:
+      - previous (track|item)
+      - go back [to the (previous|last) (song|track)]
+      - replay [the (previous|last) (song|track)] [again]
+      - play [the] (previous|last) [(song|track)] [again]
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - previous (track|item) [in] <area>
+      - go back [to the (previous|last) (song|track)] [in] <area>
+      - (replay [the (previous|last) (song|track)] [again];[in] <area>)
+      - (play [the] (previous|last) [(song|track) ][again];[in] <area>)
+  HassMediaSearchAndPlay:
+    data:
+    - sentences:
+      - play [the] {media_class} {search_query}
+      - play [the] {search_query} {media_class}
+      - play {search_query}
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - play {search_query} in <area>
+      - play [the] {media_class} {search_query} in <area>
+      - play [the] {search_query} {media_class} in <area>
+    - sentences:
+      - play {search_query} on <name>
+      - play [the] {media_class} {search_query} on <name>
+      - play [the] {search_query} {media_class} on <name>
+      - play {search_query} on <name> in <area>
+      - play [the] {media_class} {search_query} on <name> in <area>
+      - play [the] {search_query} {media_class} on <name> in <area>
+      requires_context:
+        domain: media_player
+  HassMediaUnpause:
+    data:
+    - sentences:
+      - ((unpause|resume);<name>)
+      requires_context:
+        domain: media_player
+    - sentences:
+      - (unpause|resume)
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - (unpause|resume) [[the|my] (music|[tv] show[s]|media [player[s]])] [in] <area>
+      - (unpause|resume) <area> (music|[tv] show[s]|media [player[s]])
+  HassSetVolume:
+    data:
+    - sentences:
+      - <numeric_value_set> <name> volume to <volume>
+      - turn <name> [volume] (up|down) to <volume>
+      - (<numeric_value_set> the volume to <volume>;[on] <name>)
+      - (turn (the volume;(up|down)) to <volume>;[on] <name>)
+      requires_context:
+        domain: media_player
+    - sentences:
+      - <numeric_value_set> volume to <volume>
+      - turn volume (up|down) to <volume>
+      - <numeric_value_set> the volume to <volume>
+      - turn (the volume;(up|down)) to <volume>
+      requires_context:
+        area:
+          slot: true
+    - sentences:
+      - <numeric_value_set> <area> volume to <volume>
+      - turn <area> [volume] (up|down) to <volume>
+      - turn [volume] (up|down) to <volume> [in] <area>
+      - (<numeric_value_set> the volume to <volume>;[in] <area>)
+      - <numeric_value_set> the volume [in] <area> to <volume>
+      - (turn (the volume;(up|down)) to <volume>;[in] <area>)
+  HassShoppingListAddItem:
+    data:
+    - sentences:
+      - add <item> to <my_list>
+      - put <item> (on|in) <my_list>
+      response: item_added
+      expansion_rules:
+        my_list: '[my|the] [shopping] list'
+        item: '{shopping_list_item:item}'
+  HassShoppingListCompleteItem:
+    data:
+    - sentences:
+      - (check|complete|delete|remove) (off;<item>) (from|on|in) <my_list>
+      - (check|complete|delete|remove) <item> (off|from|on|in) <my_list>
+      response: item_completed
+      expansion_rules:
+        my_list: '[my|the] [shopping] list'
+        item: '{shopping_list_item:item}'
+  HassListAddItem:
+    data:
+    - sentences:
+      - add <item> to <my_list>
+      - put <item> (on|in) <my_list>
+      response: item_added
+      requires_context:
+        domain: todo
+      expansion_rules:
+        my_list: '[my|the] {name} [list]'
+        item: '{todo_list_item:item}'
+  HassListCompleteItem:
+    data:
+    - sentences:
+      - (check|complete|delete|remove) (off;<item>) (from|on|in) <my_list>
+      - (check|complete|delete|remove) <item> (off|from|on|in) <my_list>
+      response: item_completed
+      requires_context:
+        domain: todo
+      expansion_rules:
+        my_list: '[my|the] {name} [list]'
+        item: '{todo_list_item:item}'
+  HassVacuumReturnToBase:
+    data:
+    - sentences:
+      - return <name> [to base]
+      requires_context:
+        domain: vacuum
+  HassVacuumStart:
+    data:
+    - sentences:
+      - start <name>
+      requires_context:
+        domain: vacuum
+    - sentences:
+      - <clean> <floor>
+  HassGetWeather:
+    data:
+    - sentences:
+      - <what_is> [the] weather [like]
+    - sentences:
+      - <what_is> [the] weather [like] (for|in|at) <name>
+      - <what_is> [the] weather (for|in|at) <name> [like]
+      - <what_is> [the] <name> weather [like]
+      requires_context:
+        domain: weather

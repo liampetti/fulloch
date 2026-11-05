@@ -15,12 +15,14 @@ from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from core.backends import TTS_MODEL_LANGUAGES  # noqa: E402
 from server.config_schema import (  # noqa: E402
     schema_as_dicts,
     tier_presets_as_dicts,
     wakeword_presets_as_dicts,
 )
 from server.config_store import _backends_view  # noqa: E402
+from utils.locale import intent_languages  # noqa: E402
 
 STATIC = ROOT / "server/static"
 
@@ -121,6 +123,8 @@ class BrowserModules(unittest.TestCase):
             field.update(value=field["default"], set=False)
         self.schema = {
             "fields": fields, "models": None, "credentials": {}, "variant": "cpu",
+            "intent_languages": intent_languages(),
+            "tts_model_languages": {key: list(value) for key, value in TTS_MODEL_LANGUAGES.items()},
             "default_backends": {"asr": "moonshine", "tts": "kokoro-onnx", "llm": "laya"},
             "tier_presets": tier_presets_as_dicts(),
             "wakeword_presets": wakeword_presets_as_dicts(),
@@ -132,6 +136,8 @@ class BrowserModules(unittest.TestCase):
         self.status = {"phase": "READY", "state": "idle", "server_instance_id": "test"}
         self.documents = {"documents": [{"path": "Fulloch/example-report.md", "title": "example report"}]}
         self.progress = {"state": "downloading", "assets": []}
+        self.intent_prepare_error = False
+        self.config_error = False
         self.history = [{"role": "assistant", "source": "startup", "ts": 1, "content": "Hello"}]
         self.page.route("**/*", self.route)
 
@@ -153,6 +159,10 @@ class BrowserModules(unittest.TestCase):
         if path == "/fulloch_animate.png":
             return route.fulfill(path=ROOT / "utils/fulloch_animate.png", content_type="image/png")
         self.requests.append((path, route.request.method, route.request.post_data))
+        if (path == "/setup/intent-languages" and self.intent_prepare_error) or (
+            path == "/config" and route.request.method == "PUT" and self.config_error
+        ):
+            return route.fulfill(status=503, body=json.dumps({"detail": "Download failed"}), content_type="application/json")
         data = {
             "/status": self.status, "/history": self.history,
             "/config": {"wakeword": "hey atticus", "restart_required": False},
@@ -217,6 +227,36 @@ class BrowserModules(unittest.TestCase):
         self.assertEqual(len(self.documents["documents"]), 1)
         self.page.wait_for_timeout(1200)
         self.assertTrue(self.page.locator("#thinking-job-card").is_hidden())
+        self.page.reload()
+        self.page.wait_for_function("boundary.streams.length === 1")
+        self.assertTrue(self.page.locator("#thinking-job-card").is_hidden())
+
+    def test_thinking_terminal_job_expires_and_stays_hidden(self):
+        self.page.clock.install()
+        self.status["thinking_job"] = {"id": "failed", "status": "FAILED", "task": "Failed job"}
+        self.open_chat()
+        self.page.wait_for_function("document.querySelector('#thinking-job-task').textContent === 'Failed job'")
+        self.page.clock.run_for(299000)
+        self.assertTrue(self.page.locator("#thinking-job-card").is_visible())
+        self.page.clock.run_for(1100)
+        self.assertTrue(self.page.locator("#thinking-job-card").is_hidden())
+        self.page.reload()
+        self.page.wait_for_function("boundary.streams.length === 1")
+        self.assertTrue(self.page.locator("#thinking-job-card").is_hidden())
+
+    def test_old_finished_job_is_not_shown(self):
+        self.status["thinking_job"] = {"id": "old", "status": "READY", "task": "Old job", "finished_at": 1}
+        self.open_chat()
+        self.page.wait_for_timeout(200)
+        self.assertTrue(self.page.locator("#thinking-job-card").is_hidden())
+
+    def test_brand_subtitle_wraps_on_narrow_screen(self):
+        self.page.set_viewport_size({"width": 320, "height": 700})
+        self.open_chat()
+        subtitle = self.page.locator("#brand-sub")
+        self.assertEqual(subtitle.evaluate("el => getComputedStyle(el).whiteSpace"), "normal")
+        self.assertGreater(subtitle.evaluate("el => el.getBoundingClientRect().height"),
+                           subtitle.evaluate("el => parseFloat(getComputedStyle(el).fontSize) * 1.5"))
 
     def test_logo_idle_blinks_glances_and_teardown(self):
         self.page.clock.install()
@@ -666,6 +706,136 @@ class BrowserModules(unittest.TestCase):
         self.page.wait_for_timeout(50)
         self.assertTrue(any(path == "/config" and 'af_bella' in (body or '') for path, _, body in self.requests))
 
+    def test_wizard_language_selection_prepares_and_persists(self):
+        self.status["phase"] = "NEEDS_SETUP"
+        self.page.goto("http://localhost/setup")
+        picker = self.page.locator("#wizard-intent-languages")
+        self.assertIn("English", picker.locator(".language-pill").inner_text())
+        picker.locator("summary").click()
+        picker.locator('input[value="fr"]').click()
+        self.assertEqual(picker.locator(".language-pill").count(), 2)
+        self.page.locator("#next1").click()
+        self.page.wait_for_function("document.querySelector('#intent-preparation')?.textContent.includes('ready')")
+        prepared = [json.loads(body)["languages"] for path, _, body in self.requests if path == "/setup/intent-languages"]
+        self.assertEqual(prepared, [["en", "fr"]])
+        self.assertFalse(any(path == "/config" and method == "PUT" for path, method, _ in self.requests))
+        self.page.locator("#ha-back").click()
+        self.assertEqual(picker.locator(".language-pill").count(), 2)
+        self.page.locator("#next1").click()
+        self.page.locator("#ha-next").click()
+        self.page.locator("#get-started").click()
+        self.page.wait_for_function("!!document.querySelector('#cancel-startup')")
+        configs = [json.loads(body)["updates"] for path, method, body in self.requests if path == "/config" and method == "PUT"]
+        self.assertEqual(configs[-1]["general.intent_languages"], ["en", "fr"])
+
+    def test_wizard_tts_language_defaults_and_persists(self):
+        self.status['phase'] = 'NEEDS_SETUP'
+        self.schema['models'] = {'asr': {'backend': 'moonshine'},
+                                 'tts': {'backend': 'pocket-tts-onnx'}, 'llm': {'backend': 'laya'}}
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#tier-select').wait_for()
+        select = self.page.locator('#wizard-tts-language')
+        self.assertTrue(select.is_visible())
+        self.assertEqual(select.input_value(), 'english')
+        picker = self.page.locator('#wizard-intent-languages')
+        picker.locator('summary').click()
+        picker.locator('input[value="de-CH"]').check()
+        picker.locator('input[value="fr"]').check()
+        self.assertEqual(select.input_value(), 'german')
+        picker.locator('input[value="de-CH"]').uncheck()
+        self.assertEqual(select.input_value(), 'french')
+        select.select_option('italian')
+        picker.locator('input[value="es"]').check()
+        self.assertEqual(select.input_value(), 'italian')
+        self.page.locator('#next1').click()
+        self.page.locator('#ha-back').click()
+        self.assertEqual(select.input_value(), 'italian')
+        self.page.locator('#next1').click()
+        self.page.locator('#ha-next').click()
+        self.page.locator('#get-started').click()
+        self.page.wait_for_function("!!document.querySelector('#cancel-startup')")
+        updates = [json.loads(body)['updates'] for path, method, body in self.requests if path == '/config' and method == 'PUT']
+        self.assertEqual(updates[-1]['general.tts_language'], 'italian')
+
+    def test_wizard_tts_language_updates_with_preset(self):
+        self.status['phase'] = 'NEEDS_SETUP'
+        self.schema['models'] = {'asr': {'backend': 'moonshine'},
+                                 'tts': {'backend': 'pocket-tts-onnx'}, 'llm': {'backend': 'laya'}}
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#tier-select').wait_for()
+        self.assertTrue(self.page.locator('#wizard-tts-language').is_visible())
+        self.page.locator('#tier-select').select_option('lite')
+        self.assertTrue(self.page.locator('#wizard-tts-language-field').is_hidden())
+
+    def test_wizard_tts_language_hidden_for_unsupported_models(self):
+        self.status['phase'] = 'NEEDS_SETUP'
+        self.page.goto('http://localhost/setup')
+        self.assertTrue(self.page.locator('#wizard-tts-language-field').is_hidden())
+        self.page.locator('#next1').click()
+        self.page.locator('#ha-next').click()
+        self.page.locator('#get-started').click()
+        self.page.wait_for_function("!!document.querySelector('#cancel-startup')")
+        updates = [json.loads(body)['updates'] for path, method, body in self.requests if path == '/config' and method == 'PUT']
+        self.assertNotIn('general.tts_language', updates[-1])
+
+    def test_wizard_language_download_failure_blocks_install_until_retry(self):
+        self.status["phase"] = "NEEDS_SETUP"
+        self.intent_prepare_error = True
+        self.page.goto("http://localhost/setup")
+        self.page.locator("#wizard-intent-languages summary").click()
+        self.page.locator('#wizard-intent-languages input[value="fr"]').check()
+        self.page.locator("#next1").click()
+        self.page.wait_for_function("document.querySelector('#intent-preparation')?.textContent.includes('Could not')")
+        self.page.locator("#ha-next").click()
+        self.page.locator("#get-started").click()
+        self.assertIn("retry", self.page.locator("#alert").inner_text())
+        self.assertFalse(any(path == "/setup/install" for path, _, _ in self.requests))
+        self.intent_prepare_error = False
+        self.page.locator("#search-back").click()
+        self.page.locator("#ha-back").click()
+        self.page.locator("#next1").click()
+        self.page.wait_for_function("document.querySelector('#intent-preparation')?.textContent.includes('ready')")
+
+    def test_settings_language_autosave_and_failure_restore(self):
+        self.page.goto("http://localhost/setup")
+        self.page.locator('[data-section="General"] > summary').click()
+        picker = self.page.locator("#settings-intent-languages")
+        picker.locator("summary").click()
+        picker.locator('input[value="de"]').check()
+        self.page.wait_for_function("document.querySelector('#intent-language-status').textContent.includes('saved')")
+        configs = [json.loads(body)["updates"] for path, method, body in self.requests if path == "/config" and method == "PUT"]
+        self.assertEqual(configs[-1], {"general.intent_languages": ["en", "de"]})
+        self.config_error = True
+        picker.locator("summary").click()
+        picker.locator('input[value="fr"]').click()
+        self.page.wait_for_function("document.querySelector('#intent-language-status').textContent.includes('failed')")
+        self.assertEqual(picker.locator(".language-pill").count(), 2)
+        picker.locator("summary").click()
+        self.assertFalse(picker.locator('input[value="fr"]').is_checked())
+
+    def test_settings_can_clear_existing_english_asr_override(self):
+        asr = next(field for field in self.schema["fields"] if field["path"] == "general.asr_language")
+        asr.update(value="English", set=True)
+        self.page.goto("http://localhost/setup")
+        self.page.locator('[data-section="General"] > summary').click()
+        override = self.page.locator('#cf-general_asr_language')
+        self.assertEqual(override.input_value(), "English")
+        override.fill("")
+        self.page.locator('#save-cfg').click()
+        self.page.wait_for_function("document.querySelector('#save-note')?.textContent.includes('Saved')")
+        configs = [json.loads(body)["updates"] for path, method, body in self.requests if path == "/config" and method == "PUT"]
+        self.assertEqual(configs[-1]["general.asr_language"], "")
+
+    def test_language_selector_requires_at_least_one_language(self):
+        self.status["phase"] = "NEEDS_SETUP"
+        self.page.goto("http://localhost/setup")
+        picker = self.page.locator("#wizard-intent-languages")
+        picker.locator("summary").focus()
+        self.page.keyboard.press("Enter")
+        picker.locator('input[value="en"]').click()
+        self.assertTrue(picker.locator('input[value="en"]').is_checked())
+        self.assertIn("at least one", picker.locator(".language-validation").inner_text())
+
     def test_settings_uses_runtime_defaults_not_first_gpu_dropdown_option(self):
         self.schema["variant"] = "gpu"
         self.schema['default_backends'] = {'asr': 'qwen', 'tts': 'qwen', 'llm': 'llama'}
@@ -804,8 +974,25 @@ class BrowserModules(unittest.TestCase):
         self.page.locator('[data-section="Models"]').evaluate('node => node.open = true')
         self.page.locator('#sm-tts').select_option('pocket-tts-pytorch')
         self.assertEqual(self.page.locator('#model-access .access-notice').count(), 0)
+        self.page.locator('[data-section="Voice"]').evaluate('node => node.open = true')
+        self.assertTrue(self.page.locator('#tts-language').is_visible())
+        self.page.locator('#tts-language').select_option('french')
         self.page.locator('#sm-tts').select_option('pocket-tts-onnx')
         self.assertEqual(self.page.locator('#model-access .access-notice').count(), 0)
+        self.assertEqual(self.page.locator('#tts-language').input_value(), 'french')
+
+    def test_tts_language_selector_tracks_supported_backend(self):
+        self.schema['models'] = {'tts': {'backend': 'pocket-tts-onnx'}}
+        self.page.goto('http://localhost/setup')
+        self.page.locator('#save-cfg').wait_for()
+        self.page.locator('[data-section="Voice"]').evaluate('node => node.open = true')
+        self.assertTrue(self.page.locator('#tts-language-field').is_visible())
+        self.page.locator('#tts-language').select_option('french')
+        self.page.locator('[data-section="Models"]').evaluate('node => node.open = true')
+        self.page.locator('#sm-tts').select_option('kokoro-onnx')
+        self.assertFalse(self.page.locator('#tts-language-field').is_visible())
+        self.page.locator('#sm-tts').select_option('pocket-tts-onnx')
+        self.assertEqual(self.page.locator('#tts-language').input_value(), 'french')
 
     def test_wizard_recommends_hardware_classes_and_falls_back_safely(self):
         self.open_chat()

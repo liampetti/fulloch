@@ -57,6 +57,7 @@ print(json.dumps(sorted(registered)))
         "turn_off",
         "toggle",
         "ha_set_brightness",
+        "ha_hassil_area",
         "ha_set_color",
         "ha_volume_set",
         "ha_volume_up",

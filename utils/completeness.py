@@ -29,6 +29,11 @@ SPECULATION_UNSAFE_INTENTS: frozenset[str] = frozenset(
     {
         "ha_lock",
         "ha_unlock",
+        "ha_open_cover",
+        "ha_close_cover",
+        "ha_set_cover_position",
+        "ha_set_climate",
+        "ha_hassil_area",
         "play_song",
         "start_countdown",
     }
@@ -178,6 +183,13 @@ def should_commit_provisional(prompt: str, catch_result) -> bool:
             intents = {a.get("intent") for a in actions}
             if intents & SPECULATION_UNSAFE_INTENTS:
                 return False
+            # HassIL may resolve a generic turn-on to a scene or script. Those
+            # can perform arbitrary side effects and must wait for the endpoint.
+            for action in actions:
+                args = action.get("args") or []
+                if action.get("intent") in {"turn_on", "turn_off"} and isinstance(args, list) and args:
+                    if isinstance(args[0], str) and args[0].startswith(("scene.", "script.")):
+                        return False
             return is_complete(prompt)
     # Free-form and reply-only paths need the full utterance. In particular,
     # Parakeet can snapshot after a short pause in "can you read me ..." or

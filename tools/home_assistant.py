@@ -59,6 +59,9 @@ from .ha_devices import (
     ha_vacuum as ha_vacuum,
 )
 from .ha_devices import (
+    hassil_area as hassil_area,
+)
+from .ha_devices import (
     lock as lock,
 )
 from .ha_devices import (

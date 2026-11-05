@@ -1,13 +1,14 @@
-"""Official Kyutai Pocket TTS PyTorch adapter with CUDA PCM streaming.
+"""Official Kyutai Pocket TTS PyTorch adapter with CPU/GPU PCM streaming.
 
 Pocket's generator yields audio frames as Mimi decodes them. A single shared
-worker keeps CUDA model access serial, matching Qwen's worker contract, while
+worker keeps model access serial, matching Qwen's worker contract, while
 the consumer sends each frame to the browser immediately.
 """
 
 import importlib.resources
 import logging
 import queue
+import re
 import tempfile
 import threading
 import time
@@ -45,31 +46,36 @@ _model = None
 _torch = None
 _voice_state = None
 
-WEIGHTS_URI = "hf://latent-variable/pocket-tts-cloning-en/languages/english/model.safetensors@ead4edebb72d7dd41468bbf8456f2822b3aa3fb1"
-ORIGINAL_WEIGHTS_URI = "hf://kyutai/pocket-tts/languages/english_2026-04/model.safetensors@19f95fe2df36e79fbd9f10008595cc4c977a0fcc"
+MIRROR_REPO = "lunahr/pocket-tts-ungated"
+MIRROR_REVISION = "d03cd73415a8d46d8eb115c7b524aebb0a729f4a"
 
 
-def load_tts(model_id=None, language: str = "english_2026-04", device: str = "cuda", **opts):
-    """Load the official Pocket model and place its tensors on CUDA.
+def load_tts(model_id=None, language: str = "english_2026-04", device: Optional[str] = None, **opts):
+    """Load the selected Pocket model on CPU or CUDA.
 
-    The setup downloader pre-caches the public mirror and official tokenizer.
-    The pinned runtime's bundled YAML points at the gated repo, so construct a
-    temporary copy with the mirror URI instead of silently using that default.
+    The setup downloader pre-caches the pinned mirror's weights and tokenizer.
+    Rewrite the bundled config without silently falling back to other weights.
     """
     global _model, _torch
     import torch
     from pocket_tts import TTSModel
 
-    if not device.startswith("cuda") or not torch.cuda.is_available():
-        raise RuntimeError("Pocket TTS PyTorch requires an available CUDA device")
-    if language not in {"english", "english_2026-04"}:
-        raise ValueError("Pocket TTS mirror supports english_2026-04 only")
+    from .backends import pocket_pytorch_snapshots, variant
+
+    language = "english_2026-04" if language == "english" else language
+    pocket_pytorch_snapshots(language)  # Validate before using in paths.
+    if device is None:
+        device = "cuda" if variant() != "cpu" and torch.cuda.is_available() else "cpu"
+    if device != "cpu" and not (device.startswith("cuda") and torch.cuda.is_available()):
+        raise RuntimeError(f"Pocket TTS PyTorch device unavailable: {device}")
     _torch = torch
     temperature = opts.get("temperature")
-    config = importlib.resources.files("pocket_tts").joinpath("config/english_2026-04.yaml").read_text(encoding="utf-8")
-    if config.count(ORIGINAL_WEIGHTS_URI) != 1:
-        raise RuntimeError("Unsupported Pocket TTS config: expected pinned Kyutai weights URI")
-    config = config.replace(ORIGINAL_WEIGHTS_URI, WEIGHTS_URI)
+    config = importlib.resources.files("pocket_tts").joinpath(f"config/{language}.yaml").read_text(encoding="utf-8")
+    base = f"hf://{MIRROR_REPO}/languages/{language}"
+    config, weights_count = re.subn(r"(?m)^weights_path: hf://kyutai/pocket-tts/\S+[ \t]*$", f"weights_path: {base}/model.safetensors@{MIRROR_REVISION}", config)
+    config, tokenizer_count = re.subn(r"(?m)^([ \t]*tokenizer_path:) hf://kyutai/pocket-tts-without-voice-cloning/[^\s]+", rf"\1 {base}/tokenizer.model@{MIRROR_REVISION}", config)
+    if weights_count != 1 or tokenizer_count != 1:
+        raise RuntimeError("Unsupported Pocket TTS config: expected Kyutai weights and tokenizer URIs")
     # Do not allow an inaccessible mirror to silently switch to non-cloning
     # weights: setup should report the actual download/load failure instead.
     config = "\n".join(line for line in config.splitlines() if not line.startswith("weights_path_without_voice_cloning:")) + "\n"

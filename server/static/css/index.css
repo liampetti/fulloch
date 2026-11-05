@@ -224,9 +224,8 @@ header .sub  {
   margin-top: 2px;
   font-family: var(--font-mono);
   letter-spacing: 0.01em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 #settings-btn {

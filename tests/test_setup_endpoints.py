@@ -7,6 +7,7 @@ Drives the config/install/voice/preflight routes against a setup-mode app
 import sys
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -31,6 +32,38 @@ def test_schema_endpoint_lists_fields(tmp_path):
     paths = {f["path"] for f in body["fields"]}
     assert "general.wakeword" in paths
     assert body["wakeword_presets"] and body["tier_presets"]
+    assert body["intent_languages"]["en"] == "English"
+    assert body["intent_languages"]["fr"] == "Français (French)"
+
+
+def test_wizard_language_preparation_does_not_save_config(tmp_path, monkeypatch):
+    from server import downloader
+
+    client, _, path = _client(tmp_path)
+    original = Path(path).read_text()
+    calls = []
+    monkeypatch.setattr(downloader, "ensure_hassil_intents", lambda languages, directory: calls.append((languages, directory)))
+    response = client.post("/setup/intent-languages", json={"languages": ["en", "fr"]})
+    assert response.status_code == 200
+    assert calls == [(["en", "fr"], str(tmp_path / "intents"))]
+    assert Path(path).read_text() == original
+    assert client.post("/setup/intent-languages", json={"languages": ["../bad"]}).status_code == 422
+    assert client.post("/setup/intent-languages", json={"languages": []}).status_code == 422
+    assert len(calls) == 1
+
+
+def test_wizard_language_preparation_reports_download_failure(tmp_path, monkeypatch):
+    from server import downloader
+
+    client, _, path = _client(tmp_path)
+    original = Path(path).read_text()
+    def fail(*args):
+        raise OSError("offline")
+
+    monkeypatch.setattr(downloader, "ensure_hassil_intents", fail)
+    response = client.post("/setup/intent-languages", json={"languages": ["fr"]})
+    assert response.status_code == 503
+    assert Path(path).read_text() == original
 
 
 def test_integration_token_creation_preserves_existing_and_is_live(tmp_path, monkeypatch):
@@ -86,6 +119,62 @@ def test_config_put_rejects_unknown_key(tmp_path):
     client, _, _ = _client(tmp_path)
     r = client.put("/config", json={"updates": {"general.bogus": "x"}})
     assert r.status_code == 422
+
+
+def test_intent_language_update_downloads_before_save(tmp_path, monkeypatch):
+    from server import downloader
+
+    client, _, path = _client(tmp_path)
+    calls = []
+    monkeypatch.setattr(downloader, "ensure_hassil_intents", lambda languages, directory: calls.append((languages, directory)))
+    response = client.put("/config", json={"updates": {"general.intent_languages": ["en", "fr"]}})
+    assert response.status_code == 200
+    assert calls == [(["en", "fr"], str(tmp_path / "intents"))]
+    assert "fr" in Path(path).read_text()
+    # Setup mode has no running assistant to hot-apply the change.
+    assert response.json()["restart_required"] is True
+
+
+def test_intent_download_failure_keeps_configuration_unchanged(tmp_path, monkeypatch):
+    from server import downloader
+
+    client, _, path = _client(tmp_path)
+    original = Path(path).read_text()
+
+    def fail(*args):
+        raise OSError("offline")
+
+    monkeypatch.setattr(downloader, "ensure_hassil_intents", fail)
+    response = client.put("/config", json={"updates": {"general.intent_languages": ["fr"], "general.wakeword": "computer"}})
+    assert response.status_code == 503
+    assert Path(path).read_text() == original
+
+
+def test_invalid_batch_never_starts_intent_download(tmp_path, monkeypatch):
+    from server import downloader
+
+    client, _, _ = _client(tmp_path)
+    monkeypatch.setattr(downloader, "ensure_hassil_intents", lambda *args: pytest.fail("unexpected download"))
+    response = client.put("/config", json={"updates": {"general.intent_languages": ["fr"], "general.bogus": "x"}})
+    assert response.status_code == 422
+
+
+def test_setup_install_prepares_configured_languages_before_start(tmp_path, monkeypatch):
+    from server import downloader
+
+    client, ctx, path = _client(tmp_path)
+    Path(path).write_text("general:\n  intent_languages: [en, de]\n")
+    calls = []
+
+    def fail(languages, directory):
+        calls.append((languages, directory))
+        raise OSError("offline")
+
+    monkeypatch.setattr(downloader, "ensure_hassil_intents", fail)
+    response = client.post("/setup/install")
+    assert response.status_code == 503
+    assert calls == [(["en", "de"], str(tmp_path / "intents"))]
+    assert ctx.lifecycle.phase == lc.NEEDS_SETUP
 
 
 def test_setup_timezone_only_seeds_an_unset_config(tmp_path, monkeypatch):

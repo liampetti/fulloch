@@ -31,6 +31,13 @@ current_satellite_id: "contextvars.ContextVar[Optional[str]]" = contextvars.Cont
 current_satellite_ha_area: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
     "current_satellite_ha_area", default=None
 )
+# Scoped to a verified timer-start dispatch, never to the shared assistant.
+current_timer_response_language: "contextvars.ContextVar[str]" = contextvars.ContextVar(
+    "current_timer_response_language", default="en"
+)
+current_timer_response_intents_dir: "contextvars.ContextVar[str]" = contextvars.ContextVar(
+    "current_timer_response_intents_dir", default="./data/intents"
+)
 
 _current_assistant: Optional[Any] = None
 

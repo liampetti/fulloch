@@ -221,6 +221,7 @@ _ASSISTANT_OPTION_KEYS = (
     "wakeword_pattern",
     "voice_clone",
     "tts_speed",
+    "tts_language",
     "whisper_gain",
     "barge_in",
     "conversation_mode_default",
@@ -400,6 +401,13 @@ def main():
         lifecycle=lifecycle,
         **options,
     )
+    try:
+        assistant.configure_hassil(
+            (_read_config().get("general") or {}).get("intent_languages") or ["en"],
+            str(Path(_CONFIG_PATH).parent / "intents"),
+        )
+    except Exception:  # noqa: BLE001 — retain the existing router if packs are unavailable
+        logger.exception("Could not initialize Home Assistant intent matcher")
     context.set_assistant(assistant)
     assistant.run()
 

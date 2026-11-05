@@ -415,6 +415,7 @@ class BackgroundJob:
             "origin_satellite_id": self.snapshot.origin_satellite_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "finished_at": finished_at,
             "elapsed_seconds": round(max(0.0, duration_end - self.created_at), 2),
             "progress": research_progress(self),
             "partial_artifact_link": f"/reports/{quote(self.note_id, safe='/')}" if self.note_id else "",

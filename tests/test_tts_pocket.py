@@ -5,13 +5,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import core.tts_pocket as tts  # noqa: E402
 
 
-def test_load_tts_uses_numeric_default_temperature(monkeypatch, tmp_path):
+def test_load_tts_uses_selected_mirror_and_device(monkeypatch, tmp_path):
     calls = {}
 
     class Model:
@@ -22,7 +23,7 @@ def test_load_tts_uses_numeric_default_temperature(monkeypatch, tmp_path):
             return cls()
 
         def to(self, device):
-            assert device == "cuda"
+            assert device == "cpu"
             return self
 
         def eval(self):
@@ -34,20 +35,50 @@ def test_load_tts_uses_numeric_default_temperature(monkeypatch, tmp_path):
     )
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    (config_dir / "english_2026-04.yaml").write_text(
-        f"weights_path: {tts.ORIGINAL_WEIGHTS_URI}\n"
+    (config_dir / "french_24l.yaml").write_text(
+        "weights_path: hf://kyutai/pocket-tts/languages/french_24l/model.safetensors@revision\n"
         "weights_path_without_voice_cloning: hf://fallback\n"
-        "tokenizer_path: hf://kyutai/pocket-tts-without-voice-cloning/tokenizer\n"
+        "  tokenizer_path: hf://kyutai/pocket-tts-without-voice-cloning/languages/french_24l/tokenizer.model@revision\n"
     )
     monkeypatch.setattr(tts.importlib.resources, "files", lambda _: tmp_path)
 
-    tts.load_tts()
+    tts.load_tts(language="french_24l", device="cpu")
 
     assert calls["temp"] == 0.7 and calls["lsd_decode_steps"] == 1
-    assert tts.WEIGHTS_URI in calls["config_contents"]
-    assert tts.ORIGINAL_WEIGHTS_URI not in calls["config_contents"]
+    assert f"hf://{tts.MIRROR_REPO}/languages/french_24l/model.safetensors@{tts.MIRROR_REVISION}" in calls["config_contents"]
     assert "weights_path_without_voice_cloning" not in calls["config_contents"]
-    assert "kyutai/pocket-tts-without-voice-cloning/tokenizer" in calls["config_contents"]
+    assert f"hf://{tts.MIRROR_REPO}/languages/french_24l/tokenizer.model@{tts.MIRROR_REVISION}" in calls["config_contents"]
+
+
+@pytest.mark.parametrize("language", ["english_2026-04", "french_24l", "german", "italian", "portuguese", "spanish"])
+def test_bundled_language_configs_use_mirror_for_weights_and_tokenizer(monkeypatch, language):
+    from importlib import resources
+
+    pytest.importorskip("pocket_tts")
+    configs = resources.files("pocket_tts")
+    calls = {}
+
+    class Model:
+        @classmethod
+        def load_model(cls, **kwargs):
+            calls["config"] = Path(kwargs["config"]).read_text()
+            return cls()
+
+        def to(self, device):
+            calls["device"] = device
+            return self
+
+        def eval(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "pocket_tts", SimpleNamespace(TTSModel=Model))
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False)))
+    monkeypatch.setattr(tts.importlib.resources, "files", lambda _: configs)
+    tts.load_tts(language=language)
+    assert calls["device"] == "cpu"
+    assert f"languages/{language}/model.safetensors@{tts.MIRROR_REVISION}" in calls["config"]
+    assert f"languages/{language}/tokenizer.model@{tts.MIRROR_REVISION}" in calls["config"]
+    assert "weights_path_without_voice_cloning" not in calls["config"]
 
 
 def test_unsupported_speed_is_ignored_with_explicit_warning(caplog):

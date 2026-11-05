@@ -1,0 +1,60 @@
+language: de
+schema_version: 1
+source_revision: "2025.6.23"
+provenance: "Fulloch-specific responses; not copied from Home Assistant."
+responses:
+  time:
+    success:
+      - "Es ist {time} Uhr."
+  date:
+    success:
+      - "Heute ist {date}."
+  timer_started:
+    success:
+      - "Timer für {duration} gestartet."
+  timer_cancelled:
+    success:
+      - "Timer abgebrochen."
+  timer_completed:
+    success:
+      - "Dein Timer ist abgelaufen."
+  timer_status:
+    success: ["Der Timer hat noch {duration} übrig."]
+  timer_status_multiple:
+    success: ["Die Timer haben jeweils noch {durations} übrig."]
+  timer_none:
+    success: ["Es sind keine Timer aktiv."]
+    error: ["Es sind keine Timer aktiv."]
+  timer_ambiguous:
+    error: ["Mehrere Timer sind aktiv. Bitte gib an, welchen du abbrechen möchtest."]
+  timer_limit:
+    error: ["Es sind zu viele Timer aktiv. Brich einen ab, bevor du einen neuen startest."]
+  timer_too_long:
+    error: ["Timer dürfen höchstens sieben Tage dauern."]
+  timer_invalid_duration:
+    error: ["Ich habe die Timerdauer nicht verstanden."]
+  light_brightness:
+    success: ["Die Helligkeit wurde auf {value} Prozent eingestellt."]
+  climate_temperature:
+    success: ["Die Temperatur wurde auf {value} Grad eingestellt."]
+  cover_position:
+    success: ["Die Position wurde auf {value} Prozent eingestellt."]
+  media_volume:
+    success: ["Die Lautstärke wurde auf {value} Prozent eingestellt."]
+  ha_unreachable:
+    error: ["Ich konnte Home Assistant nicht erreichen."]
+  ha_timeout:
+    error: ["Home Assistant hat nicht rechtzeitig geantwortet."]
+  ha_not_configured:
+    error: ["Home Assistant ist nicht eingerichtet."]
+  voice_denied:
+    error: ["Dieses Gerät ist nicht für die Sprachsteuerung verfügbar. Es wurde kein Befehl gesendet."]
+  light_on:
+    success:
+      - "Befehl zum Einschalten der Beleuchtung gesendet."
+  light_off:
+    success:
+      - "Befehl zum Ausschalten der Beleuchtung gesendet."
+  operation_failed:
+    error:
+      - "Entschuldigung, ich konnte das nicht ausführen."

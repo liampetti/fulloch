@@ -15,6 +15,9 @@ async function doInstall() {
   if (btn) btn.disabled = true;
   clearAlert();
   try {
+    if (state.intentPreparation && !(await state.intentPreparation)) {
+      throw new Error('Could not prepare Home Assistant languages. Go back to the preset step and continue to retry.');
+    }
     // Check disk, model-hub access and GPU availability before writing setup.
     const models = chosenModels();
     const pre = await postJSON('/setup/preflight-download', { models });
@@ -31,7 +34,10 @@ async function doInstall() {
     const voice = tts === 'kokoro-onnx'
       ? (state.schema.models?.tts?.backend === tts && sel.voice_clone ? sel.voice_clone : 'af_heart')
       : (sel.voice_clone && state.schema.models?.tts?.backend !== 'kokoro-onnx' ? sel.voice_clone : 'atticus');
-    const updates = { 'general.voice_clone': voice };
+    const updates = { 'general.voice_clone': voice, 'general.intent_languages': sel.intent_languages };
+    if ((state.schema.tts_model_languages?.[tts] || []).includes(sel.tts_language)) {
+      updates['general.tts_language'] = sel.tts_language;
+    }
     if (wakeword) {
       updates['general.wakeword'] = wakeword.wakeword;
       updates['general.wakeword_pattern'] = wakeword.pattern;

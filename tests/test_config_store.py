@@ -69,6 +69,37 @@ def test_persistent_logging_defaults_to_disabled():
     assert field.default is False
 
 
+def test_example_and_schema_default_to_auto_asr_with_editable_intent_languages():
+    example = Path(__file__).resolve().parents[1] / "data/config.example.yml"
+    config = cs.read_config(str(example))
+    assert config["general"]["asr_language"] is None
+    assert config["general"]["intent_languages"] == ["en"]
+    assert field_for("general.asr_language").default is None
+    assert field_for("general.asr_language").apply != "hot"
+
+
+def test_asr_language_override_and_intent_languages_are_independent(tmp_path):
+    path = _write(tmp_path, 'general:\n  asr_language: "English"\n')
+    cs.update_config({"general.intent_languages": ["en", "fr", "de"]}, path)
+    assert cs.read_config(path)["general"] == {"asr_language": "English", "intent_languages": ["en", "fr", "de"]}
+    cs.update_config({"general.asr_language": "French"}, path)
+    assert cs.read_config(path)["general"]["asr_language"] == "French"
+    cs.update_config({"general.asr_language": ""}, path)
+    assert "asr_language" not in cs.read_config(path)["general"]
+    assert cs.read_config(path)["general"]["intent_languages"] == ["en", "fr", "de"]
+
+
+def test_tts_model_language_is_restart_setting(tmp_path):
+    from server.config_schema import field_for
+
+    path = _write(tmp_path, 'general:\n  wakeword: "hey atticus"\n')
+    spec = field_for("general.tts_language")
+    assert spec.default == "english" and spec.apply == "restart"
+    cs.update_config({"general.tts_language": "french"}, path)
+    assert cs.read_config(path)["general"]["tts_language"] == "french"
+    assert "french" in cs.settings_view(path)["tts_model_languages"]["pocket-tts-onnx"]
+
+
 def test_thinking_settings_expose_only_valid_slot_choices(tmp_path):
     enabled = field_for("thinking.enabled")
     slots = field_for("thinking.server_slots")
@@ -132,6 +163,78 @@ def test_list_coercion_from_csv(tmp_path):
     cs.update_config({"general.asr_context_terms": "phoebe bridgers, downstairs office"}, path)
     terms = cs.read_config(path)["general"]["asr_context_terms"]
     assert terms == ["phoebe bridgers", "downstairs office"]
+
+
+def test_intent_languages_default_and_round_trip(tmp_path):
+    field = field_for("general.intent_languages")
+    assert field is not None and field.default == ["en"]
+    path = _write(tmp_path, "general:\n  wakeword: hi\n")
+    cs.update_config({"general.intent_languages": ["en", "fr", "de"]}, path)
+    assert cs.read_config(path)["general"]["intent_languages"] == ["en", "fr", "de"]
+    with pytest.raises(cs.ConfigValidationError):
+        cs.update_config({"general.intent_languages": ["../fr"]}, path)
+    assert cs.read_config(path)["general"]["intent_languages"] == ["en", "fr", "de"]
+
+
+def test_intent_languages_schema_download_and_hot_reload_round_trip(tmp_path, monkeypatch):
+    import shutil
+    from unittest.mock import MagicMock, patch
+
+    from fastapi.testclient import TestClient
+
+    from core.assistant import Assistant
+    from server import downloader
+    from server.dashboard import create_app
+    from server.lifecycle import READY, AppContext, Lifecycle
+    from tools import ha_client
+
+    config = tmp_path / "config.yml"
+    config.write_text("general:\n  wakeword: hi\n")
+    intent_dir = tmp_path / "intents"
+    monkeypatch.setattr(ha_client, "_loaded", True)
+    with patch("core.assistant.AudioCapture", return_value=MagicMock()):
+        assistant = Assistant(wakeword="hi")
+    assistant._tts_backend = "qwen"
+    assistant.configure_hassil(["en"], str(intent_dir))
+    context = AppContext(lifecycle=Lifecycle(phase=READY), config_path=str(config), assistant=assistant)
+    client = TestClient(create_app(context=context))
+    field = next(f for f in client.get("/setup/schema").json()["fields"] if f["path"] == "general.intent_languages")
+    assert field["default"] == ["en"] and field["value"] is None
+    calls = []
+
+    def prepare(languages, directory):
+        calls.append((list(languages), directory, list(cs.read_config(str(config))["general"].get("intent_languages", ["en"]))))
+        if "fr" in languages:
+            target = Path(directory) / "fr" / "2025.6.23.yaml"
+            target.parent.mkdir(exist_ok=True)
+            shutil.copyfile(Path(__file__).parent / "fixtures/hassil/fr/2025.6.23.yaml", target)
+
+    monkeypatch.setattr(downloader, "ensure_hassil_intents", prepare)
+    response = client.put("/config", json={"updates": {"general.intent_languages": ["en", "fr"]}})
+    assert response.status_code == 200 and response.json()["restart_required"] is False
+    assert calls[0] == (["en", "fr"], str(intent_dir), ["en"])
+    assert cs.read_config(str(config))["general"]["intent_languages"] == ["en", "fr"]
+    assert [language for language, _ in assistant._hassil_fastpath.tables] == ["en", "fr"]
+    saved_field = next(f for f in client.get("/setup/schema").json()["fields"] if f["path"] == "general.intent_languages")
+    assert saved_field["value"] == ["en", "fr"]
+
+    before = config.read_text()
+    old_matcher = assistant._hassil_fastpath
+    def fail_download(*args):
+        raise OSError("offline")
+
+    monkeypatch.setattr(downloader, "ensure_hassil_intents", fail_download)
+    response = client.put("/config", json={"updates": {"general.intent_languages": ["en", "fr", "de"]}})
+    assert response.status_code == 503
+    assert config.read_text() == before
+    assert assistant._hassil_fastpath is old_matcher
+def test_intent_language_names():
+    from utils.locale import intent_languages
+
+    languages = intent_languages()
+    assert languages["en"] == "English"
+    assert languages["de"] == "Deutsch (German)"
+    assert languages["fr"] == "Français (French)"
 
 
 def test_dict_coercion_accepts_json_and_rejects_non_objects(tmp_path):

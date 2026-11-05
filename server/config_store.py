@@ -173,15 +173,8 @@ def _atomic_dump(doc: CommentedMap, path: str) -> None:
         raise
 
 
-def update_config(updates: dict, path: str = DEFAULT_CONFIG_PATH) -> list:
-    """Validate + apply a {dotted_path: value} map, writing atomically.
-
-    Every key must be a known schema path. Raises ConfigValidationError
-    (with all offending keys) before writing anything. Returns the applied
-    changes as `[{"path", "apply", "value"}]` — `apply` lets the caller flag
-    restart-required edits and `value` (already coerced) lets it push the
-    change to the running assistant for live hot-apply.
-    """
+def validate_updates(updates: dict) -> list:
+    """Validate and coerce a batch without changing the configuration."""
     errors: dict = {}
     coerced: list = []
     for dotted, raw in updates.items():
@@ -190,11 +183,25 @@ def update_config(updates: dict, path: str = DEFAULT_CONFIG_PATH) -> list:
             errors[dotted] = "unknown config key"
             continue
         try:
-            coerced.append((f, _coerce(f, raw)))
+            value = _coerce(f, raw)
+            if dotted == "general.intent_languages" and value is not None:
+                from utils.locale import intent_languages
+
+                unknown = set(value) - intent_languages().keys()
+                if unknown:
+                    raise ValueError(f"unsupported intent languages: {', '.join(sorted(unknown))}")
+                value = list(dict.fromkeys(value))
+            coerced.append((f, value))
         except ValueError as e:
             errors[dotted] = str(e)
     if errors:
         raise ConfigValidationError(errors)
+    return coerced
+
+
+def update_config(updates: dict, path: str = DEFAULT_CONFIG_PATH) -> list:
+    """Validate and atomically apply a {dotted_path: value} map."""
+    coerced = validate_updates(updates)
 
     doc = _load_doc(path)
     for f, value in coerced:
@@ -367,7 +374,8 @@ def settings_view(path: str = DEFAULT_CONFIG_PATH) -> dict:
         ):
             value = section[legacy]
         fields.append({**spec, "value": value, "set": present})
-    from core.backends import resolve_models, variant
+    from core.backends import TTS_MODEL_LANGUAGES, resolve_models, variant
+    from utils.locale import intent_languages
 
     # Keep the settings console's unconfigured selections aligned with the
     # runtime. Backend dropdown ordering is a presentation choice (and puts
@@ -380,6 +388,8 @@ def settings_view(path: str = DEFAULT_CONFIG_PATH) -> dict:
 
     return {
         "groups": list(GROUPS),
+        "intent_languages": intent_languages(),
+        "tts_model_languages": {backend: list(languages) for backend, languages in TTS_MODEL_LANGUAGES.items()},
         "fields": fields,
         "models": cfg.get("models"),
         "default_backends": default_backends,

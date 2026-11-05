@@ -83,6 +83,73 @@ def test_typed_fast_path_targets_pinned_room_without_voice_connection(room_chat,
     assert assistant.satellites["dashboard-text"].ha_area is None
 
 
+def test_hassil_dispatches_through_chat_and_preserves_satellite_room(room_chat, tmp_path):
+    http, assistant, post = room_chat
+    assistant.configure_hassil(["en"], str(tmp_path / "intents"))
+    response = http.post("/chat", json={"text": "turn on lights", "ha_area": "downstairs_office"})
+    assert response.status_code == 200
+    assert "Downstairs Office" in response.json()["answer"]
+    post.assert_called_once_with("/api/services/light/turn_on", json={
+        "entity_id": ["light.office", "light.office_pendant"],
+    })
+
+
+def test_hassil_dispatches_area_through_registered_tool(room_chat, tmp_path):
+    http, assistant, post = room_chat
+    tool_registry.register_tool(ha_devices.hassil_area, name="ha_hassil_area")
+    assistant.configure_hassil(["en"], str(tmp_path / "intents"))
+    response = http.post("/chat", json={"text": "turn on the lights in the kitchen"})
+    assert response.status_code == 200
+    post.assert_called_once_with("/api/services/light/turn_on", json={"entity_id": ["light.kitchen"]})
+
+
+def test_hassil_language_config_hot_reloads(room_chat, tmp_path, monkeypatch):
+    import shutil
+    from pathlib import Path
+
+    http, assistant, post = room_chat
+    intent_dir = tmp_path / "intents"
+    assistant.configure_hassil(["en"], str(intent_dir))
+    assistant._tts_backend = "qwen"
+    target = intent_dir / "de" / "2025.6.23.yaml"
+    target.parent.mkdir()
+    shutil.copyfile(Path(__file__).parent / "fixtures/hassil/de/2025.6.23.yaml", target)
+    monkeypatch.setattr(ha_client, "_ENTITY_ALIASES_MULTI", {"küchenlicht": ["light.kitchen"]})
+    monkeypatch.setattr(ha_client, "_ENTITY_ALIASES", {"küchenlicht": "light.kitchen"})
+
+    response = http.put("/config", json={"updates": {"general.intent_languages": ["de"]}})
+    assert response.status_code == 200
+    assert response.json()["restart_required"] is False
+    assert response.json()["applied"][0]["hot_applied"] is True
+    result = http.post("/chat", json={"text": "schalte das küchenlicht ein"})
+    assert result.status_code == 200
+    post.assert_called_once_with("/api/services/light/turn_on", json={"entity_id": "light.kitchen"})
+
+
+def test_multilingual_time_timer_and_music_dispatch_without_ha_discovery(room_chat, monkeypatch):
+    from pathlib import Path
+
+    from utils.hassil_fastpath import HassilFastPath
+
+    http, assistant, post = room_chat
+    assistant._hassil_fastpath = HassilFastPath(["de"], str(Path(__file__).parent / "fixtures/hassil"))
+    monkeypatch.setattr(ha_client, "_loaded", False)
+    monkeypatch.setattr(ha_client, "HA_TOKEN", "")
+    time_tool = Mock(return_value="The time")
+    timer_tool = Mock(return_value="Timer started")
+    play_tool = Mock(return_value="Playing")
+    tool_registry.register_tool(time_tool, name="get_current_time")
+    tool_registry.register_tool(timer_tool, name="start_countdown")
+    tool_registry.register_tool(play_tool, name="play_song")
+    for text in ("um wie viel uhr ist es", "um wie viel uhr ist das", "timer für fünf minuten", "spiele jazz"):
+        assert http.post("/chat", json={"text": text}).status_code == 200
+    assert time_tool.call_count == 2
+    time_tool.assert_called_with()
+    timer_tool.assert_called_once_with("300 seconds")
+    play_tool.assert_called_once_with("jazz")
+    post.assert_not_called()
+
+
 def test_original_three_turn_conversation_stays_on_fast_path(room_chat):
     http, assistant, post = room_chat
     for text in (

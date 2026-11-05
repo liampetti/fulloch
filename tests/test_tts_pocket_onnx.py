@@ -42,6 +42,9 @@ def test_loads_bundle_local_wrapper_and_uses_voice_wav(tmp_path, monkeypatch):
     assert sample_rate == 24000
     assert len(chunks) == 1
 
+    french = tts.load_tts(str(model_dir), language="french_24l")
+    assert french.kwargs["language"] == "french_24l"
+
 
 def test_play_chunks_emits_websocket_messages():
     import core.tts_pocket_onnx as tts

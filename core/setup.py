@@ -11,6 +11,7 @@ Import-light (stdlib + the import-light `core.backends`); never touches torch
 or the model stack, so it runs in Phase A before anything heavy loads.
 """
 
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -82,6 +83,21 @@ def _hub_snapshot_complete(model_id: str, models_dir: str) -> bool:
     return bool(revision) and snapshot.is_dir() and any(snapshot.iterdir())
 
 
+def pocket_onnx_bundle_present(root, language: str) -> bool:
+    """Check the selected bundle, not a marker left by a different language."""
+    root = Path(root)
+    bundle = root / "onnx" / language
+    try:
+        metadata = json.loads((bundle / "bundle.json").read_text())
+        names = [metadata["tokenizer_file"], "mimi_encoder.onnx", "text_conditioner.onnx",
+                 "flow_lm_main_int8.onnx", "flow_lm_flow_int8.onnx", "mimi_decoder_int8.onnx"]
+        if metadata.get("bos_before_voice_file"):
+            names.append(metadata["bos_before_voice_file"])
+        return (root / "pocket_tts_onnx.py").is_file() and all((bundle / name).is_file() for name in names)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def _asset_present(domain_cfg: dict, models_dir: str) -> bool:
     """Whether the model asset for one resolved domain is on disk.
 
@@ -97,12 +113,16 @@ def _asset_present(domain_cfg: dict, models_dir: str) -> bool:
     model = domain_cfg.get("model")
     if not model:
         return True
+    if spec is not None and spec.backend == "pocket-tts-onnx":
+        return pocket_onnx_bundle_present(model, domain_cfg.get("opts", {}).get("language", "english_2026-04"))
     if spec is not None and spec.backend == "pocket-tts-pytorch":
-        # Both pinned snapshots are required, not merely any cached revision.
+        from .backends import pocket_pytorch_snapshots
+
+        # The selected language's weights and tokenizer must both be cached.
         return all(
             all((_hub_dir(repo, models_dir) / "snapshots" / revision / filename).is_file()
                 for filename in allow)
-            for repo, allow, revision in spec.hf_snapshots
+            for repo, allow, revision in pocket_pytorch_snapshots(domain_cfg.get("opts", {}).get("language", "english_2026-04"))
         )
     if spec is not None and spec.hf_files:
         root = Path(model)
@@ -178,7 +198,7 @@ def detect_setup_state(
             config_error=msg,
         )
 
-    resolved = resolve_models(config.get("models"))
+    resolved = resolve_models(config.get("models"), (config.get("general") or {}).get("tts_language"))
 
     # Variant guard: the slim CPU image can't load gpu_only backends (no
     # qwen_asr / flash-attn / llama-cpp). This bites when a config resolves to

@@ -80,8 +80,19 @@ SCHEMA: tuple = (
         "asr_language",
         "str",
         "General",
-        "English",
-        "Force transcription to one language (currently English only).",
+        None,
+        "Optional single-language transcription override. Leave blank for "
+        "automatic detection when supported by the selected ASR model. "
+        "This is independent of intent languages and requires a restart.",
+    ),
+    Field(
+        "general",
+        "intent_languages",
+        "list",
+        "General",
+        ["en"],
+        "Languages to use for Home Assistant intent matching.",
+        apply=HOT,
     ),
     Field(
         "general",
@@ -167,6 +178,11 @@ SCHEMA: tuple = (
         "Stock symbols to include in finance briefings (for example, AAPL:NASDAQ). Exchange-first symbols are also accepted. Requires a SerpApi key; restart required.",
     ),
     # --- Voice -------------------------------------------------------------
+    Field(
+        "general", "tts_language", "enum", "Voice", "english",
+        "Pretrained TTS language weights, used only by supported models. Restart required.",
+        choices=("english", "french", "german", "italian", "portuguese", "spanish"),
+    ),
     Field(
         "general",
         "voice_clone",
@@ -326,7 +342,7 @@ SCHEMA: tuple = (
         "vad_soft_endpoint_silence_ms",
         "int",
         "Endpointing",
-        500,
+        100,
         "Early-commit pause: a complete + speculation-safe command acts "
         "before the full endpoint, cutting latency. 0 disables.",
         apply=HOT,

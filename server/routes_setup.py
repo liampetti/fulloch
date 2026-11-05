@@ -34,6 +34,10 @@ class ConfigUpdateRequest(BaseModel):
     updates: dict
 
 
+class IntentLanguagesRequest(BaseModel):
+    languages: list[str]
+
+
 class TimezoneRequest(BaseModel):
     tz: str
 
@@ -129,7 +133,7 @@ def start_auto_download(context: AppContext) -> None:
     from .downloader import plan_assets
 
     cfg = read_config(context.config_path)
-    resolved = resolve_models(cfg.get("models"))
+    resolved = resolve_models(cfg.get("models"), (cfg.get("general") or {}).get("tts_language"))
     assets = plan_assets(resolved)
 
     def _done(ok: bool) -> None:
@@ -220,6 +224,25 @@ def register_setup_routes(
 
         return JSONResponse(preflight())
 
+    @app.post("/setup/intent-languages")
+    def setup_intent_languages(req: IntentLanguagesRequest) -> JSONResponse:
+        """Prepare wizard selections without changing the saved configuration."""
+        from .config_store import ConfigValidationError, validate_updates
+        from .downloader import ensure_hassil_intents
+
+        if not req.languages:
+            raise HTTPException(status_code=422, detail="Select at least one intent language.")
+        try:
+            languages = validate_updates({"general.intent_languages": req.languages})[0][1]
+        except ConfigValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors) from exc
+        try:
+            ensure_hassil_intents(languages, str(Path(context.config_path).parent / "intents"))
+        except Exception as exc:  # noqa: BLE001 — report download failures to the wizard
+            logger.warning("Intent language preparation failed: %s", exc)
+            raise HTTPException(status_code=503, detail="Could not prepare intent languages; please retry.") from exc
+        return JSONResponse({"ok": True})
+
     @app.post("/setup/integration-token")
     def setup_integration_token() -> JSONResponse:
         """Issue a token once; existing integrations and credentials are preserved."""
@@ -243,7 +266,7 @@ def register_setup_routes(
     def config_update(req: ConfigUpdateRequest) -> JSONResponse:
         from utils import local_time
 
-        from .config_store import ConfigValidationError, update_config
+        from .config_store import ConfigValidationError, update_config, validate_updates
 
         timezone = req.updates.get("general.timezone")
         if "general.timezone" in req.updates and not local_time.is_valid_tz(timezone):
@@ -257,6 +280,16 @@ def register_setup_routes(
             except (OSError, ValueError) as e:
                 raise HTTPException(status_code=422, detail={"general.voice_clone": str(e)}) from e
         try:
+            validated = validate_updates(req.updates)
+            for field, value in validated:
+                if field.path == "general.intent_languages":
+                    from .downloader import ensure_hassil_intents
+
+                    try:
+                        ensure_hassil_intents(value or ["en"], str(Path(context.config_path).parent / "intents"))
+                    except Exception as exc:  # noqa: BLE001 — convert download failures to an actionable API error
+                        logger.warning("Intent language download failed: %s", exc)
+                        raise HTTPException(status_code=503, detail="Could not download intent languages; configuration was not saved.") from exc
             applied = update_config(req.updates, context.config_path)
         except ConfigValidationError as e:
             raise HTTPException(status_code=422, detail=e.errors) from e
@@ -311,6 +344,7 @@ def register_setup_routes(
         from core.backends import resolve_models
 
         from .config_schema import TIER_PRESETS
+        from .config_store import read_config
         from .downloader import plan_assets
 
         models = req.models
@@ -319,7 +353,8 @@ def register_setup_routes(
             if tier is None:
                 raise HTTPException(status_code=422, detail=f"unknown tier {req.tier!r}")
             models = tier.models
-        resolved = resolve_models(models)
+        cfg = read_config(context.config_path)
+        resolved = resolve_models(models, (cfg.get("general") or {}).get("tts_language"))
         assets = plan_assets(resolved)
         return JSONResponse({"assets": [a.snapshot() for a in assets]})
 
@@ -357,10 +392,16 @@ def register_setup_routes(
         from core.backends import resolve_models
 
         from .config_store import read_config
-        from .downloader import plan_assets
+        from .downloader import ensure_hassil_intents, plan_assets
 
         cfg = read_config(context.config_path)
-        resolved = resolve_models(cfg.get("models"))
+        languages = (cfg.get("general") or {}).get("intent_languages") or ["en"]
+        try:
+            ensure_hassil_intents(languages, str(Path(context.config_path).parent / "intents"))
+        except Exception as exc:  # noqa: BLE001 — surface failures before starting installation
+            logger.warning("Intent language download failed: %s", exc)
+            raise HTTPException(status_code=503, detail="Could not prepare intent languages; please retry setup.") from exc
+        resolved = resolve_models(cfg.get("models"), (cfg.get("general") or {}).get("tts_language"))
         assets = plan_assets(resolved)
 
         def _done(ok: bool) -> None:
@@ -395,7 +436,7 @@ def register_setup_routes(
         from .downloader import plan_assets
 
         cfg = read_config(context.config_path)
-        resolved = resolve_models(cfg.get("models"))
+        resolved = resolve_models(cfg.get("models"), (cfg.get("general") or {}).get("tts_language"))
         assets = plan_assets(resolved)
 
         def _done(ok: bool) -> None:

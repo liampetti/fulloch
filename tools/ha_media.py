@@ -6,6 +6,7 @@ Uses ha_client as the single owner of configuration and resolution state.
 import logging
 from typing import Optional
 
+from utils.response_language import response
 from utils.value_parsing import parse_percentage
 
 from . import ha_client as client
@@ -31,19 +32,19 @@ def volume_set(entity: str, volume: int | str) -> str:
     """
     entity_id = _media_target(entity)
     if entity_id is None:
-        return "I don't know which speakers to adjust."
+        return response("media_no_speakers")
     friendly = client._friendly_for(entity_id)
 
     try:
         pct = parse_percentage(volume)
     except ValueError:
-        return "I couldn't read that volume percentage."
+        return response("media_invalid_volume")
     return client._call_service(
         "media_player",
         "volume_set",
         entity_id,
         {"volume_level": pct / 100},
-        success_message=f"{friendly} volume {pct}",
+        success_message=response("media_volume_set", target=friendly, value=pct),
     )
 
 
@@ -56,13 +57,13 @@ def volume_up(entity: Optional[str] = None) -> str:
     """Step the volume up on a media_player entity (default: Spotify, AVR, then TV)."""
     entity_id = _media_target(entity)
     if entity_id is None:
-        return "I don't know which speakers to turn up."
+        return response("media_no_louder")
     friendly = client._friendly_for(entity_id)
     return client._call_service(
         "media_player",
         "volume_up",
         entity_id,
-        success_message=f"{friendly} louder",
+        success_message=response("media_louder", target=friendly),
     )
 
 
@@ -75,13 +76,13 @@ def volume_down(entity: Optional[str] = None) -> str:
     """Step the volume down on a media_player entity (default: Spotify, AVR, then TV)."""
     entity_id = _media_target(entity)
     if entity_id is None:
-        return "I don't know which speakers to turn down."
+        return response("media_no_quieter")
     friendly = client._friendly_for(entity_id)
     return client._call_service(
         "media_player",
         "volume_down",
         entity_id,
-        success_message=f"{friendly} quieter",
+        success_message=response("media_quieter", target=friendly),
     )
 
 
@@ -99,14 +100,14 @@ def select_source(source: str, entity: Optional[str] = None) -> str:
     """
     entity_id = _media_target(entity, prefer_spotify=False)
     if entity_id is None:
-        return "I don't know which device to switch."
+        return response("media_no_device")
     friendly = client._friendly_for(entity_id)
     return client._call_service(
         "media_player",
         "select_source",
         entity_id,
         {"source": source},
-        success_message=f"{friendly} switched to {source}",
+        success_message=response("media_source", target=friendly, source=source),
     )
 
 
@@ -169,19 +170,19 @@ def _spotify_transport_fallback(action: str) -> Optional[str]:
         device_id = spotify_tool._get_active_device(sp)
         if action == "pause":
             sp.pause_playback(device_id=device_id)
-            return "Spotify paused"
+            return response("spotify_paused")
         if action == "resume":
             sp.start_playback(device_id=device_id)
-            return "Spotify resumed"
+            return response("spotify_resumed")
         if action == "skip":
             sp.next_track(device_id=device_id)
-            return "Skipped to the next track on Spotify"
+            return response("spotify_skipped")
         if action == "previous":
             sp.previous_track(device_id=device_id)
-            return "Back a track on Spotify"
+            return response("spotify_previous")
     except Exception:
         logger.exception(f"Spotify Connect transport fallback failed ({action})")
-        return "Couldn't control Spotify — no active device found."
+        return response("spotify_no_device")
     return None
 
 
@@ -194,13 +195,13 @@ def pause(entity: Optional[str] = None) -> str:
     """Pause a media_player entity. Defaults to Spotify, then AVR, then TV."""
     entity_id = _media_target(entity)
     if entity_id is None:
-        return _spotify_transport_fallback("pause") or "I don't know which player to pause."
+        return _spotify_transport_fallback("pause") or response("media_no_pause")
     friendly = client._friendly_for(entity_id)
     return client._call_service(
         "media_player",
         "media_pause",
         entity_id,
-        success_message=f"{friendly} paused",
+        success_message=response("media_paused", target=friendly),
     )
 
 
@@ -213,13 +214,13 @@ def resume(entity: Optional[str] = None) -> str:
     """Resume a media_player entity. Defaults to Spotify, then AVR, then TV."""
     entity_id = _media_target(entity)
     if entity_id is None:
-        return _spotify_transport_fallback("resume") or "I don't know which player to resume."
+        return _spotify_transport_fallback("resume") or response("media_no_resume")
     friendly = client._friendly_for(entity_id)
     return client._call_service(
         "media_player",
         "media_play",
         entity_id,
-        success_message=f"{friendly} resumed",
+        success_message=response("media_resumed", target=friendly),
     )
 
 
@@ -232,13 +233,13 @@ def skip(entity: Optional[str] = None) -> str:
     """Skip a media_player entity. Defaults to Spotify, then AVR, then TV."""
     entity_id = _media_target(entity)
     if entity_id is None:
-        return _spotify_transport_fallback("skip") or "I don't know which player to skip on."
+        return _spotify_transport_fallback("skip") or response("media_no_skip")
     friendly = client._friendly_for(entity_id)
     return client._call_service(
         "media_player",
         "media_next_track",
         entity_id,
-        success_message=f"{friendly} skipped",
+        success_message=response("media_skipped", target=friendly),
     )
 
 
@@ -252,14 +253,14 @@ def previous(entity: Optional[str] = None) -> str:
     entity_id = _media_target(entity)
     if entity_id is None:
         return (
-            _spotify_transport_fallback("previous") or "I don't know which player to skip back on."
+            _spotify_transport_fallback("previous") or response("media_no_previous")
         )
     friendly = client._friendly_for(entity_id)
     return client._call_service(
         "media_player",
         "media_previous_track",
         entity_id,
-        success_message=f"{friendly} back a track",
+        success_message=response("media_previous", target=friendly),
     )
 
 
@@ -277,12 +278,12 @@ def ha_mute(entity: Optional[str] = None, muted: bool = True) -> str:
     """
     entity_id = _media_target(entity)
     if entity_id is None:
-        return "I don't know which speakers to mute."
+        return response("media_no_mute")
     friendly = client._friendly_for(entity_id)
     return client._call_service(
         "media_player",
         "volume_mute",
         entity_id,
         {"is_volume_muted": bool(muted)},
-        success_message=f"{friendly} {'muted' if muted else 'unmuted'}",
+        success_message=response("media_muted" if muted else "media_unmuted", target=friendly),
     )

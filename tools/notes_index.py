@@ -279,7 +279,16 @@ class NotesIndex:
             self._ensure_loaded()
             seen = set()
             dirty = False
-            all_paths = sorted(self._notes_root.rglob("*.md"))
+            all_paths = []
+            for path in sorted(self._notes_root.rglob("*.md")):
+                try:
+                    # A vault may contain broken links or links outside its root.
+                    # Neither should prevent searches of the remaining notes.
+                    self._rel(path)
+                    if path.is_file():
+                        all_paths.append(path)
+                except (OSError, ValueError):
+                    continue
             pending = [
                 path
                 for path in all_paths
@@ -330,3 +339,28 @@ class NotesIndex:
             scores = matrix @ query_emb
             top_idx = np.argsort(-scores)[:k]
             return [(float(scores[i]), self._chunks[i]) for i in top_idx]
+
+    def search_documents(
+        self, query: str, *, allowed_files: set[str], k: int = 50, min_score: float = 0.25,
+    ) -> List[Tuple[float, Chunk]]:
+        """Return the best matching chunk per allowed document, ranked by similarity."""
+        self.scan()
+        with self._lock:
+            chunks = [chunk for chunk in self._chunks if chunk.file in allowed_files]
+            if not chunks or k <= 0:
+                return []
+            query_emb = self._embed([QUERY_INSTRUCTION + query])[0]
+            scores = np.stack([chunk.embedding for chunk in chunks]) @ query_emb
+            results = []
+            seen = set()
+            for index in np.argsort(-scores):
+                score, chunk = float(scores[index]), chunks[index]
+                if score < min_score:
+                    break
+                if chunk.file in seen:
+                    continue
+                seen.add(chunk.file)
+                results.append((score, chunk))
+                if len(results) >= k:
+                    break
+            return results

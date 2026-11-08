@@ -60,13 +60,11 @@ export function createSettings({ state, voice, doRestart, doRestartToHttps }) {
       <p class="preset-intro">Pick the stack that suits your hardware. Fine-tune it below.</p>
       <div class="preset-pills" role="group" aria-label="Hardware presets">${tiers.map(t => `<button type="button" class="preset-pill" data-tier="${esc(t.id)}" aria-pressed="false"><span class="preset-pill-name">${esc(t.label.split(' — ')[0])}</span><span class="preset-pill-detail">${t.vram_class_gb ? `${t.vram_class_gb} GB` : 'No GPU'}</span></button>`).join('')}</div>
       <p class="preset-status" id="preset-description" aria-live="polite"></p><div id="preset-access"></div></section>`));
-    config.appendChild(section('General', 'Home Assistant languages, notes storage and conversation history. Other tuning remains in config.yml.',
+    config.appendChild(section('General', 'Home Assistant languages and notes storage. Other tuning remains in config.yml.',
       `<label>Home Assistant intent languages ${info('Choose the languages used to match Home Assistant commands. Your speech recognition and spoken response languages depend on your speech models. New language tables are downloaded once; changes save immediately.')}</label>
       <div id="settings-intent-languages"></div><p id="intent-language-status" class="help" role="status" aria-live="polite"></p>` +
       input('general.asr_language', 'Speech recognition language override', 'Leave blank for automatic detection where supported. Enter a single language name, such as French, only if your ASR backend supports it. Independent of intent languages; restart required.') +
-      input('notes.path', 'Notes directory', 'A directory on the Fulloch host/container for Markdown notes. It does not need to be an Obsidian vault.') + `
-      <label>Delete conversation history ${info('Clears the dashboard and active conversation context, not saved notes or reports.')}</label>
-      <button class="danger" id="delete-conversation">Delete conversation history</button>`));
+      input('notes.path', 'Notes directory', 'A directory on the Fulloch host/container for Markdown notes. It does not need to be an Obsidian vault.')));
     const asr = optsFor('asr'), tts = optsFor('tts');
     const llms = optsFor('llm').filter(b => b.backend !== 'openai');
     const aiCustom = ['custom', 'openai'].includes(backend('llm'));
@@ -192,10 +190,6 @@ export function createSettings({ state, voice, doRestart, doRestartToHttps }) {
     });
     $('voice-sel').parentElement.appendChild(voice.makeVoicePreview($('voice-sel')));
     $('save-cfg').addEventListener('click', saveAllSettings);
-    $('delete-conversation').addEventListener('click', async () => {
-      if (!confirm('Delete conversation history? Saved notes and reports will be kept.')) return;
-      await action('/reset', {}, 'Conversation history deleted.');
-    });
     $('sec-pw-save').addEventListener('click', async () => {
       const password = $('sec-pw').value;
       if (password.length < 8 || password !== $('sec-pw2').value) {

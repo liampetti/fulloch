@@ -82,6 +82,27 @@
 
   <main>
     <section id="chat" class="view">
+      <div id="conversation-controls" class="conversation-controls">
+        <button type="button" id="conversation-menu-button" class="conversation-menu-button" aria-label="Conversation options" aria-expanded="false">⋮</button>
+        <div id="conversation-menu" class="conversation-popover" hidden>
+          <button type="button" id="conversation-save">Save conversation</button>
+          <button type="button" id="conversation-clear">Clear conversation</button>
+          <button type="button" id="conversation-list-open">Saved conversations</button>
+        </div>
+        <div id="conversation-list" class="conversation-popover conversation-list" hidden>
+          <h2>Saved conversations</h2>
+          <form id="conversation-search-form" role="search">
+            <input id="conversation-search" type="search" maxlength="500" placeholder="Search by meaning…" aria-label="Search saved conversations">
+            <button type="submit">Search</button>
+            <button type="button" id="conversation-search-clear">Clear</button>
+          </form>
+          <div id="conversation-items" class="conversation-items"></div>
+          <button type="button" id="conversation-more" hidden>Load more</button>
+          <p id="conversation-list-status" role="status"></p>
+        </div>
+      </div>
+      <p id="conversation-context-hint" class="conversation-context-hint">The assistant uses a limited working context; older visible messages may not be remembered.</p>
+      <p id="conversation-status" class="conversation-status" role="status" aria-live="polite" hidden></p>
       <div class="empty" id="empty">
         <div class="logo-lg"><img src="/logo.png" alt=""></div>
         <p class="wake-hint" id="wake-hint" hidden></p>
@@ -99,9 +120,15 @@
     </section>
 
     <section id="entities" class="view" hidden>
+      <div id="entities-all-controls" class="entity-bulk-controls" hidden>
+        <span>All entities</span>
+        <button type="button" id="entities-allow-all">Allow all</button>
+        <button type="button" id="entities-block-all">Block all</button>
+      </div>
       <input id="entity-search" type="text" placeholder="Search entities…" autocomplete="off">
+      <p id="entities-error" class="entity-error" role="alert" hidden></p>
       <div id="entities-list" class="entities-list"></div>
-      <p class="facts-hint" id="entities-hint">Switch off any entity you don't want Fulloch to control by voice — it stays usable here in the dashboard. Door locks and alarms are good candidates. Changes take effect immediately.</p>
+      <p class="facts-hint" id="entities-hint">Switch off any entity you don't want Fulloch to control by voice — it stays usable here in the dashboard. Door locks and alarms are good candidates. Bulk controls affect all entities or all entities in a group, including those hidden by search. Changes take effect immediately.</p>
     </section>
 
     <section id="obsidian" class="view" hidden>
@@ -139,6 +166,15 @@
             <button id="documents-refresh" class="obs-btn ghost" type="button">Refresh</button>
           </div>
         </div>
+        <form id="documents-search-form" class="documents-search" role="search">
+          <label for="documents-search">Search documents by meaning</label>
+          <div class="documents-search-controls">
+            <input id="documents-search" type="search" placeholder="Search documents…" maxlength="500" autocomplete="off">
+            <button class="obs-btn ghost" type="submit">Search</button>
+            <button id="documents-search-clear" class="obs-btn ghost" type="button">Clear</button>
+          </div>
+          <p id="documents-search-status" class="documents-search-status" role="status" aria-live="polite"></p>
+        </form>
         <div id="documents-list" class="documents-list" aria-live="polite"></div>
       </section>
     </section>
@@ -147,6 +183,50 @@
       <div id="satellites-stage"></div>
     </section>
   </main>
+
+  <dialog id="sat-setup" class="sat-setup" aria-labelledby="sat-setup-title">
+    <h2 id="sat-setup-title">Set up Waveshare via USB</h2>
+    <p>For the <strong>ESP32-S3 Touch LCD 1.85C Box Rev 2</strong> only. Connect the board by USB. Setup requires a dashboard password and a signed-in session; enable one in Settings → Security if needed.</p>
+    <p class="sat-setup-warning"><strong>Migration:</strong> all existing tokenless satellites must be reprovisioned when mandatory authentication is enabled. Registered token-bearing devices remain supported. Keep USB access for recovery.</p>
+    <p id="sat-setup-support" role="status"></p>
+    <p>For a private or self-signed certificate, install the server's public CA certificate in your browser or operating system trust store, then open the dashboard at the matching HTTPS hostname. Never paste a private key.</p>
+    <p>WebSerial unavailable? <a href="/static/satellite-usb-cli.txt" target="_blank" rel="noopener">Use the interactive USB CLI fallback</a>.</p>
+    <form id="sat-setup-form" autocomplete="off">
+      <fieldset id="sat-setup-fields">
+        <legend>Device and network</legend>
+        <div class="sat-setup-grid">
+          <label>Device ID <input name="device_id" required maxlength="64" placeholder="kitchen-01"></label>
+          <label>Device name <input name="device_name" required maxlength="64" placeholder="Kitchen"></label>
+          <label>POSIX timezone <input name="timezone" required maxlength="64" value="UTC0"></label>
+          <label>Wi-Fi network <input name="wifi_ssid" required maxlength="32"></label>
+          <label>Wi-Fi password <input name="wifi_password" type="password" required maxlength="63" autocomplete="new-password"></label>
+          <label>Server WSS URL <input name="server_url" type="url" required placeholder="wss://fulloch.local:8765/ws/satellite-v2"></label>
+        </div>
+        <p>Use a LAN hostname or IP reachable by the satellite, not a Docker bridge address. The certificate must match this host. If the address or certificate changes, reprovision the device.</p>
+        <label>Public server certificate (PEM, optional if using the active dashboard certificate)<textarea name="certificate" rows="3" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
+        <div class="sat-setup-grid">
+          <label>Speaker volume (%) <input name="volume" type="number" min="0" max="100" value="50" required></label>
+          <label>Display rotation <select name="rotation"><option value="0">0°</option><option value="180">180°</option></select></label>
+          <label>Music service <select name="music"><option value="none">Disabled</option><option value="sonos">Sonos</option><option value="spotify">Spotify</option></select></label>
+        </div>
+        <label class="sat-setup-check"><input name="aec" type="checkbox" checked> Enable echo cancellation</label>
+        <div id="sat-setup-sonos" hidden><label>Sonos host <input name="sonos_host" maxlength="63"></label></div>
+        <div id="sat-setup-spotify" class="sat-setup-grid" hidden>
+          <label>Spotify client ID <input name="spotify_id" maxlength="256"></label>
+          <label>Spotify client secret <input name="spotify_secret" type="password" maxlength="256" autocomplete="new-password"></label>
+          <label>Spotify refresh token <input name="spotify_token" type="password" maxlength="512" autocomplete="new-password"></label>
+        </div>
+        <label class="sat-setup-check"><input name="migration" type="checkbox" required> I understand that all existing tokenless satellites must be reprovisioned and agree to enable mandatory token authentication.</label>
+      </fieldset>
+      <div class="sat-setup-actions">
+        <button id="sat-setup-prepare" class="satellite-action" type="submit">Validate and prepare</button>
+        <button id="sat-setup-flash" class="satellite-action" type="button" hidden>Choose USB device and flash</button>
+        <button id="sat-setup-cancel" class="satellite-action quiet" type="button">Cancel</button>
+      </div>
+    </form>
+    <progress id="sat-setup-progress" max="100" value="0" hidden></progress>
+    <p id="sat-setup-message" role="status" aria-live="polite"></p>
+  </dialog>
 
 
   <footer id="chat-footer">

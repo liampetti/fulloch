@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 import requests
 
 from utils.local_time import now
+from utils.response_language import response as localized_response
 
 from . import notes, notes_root
 from .thinking_context import get_artifact
@@ -147,8 +148,9 @@ def _save_results(query: str, papers: list[dict]) -> None:
 
 
 def _format(paper: dict) -> str:
-    citations = f", cited {paper['citations']} times" if paper["citations"] is not None else ""
-    return f"{paper['title']} ({paper['year'] or 'year unknown'}{citations}). {paper['digest'][:500]} [{paper['source']}: {paper['id']}]"
+    citations = localized_response("research_paper_citations", count=paper['citations']) if paper["citations"] is not None else ""
+    return localized_response("research_paper_entry", title=paper['title'], year=paper['year'] or localized_response("research_paper_unknown_year"),
+                              citations=citations, digest=paper['digest'][:500], source=paper['source'], id=paper['id'])
 
 
 def _with_source_quality(papers: list[dict]) -> list[dict]:
@@ -171,18 +173,18 @@ def _wolfram_enabled() -> bool:
 )
 def search_papers(query: str, source: str = "auto", max_results: int = MAX_RESULTS) -> str:
     if not isinstance(query, str):
-        return ThinkingResult("Ask what papers to search for.", status="needs_input", scope="A paper-search query is required.")
+        return ThinkingResult(localized_response("research_missing_query"), status="needs_input", scope="A paper-search query is required.")
     query = query.strip()
     if not query:
-        return ThinkingResult("Ask what papers to search for.", status="needs_input", scope="A paper-search query is required.")
+        return ThinkingResult(localized_response("research_missing_query"), status="needs_input", scope="A paper-search query is required.")
     try:
         limit = _limit(max_results)
     except (TypeError, ValueError):
-        return ThinkingResult(f"Choose between 1 and {MAX_RESULTS} paper results.", status="needs_input", scope="The requested result count is invalid.")
+        return ThinkingResult(localized_response("research_bad_count", max=MAX_RESULTS), status="needs_input", scope="The requested result count is invalid.")
     providers = {"semantic_scholar": _semantic_scholar, "arxiv": _arxiv, "openalex": _openalex}
     order = ["semantic_scholar", "arxiv", "openalex"] if source == "auto" else [source]
     if any(name not in providers for name in order):
-        return ThinkingResult(f"Unknown paper source {source!r}.", status="needs_input", scope="The requested paper source is unsupported.")
+        return ThinkingResult(localized_response("research_unknown_source", source=repr(source)), status="needs_input", scope="The requested paper source is unsupported.")
     provider_responded = False
     for name in order:
         try:
@@ -201,13 +203,13 @@ def search_papers(query: str, source: str = "auto", max_results: int = MAX_RESUL
             )
     if not provider_responded:
         return ThinkingResult(
-            "Paper search is temporarily unavailable.",
+            localized_response("research_unavailable"),
             status="unavailable",
             scope="No configured paper provider completed the requested search.",
             next_actions=("search_papers",),
         )
     return ThinkingResult(
-        f"I couldn't find papers matching {query}.",
+        localized_response("research_not_found", query=query),
         status="rejected",
         scope="No configured paper provider returned a record for this query.",
         next_actions=("search_papers",),
@@ -233,16 +235,15 @@ def get_paper_detail(artifact_id: str, ordinal: int) -> str:
         paper = papers[int(ordinal) - 1]
     except (IndexError, TypeError, ValueError):
         return ThinkingResult(
-            "That paper is unavailable in the supplied search artifact.",
+            localized_response("research_paper_unavailable"),
             status="needs_input",
             scope="A valid paper-search artifact reference and ordinal are required.",
         )
     if not isinstance(paper, dict):
-        return ThinkingResult("That paper record is invalid.", status="failed", scope="The stored paper record is malformed.")
-    text = (
-        f"{paper['title']}. {paper['digest'][:1500]} DOI: {paper['doi'] or 'not supplied'}. "
-        f"Source: {paper['source']} {paper['id']}. URL: {paper['url'] or 'not supplied'}."
-    )
+        return ThinkingResult(localized_response("research_paper_invalid"), status="failed", scope="The stored paper record is malformed.")
+    text = localized_response("research_paper_detail", title=paper['title'], digest=paper['digest'][:1500],
+                              doi=paper['doi'] or localized_response("research_not_supplied"),
+                              source=paper['source'], id=paper['id'], url=paper['url'] or localized_response("research_not_supplied"))
     return ThinkingResult(
         text,
         evidence={"artifact_id": artifact_id, "ordinal": int(ordinal), "paper": paper},
@@ -260,7 +261,7 @@ def get_paper_detail(artifact_id: str, ordinal: int) -> str:
 def wolfram_query(query: str) -> str:
     """Run one bounded Wolfram Alpha query only when explicitly configured."""
     if not _wolfram_enabled():
-        return "Wolfram is not enabled."
+        return localized_response("research_wolfram_disabled")
     try:
         response = requests.get(
             "https://api.wolframalpha.com/v1/result",
@@ -270,4 +271,4 @@ def wolfram_query(query: str) -> str:
         response.raise_for_status()
         return response.text[:2000]
     except requests.RequestException as exc:
-        return f"Wolfram is unavailable: {exc}"
+        return localized_response("research_wolfram_unavailable", error=exc)

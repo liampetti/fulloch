@@ -11,7 +11,7 @@ from core import agent_loop as al
 from core.agent_search import normalise_search_query
 from core.tts_session import TtsSession
 from core.turn_stats import TurnStats
-from tools.tool_registry import ToolRegistry
+from tools.tool_registry import ThinkingResult, ToolRegistry
 
 
 @pytest.fixture
@@ -116,6 +116,33 @@ def test_search_stall_precedes_dispatch_and_summary_is_in_history_before_replan(
     turn.catch.assert_called_once_with("Find the latest news")
     turn.search.assert_called_once_with("latest news")
     assert turn.stats.tool_dispatches == 1
+
+
+def test_translated_current_news_requires_search_before_answering(turn):
+    query = "What was the news in Germany today? Tell me in German"
+    _emissions(
+        turn,
+        {"reply": "Erfundene Nachrichten."},
+        {"actions": [_search("today's news in Germany")]},
+        {"reply": "Die bestätigten Nachrichten aus Deutschland."},
+    )
+    turn.host._summarise_search_result.return_value = "Verified news in Germany today."
+
+    assert turn.loop.run(query) == "Die bestätigten Nachrichten aus Deutschland."
+    turn.search.assert_called_once_with("today's news in Germany")
+    assert turn.host._generate_with_context_recovery.call_count == 3
+    assert any(item.get("name") == "live_fact_guard" for item in turn.history)
+    assert not any("Erfundene Nachrichten" in str(item.get("content", "")) for item in turn.history)
+
+
+def test_translated_current_news_does_not_return_guess_after_repair_fails(turn):
+    _emissions(turn, {"reply": "Erfundene Nachrichten."}, {"reply": "Noch mehr erfundene Nachrichten."})
+
+    result = turn.loop.run("What was the news in Germany today? Tell me in German")
+
+    assert "couldn't verify" in result
+    assert "Nachrichten" not in result
+    turn.search.assert_not_called()
 
 
 def test_current_research_acknowledgement_is_replaced_with_real_deep_think_dispatch(turn):
@@ -224,6 +251,52 @@ def test_search_cache_is_scoped_to_one_turn(turn):
     assert turn.loop.run("Find the news again") == "Grounded findings."
     assert turn.search.call_args_list == [call("latest news"), call("latest news")]
     assert turn.host._summarise_search_result.call_count == 2
+
+
+@pytest.mark.parametrize("retry_query", ["latest news", "major headlines today"])
+@pytest.mark.parametrize("first_status", ["rejected", "evidence"])
+def test_failed_search_retry_returns_only_successful_summary(turn, retry_query, first_status):
+    turn.catch.return_value = {"actions": [_search()]}
+    turn.search.side_effect = [
+        ThinkingResult("User question: no usable snippets", status=first_status, scope="Sources."),
+        ThinkingResult("User question: useful snippets", status="evidence", scope="Sources found."),
+    ]
+    turn.host._summarise_search_result.side_effect = [
+        "I'm not able to answer this. The snippets do not contain news.",
+        "Today's headlines include a major discovery.",
+    ]
+    _emissions(turn, {"actions": [_search(retry_query)]},
+               {"reply": "I'm not able to answer this. Today's headlines include a major discovery."})
+
+    assert turn.loop.run("Summarise today's news") == "Today's headlines include a major discovery."
+    assert turn.search.call_count == 2
+
+
+def test_unresolved_search_failure_is_still_reported(turn):
+    turn.catch.return_value = {"actions": [_search()]}
+    turn.search.return_value = ThinkingResult(
+        "User question: no usable snippets", status="rejected", scope="No sources."
+    )
+    turn.host._summarise_search_result.return_value = "I couldn't find any news."
+    _emissions(turn, {"reply": "I couldn't find any news."})
+
+    assert "couldn't find any news" in turn.loop.run("Summarise today's news")
+
+
+def test_separate_failed_search_is_not_hidden_by_success(turn):
+    turn.catch.return_value = {"actions": [_search("news"), _search("weather")]}
+    turn.search.side_effect = [
+        ThinkingResult("User question: no news", status="rejected", scope="No sources."),
+        ThinkingResult("User question: weather", status="evidence", scope="Sources found."),
+    ]
+    turn.host._summarise_search_result.side_effect = [
+        "I can't answer from these sources.", "The forecast is sunny.",
+    ]
+    _emissions(turn, {"actions": [_search("weather")]}, {"reply": "The forecast is sunny."})
+
+    answer = turn.loop.run("Find news and weather")
+    assert "can't answer" in answer
+    assert "forecast is sunny" in answer
 
 
 def test_cancellation_during_search_stall_prevents_dispatch(turn):

@@ -11,6 +11,8 @@
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 ruff>=0.4.0
+filelock==3.20.3
+esp-idf-nvs-partition-gen==0.1.7
 
 # Light runtime deps the tests import directly
 numpy>=1.24.0
@@ -24,6 +26,8 @@ requests>=2.31
 beautifulsoup4>=4.12
 Markdown>=3.10
 word2number>=1.1
+num2words==0.5.14
+langid==1.1.6
 hassil>=2.1.0
 simpleeval>=1.0
 pint>=0.24

@@ -3,6 +3,7 @@ import { createLifetime } from './browser-lifetime.js';
 import { createChatUI } from './chat-ui.js';
 import { createBrowserSatellite } from './browser-satellite.js';
 import { createBrandLogo } from './brand-logo.js';
+import { createSatelliteSetup } from './satellite-setup.js';
 
 const lifetime = createLifetime();
 const brandLogo = createBrandLogo(document.getElementById('brand-logo'));
@@ -347,7 +348,14 @@ const satellite = createBrowserSatellite({
   const entitiesList = document.getElementById('entities-list');
   const entitiesHint = document.getElementById('entities-hint');
   const entitySearch = document.getElementById('entity-search');
+  const entitiesAllControls = document.getElementById('entities-all-controls');
+  const entitiesAllowAll = document.getElementById('entities-allow-all');
+  const entitiesBlockAll = document.getElementById('entities-block-all');
+  const entitiesError = document.getElementById('entities-error');
   let allEntities = [];
+  let entitiesBusy = false;
+  let entitiesRequestVersion = 0;
+  const expandedEntityDomains = new Set();
 
   const renderEntities = () => {
     const q = entitySearch.value.trim().toLowerCase();
@@ -357,6 +365,9 @@ const satellite = createBrowserSatellite({
           e.entity_id.toLowerCase().includes(q))
       : allEntities;
     entitiesList.innerHTML = '';
+    entitiesAllControls.hidden = !allEntities.length;
+    entitiesAllowAll.disabled = entitiesBusy || !allEntities.some((e) => e.denied);
+    entitiesBlockAll.disabled = entitiesBusy || !allEntities.some((e) => !e.denied);
     if (!items.length) {
       const empty = document.createElement('div');
       empty.className = 'entities-empty';
@@ -366,16 +377,42 @@ const satellite = createBrowserSatellite({
       entitiesList.appendChild(empty);
       return;
     }
-    let domain = null;
+    const groups = new Map();
     for (const e of items) {
-      if (e.domain !== domain) {
-        domain = e.domain;
-        const head = document.createElement('div');
-        head.className = 'entity-domain-head';
-        head.textContent = domain;
-        entitiesList.appendChild(head);
+      if (!groups.has(e.domain)) groups.set(e.domain, []);
+      groups.get(e.domain).push(e);
+    }
+    for (const [domain, visibleEntities] of groups) {
+      const domainEntities = allEntities.filter((e) => e.domain === domain);
+      const group = document.createElement('details');
+      group.className = 'entity-group';
+      group.open = expandedEntityDomains.has(domain);
+      const head = document.createElement('summary');
+      head.className = 'entity-domain-head';
+      head.textContent = `${domain} (${visibleEntities.length}${visibleEntities.length !== domainEntities.length ? ` of ${domainEntities.length}` : ''})`;
+      head.addEventListener('click', () => {
+        if (group.open) expandedEntityDomains.delete(domain);
+        else expandedEntityDomains.add(domain);
+      });
+      const controls = document.createElement('div');
+      controls.className = 'entity-bulk-controls';
+      const scope = document.createElement('span');
+      scope.textContent = `All ${domain} entities`;
+      controls.appendChild(scope);
+      for (const [text, denied] of [['Allow all', false], ['Block all', true]]) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = text;
+        button.setAttribute('aria-label', `${text} ${domain} entities`);
+        button.disabled = entitiesBusy || !domainEntities.some((e) => e.denied !== denied);
+        button.addEventListener('click', () => setEntitiesDenied(domainEntities, denied));
+        controls.appendChild(button);
       }
-      entitiesList.appendChild(renderEntityRow(e));
+      const rows = document.createElement('div');
+      rows.className = 'entity-group-rows';
+      for (const e of visibleEntities) rows.appendChild(renderEntityRow(e));
+      group.append(head, controls, rows);
+      entitiesList.appendChild(group);
     }
   };
 
@@ -398,41 +435,55 @@ const satellite = createBrowserSatellite({
     const input = document.createElement('input');
     input.type = 'checkbox';
     input.checked = !e.denied;  // checked = allowed for voice
+    input.disabled = entitiesBusy;
+    input.setAttribute('aria-label', `Allow voice control of ${e.name}`);
     const slider = document.createElement('span');
     slider.className = 'slider';
     label.append(input, slider);
-    input.addEventListener('change', () => setEntityDenied(e, !input.checked, input));
+    input.addEventListener('change', () => setEntitiesDenied([e], !input.checked, true));
 
     row.append(body, label);
     return row;
   };
 
-  const setEntityDenied = async (e, denied, input) => {
-    input.disabled = true;
+  const setEntitiesDenied = async (entities, denied, single = false) => {
+    if (entitiesBusy || !entities.length) return;
+    entitiesBusy = true;
+    entitiesRequestVersion++;
+    entitiesError.hidden = true;
+    renderEntities();
     try {
-      const r = await fetch('/entities', {
+      const r = await fetch(single ? '/entities' : '/entities/bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ entity_id: e.entity_id, denied }),
+        body: JSON.stringify(single
+          ? { entity_id: entities[0].entity_id, denied }
+          : { entity_ids: entities.map((e) => e.entity_id), denied }),
       });
       if (!r.ok) throw new Error(`status ${r.status}`);
       const data = await r.json();
       allEntities = data.entities || [];
-      renderEntities();
     } catch (err) {
       console.error('entity toggle failed', err);
-      input.checked = !denied;  // revert on failure
+      entitiesError.textContent = 'Could not update voice access. Please try again.';
+      entitiesError.hidden = false;
     } finally {
-      input.disabled = false;
+      entitiesBusy = false;
+      renderEntities();
     }
   };
 
   const loadEntities = async () => {
+    if (entitiesBusy) return;
+    const version = ++entitiesRequestVersion;
     try {
       const r = await fetch('/entities');
+      if (!r.ok) throw new Error(`status ${r.status}`);
       const data = await r.json();
+      if (version !== entitiesRequestVersion) return;
       if (!data.available) {
         allEntities = [];
+        entitiesAllControls.hidden = true;
         entitiesList.innerHTML =
           '<div class="entities-empty">Home Assistant isn\'t configured.</div>';
         entitiesHint.hidden = true;
@@ -442,13 +493,19 @@ const satellite = createBrowserSatellite({
       allEntities = data.entities || [];
       renderEntities();
     } catch (e) {
+      if (version !== entitiesRequestVersion) return;
       console.warn('entities load failed', e);
+      allEntities = [];
       entitiesList.innerHTML =
         '<div class="entities-empty">Couldn\'t load entities.</div>';
+      entitiesAllControls.hidden = true;
+      entitiesHint.hidden = true;
     }
   };
 
   entitySearch.addEventListener('input', renderEntities);
+  entitiesAllowAll.addEventListener('click', () => setEntitiesDenied(allEntities, false));
+  entitiesBlockAll.addEventListener('click', () => setEntitiesDenied(allEntities, true));
 
   // ---- Documents workspace + optional Obsidian integration ----
   const obsPill = document.getElementById('obs-pill');
@@ -466,8 +523,15 @@ const satellite = createBrowserSatellite({
   const documentsList = document.getElementById('documents-list');
   const documentsRefresh = document.getElementById('documents-refresh');
   const documentsSort = document.getElementById('documents-sort');
+  const documentsSearchForm = document.getElementById('documents-search-form');
+  const documentsSearch = document.getElementById('documents-search');
+  const documentsSearchClear = document.getElementById('documents-search-clear');
+  const documentsSearchStatus = document.getElementById('documents-search-status');
   const DOCUMENTS_PAGE_SIZE = 25;
   let loadedDocuments = [];
+  let activeDocumentQuery = '';
+  let documentsSearchVersion = 0;
+  let documentsLoadVersion = 0;
   const OBSIDIAN_PLUGIN_INFO_DISMISS_KEY = 'fulloch.obsidian_plugin_info_dismissed_v1';
   let obsState = null;
 
@@ -583,20 +647,85 @@ const satellite = createBrowserSatellite({
   };
 
   const loadDocuments = async () => {
-    documentsList.innerHTML = '<p class="documents-empty">Loading documents…</p>';
+    const version = ++documentsLoadVersion;
+    if (!activeDocumentQuery) documentsList.innerHTML = '<p class="documents-empty">Loading documents…</p>';
     try {
       const r = await fetch('/api/documents');
       if (!r.ok) throw new Error(`status ${r.status}`);
       const data = await r.json();
+      if (version !== documentsLoadVersion) return;
       loadedDocuments = Array.isArray(data.documents) ? data.documents : [];
-      renderDocuments(loadedDocuments);
+      if (activeDocumentQuery) searchDocuments(activeDocumentQuery);
+      else renderDocuments(loadedDocuments);
     } catch (e) {
+      if (version !== documentsLoadVersion) return;
       console.warn('documents load failed', e);
-      documentsList.innerHTML = '<p class="documents-empty">Couldn\'t load documents.</p>';
+      if (!activeDocumentQuery) documentsList.innerHTML = '<p class="documents-empty">Couldn\'t load documents.</p>';
     }
   };
+  const resetDocumentSearch = () => {
+    documentsSearchVersion++;
+    activeDocumentQuery = '';
+    documentsSort.disabled = false;
+    documentsSearchStatus.textContent = '';
+    renderDocuments(loadedDocuments);
+  };
+  const searchDocuments = async (query) => {
+    const version = ++documentsSearchVersion;
+    activeDocumentQuery = query;
+    documentsSort.disabled = true;
+    documentsSearchStatus.textContent = 'Searching documents…';
+    documentsList.replaceChildren();
+    try {
+      const r = await fetch('/api/documents/search', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query }),
+      });
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      const data = await r.json();
+      if (version !== documentsSearchVersion) return;
+      const results = Array.isArray(data.results) ? data.results : [];
+      documentsSearchStatus.textContent = results.length
+        ? `Top ${results.length} matching document${results.length === 1 ? '' : 's'}, ranked by relevance.`
+        : 'No matching documents found.';
+      for (const file of results) {
+        if (!file || typeof file.path !== 'string' || !file.path.endsWith('.md') ||
+            file.path.split('/').some(part => !part || part === '.' || part === '..')) continue;
+        const item = document.createElement('div');
+        item.className = 'document-search-result';
+        const path = document.createElement('p');
+        path.className = 'document-search-path';
+        path.textContent = file.path;
+        const excerpt = document.createElement('p');
+        excerpt.className = 'document-search-excerpt';
+        excerpt.textContent = typeof file.excerpt === 'string' ? file.excerpt : '';
+        item.append(makeDocumentLink(file), path, excerpt);
+        documentsList.appendChild(item);
+      }
+    } catch (e) {
+      if (version !== documentsSearchVersion) return;
+      console.warn('documents search failed', e);
+      documentsSearchStatus.textContent = 'Could not search documents. Please try again.';
+    }
+  };
+  documentsSearchForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const query = documentsSearch.value.trim();
+    if (query) searchDocuments(query);
+    else resetDocumentSearch();
+  });
+  documentsSearch.addEventListener('input', () => {
+    if (activeDocumentQuery) resetDocumentSearch();
+  });
+  documentsSearchClear.addEventListener('click', () => {
+    documentsSearch.value = '';
+    resetDocumentSearch();
+    documentsSearch.focus();
+  });
   documentsRefresh.addEventListener('click', loadDocuments);
-  documentsSort.addEventListener('change', () => renderDocuments(loadedDocuments));
+  documentsSort.addEventListener('change', () => {
+    if (!activeDocumentQuery) renderDocuments(loadedDocuments);
+  });
 
   const obsJson = async (url, opts) => {
     const r = await fetch(url, opts);
@@ -690,6 +819,7 @@ const satellite = createBrowserSatellite({
 
   // ---- Satellites workspace ----
   const satellitesStage = document.getElementById('satellites-stage');
+  const satelliteSetup = createSatelliteSetup({ onSuccess: () => loadSatellites() });
 
   const satelliteIcon = (satellite) => {
     const name = `${satellite.label || ''} ${satellite.area || ''}`.toLowerCase();
@@ -841,7 +971,8 @@ const satellite = createBrowserSatellite({
       ? 'Conversation mode belongs to one room at a time. Pause listening without disconnecting a room.'
       : 'Open Voice mode in the dashboard or connect a native satellite to bring a room online.';
     const refresh = satelliteButton('Refresh rooms', 'satellite-refresh', () => loadSatellites());
-    masthead.append(eyebrow, heading, copy, refresh);
+    const setup = satelliteButton('Set up Waveshare via USB', 'satellite-refresh', () => satelliteSetup.open());
+    masthead.append(eyebrow, heading, copy, refresh, setup);
     satellitesStage.append(masthead);
     if (error) {
       const message = document.createElement('p');

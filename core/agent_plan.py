@@ -255,7 +255,11 @@ class TurnPlan:
             label = self.name(step.action).replace("_", " ")
             if label not in labels:
                 labels.append(label)
-        return "Not completed: " + ", ".join(labels) + "." if labels else ""
+        if not labels:
+            return ""
+        from utils.response_language import response
+
+        return response("agent_not_completed", tasks=", ".join(labels))
 
     def finish(self, text="", *, include_results=False):
         parts = self.output() if include_results else []

@@ -427,7 +427,7 @@ def test_exchange_rate_converts_an_amount_without_deep_think(monkeypatch):
 
     result = finance.get_exchange_rate("USD", "AUD", 100)
 
-    assert "100 USD is approximately 150 AUD" in result
+    assert str(result) == "100 USD is approximately 150.00 AUD."
     assert result.evidence["exchange_rate"] == {
         "pair": "USD-AUD",
         "base_currency": "USD",
@@ -442,6 +442,7 @@ def test_exchange_rate_converts_an_amount_without_deep_think(monkeypatch):
     }
     assert native_access_class("get_exchange_rate") == "read"
     assert native_requires_deep_think("get_exchange_rate") is False
+    assert result.artifact["exchange_rate"] == result.evidence["exchange_rate"]
 
 
 def test_exchange_rate_preserves_currency_pair_in_provider_query(monkeypatch):
@@ -458,7 +459,39 @@ def test_exchange_rate_preserves_currency_pair_in_provider_query(monkeypatch):
     result = finance.get_exchange_rate("AUD", "EUR", 7500)
 
     assert calls[0]["q"] == "AUD-EUR"
-    assert "7500 AUD is approximately 4500 EUR" in result
+    assert str(result) == "7500 AUD is approximately 4500.00 EUR."
+
+
+def test_exchange_rate_rounds_spoken_conversion_but_preserves_exact_card(monkeypatch):
+    finance = _module(monkeypatch)
+    payload = _quote_payload()
+    payload["summary"].update({"stock": "AUD-USD", "price": "0.69347", "extracted_price": 0.69347})
+    monkeypatch.setattr(finance.requests, "get", lambda *_args, **_kwargs: _Response(payload))
+
+    result = finance.get_exchange_rate("AUD", "USD", 214)
+
+    assert str(result) == "214 AUD is approximately 148.40 USD."
+    assert result.artifact["exchange_rate"]["converted_amount"] == 148.40258
+    assert result.artifact["exchange_rate"]["quoted_at"]
+    assert result.artifact["exchange_rate"]["source_url"]
+
+
+def test_exchange_rate_without_amount_speaks_only_the_rate(monkeypatch):
+    finance = _module(monkeypatch)
+    payload = _quote_payload()
+    payload["summary"].update({"stock": "AUD-USD", "price": "0.69347", "extracted_price": 0.69347})
+    monkeypatch.setattr(finance.requests, "get", lambda *_args, **_kwargs: _Response(payload))
+
+    assert str(finance.get_exchange_rate("AUD", "USD")) == "1 AUD = 0.69347 USD."
+
+
+def test_exchange_rate_does_not_round_small_nonzero_result_to_zero(monkeypatch):
+    finance = _module(monkeypatch)
+    payload = _quote_payload()
+    payload["summary"].update({"stock": "AUD-USD", "price": "0.0012", "extracted_price": 0.0012})
+    monkeypatch.setattr(finance.requests, "get", lambda *_args, **_kwargs: _Response(payload))
+
+    assert str(finance.get_exchange_rate("AUD", "USD", 1)) == "1 AUD is approximately 0.0012 USD."
 
 
 def test_exchange_rate_rejects_invalid_codes_and_amount_without_network(monkeypatch):

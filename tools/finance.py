@@ -7,8 +7,10 @@ import re
 
 import requests
 
+from core.satellite_context import current_response_language
 from server.credentials_store import get_credential
 from utils.local_time import now
+from utils.response_language import response as localized_response
 
 from ._config import config
 from .thinking_playbooks import thinking_playbook
@@ -288,34 +290,52 @@ def _matches_requested_symbol(requested: str, quote: dict) -> bool:
 
 
 def _spoken_amount(value: object, currency: str | None) -> str:
-    text = _text(value) or "price not supplied"
+    text = _text(value) or localized_response("finance_no_price")
     number_text = re.sub(r"[$\u00a3\u20ac]|\b[A-Z]{3}\b", "", text).replace(",", "").strip()
     number = _number(number_text)
     if number is None:
         return text
+    language = current_response_language.get()
+    if language in {"fr", "de"}:
+        from babel.numbers import format_decimal, get_currency_name
+
+        amount = format_decimal(number, format="#,##0.00", locale=language)
+        return f"{amount} {get_currency_name(currency, count=number, locale=language)}" if currency else amount
     amount = f"{number:,.2f}"
     return f"{amount} {_CURRENCY_NAMES.get(currency or '', currency)}" if currency else amount
 
 
 def _spoken_percent(value: object) -> str | None:
     number = _number(str(value).replace("%", "").replace(",", ""))
-    return f"{number:.2f} percent" if number is not None else None
+    if number is None:
+        return None
+    language = current_response_language.get()
+    if language in {"fr", "de"}:
+        from babel.numbers import format_decimal
+
+        value = format_decimal(number, format="0.00", locale=language)
+    else:
+        value = f"{number:.2f}"
+    return localized_response("finance_percent", value=value)
 
 
 def _format_quote(quote: dict) -> str:
     identity = quote["name"] or quote["symbol"] or quote["requested_symbol"]
     price = _spoken_amount(quote["price"], quote["currency"])
-    location = f" on {quote['exchange']}" if quote["exchange"] else ""
-    sentences = [f"{identity} is trading at {price}{location}."]
+    if quote["exchange"]:
+        sentences = [localized_response("finance_quote_exchange", name=identity, price=price, exchange=quote["exchange"])]
+    else:
+        sentences = [localized_response("finance_quote", name=identity, price=price)]
     movement = quote["change"] or ""
     match = re.fullmatch(r"(up|down)\s+(.+)", movement, re.IGNORECASE)
     percent = _spoken_percent(quote["change_percent"])
     if match:
         change = _spoken_amount(match.group(2), quote["currency"])
-        detail = f"It is {match.group(1).lower()} {change}"
-        sentences.append(f"{detail}{f', or {percent}' if percent else ''}.")
+        detail = localized_response("finance_up" if match.group(1).lower() == "up" else "finance_down", amount=change)
+        sentences.append(localized_response("finance_movement_percent", detail=detail, percent=percent)
+                         if percent else localized_response("finance_movement", detail=detail))
     elif percent:
-        sentences.append(f"It has moved {percent}.")
+        sentences.append(localized_response("finance_moved", percent=percent))
     return " ".join(sentences)
 
 
@@ -380,16 +400,27 @@ def _request(params: dict) -> tuple[dict | None, str | None]:
     return payload, None
 
 
+def _localized_provider_error(error: str) -> str:
+    """Keep provider error identifiers stable for internal routing."""
+    key = {
+        "Finance search authentication failed; update serpapi_api_key in credentials.json.": "finance_auth_failed",
+        "Finance search is temporarily unavailable.": "finance_unavailable",
+        "Finance search returned an invalid response.": "finance_invalid_response",
+        "Finance search provider rejected the request.": "finance_provider_rejected",
+    }.get(error)
+    return localized_response(key) if key else error
+
+
 def _get_quote(symbol: str, window: str, fresh: bool) -> ThinkingResult:
     if not _available():
         return ThinkingResult(
-            "Finance research is not configured; add serpapi_api_key to credentials.json.",
+            localized_response("finance_not_configured"),
             status="unavailable",
             scope="A SerpApi key is required for finance research.",
         )
     if not isinstance(symbol, str) or not _SYMBOL_RE.fullmatch(symbol.strip()):
         return ThinkingResult(
-            "Ask for a stock symbol such as NASDAQ:TSLA.",
+            localized_response("finance_bad_symbol"),
             status="needs_input",
             scope="A valid stock symbol is required; company names can be ambiguous.",
             recovery={
@@ -400,7 +431,7 @@ def _get_quote(symbol: str, window: str, fresh: bool) -> ThinkingResult:
         )
     if window not in {"1D", "5D", "1M", "6M", "YTD", "1Y", "5Y", "MAX"}:
         return ThinkingResult(
-            "Choose a chart window from 1D, 5D, 1M, 6M, YTD, 1Y, 5Y, or MAX.",
+            localized_response("finance_bad_window"),
             status="needs_input",
             scope="The requested chart window is unsupported.",
         )
@@ -416,7 +447,7 @@ def _get_quote(symbol: str, window: str, fresh: bool) -> ThinkingResult:
     if error:
         if error == "Finance search provider rejected the request.":
             return ThinkingResult(
-                "I couldn't find information on that stock.",
+                localized_response("finance_not_found"),
                 status="rejected",
                 scope="The finance provider returned no matching listing.",
                 recovery={
@@ -426,14 +457,14 @@ def _get_quote(symbol: str, window: str, fresh: bool) -> ThinkingResult:
                 },
             )
         return ThinkingResult(
-            error,
+            _localized_provider_error(error),
             status="unavailable",
             scope="The finance provider did not complete the quote request.",
         )
     quote = _quote(payload, symbol, window, now().strftime("%Y-%m-%d %H:%M %Z"), fresh)
     if quote["price"] is None and quote["name"] is None:
         return ThinkingResult(
-            f"I couldn't verify an instrument for {symbol}.",
+            localized_response("finance_unverified_symbol", symbol=symbol),
             status="rejected",
             scope="The finance provider returned no identifiable quote.",
             recovery={
@@ -444,7 +475,7 @@ def _get_quote(symbol: str, window: str, fresh: bool) -> ThinkingResult:
         )
     if not _matches_requested_symbol(symbol, quote):
         return ThinkingResult(
-            f"I couldn't verify that the returned listing matches {symbol}.",
+            localized_response("finance_wrong_symbol", symbol=symbol),
             status="rejected",
             scope="The provider returned a different or incomplete instrument identity.",
             recovery={
@@ -492,13 +523,13 @@ def get_exchange_rate(
     quote_currency = quote_currency.strip().upper() if isinstance(quote_currency, str) else ""
     if not _CURRENCY_RE.fullmatch(base) or not _CURRENCY_RE.fullmatch(quote_currency):
         return ThinkingResult(
-            "Use three-letter ISO currency codes, such as AUD and USD.",
+            localized_response("finance_bad_currency"),
             status="needs_input",
             scope="A base and quote ISO currency code are required.",
         )
     if base == quote_currency:
         return ThinkingResult(
-            "Choose two different currencies.",
+            localized_response("finance_same_currency"),
             status="needs_input",
             scope="A currency conversion requires different base and quote currencies.",
         )
@@ -509,7 +540,7 @@ def get_exchange_rate(
         or amount < 0
     ):
         return ThinkingResult(
-            "Use a non-negative numeric amount.",
+            localized_response("finance_bad_amount"),
             status="needs_input",
             scope="The requested conversion amount is invalid.",
         )
@@ -520,15 +551,18 @@ def get_exchange_rate(
     rate = quote["numeric_price"]
     if rate is None:
         return ThinkingResult(
-            f"I retrieved {base}/{quote_currency} but the provider did not supply a numeric rate.",
+            localized_response("finance_missing_rate", base=base, quote=quote_currency),
             status="rejected",
             scope="The provider returned a currency instrument without a numeric rate for conversion.",
         )
     conversion = None if amount is None else round(amount * rate, 6)
-    text = f"{base}/{quote_currency}: 1 {base} = {rate:g} {quote_currency}."
     if conversion is not None:
-        text += f" {amount:g} {base} is approximately {conversion:g} {quote_currency}."
-    text += f" Quote timestamp: {quote['quoted_at'] or 'provider timestamp not supplied'}; retrieved {quote['retrieved_at']}; {quote['cache_mode']}."
+        # Keep small nonzero conversions meaningful rather than rounding them to zero.
+        spoken_conversion = f"{conversion:.2f}" if conversion == 0 or conversion >= 0.01 else f"{conversion:g}"
+        text = localized_response("finance_conversion", amount=f"{amount:g}", base=base,
+                                  conversion=spoken_conversion, quote=quote_currency)
+    else:
+        text = f"1 {base} = {rate:g} {quote_currency}."
     exchange_rate = {
         "pair": f"{base}-{quote_currency}",
         "base_currency": base,
@@ -565,7 +599,7 @@ def get_watchlist_brief(window: str = "5D", fresh: bool = False) -> str:
     symbols = _watchlist()
     if not symbols:
         return ThinkingResult(
-            "No finance watchlist is configured.",
+            localized_response("finance_empty_watchlist"),
             status="needs_input",
             scope="Add symbols under finance.watchlist or ask about one exact stock symbol.",
         )
@@ -575,7 +609,7 @@ def get_watchlist_brief(window: str = "5D", fresh: bool = False) -> str:
     ]
     if not quotes:
         return ThinkingResult(
-            "I couldn't retrieve the configured watchlist.",
+            localized_response("finance_watchlist_failed"),
             status="unavailable",
             scope="No watchlist quote request completed successfully.",
             next_actions=("get_watchlist_brief",),
@@ -603,7 +637,7 @@ def get_market_brief(fresh: bool = False) -> str:
     fresh = _fresh(fresh)
     if not _available():
         return ThinkingResult(
-            "Finance research is not configured; add serpapi_api_key to credentials.json.",
+            localized_response("finance_not_configured"),
             status="unavailable",
             scope="A SerpApi key is required for finance research.",
         )
@@ -616,14 +650,14 @@ def get_market_brief(fresh: bool = False) -> str:
     )
     if error:
         return ThinkingResult(
-            error,
+            _localized_provider_error(error),
             status="unavailable",
             scope="The finance provider did not complete the market request.",
         )
     records = _market_records(payload)
     if not records:
         return ThinkingResult(
-            "I couldn't retrieve a broad market snapshot.",
+            localized_response("finance_market_failed"),
             status="rejected",
             scope="The provider returned no usable market-index records.",
         )

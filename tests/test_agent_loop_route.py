@@ -12,6 +12,8 @@ import types
 from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.agent_follow_up import startup_greeting_follow_up  # noqa: E402
@@ -33,6 +35,358 @@ def _host(**overrides):
     }
     base.update(overrides)
     return types.SimpleNamespace(**base)
+
+
+def test_nested_days_between_is_repaired_before_plan_and_dispatch():
+    import json
+
+    import core.agent_loop as al
+
+    expression = 'days_between("2026-11-08", "2026-12-25")'
+    history, events = [], []
+    generate = Mock(return_value=json.dumps({"actions": [{"intent": "calculate", "args": [expression]}]}))
+    host = _host(
+        grammar=object(), wakeword_name="Fulloch", tts_session=None,
+        replan_stall_cache=[], web_search_stall_cache=[], note_write_stall_cache=[],
+        play_chunks=lambda *a, **k: None, _note_llm_remote_status=lambda *a: None,
+        _generate_with_context_recovery=generate, _record_spoken=lambda _: None,
+        _history_for=lambda _: history,
+        _emit_agent_event=lambda kind, payload, **_: events.append((kind, payload)),
+    )
+    assert al.AgentLoop(host, source="text").run("how many days till christmas") == (
+        "There are 47 days between those two dates."
+    )
+    assert generate.call_count == 1
+    action = {"intent": "days_between", "args": ["2026-11-08", "2026-12-25"]}
+    assert next(payload for kind, payload in events if kind == "plan")["actions"] == [action]
+    assert next(payload for kind, payload in events if kind == "step") == action
+    assert any(entry.get("name") == "days_between" for entry in history)
+
+
+@pytest.mark.parametrize("source", ["text", "voice"])
+@pytest.mark.parametrize("language,prompt,expected,excluded", [
+    ("en", "what time is it?", "2:30", "November"),
+    ("en", "what day is it?", "November", "2:30"),
+    ("de", "wie spät ist es", "14:30", "November"),
+    ("de", "welcher tag ist heute", "November", "14:30"),
+    ("fr", "quelle heure est il", "14:30", "novembre"),
+    ("fr", "quelle est la date", "novembre", "14:30"),
+])
+def test_clock_fastpaths_answer_only_requested_part_without_model(
+    monkeypatch, source, language, prompt, expected, excluded,
+):
+    from datetime import datetime, timezone
+
+    import core.agent_loop as al
+    from tools import ha_client, time_tools
+    from utils.hassil_fastpath import HassilFastPath
+
+    root = Path(__file__).parent.parent
+    monkeypatch.setattr(ha_client, "_loaded", False)
+    monkeypatch.setattr(ha_client, "HA_TOKEN", "")
+    monkeypatch.setattr(time_tools._local_time, "now", lambda: datetime(2026, 11, 5, 14, 30, tzinfo=timezone.utc))
+    generate = Mock(side_effect=AssertionError("fast path must not call model"))
+    host = _host(
+        _hassil_fastpath=(HassilFastPath([language], str(root / "tests/fixtures/hassil"))
+                          if language != "en" else None),
+        _hassil_intents_dir=str(root / "data/intents"),
+        _record_spoken=lambda _: None,
+        _generate_with_context_recovery=generate,
+        web_search_stall_cache=[], note_write_stall_cache=[],
+    )
+    result = al.AgentLoop(host, source=source).run(prompt)
+    assert expected in result
+    assert excluded not in result
+    generate.assert_not_called()
+
+
+def test_explicit_translation_uses_agent_after_clock_tool(monkeypatch):
+    from datetime import datetime, timezone
+
+    import core.agent_loop as al
+    from tools import time_tools
+
+    monkeypatch.setattr(time_tools._local_time, "now", lambda: datetime(2026, 11, 5, 14, 30, tzinfo=timezone.utc))
+    history = []
+    generate = Mock(side_effect=[
+        '{"actions": [{"intent": "get_current_time", "args": []}]}',
+        '{"reply": "Il est quatorze heures trente."}',
+    ])
+    host = _host(
+        grammar=object(), wakeword_name="Fulloch", tts_session=None,
+        replan_stall_cache=[], web_search_stall_cache=[], note_write_stall_cache=[],
+        play_chunks=lambda *a, **k: None, _note_llm_remote_status=lambda *a: None,
+        _play_random_ack=lambda *a, **k: None,
+        _generate_with_context_recovery=generate, _record_spoken=lambda _: None,
+        _history_for=lambda _: history,
+    )
+    result = al.AgentLoop(host, source="text").run("what time is it? in french")
+    assert result == "Il est 14:30."
+    assert generate.call_count == 2
+    assert any(item.get("name") == "get_current_time" for item in history)
+
+
+@pytest.mark.parametrize("source", ["text", "voice"])
+def test_guessed_translated_time_must_use_clock_and_cannot_change_its_value(monkeypatch, source):
+    from datetime import datetime, timedelta, timezone
+
+    import core.agent_loop as al
+    from tools import time_tools
+
+    now = datetime(2026, 11, 8, 18, 43, tzinfo=timezone(timedelta(hours=11)))
+    monkeypatch.setattr(time_tools._local_time, "now", lambda: now)
+    dispatch = Mock(wraps=al.intents.handle_action)
+    monkeypatch.setattr(al.intents, "handle_action", dispatch)
+    history, events = [], []
+    generate = Mock(side_effect=[
+        '{"reply": "Il est 14:41. Dimanche 8 novembre 2026."}',
+        '{"actions": [{"intent": "get_current_time", "args": []}]}',
+        '{"reply": "Il est 14:41. Dimanche 8 novembre 2026."}',
+    ])
+    host = _host(
+        grammar=object(), wakeword_name="Fulloch", tts_session=None, replan_stall_cache=[],
+        web_search_stall_cache=[], note_write_stall_cache=[], play_chunks=lambda *a, **k: None,
+        _note_llm_remote_status=lambda *a: None, _play_random_ack=lambda *a, **k: None,
+        _generate_with_context_recovery=generate, _record_spoken=lambda _: None,
+        _history_for=lambda _: history,
+        _emit_agent_event=lambda kind, payload, **_: events.append((kind, payload)),
+    )
+
+    result = al.AgentLoop(host, source=source).run("what time is it in french")
+
+    assert result == "Il est 18:43."
+    assert generate.call_count == 3
+    dispatch.assert_called_once_with({"intent": "get_current_time", "args": []})
+    assert any(item.get("name") == "live_fact_guard" for item in history)
+    assert all("14:41" not in str(item.get("content", "")) for item in history)
+    assert any(kind == "step" and payload["intent"] == "get_current_time" for kind, payload in events)
+    if source == "voice":
+        assert host._turn_local.response_language == "fr"
+
+
+def test_guessed_time_is_not_returned_when_model_ignores_tool_guard():
+    import core.agent_loop as al
+
+    history = []
+    generate = Mock(return_value='{"reply": "Il est 14:41."}')
+    host = _host(
+        grammar=object(), wakeword_name="Fulloch", tts_session=None, replan_stall_cache=[],
+        play_chunks=lambda *a, **k: None, _note_llm_remote_status=lambda *a: None,
+        _play_random_ack=lambda *a, **k: None, _generate_with_context_recovery=generate,
+        _record_spoken=lambda _: None, _history_for=lambda _: history,
+    )
+
+    result = al.AgentLoop(host, source="text").run("what time is it in french")
+
+    assert "couldn't verify" in result
+    assert "14:41" not in result
+    assert generate.call_count == 2
+
+
+def test_guessed_calculation_gets_a_tool_replan_before_translation(monkeypatch):
+    import core.agent_loop as al
+
+    dispatch = Mock(wraps=al.intents.handle_action)
+    monkeypatch.setattr(al.intents, "handle_action", dispatch)
+    history = []
+    generate = Mock(side_effect=[
+        '{"reply": "Cela fait cinq."}',
+        '{"actions": [{"intent": "calculate", "args": ["2+2"]}]}',
+        '{"reply": "Cela fait quatre."}',
+    ])
+    host = _host(
+        grammar=object(), wakeword_name="Fulloch", tts_session=None, replan_stall_cache=[],
+        web_search_stall_cache=[], note_write_stall_cache=[], play_chunks=lambda *a, **k: None,
+        _note_llm_remote_status=lambda *a: None, _play_random_ack=lambda *a, **k: None,
+        _generate_with_context_recovery=generate, _record_spoken=lambda _: None,
+        _history_for=lambda _: history,
+    )
+
+    assert al.AgentLoop(host, source="text").run("what is 2 plus 2 in French?") == "Cela fait quatre."
+    dispatch.assert_called_once_with({"intent": "calculate", "args": ["2+2"]})
+    assert any(item.get("name") == "live_fact_guard" for item in history)
+    assert not any("Cela fait cinq" in str(item.get("content", "")) for item in history)
+
+
+def test_pre_execution_bundled_math_guess_does_not_override_tool_result():
+    import core.agent_loop as al
+
+    history = []
+    generate = Mock(return_value=(
+        '{"actions": [{"intent": "calculate", "args": ["2+2"]}], "reply": "It is five."}'
+    ))
+    host = _host(
+        grammar=object(), wakeword_name="Fulloch", tts_session=None, replan_stall_cache=[],
+        web_search_stall_cache=[], note_write_stall_cache=[], play_chunks=lambda *a, **k: None,
+        _note_llm_remote_status=lambda *a: None, _generate_with_context_recovery=generate,
+        _record_spoken=lambda _: None, _history_for=lambda _: history,
+    )
+
+    result = al.AgentLoop(host, source="text").run("what is 2 plus 2?")
+
+    assert result == "That comes to 4."
+    assert generate.call_count == 1
+
+
+def test_unavailable_clock_tool_returns_truthful_fallback(monkeypatch):
+    import core.agent_loop as al
+
+    availability = al.tool_registry.is_available
+    monkeypatch.setattr(al.tool_registry, "is_available", lambda name: name != "get_current_time" and availability(name))
+    generate = Mock(return_value='{"reply": "Il est 14:41."}')
+    host = _host(
+        grammar=object(), wakeword_name="Fulloch", tts_session=None, replan_stall_cache=[],
+        play_chunks=lambda *a, **k: None, _note_llm_remote_status=lambda *a: None,
+        _generate_with_context_recovery=generate, _record_spoken=lambda _: None,
+    )
+
+    result = al.AgentLoop(host, source="text").run("what time is it in french")
+
+    assert "couldn't verify" in result
+    assert "14:41" not in result
+    assert generate.call_count == 1
+
+
+def test_translation_without_llm_does_not_use_laya():
+    import core.agent_loop as al
+
+    router = Mock()
+    host = _host(
+        llm_enabled=False, laya_enabled=True, laya_router=types.SimpleNamespace(route=router),
+        _speak_no_ai_fallback=lambda *args, **kwargs: "AI unavailable",
+    )
+    assert al.AgentLoop(host, source="text").run("what time is it? in french") == "AI unavailable"
+    router.assert_not_called()
+
+
+@pytest.mark.parametrize("source", ["text", "voice"])
+@pytest.mark.parametrize("prompt,action,observation,reply,target", [
+    ("what is 2 plus 2 in French?", {"intent": "calculate", "args": ["2+2"]},
+     "That comes to 4.", "Cela fait 4.", "fr"),
+    ("what is the weather in German?", {"intent": "get_weather_forecast", "args": []},
+     "It is sunny and 20 degrees.", "Es ist sonnig und 20 Grad.", "de"),
+    ("what date is next Tuesday in French?", {"intent": "date_of", "args": ["Tuesday", "next"]},
+     "Tuesday 10 November 2026.", "Cela fait 4.", "fr"),
+])
+def test_translation_composes_read_only_tool_results_once(
+    monkeypatch, source, prompt, action, observation, reply, target,
+):
+    import json
+
+    import core.agent_loop as al
+
+    history = []
+    generate = Mock(side_effect=[json.dumps({"actions": [action]}), json.dumps({"reply": reply})])
+    dispatch = Mock(return_value=observation)
+    monkeypatch.setattr(al.intents, "handle_action", dispatch)
+    monkeypatch.setattr(al.intents, "is_registered_tool", lambda _: True)
+    host = _host(
+        grammar=object(), wakeword_name="Fulloch", tts_session=None, replan_stall_cache=[],
+        web_search_stall_cache=[], note_write_stall_cache=[], play_chunks=lambda *a, **k: None,
+        _note_llm_remote_status=lambda *a: None, _play_random_ack=lambda *a, **k: None,
+        _generate_with_context_recovery=generate, _record_spoken=lambda _: None,
+        _history_for=lambda _: history,
+    )
+    assert al.AgentLoop(host, source=source).run(prompt) == reply
+    assert generate.call_count == 2
+    dispatch.assert_called_once_with(action)
+    assert any(item.get("content") == observation for item in history)
+    if source == "voice":
+        from core.text_utils import spoken_for_tts
+
+        assert host._turn_local.response_language == target
+        assert spoken_for_tts(reply, target) == (
+            "Cela fait quatre." if target == "fr" else "Es ist sonnig und zwanzig Grad."
+        )
+
+
+@pytest.mark.parametrize("observation", ["Kitchen lights turned on.", "Error: cannot reach Home Assistant."])
+def test_translation_of_action_preserves_actual_outcome_without_repeat(monkeypatch, observation):
+    import json
+
+    import core.agent_loop as al
+
+    action = {"intent": "turn_on", "args": ["kitchen"]}
+    dispatch = Mock(return_value=observation)
+    monkeypatch.setattr(al.intents, "handle_action", dispatch)
+    monkeypatch.setattr(al.intents, "is_registered_tool", lambda _: True)
+    generate = Mock(return_value=json.dumps({"actions": [action]}))
+    host = _host(
+        grammar=object(), wakeword_name="Fulloch", tts_session=None, replan_stall_cache=[],
+        web_search_stall_cache=[], note_write_stall_cache=[], play_chunks=lambda *a, **k: None,
+        _note_llm_remote_status=lambda *a: None, _generate_with_context_recovery=generate,
+        _record_spoken=lambda _: None,
+    )
+    result = al.AgentLoop(host, source="text").run("turn on the lights and answer in French")
+    assert observation in result
+    assert "couldn't provide" in result
+    dispatch.assert_called_once_with(action)
+    assert generate.call_count == 1
+
+
+def test_translation_does_not_replace_reactive_action_failure_with_model_claim(monkeypatch):
+    import json
+
+    import core.agent_loop as al
+
+    action = {"intent": "turn_on", "args": ["kitchen"]}
+    dispatch = Mock(return_value="Reactive question: The light was not found. Ask for the correct light.")
+    monkeypatch.setattr(al.intents, "handle_action", dispatch)
+    monkeypatch.setattr(al.intents, "is_registered_tool", lambda _: True)
+    generate = Mock(side_effect=[
+        json.dumps({"actions": [action]}), json.dumps({"reply": "La lumière est allumée."}),
+    ])
+    host = _host(
+        grammar=object(), wakeword_name="Fulloch", tts_session=None, replan_stall_cache=[],
+        web_search_stall_cache=[], note_write_stall_cache=[], play_chunks=lambda *a, **k: None,
+        _note_llm_remote_status=lambda *a: None, _play_random_ack=lambda *a, **k: None,
+        _generate_with_context_recovery=generate, _record_spoken=lambda _: None,
+    )
+    result = al.AgentLoop(host, source="text").run("turn on the lights and answer in French")
+    assert "The light was not found" in result
+    assert "La lumière est allumée" not in result
+    assert "couldn't provide" in result
+    dispatch.assert_called_once_with(action)
+
+
+def test_translation_fallback_after_read_does_not_return_untranslated_result(monkeypatch):
+    import core.agent_loop as al
+
+    history = []
+    generate = Mock(side_effect=[
+        '{"actions": [{"intent": "calculate", "args": ["2+2"]}]}',
+        RemoteUnreachable("offline"),
+    ])
+    host = _host(
+        grammar=object(), wakeword_name="Fulloch", tts_session=None, replan_stall_cache=[],
+        web_search_stall_cache=[], note_write_stall_cache=[], play_chunks=lambda *a, **k: None,
+        _note_llm_remote_status=lambda *a: None, _play_random_ack=lambda *a, **k: None,
+        _generate_with_context_recovery=generate, _record_spoken=lambda _: None,
+        _history_for=lambda _: history,
+        _speak_llm_error_fallback=lambda *a, **k: "Model unavailable",
+    )
+    assert al.AgentLoop(host, source="text").run("what is 2 plus 2 in French?") == "Model unavailable"
+    assert any(item.get("name") == "calculate" for item in history)
+
+
+def test_empty_translation_does_not_leak_the_untranslated_result():
+    import core.agent_loop as al
+
+    history = []
+    generate = Mock(side_effect=[
+        '{"actions": [{"intent": "calculate", "args": ["2+2"]}]}',
+        '{"reply": ""}',
+    ])
+    host = _host(
+        grammar=object(), wakeword_name="Fulloch", tts_session=None, replan_stall_cache=[],
+        web_search_stall_cache=[], note_write_stall_cache=[], play_chunks=lambda *a, **k: None,
+        _note_llm_remote_status=lambda *a: None, _play_random_ack=lambda *a, **k: None,
+        _generate_with_context_recovery=generate, _record_spoken=lambda _: None,
+        _history_for=lambda _: history,
+    )
+    result = al.AgentLoop(host, source="text").run("what is 2 plus 2 in French?")
+    assert "couldn't provide" in result
+    assert "That comes to" not in result
 
 
 def test_dashboard_localized_time_uses_verified_outcome_and_preserves_raw(monkeypatch):
@@ -61,7 +415,7 @@ def test_dashboard_localized_time_uses_verified_outcome_and_preserves_raw(monkey
     assert result == "Es ist 14:30 Uhr."
     observation = next(payload for kind, payload in events if kind == "observation")
     assert observation["result"] == result
-    assert "twenty twenty-six" in observation["raw_result"]
+    assert "zweitausendsechsundzwanzig" in observation["raw_result"]
     assert any(entry.get("content") == observation["raw_result"] for entry in history)
 
 
@@ -96,7 +450,7 @@ def test_llm_enabled_dashboard_fastpath_localizes_without_model_or_second_dispat
     generate.assert_not_called()
     observation = next(payload for kind, payload in events if kind == "observation")
     assert observation["result"] == result
-    assert "twenty twenty-six" in observation["raw_result"]
+    assert "zweitausendsechsundzwanzig" in observation["raw_result"]
     assert any(entry.get("content") == observation["raw_result"] for entry in history)
 
 
@@ -209,7 +563,8 @@ def test_dashboard_light_denied_after_match_never_localizes_success(monkeypatch)
         _record_spoken=lambda _: None,
     )
     result = al.AgentLoop(host, source="text").run("schalte das küchenlicht ein")
-    assert "isn't available for voice control" in result
+    assert "nicht für die Sprachsteuerung verfügbar" in result
+    assert "kein Befehl gesendet" in result
     post.assert_not_called()
 
 

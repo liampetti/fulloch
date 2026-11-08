@@ -125,6 +125,8 @@ class JobSnapshot:
     handoff: dict = field(default_factory=dict)
     origin_turn_id: str | None = None
     task_record: dict = field(default_factory=dict)
+    response_language: str = "en"
+    response_intents_dir: str = "./data/intents"
 
 
 @dataclass
@@ -720,6 +722,8 @@ class BackgroundJobManager:
         origin_turn_id: str | None = None,
         task_record: dict | None = None,
     ) -> str:
+        from .satellite_context import current_response_intents_dir, current_response_language
+
         if not isinstance(task, str) or not task.strip():
             raise ValueError("task must be a non-empty string")
         acknowledged_started = time.monotonic()
@@ -739,6 +743,8 @@ class BackgroundJobManager:
             notes=notes[:MAX_STATE_CHARS],
             origin_satellite_id=origin_satellite_id,
             origin_source=origin_source,
+            response_language=current_response_language.get(),
+            response_intents_dir=current_response_intents_dir.get(),
             handoff=deepcopy(handoff or {}),
             origin_turn_id=origin_turn_id,
             task_record={
@@ -972,10 +978,21 @@ class BackgroundJobManager:
                 self._persist_checkpoint(job)
             self._notify(job)
             try:
-                summary, state = self._worker(
-                    job,
-                    lambda job=job: job.cancel_requested.is_set() or job.pause_requested.is_set(),
+                from .satellite_context import (
+                    current_response_intents_dir,
+                    current_response_language,
                 )
+
+                language_token = current_response_language.set(job.snapshot.response_language)
+                directory_token = current_response_intents_dir.set(job.snapshot.response_intents_dir)
+                try:
+                    summary, state = self._worker(
+                        job,
+                        lambda job=job: job.cancel_requested.is_set() or job.pause_requested.is_set(),
+                    )
+                finally:
+                    current_response_intents_dir.reset(directory_token)
+                    current_response_language.reset(language_token)
                 with self._lock:
                     if job.cancel_requested.is_set():
                         job.status = JobStatus.CANCELLED

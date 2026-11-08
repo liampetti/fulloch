@@ -49,6 +49,56 @@ _TIME_QUERY_RE = re.compile(
     r"\s*[?.!]*\s*$",
     re.IGNORECASE,
 )
+_DATE_QUERY_RE = re.compile(
+    r"(?:what(?:'?s| is) (?:the )?date|what day is it|what(?:'?s| is) today(?:'?s)? date)"
+    r"(?:\s+(?:right\s+now|now|today|please|exactly))?\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
+_OUTPUT_LANGUAGES = {
+    "english": "en", "englisch": "en", "anglais": "en",
+    "french": "fr", "französisch": "fr", "français": "fr",
+    "german": "de", "deutsch": "de", "allemand": "de",
+    "spanish": "es", "spanisch": "es", "espagnol": "es", "español": "es",
+    "italian": "it", "italiano": "it", "portuguese": "pt", "português": "pt",
+    "brazilian portuguese": "pt-BR", "dutch": "nl", "japanese": "ja", "chinese": "zh",
+    "arabic": "ar", "swedish": "sv", "norwegian": "no", "danish": "da",
+}
+_OUTPUT_LANGUAGE_RE = re.compile(
+    r"\b(?:in|into|to|auf|en)\s+(?P<language>"
+    + "|".join(re.escape(name) for name in sorted(_OUTPUT_LANGUAGES, key=len, reverse=True))
+    + r")(?:\s+please)?(?=\s*(?:[?.!,;]|$))",
+    re.IGNORECASE,
+)
+_TRANSLATE_VERB_RE = re.compile(r"\b(?:translate|translation|übersetze|übersetzen|traduire|traduis)\b", re.I)
+_OUTPUT_VERB_RE = re.compile(r"\b(?:say|speak|answer|reply|respond|tell|translate|übersetze|antworte|sage|réponds|dis|traduis)\b", re.I)
+_MEDIA_REQUEST_RE = re.compile(r"^\s*(?:(?:please|can you|could you)\s+)*(?:play|spiele|spiel|joue|lance|reproduce|pon)\b", re.I)
+
+
+def requested_output_language(command: str) -> Optional[str]:
+    """Recognize a bounded explicit output language, not a media-language filter."""
+    match = _OUTPUT_LANGUAGE_RE.search(command)
+    if not match:
+        return None
+    if _MEDIA_REQUEST_RE.search(command) and not _OUTPUT_VERB_RE.search(command):
+        return None
+    return _OUTPUT_LANGUAGES[match.group("language").casefold()]
+
+
+def requests_translation(command: str) -> bool:
+    return bool(requested_output_language(command) or _TRANSLATE_VERB_RE.search(command))
+
+
+def _english_clock_emission(command: str):
+    from utils.hassil_fastpath import FastPathEmission
+
+    intent = "HassGetCurrentTime" if _TIME_QUERY_RE.search(command) else (
+        "HassGetCurrentDate" if _DATE_QUERY_RE.search(command) else None
+    )
+    if intent:
+        return FastPathEmission({"intent": "get_current_time", "args": []}, "en", intent, {})
+    return None
+
+
 # The direct weather path is intentionally limited to generic, default-location
 # forecasts. Locations, dates, and conditional questions need the agent to set
 # tool arguments or resolve context, so they must not match this rule.
@@ -790,8 +840,12 @@ def catch_with_hassil(user_message: str, matcher):
     """Prefer local rules, then try the multilingual device matcher."""
     if extract_note_delete(user_message) and not _obsidian_edit_enabled():
         return {"reply": _NOTE_DELETE_REPLY}
+    if requests_translation(user_message):
+        return user_message
     if actions := extract_compound_actions(user_message, _LOCAL_RULES):
         return {"actions": actions}
+    if emission := _english_clock_emission(user_message):
+        return emission
     for extract, build in _LOCAL_RULES:
         value = extract(user_message)
         if value is not None:
@@ -809,8 +863,12 @@ def catchAll(user_message: str):
     if extract_note_delete(user_message) and not _obsidian_edit_enabled():
         logger.debug("Caught note delete/edit request; refusing")
         return {"reply": _NOTE_DELETE_REPLY}
+    if requests_translation(user_message):
+        return user_message
     if actions := extract_compound_actions(user_message):
         return {"actions": actions}
+    if emission := _english_clock_emission(user_message):
+        return emission
     for extract, build in _INTENT_RULES:
         value = extract(user_message)
         if value is not None:

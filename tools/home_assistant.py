@@ -44,6 +44,9 @@ from .ha_client import (
     list_entities as list_entities,
 )
 from .ha_client import (
+    set_entities_denied as set_entities_denied,
+)
+from .ha_client import (
     set_entity_denied as set_entity_denied,
 )
 from .ha_devices import (

@@ -1,0 +1,75 @@
+Waveshare Rev 2 USB CLI fallback
+================================
+
+Use the ESP32-S3 Touch LCD 1.85C Box Rev 2. This fallback runs on the computer
+connected to the board, not inside the server container. Python 3.11+ and Git
+are required. Download the matching Fulloch repository onto that computer:
+
+  git clone https://github.com/liampetti/local-assistant.git
+  cd local-assistant
+  python -m venv .venv
+
+On Linux/macOS:
+
+  . .venv/bin/activate
+  python -m pip install esptool==4.11.0
+  python tools/satellite_usb_setup.py
+
+On Windows (PowerShell):
+
+  .venv\Scripts\Activate.ps1
+  python -m pip install esptool==4.11.0
+  python tools/satellite_usb_setup.py
+
+After setup, to revoke an individual device token interactively, run the same
+script with --revoke:
+
+  python tools/satellite_usb_setup.py --revoke
+
+Enter the dashboard HTTPS origin, public CA certificate (if needed), dashboard
+password and exact device ID when prompted. Type REVOKE to confirm. The device
+is disconnected and cannot reconnect with its revoked owned token; set it up
+again over USB to issue a new one. This does not delete other devices' tokens
+or disable mandatory authentication, even if no owned tokens remain.
+
+Enable a dashboard password and use the HTTPS dashboard origin. The program
+prompts for your password and Wi-Fi secrets without placing them in arguments or
+shell history. If HTTPS uses a private CA or self-signed certificate, supply its
+public PEM certificate at the trust prompt; the HTTPS hostname must match it.
+Supply a separate public server certificate when the satellite connects through
+a different TLS endpoint. Never provide a private key.
+
+Select the board's serial port (for example /dev/ttyACM0, /dev/ttyUSB0, or
+COM3); your user may need serial-port permissions. The satellite WSS hostname
+must be reachable from the board and match its certificate. Do not use a Docker
+bridge address unless it is reachable on the Wi-Fi network.
+
+Enabling mandatory authentication disconnects tokenless devices: ALL existing
+tokenless satellites must be reprovisioned. Existing registered tokens remain
+valid. Older unowned/shared tokens cannot be revoked by device ID: reprovision
+each device to create owned tokens, then remove the old shared entries from the
+top-level satellite_tokens list in data/config.yml. Stop the server before
+editing, back up the private configuration securely, preserve other entries,
+and restart afterward. Removing a shared token disconnects every device using
+it; do not remove it until those devices are reprovisioned. Never turn off
+satellite_token_required or delete it as a recovery shortcut.
+
+The hostname and public certificate stored on a satellite are pinned at setup.
+After a server address or certificate change, repeat setup with the same device
+ID and the new reachable WSS URL and matching public certificate. A successful
+connection replaces that device's previous owned token; other devices are not
+changed. Do not paste a private key or use a container-only Docker address.
+
+Cancel by pressing Ctrl-C. The server cancels an active candidate on normal
+cancellation; a lost connection or forcibly terminated client can leave it
+active until its five-minute deadline. On failure or timeout, the previous
+owned token remains valid unless the new device already authenticated and the
+transaction committed. Retry from the beginning and re-enter secrets. A
+partially flashed board may need to be flashed again: server-side rollback
+cannot undo USB writes. If the device connected just before interruption, it
+may already have the new token; check the dashboard before retrying.
+
+Temporary files are removed on normal exit or Ctrl-C. A power loss or forced
+termination can leave a fulloch-satellite-* directory in the system temporary
+directory. Remove it securely; it can contain an NVS image with credentials.
+Do not share the directory, NVS image, Wi-Fi password, or device token.

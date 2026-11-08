@@ -1,6 +1,7 @@
 """Dashboard API for the Obsidian integration."""
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -98,6 +99,106 @@ def test_documents_list_and_viewer_are_limited_to_the_notes_folder(ctx, tmp_path
     assert viewer.headers["content-type"].startswith("text/html")
     assert "<h1>Garden plan</h1>" in viewer.text and "Plant herbs in spring." in viewer.text
     assert client.get("/documents/../credentials.md").status_code == 404
+
+
+def test_document_semantic_search_uses_visible_paths_and_returns_ranked_links(ctx, tmp_path, monkeypatch):
+    root = tmp_path / "documents"
+    monkeypatch.setattr(notes_root, "_override", root)
+    (root / "Projects").mkdir(parents=True)
+    (root / "Projects" / "garden-plan.md").write_text("A garden plan about growing vegetables.")
+    (root / "Projects" / "other.md").write_text("Another document with content.")
+    (root / ".hidden").mkdir()
+    (root / ".hidden" / "secret.md").write_text("Private hidden note content.")
+    outside = tmp_path / "outside.md"
+    outside.write_text("Outside content")
+    (root / "escape.md").symlink_to(outside)
+    index = MagicMock()
+    index.search_documents.return_value = [
+        (0.9, SimpleNamespace(file="Projects/garden-plan.md", text="Plant herbs and vegetables.")),
+        (0.8, SimpleNamespace(file=".hidden/secret.md", text="secret")),
+        (0.7, SimpleNamespace(file="escape.md", text="outside")),
+        (0.6, SimpleNamespace(file="Projects/other.md", text="Other useful content.")),
+    ]
+    monkeypatch.setattr(notes, "_get_index", lambda: index)
+    client = _client(ctx)
+
+    result = client.post("/api/documents/search", json={"query": "  vegetable garden  "})
+
+    assert result.status_code == 200
+    results = result.json()["results"]
+    assert [item["path"] for item in results] == ["Projects/garden-plan.md", "Projects/other.md"]
+    assert results[0]["title"] == "garden plan"
+    assert results[0]["excerpt"] == "Plant herbs and vegetables."
+    index.search_documents.assert_called_once_with(
+        "vegetable garden", allowed_files={"Projects/garden-plan.md", "Projects/other.md"},
+        k=50, min_score=notes.SEMANTIC_MIN_SCORE,
+    )
+    assert client.get("/documents/" + results[0]["path"]).status_code == 200
+
+
+def test_document_search_handles_empty_invalid_and_unavailable(ctx, tmp_path, monkeypatch):
+    root = tmp_path / "documents"
+    root.mkdir()
+    monkeypatch.setattr(notes_root, "_override", root)
+    index = MagicMock()
+    monkeypatch.setattr(notes, "_get_index", lambda: index)
+    client = _client(ctx)
+    assert client.post("/api/documents/search", json={"query": " "}).status_code == 400
+    assert client.post("/api/documents/search", json={"query": "x" * 501}).status_code == 422
+    assert client.post("/api/documents/search", json={"query": "anything"}).json() == {"results": []}
+    index.search_documents.assert_not_called()
+    (root / "note.md").write_text("A visible document to index.")
+    index.search_documents.side_effect = RuntimeError("embedding model unavailable")
+    response = client.post("/api/documents/search", json={"query": "anything"})
+    assert response.status_code == 503
+    assert "embedding model" not in response.text
+
+
+def test_document_search_rejects_result_if_notes_root_changed(ctx, tmp_path, monkeypatch):
+    root = tmp_path / "first"
+    other = tmp_path / "second"
+    root.mkdir()
+    other.mkdir()
+    (root / "note.md").write_text("A note in the original documents folder.")
+    monkeypatch.setattr(notes_root, "_override", root)
+    index = MagicMock()
+
+    def switch_root(*args, **kwargs):
+        monkeypatch.setattr(notes_root, "_override", other)
+        return [(0.9, SimpleNamespace(file="note.md", text="Original private content"))]
+
+    index.search_documents.side_effect = switch_root
+    monkeypatch.setattr(notes, "_get_index", lambda: index)
+    response = _client(ctx).post("/api/documents/search", json={"query": "note"})
+
+    assert response.status_code == 409
+    assert "Original private content" not in response.text
+
+
+def test_document_search_reuses_indexed_embeddings(ctx, tmp_path, monkeypatch):
+    from tests.test_notes_index import _StubEncoder
+    from tools.notes_index import NotesIndex
+
+    root = tmp_path / "documents"
+    root.mkdir()
+    (root / "garden.md").write_text("Plant fragrant herbs in the garden during spring.")
+    (root / ".hidden.md").write_text("Plant fragrant herbs in the garden during spring.")
+    monkeypatch.setattr(notes_root, "_override", root)
+    index = NotesIndex(root, tmp_path / "index", notes._to_spoken)
+    index._model = _StubEncoder()
+    index._loaded = True
+    index._model.encode = MagicMock(wraps=index._model.encode)
+    monkeypatch.setattr(notes, "_get_index", lambda: index)
+    monkeypatch.setattr(notes, "SEMANTIC_MIN_SCORE", 0.0)
+    client = _client(ctx)
+
+    first = client.post("/api/documents/search", json={"query": "fragrant herbs"})
+    second = client.post("/api/documents/search", json={"query": "fragrant herbs"})
+
+    assert [item["path"] for item in first.json()["results"]] == ["garden.md"]
+    assert second.json() == first.json()
+    # First scan indexes each file; both queries embed only the query once.
+    assert index._model.encode.call_count == 4
 
 
 def test_report_link_renders_formatted_html(ctx, tmp_path, monkeypatch):

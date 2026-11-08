@@ -41,6 +41,7 @@ from spotipy.oauth2 import SpotifyOAuth
 
 import tools.ha_client as ha
 from server.credentials_store import get_credential
+from utils.response_language import response
 
 from ._config import config
 from .tool_registry import tool
@@ -536,10 +537,7 @@ def play_song(
     """
     sp = _get_client()
     if sp is None:
-        return (
-            "Reactive question: Spotify isn't set up yet. Add spotify_client_id, "
-            "spotify_client_secret and spotify_refresh_token to data/credentials.json."
-        )
+        return "Reactive question: " + response("spotify_unconfigured")
 
     entity_ids = _resolve_media_targets(entity)
 
@@ -552,12 +550,12 @@ def play_song(
         if (re.sub(r"[^A-Za-z]+", "", str(artist_query).lower()) == "music") or (
             artist_query is None
         ):
-            result = _dispatch_via_ha(entity_ids, "Playing music on spotify")
+            result = _dispatch_via_ha(entity_ids, response("spotify_playing_music"))
             if result:
                 return result
             _pause(sp)
             sp.start_playback(device_id=_get_active_device(sp))
-            return "Playing music on spotify"
+            return response("spotify_playing_music")
 
         playlists = sp.current_user_playlists(limit=50)["items"]
 
@@ -573,7 +571,7 @@ def play_song(
             default=(0.0, None),
         )
         if best_playlist is not None and best_score >= SIMILARITY_THRESHOLD:
-            success_message = f'Playing your playlist "{best_playlist["name"]}"'
+            success_message = response("spotify_playing_playlist", name=best_playlist["name"])
             track_uris = _playlist_track_uris(sp, best_playlist["uri"])
             result = _dispatch_queue_via_ha(entity_ids, success_message, track_uris)
             if result:
@@ -599,7 +597,7 @@ def play_song(
             artists = artist_results.get("artists", {}).get("items", [])
             artist = _best_artist(artists, artist_query)
             if artist is not None:
-                success_message = f"Playing {artist['name']} on Spotify"
+                success_message = response("spotify_playing_artist", name=artist["name"])
                 track_uris = _artist_top_track_uris(sp, artist["uri"])
                 result = _dispatch_queue_via_ha(entity_ids, success_message, track_uris)
                 if result:
@@ -615,7 +613,7 @@ def play_song(
             # resolution both failed (see `_best_semantic_playlist`).
             semantic_playlist = _best_semantic_playlist(artist_query, playlists)
             if semantic_playlist is not None:
-                success_message = f'Playing your playlist "{semantic_playlist["name"]}"'
+                success_message = response("spotify_playing_playlist", name=semantic_playlist["name"])
                 track_uris = _playlist_track_uris(sp, semantic_playlist["uri"])
                 result = _dispatch_queue_via_ha(entity_ids, success_message, track_uris)
                 if result:
@@ -650,7 +648,7 @@ def play_song(
             results = sp.search(q=artist_query, type="track", limit=10)
             tracks = results.get("tracks", {}).get("items", [])
         else:
-            return "Please provide either artist and song, playlist name, or a search query"
+            return response("spotify_missing_query")
 
         track = _best_track(tracks, artist_query, song)
         if track is None:
@@ -659,12 +657,9 @@ def play_song(
             )
             # Route through the agent replan loop (like HA's unresolved-entity
             # sentinel) instead of silently starting unrelated playback.
-            return (
-                f"Reactive question: No confident Spotify match for {query_desc!r}. "
-                "Ask the user to confirm the artist and song, or try different wording."
-            )
+            return "Reactive question: " + response("spotify_no_match", query=repr(query_desc)) + " Ask the user to confirm the artist and song, or try different wording."
 
-        success_message = f"Playing {track['name']} by {track['artists'][0]['name']}"
+        success_message = response("spotify_playing_track", name=track["name"], artist=track["artists"][0]["name"])
         result = _dispatch_via_ha(entity_ids, success_message, track["uri"], "music")
         if result:
             return result
@@ -673,4 +668,4 @@ def play_song(
         return success_message
     except Exception:
         logger.exception("Spotify play_song failed")
-        return "Unable to play your request on Spotify"
+        return response("spotify_play_failed")

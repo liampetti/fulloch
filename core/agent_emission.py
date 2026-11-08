@@ -78,6 +78,38 @@ def route_deep_think_only_tools(emission, user_prompt, *, registry, requires_dee
     return {"actions": routed}
 
 
+def repair_nested_date_actions(emission, *, registry, intent_services, requires_deep_think):
+    """Repair a narrowly recognized date-tool call before planning or dispatch."""
+    actions = emission.get("actions")
+    if not isinstance(actions, list):
+        return emission
+    repaired = []
+    for action in actions:
+        if (not isinstance(action, dict)
+                or registry.canonical_name(action.get("intent", "")) != "calculate"
+                or not registry.is_available("calculate")
+                or not registry.is_available("days_between")
+                or requires_deep_think("calculate")
+                or requires_deep_think("days_between")):
+            repaired.append(action)
+            continue
+        args, kwargs = intent_services.coerce_args(action.get("args"))
+        expression = args[0] if len(args) == 1 and not kwargs else (
+            kwargs.get("expression") if not args and set(kwargs) == {"expression"} else None
+        )
+        if not isinstance(expression, str) or "days_between" not in expression:
+            repaired.append(action)
+            continue
+        from tools.calculator import parse_nested_days_between
+
+        dates = parse_nested_days_between(expression)
+        if dates is None:
+            repaired.append(action)
+            continue
+        repaired.append({**action, "intent": "days_between", "args": list(dates)})
+    return {**emission, "actions": repaired} if repaired != actions else emission
+
+
 def _satellite_message_args(emission):
     actions = emission.get("actions") if isinstance(emission, dict) else None
     if not isinstance(actions, list) or len(actions) != 1:
@@ -159,6 +191,12 @@ def normalize_emission(
     """
     if emission is not regex_emission:
         apply_announcement_fallback(personality, user_prompt, regex_emission, emission)
+    repaired = repair_nested_date_actions(
+        emission, registry=registry, intent_services=intent_services, requires_deep_think=requires_deep_think,
+    )
+    if repaired is not emission:
+        emission = repaired
+        history_text = json.dumps(emission)
     emission = route_deep_think_only_tools(
         emission, user_prompt, registry=registry, requires_deep_think=requires_deep_think,
     )

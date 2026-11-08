@@ -39,7 +39,39 @@ from utils.intent_catch import (
     has_time_query,
     is_contextual_web_search_request,
     list_timers,
+    requested_output_language,
+    requests_translation,
 )
+
+
+@pytest.mark.parametrize("prompt,language", [
+    ("what time is it? in French", "fr"),
+    ("tell me the result in German please", "de"),
+    ("set a timer for 3 minutes in Swedish", "sv"),
+    ("say it in Brazilian Portuguese", "pt-BR"),
+    ("wie spät ist es auf französisch", "fr"),
+    ("quelle heure est-il en español", "es"),
+    ("play music and answer in French", "fr"),
+])
+def test_requested_output_language(prompt, language):
+    assert requested_output_language(prompt) == language
+    assert requests_translation(prompt)
+    assert catchAll(prompt) == prompt
+
+
+@pytest.mark.parametrize("prompt", [
+    "play music in Spanish", "play a song in French", "play French music",
+    "what time is it in London", "what is the weather in French Polynesia",
+])
+def test_content_language_and_places_do_not_become_translation_requests(prompt):
+    assert requested_output_language(prompt) is None
+    assert not requests_translation(prompt)
+
+
+def test_spanish_music_keeps_play_fastpath():
+    assert catchAll("play music in Spanish") == {
+        "actions": [{"intent": "play_song", "args": ["music in Spanish"]}],
+    }
 
 
 class TestExtractAfterPlay:

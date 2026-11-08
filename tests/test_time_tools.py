@@ -118,6 +118,23 @@ def test_time_outcome_preserves_timezone_and_dispatch(monkeypatch):
     assert "twenty twenty-six" in step.text
 
 
+def test_time_tool_uses_response_language(monkeypatch):
+    from core.satellite_context import current_response_language
+    from tools import time_tools
+
+    now = datetime.datetime(2026, 11, 5, 23, 12, tzinfo=datetime.timezone.utc)
+    monkeypatch.setattr(time_tools._local_time, "now", lambda: now)
+    token = current_response_language.set("fr")
+    try:
+        result = time_tools.get_current_time()
+    finally:
+        current_response_language.reset(token)
+    assert "novembre" in result
+    assert "cinq" in result
+    assert "twenty" not in result
+    assert result.operation_outcome.values["datetime"] == now
+
+
 def test_timer_structured_success_and_artifacts(monkeypatch):
     from tools import time_tools as timers
     from utils.intents import classify_step
@@ -221,6 +238,25 @@ def test_timer_reminder_text_is_preserved_regardless_of_language(monkeypatch):
     timer = timers.active_timers[result.operation_outcome.values["timer_id"]]
     timer.function(*timer.args)
     assert spoken == ["Vérifie le thé!"]
+
+
+def test_timer_callback_binds_and_restores_spoken_language(monkeypatch):
+    from core.satellite_context import current_response_language, current_timer_response_language
+    from tools import time_tools as timers
+
+    monkeypatch.setattr(timers.threading, "Timer", _Timer)
+    monkeypatch.setattr(timers, "active_timers", {})
+    seen = []
+    monkeypatch.setattr(timers, "_speak_proactive", lambda text, **_: seen.append(current_response_language.get()))
+    token = current_timer_response_language.set("fr")
+    try:
+        result = timers.start_countdown("60", "Vérifie dans 20 minutes")
+    finally:
+        current_timer_response_language.reset(token)
+    timer = timers.active_timers[result.operation_outcome.values["timer_id"]]
+    timer.function(*timer.args)
+    assert seen == ["fr"]
+    assert current_response_language.get() == "en"
 
 
 def test_timer_completion_falls_back_if_response_file_disappears(monkeypatch, tmp_path):

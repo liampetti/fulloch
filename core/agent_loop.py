@@ -18,16 +18,23 @@ from tools import notes
 from tools.capabilities import native_access_class, native_requires_deep_think
 from tools.tool_registry import OperationOutcome, tool_registry
 from utils import intents
-from utils.intent_catch import catch_with_hassil, catchAll, is_contextual_web_search_request
+from utils.intent_catch import (
+    _english_clock_emission,
+    catch_with_hassil,
+    catchAll,
+    is_contextual_web_search_request,
+    requested_output_language,
+    requests_translation,
+)
 from utils.intents import MAX_AGENT_CALLS_PER_TURN, NOTE_WRITE_TOOLS, StepKind
 from utils.phrases import ACK_PHRASES
 from utils.prompts import (
     assemble_foreground_history,
     get_agent_system_prompt,
 )
+from utils.response_language import response
 
 from .action_evidence import (
-    FALLBACK,
     REPAIR,
     ActionEvidence,
     claims_execution,
@@ -44,13 +51,19 @@ from .agent_plan import TurnPlan
 from .agent_search import PROMPT_STRIP_CHARS as _PROMPT_STRIP_CHARS  # noqa: F401 — Assistant export
 from .agent_search import TurnSearch, last_user_question, normalise_search_query
 from .foreground_context import is_standalone_research_request, select_prompt_profile
+from .live_fact_guard import live_fact_requirement
+from .satellite_context import (
+    current_response_intents_dir,
+    current_response_language,
+    current_timer_response_intents_dir,
+    current_timer_response_language,
+)
 from .satellite_context import (
     current_satellite_ha_area as _current_satellite_ha_area,
 )
 from .satellite_context import (
     current_satellite_id as _current_satellite_id,
 )
-from .satellite_context import current_timer_response_intents_dir, current_timer_response_language
 from .slm import ContextExhaustedError, RemoteUnreachable
 from .telemetry import event as telemetry_event
 from .thinking_context import reset_handoff, set_handoff
@@ -63,11 +76,45 @@ logger = logging.getLogger(__name__)
 NOTE_SEARCH_INTENTS = frozenset({"search_notes", "search_notes_semantic", "read_note"})
 
 
+def _live_fact_step(plan, requirement):
+    """Find an actual, successful tool observation for the requested live fact."""
+    for planned in reversed(plan.steps):
+        step = planned.result
+        if (plan.name(planned.action) not in requirement.tools or planned.status != "completed"
+                or step is None or step.kind is not StepKind.NORMAL or step.should_replan or not step.text.strip()):
+            continue
+        outcome = step.operation_outcome
+        if isinstance(outcome, OperationOutcome) and outcome.success is not True:
+            continue
+        if requirement.clock_intent and (
+            not isinstance(outcome, OperationOutcome) or outcome.code != "current_time"
+            or outcome.success is not True
+        ):
+            continue
+        return step
+    return None
+
+
+def _verified_translated_clock(host, prompt, requirement, step):
+    """Render the clock's structured instant so a model cannot alter its value."""
+    language = requested_output_language(prompt)
+    if not language or not requirement.clock_intent:
+        return None
+    from utils.fastpath_responses import select_fastpath_response
+    from utils.hassil_fastpath import MatchMetadata
+
+    metadata = MatchMetadata(language, requirement.clock_intent, requirement.clock_intent, {}, None)
+    return select_fastpath_response(
+        metadata, step.operation_outcome, "", getattr(host, "_hassil_intents_dir", "./data/intents"),
+        language_confirmed=True,
+    ) or None
+
+
 def _localized_fastpath_step(host, source, user_prompt, emission, action, step):
     """Localize a verified observation without restricting the chosen TTS backend."""
     metadata = getattr(emission, "metadata", None)
     matcher = getattr(host, "_hassil_fastpath", None)
-    if (metadata is None or matcher is None
+    if (metadata is None
             or metadata.intent not in {"HassGetCurrentTime", "HassGetCurrentDate", "HassTurnOn", "HassTurnOff", "HassStartTimer", "HassCancelTimer", "HassTimerStatus", "HassLightSet", "HassClimateSetTemperature", "HassSetPosition", "HassSetVolume"}
             or emission.get("actions") != [action]
             or not isinstance(step.operation_outcome, OperationOutcome)
@@ -76,7 +123,12 @@ def _localized_fastpath_step(host, source, user_prompt, emission, action, step):
     if (metadata.intent == "HassStartTimer" and step.operation_outcome.success is True
             and step.operation_outcome.values.get("response_language") != metadata.language):
         return step
-    if not matcher.response_language_confirmed(user_prompt, emission):
+    english_clock = _english_clock_emission(user_prompt) if not requests_translation(user_prompt) else None
+    english_confirmed = (
+        english_clock is not None and emission == english_clock
+        and metadata == english_clock.metadata
+    )
+    if not english_confirmed and (matcher is None or not matcher.response_language_confirmed(user_prompt, emission)):
         return step
     from utils.fastpath_responses import select_fastpath_response
 
@@ -84,18 +136,208 @@ def _localized_fastpath_step(host, source, user_prompt, emission, action, step):
         metadata, step.operation_outcome, step.text,
         getattr(host, "_hassil_intents_dir", "./data/intents"), language_confirmed=True,
     )
+    if source == "voice" and localized != step.text and getattr(host, "_turn_local", None) is not None:
+        # Verified intent metadata is more reliable than statistical language
+        # detection, especially for short commands such as a timer request.
+        host._turn_local.response_language = metadata.language
     return replace(step, text=localized, raw_text=step.text) if localized != step.text else step
+
+
+def _localized_ha_error(host, prompt, emission, action, step):
+    """Localize verified transport failures without altering their history text."""
+    outcome = step.operation_outcome
+    if (step.kind not in {StepKind.NORMAL, StepKind.REACTIVE} or not isinstance(outcome, OperationOutcome)
+            or not isinstance(outcome.values, dict)
+            or outcome.success is not False
+            or outcome.code not in {"ha_unreachable", "ha_timeout", "ha_not_configured", "voice_denied",
+                                    "area_not_found", "area_lookup_failed", "area_lookup_invalid",
+                                    "area_no_lights", "unsupported_domain", "location_not_found",
+                                    "location_no_devices", "invalid_temperature", "unsupported_operation",
+                                    "target_override", "target_unverified", "ha_target_rejected", "ha_service_error"}):
+        return step
+    metadata = getattr(emission, "metadata", None)
+    matcher = getattr(host, "_hassil_fastpath", None)
+    language = current_response_language.get()
+    if (metadata is not None and matcher is not None and emission.get("actions") == [action]
+            and matcher.response_language_confirmed(prompt, emission)):
+        language = metadata.language
+    if language == "en":
+        return step
+    token = current_response_language.set(language)
+    try:
+        from utils.response_language import response
+
+        if step.kind is StepKind.REACTIVE:
+            key = {"target_override": "ha_target_override", "target_unverified": "ha_target_unverified",
+                   "ha_target_rejected": "ha_target_rejected"}.get(outcome.code)
+            if key is None:
+                return step
+            target = repr(outcome.values.get("entity_id"))
+            text = response(key, "error", target=target)
+            localized = ("Reactive question: " + text + " Ask the user to clarify the target.") if text else step.text
+        elif outcome.code == "ha_service_error":
+            localized = response("ha_service_failed", "error", target=outcome.values.get("entity_id", "")) or step.text
+        else:
+            localized = response(outcome.code, "error") or step.text
+    finally:
+        current_response_language.reset(token)
+    return replace(step, text=localized, raw_text=step.raw_text or step.text) if localized != step.text else step
+
+
+def _localized_timer_step(host, prompt, emission, action, step):
+    """Render verified timer outcomes for model-routed, non-English turns."""
+    outcome = step.operation_outcome
+    if (step.raw_text is not None or step.kind is not StepKind.NORMAL or not isinstance(outcome, OperationOutcome)
+            or not isinstance(outcome.values, dict)):
+        return step
+    name = action.get("intent")
+    intent = {"start_countdown": "HassStartTimer", "cancel_timer": "HassCancelTimer",
+              "get_timer_status": "HassTimerStatus"}.get(name)
+    if not intent and name != "extend_timer":
+        return step
+    language = current_response_language.get()
+    metadata = getattr(emission, "metadata", None)
+    matcher = getattr(host, "_hassil_fastpath", None)
+    if (metadata is not None and matcher is not None and emission.get("actions") == [action]
+            and matcher.response_language_confirmed(prompt, emission)):
+        language = metadata.language
+    if language == "en":
+        return step
+    from babel.core import UnknownLocaleError
+
+    from utils.fastpath_responses import (
+        format_local_duration,
+        load_responses,
+        select_fastpath_response,
+    )
+    from utils.hassil_fastpath import MatchMetadata
+    from utils.response_language import response
+
+    if language not in {"fr", "de"}:
+        key = {"timer_started": "timer_started", "timer_cancelled": "timer_cancelled_id",
+               "timer_status": "timer_status_id", "no_active_timers": "timer_none",
+               "timer_extended": "timer_extended", "timer_not_found": "timer_not_found",
+               "invalid_duration": "timer_invalid_duration", "duration_too_long": "timer_too_long",
+               "timer_limit": "timer_limit", "ambiguous_timer": "timer_ambiguous"}.get(outcome.code)
+        pack = load_responses(getattr(host, "_hassil_intents_dir", "./data/intents"), language)
+        if not key or key not in pack:
+            return step
+
+    if outcome.code == "timer_started" and outcome.values.get("response_language") != language:
+        return step
+    if outcome.code == "timer_status":
+        import math
+
+        timers = outcome.values.get("timers")
+        if not isinstance(timers, list) or not timers or len(timers) > 32:
+            return step
+        entries = []
+        for timer in timers:
+            if not isinstance(timer, dict) or not isinstance(timer.get("timer_id"), str):
+                return step
+            seconds = timer.get("remaining_seconds")
+            if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or seconds < 0:
+                return step
+            token = current_response_language.set(language)
+            try:
+                entries.append(response("timer_status_id", timer_id=timer["timer_id"],
+                                        duration=format_local_duration(int(seconds), language)))
+            except (ValueError, UnknownLocaleError):
+                return step
+            finally:
+                current_response_language.reset(token)
+        token = current_response_language.set(language)
+        try:
+            localized = response("timer_status_list", timers="\n".join(entries)) if len(entries) > 1 else entries[0]
+        finally:
+            current_response_language.reset(token)
+    elif outcome.code == "invalid_duration" and name == "extend_timer":
+        token = current_response_language.set(language)
+        try:
+            localized = response("timer_invalid_duration", "error")
+        finally:
+            current_response_language.reset(token)
+    elif outcome.code in {"timer_extended", "timer_not_found", "timer_cancelled"}:
+        timer_id = outcome.values.get("timer_id")
+        if not isinstance(timer_id, str):
+            return step
+        token = current_response_language.set(language)
+        try:
+            if outcome.code == "timer_not_found":
+                localized = response("timer_not_found", "error", timer_id=timer_id)
+            elif outcome.code == "timer_cancelled":
+                localized = response("timer_cancelled_id", timer_id=timer_id)
+            else:
+                seconds = outcome.values.get("duration_seconds")
+                if not isinstance(seconds, int) or isinstance(seconds, bool) or seconds < 0:
+                    return step
+                try:
+                    duration = format_local_duration(seconds, language)
+                except (ValueError, UnknownLocaleError):
+                    return step
+                localized = response("timer_extended", timer_id=timer_id, duration=duration)
+        finally:
+            current_response_language.reset(token)
+    elif intent:
+        match = MatchMetadata(language, intent, intent, {}, None)
+        localized = select_fastpath_response(
+            match, outcome, step.text, getattr(host, "_hassil_intents_dir", "./data/intents"),
+            language_confirmed=True,
+        )
+    else:
+        return step
+    return replace(step, text=localized, raw_text=step.raw_text or step.text) if localized and localized != step.text else step
+
+
+def _localized_time_step(action, step):
+    """Localize a model-routed date/time observation without claiming an action."""
+    if action.get("intent") != "get_current_time" or step.kind is not StepKind.NORMAL:
+        return step
+    outcome = step.operation_outcome
+    language = current_response_language.get()
+    if (language == "en" or not isinstance(outcome, OperationOutcome)
+            or outcome.code != "current_time" or outcome.success is not True):
+        return step
+    from babel.core import UnknownLocaleError
+
+    from utils.fastpath_responses import format_local_datetime, load_responses
+    from utils.response_language import response
+
+    try:
+        if language not in {"fr", "de"}:
+            if "current_date_and_time" not in load_responses(current_response_intents_dir.get(), language):
+                return step
+        values = format_local_datetime(outcome.values.get("datetime"), language)
+        localized = response("current_date_and_time", **values)
+    except (AttributeError, TypeError, ValueError, UnknownLocaleError):
+        return step
+    return replace(step, text=localized, raw_text=step.raw_text or step.text) if localized and localized != step.text else step
 
 
 def _dispatch_with_timer_language(host, source, prompt, emission, action):
     """Bind a timer's language to this dispatch, never to another turn."""
     metadata = getattr(emission, "metadata", None)
     matcher = getattr(host, "_hassil_fastpath", None)
+    confirmed = bool(
+        metadata is not None and matcher is not None
+        and emission.get("actions") == [action]
+        and matcher.response_language_confirmed(prompt, emission)
+    )
+    if confirmed and source == "voice" and getattr(host, "_turn_local", None) is not None:
+        host._turn_local.response_language = metadata.language
+    dispatch_language = metadata.language if confirmed else current_response_language.get()
     language = None
-    if (metadata is not None and matcher is not None
-            and metadata.intent == "HassStartTimer" and metadata.language in {"en", "fr", "de"}
-            and emission.get("actions") == [action]
-            and matcher.response_language_confirmed(prompt, emission)):
+    # Model-routed timer starts have no HassIL metadata. Preserve a detected
+    # language only when its completion template exists; otherwise the timer
+    # thread must announce in English rather than losing its reminder.
+    if action.get("intent") == "start_countdown":
+        from utils.fastpath_responses import load_responses, render_response
+
+        candidate = dispatch_language
+        responses = load_responses(getattr(host, "_hassil_intents_dir", "./data/intents"), candidate)
+        if render_response(responses, "timer_completed", "success", {}):
+            language = candidate
+    if confirmed and metadata.intent == "HassStartTimer":
         from utils.fastpath_responses import load_responses, render_response
 
         responses = load_responses(getattr(host, "_hassil_intents_dir", "./data/intents"), metadata.language)
@@ -103,11 +345,13 @@ def _dispatch_with_timer_language(host, source, prompt, emission, action):
             language = metadata.language
     token = current_timer_response_language.set(language or "en")
     dir_token = current_timer_response_intents_dir.set(getattr(host, "_hassil_intents_dir", "./data/intents"))
+    language_context = current_response_language.set(dispatch_language)
     try:
         return intents.handle_action(action)
     finally:
         current_timer_response_intents_dir.reset(dir_token)
         current_timer_response_language.reset(token)
+        current_response_language.reset(language_context)
 
 
 def _contextual_turn_onoff(
@@ -256,10 +500,16 @@ class AgentLoop:
             return ""
         token = _current_satellite_id.set(self.satellite_id)
         area_token = _current_satellite_ha_area.set(self.ha_area)
+        from utils.response_language import detect_response_language
+
+        language_token = current_response_language.set(detect_response_language(user_prompt))
+        intents_token = current_response_intents_dir.set(getattr(host, "_hassil_intents_dir", "./data/intents"))
         try:
             spoken = self._run(host, session, source, stats, on_slm_start, cancel_check, user_prompt)
             return "" if session is not None and session.cancelled else spoken
         finally:
+            current_response_intents_dir.reset(intents_token)
+            current_response_language.reset(language_token)
             _current_satellite_ha_area.reset(area_token)
             _current_satellite_id.reset(token)
 
@@ -273,7 +523,7 @@ class AgentLoop:
         startup_greeting = startup_greeting_follow_up(greeting_response, user_prompt)
         resume_pending = getattr(host, "resume_pending_thinking_task", None)
         if resume_pending is not None and resume_pending(self.satellite_id, user_prompt):
-            return "Thanks, I'll continue that investigation with the proposed correction."
+            return response("agent_research_correction")
         task_follow_up = getattr(host, "research_task_follow_up", None)
         if task_follow_up is not None:
             task_reply = task_follow_up(self.satellite_id, user_prompt)
@@ -341,7 +591,7 @@ class AgentLoop:
         # neither path can start the conversational SLM.
         if not host.llm_enabled:
             laya_routed = False
-            if first_emission is None and getattr(host, "laya_enabled", False):
+            if first_emission is None and not requests_translation(user_prompt) and getattr(host, "laya_enabled", False):
                 router = getattr(host, "laya_router", None)
                 if router is not None:
                     laya_started = time.monotonic()
@@ -388,6 +638,31 @@ class AgentLoop:
         # Each distinct raw lookup gets a composing replan. A repeated lookup
         # reuses its observation and cannot start another composing loop.
         lookup_composed = set()
+        translation_pending = False
+        required_live_fact = live_fact_requirement(user_prompt, matcher)
+        # Ordinary clock requests are already handled by the existing local
+        # fast path. This guard addresses the model-routed translation path.
+        if required_live_fact and required_live_fact.clock_intent and not requests_translation(user_prompt):
+            required_live_fact = None
+        live_fact_repair_attempted = False
+
+        def request_live_fact_repair(iteration):
+            nonlocal live_fact_repair_attempted
+            if (live_fact_repair_attempted or required_live_fact is None
+                    or not any(tool_registry.is_available(name) for name in required_live_fact.tools)
+                    or iteration >= MAX_AGENT_CALLS_PER_TURN - 1):
+                return False
+            live_fact_repair_attempted = True
+            history.append({
+                "role": "tool", "name": "live_fact_guard",
+                "content": ("The prior draft was not shown because it lacked a successful tool result. "
+                            + required_live_fact.guidance + " Do not guess; keep answering the original request."),
+            })
+            host._emit_agent_event("observation", {
+                "intent": "live_fact_guard", "result": "A tool lookup is required before answering."
+            }, source=source)
+            return True
+
         for iteration in range(MAX_AGENT_CALLS_PER_TURN):
             if session is not None and session.cancelled:
                 return ""
@@ -425,6 +700,9 @@ class AgentLoop:
                                 "tts_active_event": getattr(
                                     host._turn_local, "tts_active_event", None
                                 ),
+                                **({"language": current_response_language.get(),
+                                    "intents_dir": current_response_intents_dir.get()}
+                                   if current_response_language.get() != "en" else {}),
                             },
                             daemon=True,
                         )
@@ -447,7 +725,7 @@ class AgentLoop:
                     # trigger it. Recovery wrapper sheds oldest history and retries
                     # on overflow; only re-raises if the recent floor won't fit.
                     with ThinkingWatchdog(
-                        host.replan_stall_cache,
+                        host.replan_stall_cache if current_response_language.get() == "en" else [],
                         host.play_chunks,
                         session or host.tts_session,
                         sink=getattr(host._turn_local, "sink", None),
@@ -516,6 +794,8 @@ class AgentLoop:
                         turn_id=self.turn_id,
                         process_generation=getattr(getattr(host, "slm_model", None), "_fulloch_process_generation", None),
                     )
+                    if translation_pending and not evidence.records:
+                        return host._context_exhausted_reply()
                     return plan.finish(host._context_exhausted_reply(), include_results=True)
                 except RemoteUnreachable as e:
                     if session is not None and session.cancelled:
@@ -531,6 +811,8 @@ class AgentLoop:
                     # run, or after model-authored work. Preserve either plan;
                     # never redispatch its first actions just to degrade.
                     if plan.steps:
+                        if translation_pending and not evidence.records:
+                            return remote_fallback()
                         return plan.finish(remote_fallback(), include_results=True)
                     if first_emission is None and regex_emission is None:
                         return remote_fallback()
@@ -543,7 +825,9 @@ class AgentLoop:
                     if session is not None and session.cancelled:
                         return ""
                     logger.exception("Agent generation failed while continuing a plan")
-                    return plan.finish("I couldn't continue because the language model failed.", include_results=True)
+                    if translation_pending and not evidence.records:
+                        return response("agent_model_failed")
+                    return plan.finish(response("agent_model_failed"), include_results=True)
                 finally:
                     if replan_ack_thread is not None:
                         replan_ack_thread.join()
@@ -560,8 +844,10 @@ class AgentLoop:
                     )
                 except ValueError:
                     if not plan.steps:
-                        return random.choice(["Sorry, can you repeat that", "I don't understand"])
-                    return plan.finish("Sorry, I couldn't continue the plan.", include_results=True)
+                        return response("agent_repeat_request")
+                    if translation_pending and not evidence.records:
+                        return response("agent_translation_unavailable")
+                    return plan.finish(response("agent_plan_failed"), include_results=True)
                 # Canonicalise what goes into history so reasoning junk doesn't
                 # pollute the context the model sees on the next call.
                 emission_text = json.dumps(emission)
@@ -577,6 +863,19 @@ class AgentLoop:
             delivery = normalized.delivery
             bundled_reply = normalized.bundled_reply
 
+            if "reply" in emission and not emission.get("actions") and required_live_fact:
+                verified_step = _live_fact_step(plan, required_live_fact)
+                if verified_step is None:
+                    if request_live_fact_repair(iteration):
+                        continue
+                    return plan.finish(response("agent_live_lookup_unavailable"), include_results=bool(evidence.records))
+                if required_live_fact.clock_intent and requested_output_language(user_prompt):
+                    verified_clock = _verified_translated_clock(host, user_prompt, required_live_fact, verified_step)
+                    if verified_clock:
+                        emission = {"reply": verified_clock}
+                        emission_text = json.dumps(emission)
+                        delivery = bundled_reply = None
+
             if (iteration == 0 and research_handoff_required
                     and "reply" in emission and not emission.get("actions")):
                 # Acknowledgement prose cannot queue a job. Enforce the narrow
@@ -586,13 +885,15 @@ class AgentLoop:
                 emission = (
                     {"actions": [{"intent": "deep_think", "args": [user_prompt]}]}
                     if tool_registry.is_available("deep_think")
-                    else {"reply": "Background research is unavailable right now; I haven't queued an investigation."}
+                    else {"reply": response("agent_research_unavailable")}
                 )
                 emission_text = json.dumps(emission)
                 delivery = bundled_reply = None
 
             if emission.get("actions") and plan.repeated_without_progress(emission["actions"]):
-                blocker = "I couldn't make progress after one correction; the current plan repeated without a new result."
+                if translation_pending and not evidence.records:
+                    return response("agent_translation_unavailable")
+                blocker = response("agent_no_progress")
                 findings = search.output_parts(plan.output(include_lookups=True))
                 spoken = " ".join([*findings, blocker])
                 logger.warning(
@@ -625,7 +926,9 @@ class AgentLoop:
                     return spoken
                 if iteration < MAX_AGENT_CALLS_PER_TURN - 1:
                     continue
-                return plan.finish("I couldn't finish the remaining steps.", include_results=True)
+                if translation_pending and not evidence.records:
+                    return response("agent_translation_unavailable")
+                return plan.finish(response("agent_steps_incomplete"), include_results=True)
 
             if emission.get("actions"):
                 bundled_reply = bundled_reply or emission.get("reply")
@@ -652,13 +955,18 @@ class AgentLoop:
             # Reply branch — agent's final spoken answer.
             if "reply" in emission:
                 reply = (emission.get("reply") or "").strip()
+                if requests_translation(user_prompt) and evidence.records:
+                    # Do not let a translation model invent or alter action
+                    # outcomes. Preserve the actual observation and be explicit
+                    # that the requested translation was not provided.
+                    return plan.finish(response("agent_translation_unavailable"), include_results=True)
                 # A single quick search may use its focused summary verbatim.
                 # Mixed plans must compose from all tool findings instead.
                 non_search_results = any(
                     step.result is not None and not intents.is_web_search(step.action.get("intent"))
                     for step in plan.steps
                 )
-                if not non_search_results and len(search.summaries) == 1 and (grounded := search.grounded_reply()):
+                if not requests_translation(user_prompt) and not non_search_results and len(search.summaries) == 1 and (grounded := search.summaries[0]):
                     if evidence.records:
                         grounded = ". ".join(search.output_parts([evidence.response()]))
                     reply = plan.finish(grounded)
@@ -683,15 +991,20 @@ class AgentLoop:
                         host._emit_agent_event("observation", {"intent": "reply_guard", "result": REPAIR}, source=source)
                         continue
                     else:
-                        reply = FALLBACK
+                        reply = response("agent_confirmation_failed")
                     reply = plan.finish(reply, include_results=bool(search.latest))
                     turn_history.append({"role": "assistant", "content": json.dumps({"reply": reply})})
                     return reply
                 if not reply:
+                    if translation_pending and not evidence.records:
+                        return response("agent_translation_unavailable")
                     if plan.steps:
-                        return plan.finish("I couldn't compose the final answer.", include_results=True)
+                        return plan.finish(response("agent_compose_failed"), include_results=True)
                     return random.choice(ACK_PHRASES)
                 reply = plan.finish(intents.strip_unfounded_save_claim(reply, note_written))
+                if source == "voice" and (target_language := requested_output_language(user_prompt)):
+                    if getattr(host, "_turn_local", None) is not None:
+                        host._turn_local.response_language = target_language
                 turn_history = host._history_for(self.satellite)
                 if turn_history:
                     turn_history[-1] = {"role": "assistant", "content": json.dumps({"reply": reply})}
@@ -703,7 +1016,7 @@ class AgentLoop:
                 if plan.pending():
                     continue
                 if plan.steps:
-                    return plan.finish("I couldn't continue the plan.", include_results=True)
+                    return plan.finish(response("agent_plan_failed"), include_results=True)
                 return random.choice(ACK_PHRASES)
             batch = plan.stage(actions[:3])
 
@@ -785,13 +1098,19 @@ class AgentLoop:
                     # "searching the web" during the lookup itself, not after
                     # it lands (the summarise step that follows is only ~1s).
                     if intents.is_web_search(intent_name) and host.web_search_stall_cache:
-                        chunks, sr = random.choice(host.web_search_stall_cache)
-                        host.play_chunks(chunks, sr, session=session or host.tts_session)
+                        if current_response_language.get() == "en":
+                            chunks, sr = random.choice(host.web_search_stall_cache)
+                            host.play_chunks(chunks, sr, session=session or host.tts_session)
+                        else:
+                            host._play_random_ack(session or host.tts_session, cache=host.web_search_stall_cache)
                         if session is not None and session.cancelled:
                             return ""
                     elif intents.is_note_write(intent_name) and host.note_write_stall_cache:
-                        chunks, sr = random.choice(host.note_write_stall_cache)
-                        host.play_chunks(chunks, sr, session=session or host.tts_session)
+                        if current_response_language.get() == "en":
+                            chunks, sr = random.choice(host.note_write_stall_cache)
+                            host.play_chunks(chunks, sr, session=session or host.tts_session)
+                        else:
+                            host._play_random_ack(session or host.tts_session, cache=host.note_write_stall_cache)
                         if session is not None and session.cancelled:
                             return ""
                     elif intent_name == "play_song":
@@ -846,7 +1165,8 @@ class AgentLoop:
                         try:
                             summary = search.summarise(
                                 step.text, summariser=host._summarise_search_result,
-                                watchdog=ThinkingWatchdog, clips=host.web_search_stall_cache,
+                                watchdog=ThinkingWatchdog,
+                                clips=host.web_search_stall_cache if current_response_language.get() == "en" else [],
                                 play_chunks=host.play_chunks, session=session or host.tts_session,
                                 sink=getattr(host._turn_local, "sink", None),
                                 tts_active_event=getattr(
@@ -861,10 +1181,10 @@ class AgentLoop:
                             host._note_llm_remote_status(False, str(e))
                             # The tools already ran. Never redispatch the regex
                             # plan (especially mutations) to degrade gracefully.
-                            summary = "The search results could not be summarised; original source material has been retained."
+                            summary = response("agent_summary_failed")
                         except Exception:
                             logger.exception("Search summarisation failed; retaining sources and pending work")
-                            summary = "The search results could not be summarised; original source material has been retained."
+                            summary = response("agent_summary_failed")
                         if session is not None and session.cancelled:
                             return ""
                         # Replace the raw payload with the summary; the loop
@@ -875,6 +1195,10 @@ class AgentLoop:
                 history_text = step.text
                 if iteration == 0 and first_emission is not None and not reused:
                     step = _localized_fastpath_step(host, source, user_prompt, first_emission, action, step)
+                step = _localized_ha_error(host, user_prompt, first_emission if iteration == 0 else None, action, step)
+                step = _localized_timer_step(host, user_prompt, first_emission if iteration == 0 else None, action, step)
+                if step.raw_text is None:
+                    step = _localized_time_step(action, step)
                 plan.record(planned_step, step, reused=reused)
                 if not reused:
                     evidence.record({**action, "intent": intent_name}, step)
@@ -910,7 +1234,7 @@ class AgentLoop:
                     if independent:
                         continue
                     spoken = (
-                        step.text.strip() or "I'll look into that and let you know when I'm done."
+                        step.text.strip() or response("research_started")
                     )
                     spoken = plan.finish("", include_results=True) or spoken
                     host._record_spoken(spoken)
@@ -926,6 +1250,12 @@ class AgentLoop:
                     and step.kind is StepKind.NORMAL
                     and intents.is_lookup(intent_name)
                 )
+                translation_replan = (
+                    requests_translation(user_prompt) and not web_summarised
+                    and (intent_name in {"get_current_time", "date_of"} or native_access_class(intent_name) == "read")
+                    and not evidence.records and planned_step.key not in lookup_composed
+                    and step.kind is StepKind.NORMAL
+                )
                 # A web search always hands control back to the agent: its
                 # summary is now in history, so the agent decides the next
                 # move (another search, a follow-up tool, or a reply) from
@@ -937,9 +1267,17 @@ class AgentLoop:
                     and (later.action.get("depends_on") or plan.name(later.action) in NOTE_WRITE_TOOLS)
                     for later in batch[batch.index(planned_step) + 1:]
                 )
-                if web_summarised or step.should_replan or lookup_replan or dependent_replan:
-                    if lookup_replan:
+                if web_summarised or step.should_replan or lookup_replan or translation_replan or dependent_replan:
+                    if web_summarised and requests_translation(user_prompt):
+                        translation_pending = True
+                    if lookup_replan or translation_replan:
                         lookup_composed.add(planned_step.key)
+                    if translation_replan:
+                        translation_pending = True
+                        host._history_for(self.satellite).append({
+                            "role": "tool", "name": "translation_request",
+                            "content": "Answer in the user's requested language using the actual tool observations. Preserve their facts and failures. Do not repeat completed tool calls.",
+                        })
                     replan = True
                     plan.defer(batch, planned_step)
                     break
@@ -956,11 +1294,28 @@ class AgentLoop:
             if plan.pending():
                 continue
 
+            if required_live_fact and _live_fact_step(plan, required_live_fact) is None:
+                if request_live_fact_repair(iteration):
+                    continue
+                return plan.finish(response("agent_live_lookup_unavailable"), include_results=bool(evidence.records))
+
             # No further replan requested. NORMAL includes plain-string failures;
             # operation confirmations must therefore preserve actual tool output,
             # never replace it with model-authored delivery/bundled prose.
             if evidence.records:
-                spoken = plan.finish("", include_results=True) or evidence.response()
+                notice = response("agent_translation_unavailable") if requests_translation(user_prompt) else ""
+                spoken = plan.finish(notice, include_results=True) or evidence.response()
+                host._record_spoken(spoken)
+                return spoken
+            unclassified_result = any(
+                planned.result is not None and plan.name(planned.action) not in {"get_current_time", "date_of"}
+                and native_access_class(plan.name(planned.action)) != "read"
+                for planned in plan.steps
+            )
+            if requests_translation(user_prompt) and unclassified_result:
+                # An unclassified tool is not safe to reinterpret or repeat.
+                # Keep its observation and explicitly disclose the missing translation.
+                spoken = plan.finish(response("agent_translation_unavailable"), include_results=True)
                 host._record_spoken(spoken)
                 return spoken
             # A lookup is not evidence that an operation occurred. Guard bundled
@@ -968,7 +1323,7 @@ class AgentLoop:
             if claims_execution(bundled_reply or "") or claims_execution(delivery or ""):
                 bundled_reply = None
                 delivery = None
-            if bundled_reply and not search.latest:
+            if bundled_reply and not search.latest and required_live_fact is None:
                 spoken = intents.strip_unfounded_save_claim(bundled_reply, note_written)
                 host._record_spoken(spoken)
                 return spoken
@@ -978,7 +1333,7 @@ class AgentLoop:
             # completed actions to the user.
             spoken = delivery if delivery else ". ".join(parts)
             if not spoken:
-                spoken = FALLBACK
+                spoken = response("agent_confirmation_failed")
             spoken = plan.finish(intents.strip_unfounded_save_claim(spoken, note_written))
             host._record_spoken(spoken)
             return spoken
@@ -987,10 +1342,12 @@ class AgentLoop:
         logger.warning(f"Hit MAX_AGENT_CALLS_PER_TURN={MAX_AGENT_CALLS_PER_TURN}")
         # If we researched something, speak the findings instead of a flat
         # apology — the lookup succeeded even though the agent never settled.
+        if translation_pending and not evidence.records:
+            return response("agent_translation_unavailable")
         if spoken := plan.finish("", include_results=True):
             host._record_spoken(spoken)
             return spoken
-        return "Sorry, I couldn't finish that."
+        return response("agent_failed")
 
     def _remote_llm_unavailable_fallback(self, host) -> str:
         fallback = getattr(host, "_remote_llm_unavailable_fallback", None)
@@ -1058,7 +1415,7 @@ class AgentLoop:
             if intent_name == "play_song":
                 _play_music_search_ack(host, session)
             if intent_name == "deep_think":
-                step = intents.StepResult(StepKind.ERROR, "Research requires an available language model.", False)
+                step = intents.StepResult(StepKind.ERROR, response("agent_research_needs_model"), False)
                 needs_model = True
             else:
                 step = plan.cached(planned_step) or intents.classify_step(
@@ -1066,9 +1423,13 @@ class AgentLoop:
                 )
             observed_text = step.text
             step = _localized_fastpath_step(host, source, user_prompt, first_emission, action, step)
+            step = _localized_ha_error(host, user_prompt, first_emission, action, step)
+            step = _localized_timer_step(host, user_prompt, first_emission, action, step)
+            if step.raw_text is None:
+                step = _localized_time_step(action, step)
             if step.kind is StepKind.WEB_SEARCH:
                 # Raw source blobs cannot be spoken without a summariser.
-                step = intents.StepResult(StepKind.ERROR, "Web findings require an available summariser.", False,
+                step = intents.StepResult(StepKind.ERROR, response("agent_web_needs_model"), False,
                                           artifact=step.artifact, outcome=step.outcome)
                 needs_model = True
             if step.kind is StepKind.ERROR:

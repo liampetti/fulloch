@@ -11,11 +11,12 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import requests
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -162,8 +163,26 @@ class NoteRequest(BaseModel):
     content: str
 
 
+class DocumentSearchRequest(BaseModel):
+    query: str = Field(max_length=500)
+
+
+class ConversationSearchRequest(BaseModel):
+    query: str = Field(max_length=500)
+    offset: int = Field(default=0, ge=0)
+
+
+class ConversationLoadRequest(BaseModel):
+    current: Literal["save", "clear"]
+
+
 class EntityDenyRequest(BaseModel):
     entity_id: str
+    denied: bool
+
+
+class EntitiesDenyRequest(BaseModel):
+    entity_ids: list[str]
     denied: bool
 
 
@@ -184,21 +203,100 @@ def register_chat_routes(
     registration. Locks and queues belong to this app, never to the module.
     """
     lifecycle = context.lifecycle
-    history_log: list = []
+    from .conversations import ConversationStore
+
+    store = ConversationStore(os.environ.get(
+        "FULLOCH_CONVERSATION_DB", str(Path(context.config_path).parent / "conversations.sqlite3"),
+    ))
+    history_log, restored_context = store.active()
     history_lock = threading.Lock()
+    conversation_gate = threading.Lock()
     subscribers: list[queue.Queue] = []
     subscribers_lock = threading.Lock()
     proactive_slots = threading.BoundedSemaphore(PROACTIVE_REQUEST_LIMIT)
-    startup_greeting_seeded = False
+    startup_greeting_seeded = bool(history_log)
+    conversation_storage_healthy = True
 
-    def on_turn(event: dict) -> None:
-        # Native lifecycle events have no chat role and aren't dashboard messages.
-        if not event.get("role"):
+    def assistant_context():
+        history = getattr(context.assistant, "_history", None)
+        satellite_histories = getattr(context.assistant, "_satellite_histories", {})
+        visible_satellites = {event.get("satellite_id") for event in history_log if event.get("source") == "voice"}
+        return {
+            "dashboard": list(history[-50:]) if isinstance(history, list) else [],
+            "satellites": {key: list(value[-50:]) for key, value in satellite_histories.items()
+                           if isinstance(key, str) and key in visible_satellites and isinstance(value, list)}
+            if isinstance(satellite_histories, dict) else {},
+        }
+
+    def apply_context(events, saved, *, restore_satellites=False):
+        history = getattr(context.assistant, "_history", None)
+        if not isinstance(history, list):
             return
-        with history_lock:
-            history_log.append(event)
-            if len(history_log) > HISTORY_LIMIT:
-                del history_log[: len(history_log) - HISTORY_LIMIT]
+        dashboard = saved.get("dashboard", []) if isinstance(saved, dict) else saved
+        if not dashboard:
+            dashboard = [{"role": event["role"], "content": event["content"]}
+                         for event in events if event.get("role") in {"user", "assistant"}
+                         and event.get("source") != "startup" and isinstance(event.get("content"), str)]
+        history[:] = dashboard[-50:]
+        if restore_satellites and isinstance(saved, dict):
+            satellite_histories = getattr(context.assistant, "_satellite_histories", None)
+            if isinstance(satellite_histories, dict):
+                restored_at = getattr(context.assistant, "_restored_voice_context", None)
+                if not isinstance(restored_at, dict):
+                    restored_at = {}
+                for satellite_id, entries in saved.get("satellites", {}).items():
+                    if isinstance(satellite_id, str) and isinstance(entries, list):
+                        satellite_histories[satellite_id] = entries[-50:]
+                        restored_at[satellite_id] = time.monotonic()
+                context.assistant._restored_voice_context = restored_at
+        if hasattr(context.assistant, "_laya_context"):
+            context.assistant._laya_context = None
+
+    def clear_visible_voice_context(events):
+        histories = getattr(context.assistant, "_satellite_histories", None)
+        if not isinstance(histories, dict):
+            return
+        satellite_ids = {event.get("satellite_id") for event in events if event.get("source") == "voice"}
+        restored = getattr(context.assistant, "_restored_voice_context", None)
+        for satellite_id in satellite_ids:
+            if not isinstance(satellite_id, str) or satellite_id == "dashboard-text":
+                continue
+            histories.pop(satellite_id, None)
+            if isinstance(restored, dict):
+                restored.pop(satellite_id, None)
+
+    @contextmanager
+    def manage_conversation():
+        """Never replace context while a foreground turn is in progress."""
+        from core.turn_arbiter import TurnArbiter
+
+        assistant = context.assistant
+        lock = getattr(assistant, "_turn_lock", None)
+        acquired = False
+        arbiter = getattr(assistant, "_turn_arbiter", None)
+        reserved = False
+        if not conversation_gate.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Wait for the current turn to finish")
+        try:
+            if isinstance(arbiter, TurnArbiter):
+                if not arbiter.try_acquire("dashboard-management"):
+                    raise HTTPException(status_code=409, detail="Wait for the current turn to finish")
+                reserved = True
+            elif isinstance(getattr(arbiter, "owner", None), str) and arbiter.owner:
+                raise HTTPException(status_code=409, detail="Wait for the current turn to finish")
+            if isinstance(lock, type(threading.Lock())):
+                if not lock.acquire(blocking=False):
+                    raise HTTPException(status_code=409, detail="Wait for the current turn to finish")
+                acquired = True
+            yield
+        finally:
+            if acquired:
+                lock.release()
+            if reserved:
+                arbiter.release("dashboard-management")
+            conversation_gate.release()
+
+    def broadcast_event(event: dict) -> None:
         with subscribers_lock:
             dead = []
             for q in subscribers:
@@ -210,6 +308,24 @@ def register_chat_routes(
                     dead.append(q)
             for q in dead:
                 subscribers.remove(q)
+
+    def on_turn(event: dict) -> None:
+        nonlocal conversation_storage_healthy
+        # Native lifecycle events have no chat role and aren't dashboard messages.
+        if not event.get("role"):
+            return
+        with history_lock:
+            history_log.append(event)
+            if event.get("role") != "reset":
+                saved = assistant_context() if event.get("role") == "assistant" and event.get("source") in {"text", "voice"} else None
+                try:
+                    store.append(event, saved)
+                except Exception:
+                    logger.exception("Could not persist the active conversation")
+                    conversation_storage_healthy = False
+        broadcast_event(event)
+        if not conversation_storage_healthy:
+            broadcast_event({"role": "conversation_storage_error", "ts": time.time()})
 
     def _start_proactive(*args, **kwargs) -> bool:
         """Bound pending speech work rather than growing request threads."""
@@ -237,6 +353,8 @@ def register_chat_routes(
         on_turn({"role": "assistant", "content": greeting, "ts": time.time(), "source": "startup"})
 
     def _attach_turn_listener(assistant) -> None:
+        if history_log:
+            apply_context(history_log, restored_context)
         assistant.register_turn_listener(on_turn)
         _seed_startup_greeting(assistant)
 
@@ -312,12 +430,8 @@ def register_chat_routes(
             raise HTTPException(status_code=404, detail="document not found") from error
         return HTMLResponse(_document_html(path.stem.replace("-", " "), text))
 
-    @app.get("/api/documents")
-    def list_documents() -> JSONResponse:
-        """Return Markdown documents that are available to Fulloch's notes tools."""
-        from tools.notes_root import get_notes_root
-
-        root = get_notes_root().resolve()
+    def visible_documents(root: Path) -> list[dict]:
+        """List documents using the same resolved-path rules as the viewer."""
         documents = []
         try:
             candidates = root.rglob("*.md")
@@ -337,7 +451,46 @@ def register_chat_routes(
         except OSError as error:
             logger.warning("Unable to list documents in %s: %s", root, error)
         documents.sort(key=lambda document: document["path"].casefold())
-        return JSONResponse({"documents": documents})
+        return documents
+
+    @app.get("/api/documents")
+    def list_documents() -> JSONResponse:
+        """Return Markdown documents that are available to Fulloch's notes tools."""
+        from tools.notes_root import get_notes_root
+
+        return JSONResponse({"documents": visible_documents(get_notes_root().resolve())})
+
+    @app.post("/api/documents/search")
+    def search_documents(req: DocumentSearchRequest) -> JSONResponse:
+        from tools import notes
+        from tools.notes_root import get_notes_root
+
+        query = req.query.strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="Search query is empty")
+        root = get_notes_root().resolve()
+        documents = {document["path"]: document for document in visible_documents(root)}
+        if not documents:
+            return JSONResponse({"results": []})
+        try:
+            matches = notes._get_index().search_documents(
+                query, allowed_files=set(documents), k=50, min_score=notes.SEMANTIC_MIN_SCORE,
+            )
+        except Exception as error:
+            logger.exception("Document semantic search failed")
+            raise HTTPException(status_code=503, detail="Document search is unavailable") from error
+        if get_notes_root().resolve() != root:
+            raise HTTPException(status_code=409, detail="Documents folder changed; please search again")
+        results = []
+        for _score, chunk in matches:
+            try:
+                resolve_document(chunk.file)
+            except HTTPException:
+                continue
+            document = documents.get(chunk.file)
+            if document is not None:
+                results.append({**document, "excerpt": notes._truncate_snippet(chunk.text, 240)})
+        return JSONResponse({"results": results})
 
     @app.get("/documents/{document_path:path}")
     def get_document(document_path: str) -> HTMLResponse:
@@ -374,14 +527,79 @@ def register_chat_routes(
 
     @app.post("/reset")
     def reset_chat() -> dict:
-        nonlocal startup_greeting_seeded
+        nonlocal startup_greeting_seeded, conversation_storage_healthy
         require_ready()
-        with history_lock:
-            history_log.clear()
-            # An explicit reset suppresses later reinsertion of the greeting.
+        with manage_conversation():
+            with history_lock:
+                store.clear()
+                clear_visible_voice_context(history_log)
+                history_log.clear()
+                startup_greeting_seeded = True
+                conversation_storage_healthy = True
+            apply_context([], [])
+            on_turn({"role": "reset", "ts": time.time()})
+        return {"ok": True}
+
+    @app.post("/conversations")
+    def save_conversation() -> dict:
+        require_ready()
+        with manage_conversation():
+            if not conversation_storage_healthy:
+                raise HTTPException(status_code=503, detail="The active conversation could not be fully persisted")
+            try:
+                return store.save(assistant_context())
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/conversations")
+    def list_conversations(offset: int = Query(0, ge=0)) -> dict:
+        require_ready()
+        return store.list(offset=offset)
+
+    @app.get("/conversations/status")
+    def conversation_status() -> dict:
+        require_ready()
+        return {"persisted": conversation_storage_healthy}
+
+    @app.post("/conversations/search")
+    def search_conversations(req: ConversationSearchRequest) -> dict:
+        require_ready()
+        query = req.query.strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="Search query is empty")
+        try:
+            return store.list(offset=req.offset, query=query)
+        except Exception as error:
+            logger.exception("Conversation semantic search failed")
+            raise HTTPException(status_code=503, detail="Conversation search is unavailable") from error
+
+    @app.post("/conversations/{identifier}/load")
+    def load_conversation(identifier: str, req: ConversationLoadRequest) -> dict:
+        nonlocal startup_greeting_seeded, conversation_storage_healthy
+        require_ready()
+        with manage_conversation(), history_lock:
+            if req.current == "save" and not conversation_storage_healthy:
+                raise HTTPException(status_code=503, detail="The active conversation could not be fully persisted")
+            try:
+                loaded = store.load(identifier, save_context=assistant_context() if req.current == "save" else None)
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+            if loaded is None:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            events, saved, snapshot = loaded
+            clear_visible_voice_context(history_log)
+            history_log[:] = events
             startup_greeting_seeded = True
-        context.assistant._history.clear()
-        on_turn({"role": "reset", "ts": time.time()})
+            conversation_storage_healthy = True
+            apply_context(events, saved, restore_satellites=True)
+            broadcast_event({"role": "conversation_loaded", "ts": time.time()})
+        return {"ok": True, "saved": snapshot}
+
+    @app.delete("/conversations/{identifier}")
+    def delete_conversation(identifier: str) -> dict:
+        require_ready()
+        if not store.delete(identifier):
+            raise HTTPException(status_code=404, detail="Conversation not found")
         return {"ok": True}
 
     @app.get("/ready")
@@ -554,6 +772,14 @@ def register_chat_routes(
     @app.post("/chat")
     def chat(req: ChatRequest) -> dict:
         require_ready()
+        if not conversation_gate.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Wait for the current turn to finish")
+        try:
+            return _handle_chat(req)
+        finally:
+            conversation_gate.release()
+
+    def _handle_chat(req: ChatRequest) -> dict:
         # Room selection belongs to this browser request, not the shared
         # dashboard-text session or whichever voice satellite happens to be live.
         ha_area = (req.ha_area or "").strip()
@@ -656,6 +882,22 @@ def register_chat_routes(
         if not entity_id:
             raise HTTPException(status_code=400, detail="empty entity_id")
         ha.set_entity_denied(entity_id, req.denied)
+        return JSONResponse({"available": True, "entities": ha.list_entities()})
+
+    @app.post("/entities/bulk")
+    def entities_set_bulk(req: EntitiesDenyRequest) -> JSONResponse:
+        require_ready()
+        from tools._config import config
+
+        if "home_assistant" not in config:
+            raise HTTPException(status_code=404, detail="Home Assistant not configured")
+        from tools import home_assistant as ha
+
+        entity_ids = {entity_id.strip() for entity_id in req.entity_ids}
+        known_ids = {entity["entity_id"] for entity in ha.list_entities()}
+        if not entity_ids or "" in entity_ids or not entity_ids <= known_ids:
+            raise HTTPException(status_code=400, detail="unknown or empty entity_id")
+        ha.set_entities_denied(list(entity_ids), req.denied)
         return JSONResponse({"available": True, "entities": ha.list_entities()})
 
     @app.get("/ha/areas")

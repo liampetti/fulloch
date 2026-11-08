@@ -381,6 +381,20 @@ def _normalise_thinking_args(schema, args: list, kwargs: dict, *, default_overri
 
 def _budgeted_generate(worker, budget, stage: str, **kwargs):
     request_kind = kwargs.pop("request_kind", "generation")
+    # Research jobs run on a long-lived worker, so their originating turn's
+    # locale is restored by BackgroundJobManager. Preserve schema keys and
+    # evidence identifiers while asking report-producing stages to use it.
+    if stage in {"synthesis", "final_assembly", "chapter_analysis", "section"}:
+        from core.satellite_context import current_response_intents_dir, current_response_language
+        from utils.fastpath_responses import load_responses
+
+        language = current_response_language.get()
+        if language != "en" and load_responses(current_response_intents_dir.get(), language):
+            kwargs["system_prompt"] = (kwargs.get("system_prompt") or "") + (
+                f"\nWrite user-facing report prose in language {language}. "
+                "Keep required JSON keys, schema values, citations, source identifiers, "
+                "quoted evidence and tool names unchanged.\n"
+            )
     job = getattr(worker, "_active_job", None)
     attempt = {"stage": stage, "kind": request_kind, "state": "attempted"}
     if job is not None:

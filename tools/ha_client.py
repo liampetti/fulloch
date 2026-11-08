@@ -310,17 +310,23 @@ def set_entity_denied(entity_id: str, denied: bool) -> None:
     Takes effect immediately for the next `_call_service` — the set is rebound
     atomically so the reading turn thread never sees a half-updated set.
     """
+    set_entities_denied([entity_id], denied)
+
+
+def set_entities_denied(entity_ids: list[str], denied: bool) -> None:
+    """Persist one atomic update without disturbing other deny-list entries."""
     global _DENIED_ENTITIES
+    entity_ids = set(entity_ids)
     with _denylist_lock:
         current = set(_DENIED_ENTITIES)
         if denied:
-            current.add(entity_id)
+            current.update(entity_ids)
         else:
-            current.discard(entity_id)
+            current.difference_update(entity_ids)
         _persist_denylist(current)
         _DENIED_ENTITIES = frozenset(current)
     logger.info(
-        f"Voice {'blocked' if denied else 'allowed'}: {entity_id} "
+        f"Voice {'blocked' if denied else 'allowed'}: {len(entity_ids)} entity(ies) "
         f"({len(_DENIED_ENTITIES)} blocked total)"
     )
 

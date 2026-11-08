@@ -10,9 +10,11 @@ import requests
 from bs4 import BeautifulSoup
 
 import utils.local_time as _local_time
+from core.satellite_context import current_response_language
 from core.thinking_extraction import sentence_spans, table_records
 from core.thinking_scope import extract_dates
 from core.url_utils import normalize_url
+from utils.response_language import response as localized_response
 
 from ._config import config
 from .thinking_playbooks import thinking_playbook
@@ -811,20 +813,20 @@ def external_information(
     # the news. Strip the directive for the SearXNG query; keep the original for
     # the "User question:" line so the summariser still knows the user's intent.
     if not isinstance(query, str) or not query.strip():
-        return _retrieval_argument_error("Use a non-empty task-specific search query.",
+        return _retrieval_argument_error(localized_response("web_bad_query"),
                                          "The search query is missing or invalid.", "query", [])
     search_query = _strip_summarise_directive(query)
     profile = str(profile or "conversation").casefold()
     if profile not in {"conversation", "research"}:
-        return _retrieval_argument_error("Use conversation or research profile.",
+        return _retrieval_argument_error(localized_response("web_bad_profile"),
                                          "The requested web retrieval profile is unsupported.", "profile", ["conversation", "research"])
     category = str(category or "auto").casefold()
     if category not in {"auto", "general", "news"}:
-        return _retrieval_argument_error("Use auto, general, or news category.",
+        return _retrieval_argument_error(localized_response("web_bad_category"),
                                          "The requested web search category is unsupported.", "category", ["auto", "general", "news"])
     time_range = str(time_range or "").casefold()
     if time_range not in {"", "day", "week", "month", "year"}:
-        return _retrieval_argument_error("Use day, week, month, year, or no time range.",
+        return _retrieval_argument_error(localized_response("web_bad_time_range"),
                                          "The requested web time range is unsupported.", "time_range", ["", "day", "week", "month", "year"])
     research = profile == "research"
     profile_limits = RETRIEVAL_PROFILES[profile]
@@ -833,7 +835,7 @@ def external_information(
     except (TypeError, ValueError):
         page = 0
     if not 1 <= page <= profile_limits["max_pages"]:
-        return _retrieval_argument_error("Use a page between 1 and 3.",
+        return _retrieval_argument_error(localized_response("web_bad_page"),
                                          "The requested result page is outside the bounded research range.", "page",
                                          list(range(1, profile_limits["max_pages"] + 1)))
     website_snippets = []
@@ -900,8 +902,8 @@ def external_information(
                 snippet = source["evidence"]
                 sources.append(source)
                 if snippet and source.get("eligible"):
-                    source_scope = f" ({scope} news)" if scope else ""
-                    website_snippets.append(f"\n\nFrom {canonical_url}{source_scope}: {snippet}")
+                    source_scope = localized_response(f"web_scope_{scope.lower()}") if scope in {"Global", "Regional", "Local"} else ""
+                    website_snippets.append("\n\n" + localized_response("web_source", url=canonical_url, scope=source_scope, snippet=snippet))
     except Exception as e:
         logger.error(f"Unable to search web: {e}")
         search_failed = True
@@ -911,10 +913,17 @@ def external_information(
     # compresses it into a short spoken answer — otherwise the raw snippet
     # blob is joined into the spoken result and read out verbatim.
     lines = [f"User question: {query}", ""]
-    lines.append(f"Today is {_local_time.now().strftime('%B %d, %Y')}.")
+    language = current_response_language.get()
+    if language in {"fr", "de"}:
+        from babel.dates import format_date
+
+        date_text = format_date(_local_time.now().date(), "long", locale=language)
+    else:
+        date_text = _local_time.now().strftime('%B %d, %Y')
+    lines.append(localized_response("web_today", date=date_text))
     if website_snippets:
         lines.append("")
-        lines.append("A web search has retrieved the following information:")
+        lines.append(localized_response("web_retrieved"))
         lines.extend(website_snippets)
     else:
         # No usable snippets (engine down, JSON+HTML both failed, or every
@@ -922,11 +931,7 @@ def external_information(
         # the user nothing was found instead of fabricating an answer — and
         # so the agent never saves the non-finding as note content.
         lines.append("")
-        lines.append(
-            "The web search returned no usable results. Tell the user you "
-            "couldn't find anything on this right now; do not invent an "
-            "answer and do not save this as a note."
-        )
+        lines.append(localized_response("web_no_results"))
 
     artifact = _web_artifact(query, sources, profile)
     eligible_source_count = sum(bool(source.get("eligible")) for source in sources)

@@ -322,6 +322,8 @@ def chapter_excerpts(cards, *, max_chars=5_000):
 
 
 def evidence_fallback(task, cards, *, requirements=(), state=None, max_chars=12_000):
+    from utils.response_language import response
+
     state = state if state is not None else {}
     eligible = report_card_ledger(cards)
     selection_trace = {}
@@ -334,7 +336,7 @@ def evidence_fallback(task, cards, *, requirements=(), state=None, max_chars=12_
         owner = item.get("chapter_id") or item.get("identifier")
         groups.setdefault(owner, {"title": item.get("dimension") or item["question"], "cards": []})
         owners_by_requirement[item["identifier"]] = owner
-    groups["retained"] = {"title": "Additional source facts", "cards": []}
+    groups["retained"] = {"title": response("report_additional_facts"), "cards": []}
     for card in selected:
         ids = [reason.partition(":")[0] for reason in reasons.get(card["id"], [])]
         owners = list(dict.fromkeys(owners_by_requirement[identifier] for identifier in ids
@@ -415,9 +417,9 @@ def evidence_fallback(task, cards, *, requirements=(), state=None, max_chars=12_
             candidates = [first]
         extracts = [extracted_fact(card, f"citation:{card['id']}").removeprefix("- ") for card in candidates]
         summary_facts = extracts if sum(map(len, extracts)) <= 1_200 else [
-            "No summary is available."
+            response("report_no_summary")
         ]
-    summary = " ".join(summary_facts) or "No findings are available."
+    summary = " ".join(summary_facts) or response("report_no_findings")
     parts.insert(0, "## Summary\n\n" + summary)
     cards_by_id = {str(card.get("id")): card for card in selected}
     references = []

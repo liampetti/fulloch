@@ -7,6 +7,8 @@ number formatting across magnitudes, date maths, and unit conversion.
 
 from datetime import date
 
+import pytest
+
 from tools.calculator import (
     _calendar_reference,
     _fmt_number,
@@ -16,6 +18,7 @@ from tools.calculator import (
     date_of,
     days_between,
     has_relative_calendar_reference,
+    parse_nested_days_between,
 )
 
 
@@ -29,6 +32,30 @@ class TestCalculate:
     def test_function_and_rounding(self):
         # sqrt(2) rounds to 2 dp.
         assert calculate("sqrt(2)") == "That comes to 1.41."
+
+    @pytest.mark.parametrize("expression,expected", [
+        ("gcd(8,4)", "That comes to 4."),
+        ("max(1, 2)", "That comes to 2."),
+        ("pow(2,3)", "That comes to 8."),
+        ("round(1.234, 2)", "That comes to 1.23."),
+        ("1,234 + 2", "That comes to 1236."),
+        ("(1,234 + 2) * 2", "That comes to 2472."),
+        ("gcd(1,234)", "That comes to 1."),
+    ])
+    def test_argument_commas_and_thousands_separators(self, expression, expected):
+        assert calculate(expression) == expected
+
+    @pytest.mark.parametrize("expression", [
+        'days_between("2026-11-08", "2026-12-25")',
+        'days_between("today", "2026-12-25")',
+        'days_between("today", __import__("os"))',
+        '1 + days_between("today", "2026-12-25")',
+        'days_between "today", "2026-12-25"',
+    ])
+    def test_nested_tool_call_never_becomes_a_successful_date(self, expression):
+        result = calculate(expression)
+        assert result.startswith("Reactive question:")
+        assert "Call days_between directly" in result
 
     def test_divide_by_zero_is_friendly(self):
         assert "dividing by zero" in calculate("1/0")
@@ -74,6 +101,27 @@ class TestFormatNumber:
 
 
 class TestDays:
+    @pytest.mark.parametrize("expression,expected", [
+        ('days_between("2026-11-08", "2026-12-25")', ("2026-11-08", "2026-12-25")),
+        (" days_between('today', '2026-12-25') ", ("today", "2026-12-25")),
+        ('days_between("yesterday", "tomorrow")', ("yesterday", "tomorrow")),
+    ])
+    def test_parse_nested_days_between(self, expression, expected):
+        assert parse_nested_days_between(expression) == expected
+
+    @pytest.mark.parametrize("expression", [
+        'days_between("today", "2026-02-30")',
+        'days_between("today", "Christmas")',
+        'days_between("today", __import__("os"))',
+        'days_between("today", "2026-12-25", "extra")',
+        'days_between(date_a="today", date_b="2026-12-25")',
+        'days_between("today", "2026-12-25") + 1',
+        'other.days_between("today", "2026-12-25")',
+        'days_between("today", "2026-12-25")' + " " * 257,
+    ])
+    def test_nested_parser_rejects_invalid_or_nonliteral_calls(self, expression):
+        assert parse_nested_days_between(expression) is None
+
     def test_relative_dates_use_application_timezone(self, monkeypatch):
         import tools.calculator as calculator
 

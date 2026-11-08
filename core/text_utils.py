@@ -2,6 +2,8 @@
 
 import re
 
+from utils.number_words import number_words
+
 _EMOJI_PATTERN = re.compile(
     "["
     "\U0001f600-\U0001f64f"  # emoticons
@@ -27,13 +29,6 @@ _TTS_ACRONYM_RE = re.compile(
 )
 _SEMICOLON_RE = re.compile(r"\s*;\s*")
 
-_ONES = (
-    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
-    "eighteen", "nineteen",
-)
-_TENS = ("", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
-_SCALES = ((1_000_000_000_000, "trillion"), (1_000_000_000, "billion"), (1_000_000, "million"), (1_000, "thousand"))
 _NUMBER_BODY = r"(?:\d{1,3}(?:,\d{3})+|\d+)"
 _NUMBER = rf"-?{_NUMBER_BODY}(?:\.\d+)?"
 _BOUNDARY_AFTER = r"(?!(?:[\w/:-]|\.\d))"
@@ -56,6 +51,16 @@ _UNIT_RE = re.compile(
     re.IGNORECASE,
 )
 _NUMBER_RE = re.compile(rf"(?<![\w./:-])(?P<number>{_NUMBER}){_BOUNDARY_AFTER}")
+_CLOCK_RE = re.compile(
+    r"(?<![\w./:-])(?P<hour>\d{1,2}):(?P<minute>\d{2})"
+    r"(?![\w/:]|\.\d|-\d)(?P<suffix>\s*(?:a\.?m\.?|p\.?m\.?|uhr)(?!\w))?",
+    re.IGNORECASE,
+)
+_CLOCK_CONTEXT = {
+    "en": re.compile(r"\b(?:at|it(?:'s| is)|time(?:'s| is))\s*$", re.IGNORECASE),
+    "de": re.compile(r"\b(?:um|es ist|uhrzeit(?: ist)?)\s*$", re.IGNORECASE),
+    "fr": re.compile(r"(?:\b(?:il est|heure(?: est)?)|\bà)\s*$", re.IGNORECASE),
+}
 
 _THINK_PATTERN = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
 # Gemma 4 wraps its reasoning in a "thought" channel: `<|channel>thought ... <channel|>`.
@@ -102,35 +107,6 @@ def clean_for_tts(text: str, strip_think: bool = True) -> str:
     return _TTS_ACRONYM_RE.sub(lambda m: " ".join(m.group(1)), text)
 
 
-def _integer_words(number: int) -> str:
-    if number < 20:
-        return _ONES[number]
-    if number < 100:
-        tens, remainder = divmod(number, 10)
-        return _TENS[tens] if not remainder else f"{_TENS[tens]}-{_ONES[remainder]}"
-    if number < 1_000:
-        hundreds, remainder = divmod(number, 100)
-        prefix = f"{_ONES[hundreds]} hundred"
-        return prefix if not remainder else f"{prefix} {_integer_words(remainder)}"
-    for scale, name in _SCALES:
-        if number >= scale:
-            major, remainder = divmod(number, scale)
-            prefix = f"{_integer_words(major)} {name}"
-            return prefix if not remainder else f"{prefix} {_integer_words(remainder)}"
-    return str(number)
-
-
-def _number_words(value: str) -> str:
-    """Speak a decimal digit-by-digit after the point, preserving precision."""
-    negative = value.startswith("-")
-    value = value.removeprefix("-").replace(",", "")
-    whole, dot, fraction = value.partition(".")
-    spoken = _integer_words(int(whole))
-    if dot:
-        spoken += " point " + " ".join(_ONES[int(digit)] for digit in fraction)
-    return f"minus {spoken}" if negative else spoken
-
-
 def _pluralize_unit(unit: str, value: str) -> str:
     singular = abs(float(value.replace(",", ""))) == 1
     if singular:
@@ -146,13 +122,93 @@ def _pluralize_unit(unit: str, value: str) -> str:
     return f"{unit}s"
 
 
-def spoken_for_tts(text: str) -> str:
+def _spoken_clock_times(text: str, language: str) -> str:
+    """Verbalize unambiguous clock notation, not arbitrary colon-separated values."""
+    base = (language or "en").replace("_", "-").split("-", 1)[0].lower()
+    if base not in _CLOCK_CONTEXT:
+        return text
+
+    def clock(match: re.Match) -> str:
+        hour, minute = int(match.group("hour")), int(match.group("minute"))
+        suffix = (match.group("suffix") or "").strip()
+        suffix_kind = suffix.lower().replace(".", "")
+        if hour > 23 or minute > 59 or (suffix_kind in {"am", "pm"} and not 1 <= hour <= 12):
+            return match.group()
+        if suffix_kind == "uhr" and base != "de":
+            return match.group()
+        if suffix_kind in {"am", "pm"} and base != "en":
+            return match.group()
+        # Bare clock strings are useful to TTS callers, but embedded notation
+        # needs a clock cue to avoid silently changing scores, ratios and paths.
+        bare = not text[:match.start()].strip() and not text[match.end():].strip(" .!?")
+        if not (bare or suffix or _CLOCK_CONTEXT[base].search(text[:match.start()])):
+            return match.group()
+        hour_words = number_words(hour, language)
+        minute_words = number_words(minute, language)
+        if hour_words == str(hour) or minute_words == str(minute):
+            return match.group()
+        if base == "en":
+            if minute == 0:
+                result = hour_words if suffix else f"{hour_words} o'clock"
+            elif minute < 10:
+                result = f"{hour_words} oh {minute_words}"
+            else:
+                result = f"{hour_words} {minute_words}"
+            return f"{result} {suffix}" if suffix else result
+        if base == "de":
+            return f"{hour_words} Uhr" + (f" {minute_words}" if minute else "")
+        # French hour counts are feminine: une heure, vingt et une heures.
+        if hour % 10 == 1 and hour != 11:
+            hour_words = hour_words[:-2] + "une" if hour_words.endswith("un") else hour_words
+        return f"{hour_words} {'heure' if hour == 1 else 'heures'}" + (f" {minute_words}" if minute else "")
+
+    return _CLOCK_RE.sub(clock, text)
+
+
+def spoken_for_tts(text: str, language: str = "en") -> str:
     """Render common numeric notation into speech without changing display text.
 
-    This intentionally skips dates, times, versions, paths, IP addresses, and
-    identifier-like strings. Those forms have a digit next to a protected
-    separator, while standalone quantities are safe to verbalise.
+    Recognizable clock times are verbalized for English, German and French.
+    Dates, versions, paths, IP addresses and ambiguous identifiers are retained.
     """
+    text = _spoken_clock_times(text, language)
+    if language.replace("_", "-").split("-", 1)[0].lower() != "en":
+        # Keep symbols and units as written: their grammatical forms depend on
+        # the language. Do not interpret comma decimals as English thousands.
+        from babel import Locale
+        from babel.core import UnknownLocaleError
+        from babel.numbers import (
+            NumberFormatError,
+            get_decimal_symbol,
+            get_group_symbol,
+            parse_decimal,
+        )
+
+        try:
+            locale = Locale.parse(language.replace("-", "_"))
+            decimal = get_decimal_symbol(locale)
+            group = get_group_symbol(locale)
+        except (UnknownLocaleError, ValueError, TypeError):
+            return text
+        body = rf"\d+(?:{re.escape(decimal)}\d+)?"
+        if group in {",", "."} and group != decimal:
+            body = rf"(?:\d{{1,3}}(?:{re.escape(group)}\d{{3}})+(?:{re.escape(decimal)}\d+)?|{body})"
+        pattern = re.compile(rf"(?<![\w./:-])(?P<number>-?{body})(?![\w/:-]|\.\d|,\d)")
+
+        def localized_number(match: re.Match) -> str:
+            original = match.group("number")
+            try:
+                value = parse_decimal(original, locale=locale)
+            except NumberFormatError:
+                return original
+            converted = number_words(str(value), language)
+            return original if converted == str(value) else converted
+
+        return pattern.sub(localized_number, text)
+
+    def _number_words(value: str) -> str:
+        return number_words(value.replace(",", ""), language)
+
     def currency(match: re.Match) -> str:
         number = match.group("number")
         cents = match.group("cents")

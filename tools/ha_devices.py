@@ -12,6 +12,7 @@ from core.satellite_context import (
     current_satellite_id,
     get_current_assistant,
 )
+from utils.response_language import response
 from utils.value_parsing import parse_percentage
 
 from . import ha_client as client
@@ -159,10 +160,10 @@ def turn_on(entity: str, brightness: Optional[int] = None) -> str:
     if area_lights is not None:
         light_ids, area_name = area_lights
         data = {}
-        success = f"Lights on in {area_name}"
+        success = response("device_room_on", area=area_name)
         if brightness is not None:
             data["brightness"] = int((brightness / 100) * 255)
-            success = f"Lights on in {area_name} at {brightness} percent"
+            success = response("device_room_on_brightness", area=area_name, value=brightness)
         return client._call_service(
             "light", "turn_on", light_ids, data if data else None, success,
         )
@@ -172,10 +173,10 @@ def turn_on(entity: str, brightness: Optional[int] = None) -> str:
     friendly = client._friendly_for(entity_id)
 
     data = {}
-    success = f"{friendly} on"
+    success = response("device_on", target=friendly)
     if brightness is not None and domain == "light":
         data["brightness"] = int((brightness / 100) * 255)
-        success = f"{friendly} on at {brightness} percent"
+        success = response("device_on_brightness", target=friendly, value=brightness)
 
     return client._call_service(domain, "turn_on", entity_id, data if data else None, success)
 
@@ -197,14 +198,14 @@ def turn_off(entity: str) -> str:
     if area_lights is not None:
         light_ids, area_name = area_lights
         return client._call_service(
-            "light", "turn_off", light_ids, success_message=f"Lights off in {area_name}",
+            "light", "turn_off", light_ids, success_message=response("device_room_off", area=area_name),
         )
 
     entity_id = client._resolve_entity(entity)
     domain = client._domain_of(entity_id)
     friendly = client._friendly_for(entity_id)
 
-    return client._call_service(domain, "turn_off", entity_id, success_message=f"{friendly} off")
+    return client._call_service(domain, "turn_off", entity_id, success_message=response("device_off", target=friendly))
 
 
 @client.tool(
@@ -224,14 +225,14 @@ def toggle(entity: str) -> str:
     if area_lights is not None:
         light_ids, area_name = area_lights
         return client._call_service(
-            "light", "toggle", light_ids, success_message=f"Toggled the lights in {area_name}",
+            "light", "toggle", light_ids, success_message=response("device_room_toggle", area=area_name),
         )
 
     entity_id = client._resolve_entity(entity)
     domain = client._domain_of(entity_id)
     friendly = client._friendly_for(entity_id)
 
-    return client._call_service(domain, "toggle", entity_id, success_message=f"Toggled {friendly}")
+    return client._call_service(domain, "toggle", entity_id, success_message=response("device_toggle", target=friendly))
 
 
 @client.tool(
@@ -249,7 +250,7 @@ def set_ha_brightness(entity: str, brightness: int | str) -> str:
     try:
         brightness = parse_percentage(brightness)
     except ValueError:
-        return _failure("I couldn't read that brightness percentage.", "invalid_brightness", entity=entity)
+        return _failure(response("device_invalid_brightness"), "invalid_brightness", entity=entity)
     brightness_255 = int((brightness / 100) * 255)
 
     area_lights = _bare_light_area_entities(entity)
@@ -262,7 +263,7 @@ def set_ha_brightness(entity: str, brightness: int | str) -> str:
             "turn_on",
             light_ids,
             {"brightness": brightness_255},
-            success_message=f"Lights in {area_name} at {brightness} percent",
+            success_message=response("device_room_brightness", area=area_name, value=brightness),
         )
 
     entity_id = client._resolve_entity(entity, domain="light")
@@ -273,7 +274,7 @@ def set_ha_brightness(entity: str, brightness: int | str) -> str:
         "turn_on",
         entity_id,
         {"brightness": brightness_255},
-        success_message=f"{friendly} at {brightness} percent",
+        success_message=response("device_brightness", target=friendly, value=brightness),
     )
 
 
@@ -335,11 +336,11 @@ def set_color(entity: str, color: str) -> str:
         try:
             rgb = [int(c.strip()) for c in color.split(",")]
             if len(rgb) != 3:
-                return _failure("I need three numbers for an RGB colour.", "invalid_color", entity=entity)
+                return _failure(response("color_rgb_invalid"), "invalid_color", entity=entity)
         except ValueError:
-            return _failure(f"I couldn't read the colour {color}.", "invalid_color", entity=entity)
+            return _failure(response("color_unreadable", color=color), "invalid_color", entity=entity)
     else:
-        return _failure(f"I don't know the colour {color}.", "invalid_color", entity=entity)
+        return _failure(response("color_unknown", color=color), "invalid_color", entity=entity)
 
     friendly = client._friendly_for(entity_id)
     return client._call_service(
@@ -347,7 +348,8 @@ def set_color(entity: str, color: str) -> str:
         "turn_on",
         entity_id,
         {"rgb_color": rgb},
-        success_message=f"{friendly} set to {color_lower}",
+        success_message=response("device_color", target=friendly,
+                                 color=response(f"color_{color_lower.replace(' ', '_')}") if color_lower in _COLOR_MAP else color_lower),
     )
 
 
@@ -376,11 +378,7 @@ def call_ha_service(domain: str, service: str, entity: str, data: Optional[str] 
             # most fragile thing the SLM has to assemble here, so hand control
             # back so it can retry via a typed wrapper or apologise gracefully
             # (mirrors the other HA error paths' `Reactive question:` sentinel).
-            return (
-                f"Reactive question: The data for the {domain}.{service} call "
-                f"wasn't valid JSON. Retry with a more specific tool if one "
-                f"fits, otherwise tell the user you couldn't complete that."
-            )
+            return "Reactive question: " + response("ha_invalid_service_data", service=f"{domain}.{service}") + " Retry with a more specific tool if one fits, otherwise tell the user you couldn't complete that."
 
     friendly = client._friendly_for(entity_id)
     return client._call_service(
@@ -388,7 +386,7 @@ def call_ha_service(domain: str, service: str, entity: str, data: Optional[str] 
         service,
         entity_id,
         extra_data,
-        success_message=f"{service.replace('_', ' ').capitalize()} {friendly}",
+        success_message=response("device_service_sent", service=service.replace('_', ' ').capitalize(), target=friendly),
     )
 
 
@@ -417,7 +415,7 @@ def set_climate(entity: str, temperature: float, hvac_mode: Optional[str] = None
         "set_temperature",
         entity_id,
         data,
-        success_message=f"{friendly} set to {temperature} degrees",
+        success_message=response("device_climate", target=friendly, value=temperature),
     )
 
 
@@ -432,7 +430,7 @@ def lock(entity: str) -> str:
     """
     entity_id = client._resolve_entity(entity, domain="lock")
     friendly = client._friendly_for(entity_id)
-    return client._call_service("lock", "lock", entity_id, success_message=f"Locked {friendly}")
+    return client._call_service("lock", "lock", entity_id, success_message=response("device_locked", target=friendly))
 
 
 @client.tool(
@@ -446,7 +444,7 @@ def unlock(entity: str) -> str:
     """
     entity_id = client._resolve_entity(entity, domain="lock")
     friendly = client._friendly_for(entity_id)
-    return client._call_service("lock", "unlock", entity_id, success_message=f"Unlocked {friendly}")
+    return client._call_service("lock", "unlock", entity_id, success_message=response("device_unlocked", target=friendly))
 
 
 # `valve.*` entities (smart water/gas shutoffs) use their own domain and
@@ -491,7 +489,7 @@ def open_cover(entity: str) -> str:
         domain,
         _COVER_LIKE_SERVICES[domain]["open"],
         entity_id,
-        success_message=f"Opened {friendly}",
+        success_message=response("device_opened", target=friendly),
     )
 
 
@@ -513,7 +511,7 @@ def close_cover(entity: str) -> str:
         domain,
         _COVER_LIKE_SERVICES[domain]["close"],
         entity_id,
-        success_message=f"Closed {friendly}",
+        success_message=response("device_closed", target=friendly),
     )
 
 
@@ -535,7 +533,7 @@ def stop_cover(entity: str) -> str:
         domain,
         _COVER_LIKE_SERVICES[domain]["stop"],
         entity_id,
-        success_message=f"Stopped {friendly}",
+        success_message=response("device_stopped", target=friendly),
     )
 
 
@@ -564,7 +562,7 @@ def set_cover_position(entity: str, position: int) -> str:
         _COVER_LIKE_SERVICES[domain]["set_position"],
         entity_id,
         {"position": pct},
-        success_message=f"{friendly} set to {pct} percent open",
+        success_message=response("device_position", target=friendly, value=pct),
     )
 
 
@@ -588,7 +586,7 @@ def set_fan_speed(entity: str, speed: int) -> str:
         "set_percentage",
         entity_id,
         {"percentage": pct},
-        success_message=f"{friendly} speed set to {pct} percent",
+        success_message=response("device_fan_speed", target=friendly, value=pct),
     )
 
 
@@ -625,10 +623,11 @@ def ha_vacuum(entity: str, action: str = "start") -> str:
     friendly = client._friendly_for(entity_id)
     key = action.lower().strip().replace(" ", "_")
     if key not in _VACUUM_ACTIONS:
-        return f"I don't know how to '{action}' a vacuum — try start, pause, stop, dock, or locate."
-    service, template = _VACUUM_ACTIONS[key]
+        return response("vacuum_invalid", action=action)
+    service, _ = _VACUUM_ACTIONS[key]
     return client._call_service(
-        "vacuum", service, entity_id, success_message=template.format(friendly=friendly)
+        "vacuum", service, entity_id,
+        success_message=response(f"vacuum_{'dock' if key == 'return_to_base' else key}", target=friendly)
     )
 
 
@@ -646,7 +645,7 @@ def run_script(script_name: str) -> str:
     entity_id = client._resolve_entity(script_name, domain="script")
     friendly = client._friendly_for(entity_id)
     return client._call_service(
-        "script", "turn_on", entity_id, success_message=f"Running {friendly}"
+        "script", "turn_on", entity_id, success_message=response("device_script", target=friendly)
     )
 
 
@@ -664,5 +663,5 @@ def activate_scene(scene_name: str) -> str:
     entity_id = client._resolve_entity(scene_name, domain="scene")
     friendly = client._friendly_for(entity_id)
     return client._call_service(
-        "scene", "turn_on", entity_id, success_message=f"Scene {friendly} activated"
+        "scene", "turn_on", entity_id, success_message=response("device_scene", target=friendly)
     )

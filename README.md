@@ -12,6 +12,11 @@ Fulloch is your privacy-focused local voice assistant running on your own PC or 
 
 [Click here to see the satellite companion project](https://github.com/liampetti/fulloch-satellite) for running multiple ESP32-S3 satellites around your home.
 
+For Waveshare ESP32-S3 Touch LCD 1.85C Box Rev 2 USB setup, certificate trust,
+token migration, revocation and recovery, see the [satellite USB setup and CLI
+guide](server/static/satellite-usb-cli.txt). The dashboard also offers a USB
+wizard on the Satellites tab.
+
 ## Features
 
 - **Private, local by default** - speech, language processing, notes, facts, and conversation history stay on your machine; web search, Spotify, and remote language models are explicit opt-ins
@@ -229,7 +234,9 @@ Voices in `data/voices/`:
 
 Pocket TTS uses a selected `data/voices/<name>.wav` reference for one-shot cloning; use only voices you have permission to reproduce. The experimental official PyTorch backend streams PCM as it generates; the GGUF and ONNX options use independent conversions.
 
-Pocket TTS ONNX and PyTorch support English, French, German, Italian, Portuguese and Spanish model weights. Choose the TTS model language in Settings → Voice or set `general.tts_language` in `data/config.yml`; changing it requires a restart and may download a new bundle. French uses a larger, slower model. The setting is independent of recognition and intent languages and is ignored by other TTS backends; selecting a TTS language does not translate responses.
+Pocket TTS ONNX and PyTorch support English, French, German, Italian, Portuguese and Spanish model weights. Choose the default TTS model language in Settings → Voice or set `general.tts_language` in `data/config.yml`; changing it requires a restart and may download a new bundle. French uses a larger, slower model. The setting is independent of recognition and intent languages and is ignored by other TTS backends; selecting a TTS language does not translate responses.
+
+The PyTorch backend can also switch automatically for a supported response language. Missing language weights and tokenizers are downloaded in the background from the pinned Pocket mirror; while downloading or offline, speech uses the configured default model. Once cached, the alternate is loaded on CPU for the next matching utterance, which can add a noticeable first-use delay. At most one alternate is kept in system RAM; it is not loaded onto the GPU, so it does not add another Pocket model to Premium's VRAM usage. Switching depends on language detection/turn metadata and can be imperfect, especially for short or mixed-language responses. The ONNX and GGUF backends do not use this automatic switching.
 
 ## Development Disclosure
 

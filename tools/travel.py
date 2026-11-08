@@ -18,6 +18,7 @@ import utils.local_time as local_time
 from server.credentials_store import get_credential
 from utils.local_time import today as local_today
 from utils.locale import household_locale
+from utils.response_language import response as localized_response
 
 from .thinking_context import get_artifact, get_artifacts
 from .thinking_playbooks import thinking_playbook
@@ -65,11 +66,17 @@ def _available() -> bool:
 
 def _date(value: str, name: str) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{name} must use YYYY-MM-DD.")
+        raise ValueError(localized_response("travel_param_date", field=_travel_field(name)))
     try:
         return date.fromisoformat(value).isoformat()
     except ValueError:
-        raise ValueError(f"{name} must use YYYY-MM-DD.") from None
+        raise ValueError(localized_response("travel_param_date", field=_travel_field(name))) from None
+
+
+def _travel_field(name: str) -> str:
+    if name in {"return_date", "check_in", "check_out", "adults", "children"}:
+        return localized_response(f"travel_field_{name}")
+    return name
 
 
 _PLACEHOLDER_VALUES = frozenset(
@@ -321,9 +328,9 @@ def _positive(value: Any, name: str, maximum: int = 9) -> int:
     try:
         number = int(value)
     except (TypeError, ValueError):
-        raise ValueError(f"{name} must be a whole number.") from None
+        raise ValueError(localized_response("travel_param_integer", field=_travel_field(name))) from None
     if not 0 <= number <= maximum:
-        raise ValueError(f"{name} must be between 0 and {maximum}.")
+        raise ValueError(localized_response("travel_param_range", field=_travel_field(name), maximum=maximum))
     return number
 
 
@@ -363,13 +370,13 @@ def _search(params: dict[str, Any]) -> dict:
     key = _api_key()
     if not key:
         return {
-            "error": "Travel planning is not configured; add serpapi_api_key to credentials.json."
+            "error": localized_response("travel_not_configured")
         }
     try:
         response = requests.get(API_URL, params={**params, "api_key": key}, timeout=TIMEOUT_S)
         status_code = getattr(response, "status_code", 200)
         if status_code in {401, 403}:
-            return {"error": "Travel search authentication failed; update serpapi_api_key in credentials.json."}
+            return {"error": localized_response("travel_auth_failed")}
         if status_code >= 400:
             try:
                 provider_error = str(response.json().get("error") or "").strip()
@@ -383,17 +390,17 @@ def _search(params: dict[str, Any]) -> dict:
                 provider_error or "unavailable",
             )
             detail = f": {provider_error}" if provider_error else "."
-            return {"error": "Travel search provider rejected the request" + detail}
+            return {"error": localized_response("travel_provider_rejected", detail=detail)}
         response.raise_for_status()
         payload = response.json()
     except (requests.RequestException, ValueError):
-        return {"error": "Travel search is temporarily unavailable."}
+        return {"error": localized_response("travel_unavailable")}
     if not isinstance(payload, dict):
-        return {"error": "Travel search returned an invalid response."}
+        return {"error": localized_response("travel_invalid_response")}
     if payload.get("error"):
         if "api key" in str(payload["error"]).lower():
-            return {"error": "Travel search authentication failed; update serpapi_api_key in credentials.json."}
-        return {"error": "Travel search could not be completed."}
+            return {"error": localized_response("travel_auth_failed")}
+        return {"error": localized_response("travel_failed")}
     return payload
 
 
@@ -403,16 +410,15 @@ def _flight_summary(item: dict) -> str:
     last = legs[-1] if legs else {}
     departure = _airport(first.get("departure_airport"), "origin")
     arrival = _airport(last.get("arrival_airport"), "destination")
-    airline = first.get("airline") or "carrier unavailable"
+    airline = first.get("airline") or localized_response("travel_carrier_unavailable")
     duration = item.get("total_duration")
-    duration_text = f"{duration} minutes" if isinstance(duration, int) else "duration unavailable"
+    duration_text = (localized_response("travel_duration", duration=duration) if isinstance(duration, int)
+                     else localized_response("travel_duration_unavailable"))
     stops = max(len(legs) - 1, 0)
     price = item.get("price")
-    price_text = str(price) if price is not None else "price unavailable"
-    return (
-        f"{airline}; depart {_schedule_text(departure)}; arrive {_schedule_text(arrival)}; {stops} stops; "
-        f"{duration_text}; quoted price {price_text}."
-    )
+    price_text = str(price) if price is not None else localized_response("travel_price_unavailable")
+    return localized_response("travel_flight_summary", carrier=airline, departure=_schedule_text(departure),
+                              arrival=_schedule_text(arrival), stops=stops, duration=duration_text, price=price_text)
 
 
 def _offset_text(value: datetime) -> str | None:
@@ -462,9 +468,10 @@ def _airport(value: object, fallback: str) -> dict:
 
 
 def _schedule_text(airport: dict) -> str:
-    local_time = airport.get("time") or "time unavailable"
+    local_time = airport.get("time") or localized_response("travel_time_unavailable")
     timezone_offset = airport.get("timezone_offset")
-    return f"{airport.get('id', 'airport')} local {local_time}{f' ({timezone_offset})' if timezone_offset else ''}"
+    return localized_response("travel_schedule", airport=airport.get('id', 'airport'), time=local_time,
+                              offset=f" ({timezone_offset})" if timezone_offset else "")
 
 
 def _schedule_datetime(value: object, name: str) -> datetime:
@@ -486,33 +493,49 @@ def _schedule_value(record: dict, field: str) -> object:
     return value
 
 
+def _schedule_error(message: str) -> str:
+    """Translate known validation errors without changing chronology decisions."""
+    match = re.fullmatch(r"(.+) must (be an ISO timestamp with a UTC offset|include a UTC offset)\.", message)
+    if not match:
+        return message
+    field, problem = match.groups()
+    window = re.fullmatch(r"stop window (\d+) (start|end)", field)
+    leg = re.fullmatch(r"leg (\d+) (departure|arrival)", field)
+    if window:
+        field = localized_response(f"itinerary_field_window_{window.group(2)}", index=window.group(1))
+    elif leg:
+        field = localized_response(f"itinerary_field_{leg.group(2)}", index=leg.group(1))
+    key = "itinerary_timestamp_invalid" if problem.startswith("be ") else "itinerary_offset_missing"
+    return localized_response(key, field=field)
+
+
 def _evaluate_itinerary(legs: list, windows: list) -> str:
     if len(windows) != len(legs) + 1:
-        return "Provide one stop window for the journey start and each leg destination."
+        return localized_response("itinerary_windows_count")
     parsed_windows = []
     for index, window in enumerate(windows, 1):
         if not isinstance(window, dict):
-            return f"Stop window {index} must be an object."
+            return localized_response("itinerary_window_object", index=index)
         try:
             start = _schedule_datetime(window.get("start"), f"stop window {index} start")
             end = _schedule_datetime(window.get("end"), f"stop window {index} end")
         except ValueError as exc:
-            return str(exc)
+            return _schedule_error(str(exc))
         if end < start:
-            return f"Stop window {index} ends before it starts."
+            return localized_response("itinerary_window_order", index=index)
         parsed_windows.append((start, end, str(window.get("location") or f"stop {index}")))
 
     parsed_legs = []
     for index, leg in enumerate(legs, 1):
         if not isinstance(leg, dict):
-            return f"Leg {index} must be an object."
+            return localized_response("itinerary_leg_object", index=index)
         try:
             departure = _schedule_datetime(_schedule_value(leg, "departure"), f"leg {index} departure")
             arrival = _schedule_datetime(_schedule_value(leg, "arrival"), f"leg {index} arrival")
         except ValueError as exc:
-            return str(exc)
+            return _schedule_error(str(exc))
         if arrival < departure:
-            return f"Leg {index} arrives before it departs."
+            return localized_response("itinerary_leg_arrival_before_departure", index=index)
         parsed_legs.append((departure, arrival))
 
     failures = []
@@ -520,18 +543,16 @@ def _evaluate_itinerary(legs: list, windows: list) -> str:
         source_start, _, source_name = parsed_windows[index]
         _, destination_end, destination_name = parsed_windows[index + 1]
         if departure < source_start:
-            failures.append(
-                f"Leg {index + 1} leaves {source_name} at {departure.isoformat()} before its requested window begins at {source_start.isoformat()}."
-            )
+            failures.append(localized_response("itinerary_early_departure", index=index + 1, place=source_name,
+                                               actual=departure.isoformat(), bound=source_start.isoformat()))
         if arrival > destination_end:
-            failures.append(
-                f"Leg {index + 1} reaches {destination_name} at {arrival.isoformat()}, after its requested window ends at {destination_end.isoformat()}."
-            )
+            failures.append(localized_response("itinerary_late_arrival", index=index + 1, place=destination_name,
+                                               actual=arrival.isoformat(), bound=destination_end.isoformat()))
         if index and departure < parsed_legs[index - 1][1]:
-            failures.append(f"Leg {index + 1} departs before leg {index} arrives.")
+            failures.append(localized_response("itinerary_leg_departure_before_arrival", index=index + 1, previous=index))
     if failures:
-        return "Itinerary is not feasible:\n- " + "\n- ".join(failures)
-    return "Itinerary is feasible within the supplied local-time windows."
+        return localized_response("itinerary_not_feasible", failures="\n- ".join(failures))
+    return localized_response("itinerary_feasible")
 
 
 def _flight_artifact(item: dict, params: dict, departure_date: str, return_date: str | None) -> dict:
@@ -618,11 +639,11 @@ def _round_trip_summary(offer: dict) -> str:
         for airline in leg.get("airlines") or []:
             if str(airline) not in carriers:
                 carriers.append(str(airline))
-    return (
-        f"{', '.join(carriers) or 'carrier unavailable'}; outbound "
-        f"{_schedule_text(outbound_departure)} to {_schedule_text(outbound_arrival)}; return "
-        f"{_schedule_text(inbound_departure)} to {_schedule_text(inbound_arrival)}; "
-        f"provider-quoted fare {offer.get('price', 'unavailable')}"
+    return localized_response(
+        "travel_round_trip_summary", carrier=", ".join(carriers) or localized_response("travel_carrier_unavailable"),
+        out_departure=_schedule_text(outbound_departure), out_arrival=_schedule_text(outbound_arrival),
+        back_departure=_schedule_text(inbound_departure), back_arrival=_schedule_text(inbound_arrival),
+        price=offer.get('price', 'unavailable'),
     )
 
 
@@ -670,7 +691,7 @@ def search_flights_for_request(request: str) -> str:
     """Resolve a simple natural-language flight request before its typed search."""
     if not isinstance(request, str) or not request.strip():
         return ThinkingResult(
-            "Describe the origin, destination, and travel dates.",
+            localized_response("travel_origin_destination_dates"),
             status="needs_input",
             scope="A natural-language flight request is required.",
         )
@@ -678,13 +699,13 @@ def search_flights_for_request(request: str) -> str:
     dates = _request_trip_dates(request)
     if len(locations) < 2:
         return ThinkingResult(
-            "Name both the origin and destination city or airport.",
+            localized_response("travel_origin_destination"),
             status="needs_input",
             scope="Both flight endpoints are required.",
         )
     if dates is None:
         return ThinkingResult(
-            "State the departure date in a form such as 17 January 2027.",
+            localized_response("travel_departure_date"),
             status="needs_input",
             scope="The requested flight dates could not be resolved.",
         )
@@ -745,12 +766,12 @@ def search_flights(
         or not isinstance(destination, str)
         or not destination.strip()
     ):
-        return ThinkingResult("Origin and destination airport or city names are required.", status="needs_input", scope="Both flight endpoints are required.")
+        return ThinkingResult(localized_response("travel_endpoints_required"), status="needs_input", scope="Both flight endpoints are required.")
     resolved_origin = _resolve_airport(origin, "origin")
     resolved_destination = _resolve_airport(destination, "destination")
     if resolved_origin is None or resolved_destination is None:
         return ThinkingResult(
-            "Use a real origin and destination city or IATA airport code.",
+            localized_response("travel_invalid_endpoints"),
             status="needs_input",
             scope="At least one flight endpoint could not be resolved.",
             recovery={
@@ -762,7 +783,7 @@ def search_flights(
         )
     depart = _future_departure_date(departure_date)
     if depart is None:
-        return ThinkingResult("departure_date must use YYYY-MM-DD; use a future date for flight schedules.", status="needs_input", scope="A future ISO departure date is required.")
+        return ThinkingResult(localized_response("travel_departure_invalid"), status="needs_input", scope="A future ISO departure date is required.")
     try:
         returning = _date(return_date, "return_date") if return_date is not None else None
         adults, children = _positive(adults, "adults"), _positive(children, "children")
@@ -776,7 +797,7 @@ def search_flights(
             else suggested_depart
         )
         return ThinkingResult(
-            f"Those flight dates are in the past. Did you mean {date_text}?",
+            localized_response("travel_past_dates", dates=date_text),
             status="needs_input",
             scope="The requested fixed flight dates have already passed.",
             recovery={
@@ -790,14 +811,14 @@ def search_flights(
             },
         )
     if returning is not None and returning <= depart:
-        return ThinkingResult("return_date must be after departure_date.", status="needs_input", scope="The requested return date is invalid.")
+        return ThinkingResult(localized_response("travel_return_invalid"), status="needs_input", scope="The requested return date is invalid.")
     if adults < 1:
-        return ThinkingResult("At least one adult is required.", status="needs_input", scope="At least one adult is required.")
+        return ThinkingResult(localized_response("travel_adult_required"), status="needs_input", scope="At least one adult is required.")
     try:
         travel_class = {"economy": 1, "premium_economy": 2, "business": 3, "first": 4}[cabin_class]
         stops = min(max(int(max_stops), 0), 2) + 1
     except (KeyError, TypeError, ValueError):
-        return ThinkingResult("cabin_class must be economy, premium_economy, business, or first; max_stops must be 0, 1, or 2.", status="needs_input", scope="The requested cabin class or stop limit is invalid.")
+        return ThinkingResult(localized_response("travel_cabin_stops_invalid"), status="needs_input", scope="The requested cabin class or stop limit is invalid.")
     canonical_origin = (
         home_airport if inferred_home_endpoint and origin == home_city and home_airport else resolved_origin[0]
     )
@@ -809,7 +830,7 @@ def search_flights(
         canonical_origin, canonical_destination, depart, returning, adults + children, cabin
     ):
         return ThinkingResult(
-            "Equivalent flight constraints were already retrieved for this investigation.",
+            localized_response("travel_duplicate_search"),
             status="rejected",
             scope="The same resolved route, dates, travellers, and cabin already have retrieved flight evidence.",
         )
@@ -840,22 +861,22 @@ def search_flights(
         return ThinkingResult(str(first["error"]), status="unavailable", scope="The flight provider did not return schedule evidence.")
     departures = first.get("best_flights") or first.get("other_flights") or []
     if not departures:
-        return ThinkingResult("No flight offers matched those constraints.", status="rejected", scope="No retrieved offer matched the requested flight constraints.", next_actions=("search_flights",))
+        return ThinkingResult(localized_response("travel_flights_empty"), status="rejected", scope="No retrieved offer matched the requested flight constraints.", next_actions=("search_flights",))
     selected_outbound = next((item for item in departures if isinstance(item, dict)), None)
     if selected_outbound is None:
-        return ThinkingResult("No flight offers matched those constraints.", status="rejected", scope="No retrieved offer matched the requested flight constraints.", next_actions=("search_flights",))
+        return ThinkingResult(localized_response("travel_flights_empty"), status="rejected", scope="No retrieved offer matched the requested flight constraints.", next_actions=("search_flights",))
     if not _offer_matches_request(
         selected_outbound, canonical_origin, canonical_destination, depart
     ):
         return ThinkingResult(
-            "The flight provider returned an outbound schedule that did not match the requested route or date.",
+            localized_response("travel_outbound_mismatch"),
             status="unavailable",
             scope="The provider's outbound schedule could not be verified against the requested flight leg.",
         )
     token = selected_outbound.get("departure_token")
     if returning is not None and not isinstance(token, str):
         return ThinkingResult(
-            "The flight provider did not return a selectable outbound itinerary for the requested return journey.",
+            localized_response("travel_outbound_not_selectable"),
             status="unavailable",
             scope="A complete round-trip fare could not be retrieved from the provider response.",
         )
@@ -864,7 +885,7 @@ def search_flights(
         return ThinkingResult(str(result["error"]), status="unavailable", scope="The flight provider did not return schedule evidence.")
     offers = (result.get("best_flights") or result.get("other_flights") or [])[:MAX_OFFERS]
     if not offers:
-        return ThinkingResult("No flight offers matched those constraints.", status="rejected", scope="No retrieved offer matched the requested flight constraints.", next_actions=("search_flights",))
+        return ThinkingResult(localized_response("travel_flights_empty"), status="rejected", scope="No retrieved offer matched the requested flight constraints.", next_actions=("search_flights",))
     if returning is not None:
         evidence_offers = [
             _round_trip_offer(selected_outbound, item, params)
@@ -873,11 +894,11 @@ def search_flights(
         ]
         if not evidence_offers:
             return ThinkingResult(
-                "The flight provider returned return-leg schedules that did not match the requested route or date.",
+                localized_response("travel_return_mismatch"),
                 status="unavailable",
                 scope="A complete round-trip fare could not be verified against both requested flight legs.",
             )
-        text = "Google Flights round-trip results (prices can change):\n" + "\n".join(
+        text = localized_response("travel_round_trip_title") + "\n" + "\n".join(
             f"{index}. {_round_trip_summary(offer)}"
             for index, offer in enumerate(evidence_offers, 1)
         )
@@ -889,11 +910,11 @@ def search_flights(
         ]
         if not evidence_offers:
             return ThinkingResult(
-                "The flight provider returned schedules that did not match the requested route or date.",
+                localized_response("travel_schedule_mismatch"),
                 status="unavailable",
                 scope="The provider's flight schedules could not be verified against the requested leg.",
             )
-        text = "Google Flights results (prices can change):\n" + "\n".join(
+        text = localized_response("travel_flights_title") + "\n" + "\n".join(
             f"{index}. {_flight_summary(item)}"
             for index, item in enumerate(offers, 1)
             if isinstance(item, dict) and _offer_matches_request(item, canonical_origin, canonical_destination, depart)
@@ -917,11 +938,9 @@ def search_flights(
         home_city if inferred_home_endpoint and destination == home_city else resolved_destination[1]
     )
     return ThinkingResult(
-        (
-            f"Representative future date: {depart}. "
-            f"Resolved route: {route_origin_name} ({canonical_origin}) to "
-            f"{route_destination_name} ({canonical_destination}).\n{text}"
-        ),
+        localized_response("travel_resolved_route", date=depart, origin=route_origin_name,
+                           origin_code=canonical_origin, destination=route_destination_name,
+                           destination_code=canonical_destination, results=text),
         evidence={
             "journey_type": artifact["journey_type"],
             "route": {"origin": canonical_origin, "destination": canonical_destination},
@@ -954,7 +973,7 @@ def search_flights(
 def plan_travel(request: str) -> str:
     """Run the travel tool's complete evidence path for an ordered itinerary."""
     if not isinstance(request, str) or not request.strip():
-        return ThinkingResult("Describe at least two places to plan a trip.", status="needs_input", scope="An ordered multi-stop travel request is required.")
+        return ThinkingResult(localized_response("travel_plan_places"), status="needs_input", scope="An ordered multi-stop travel request is required.")
     stops = _locations_in_request(request)
     home_city = _home_city()
     home = _resolve_airport(home_city, "home") if home_city else None
@@ -964,7 +983,7 @@ def plan_travel(request: str) -> str:
         city = re.escape(stops[0][1])
         stops = [stops[0], home] if re.search(rf"\bfrom\s+{city}\b", request, re.IGNORECASE) else [home, stops[0]]
     if len(stops) < 2:
-        return ThinkingResult("Name a destination; a home airport could not be inferred from the household timezone.", status="needs_input", scope="At least one travel endpoint is required and no home airport default is available.")
+        return ThinkingResult(localized_response("travel_home_unknown"), status="needs_input", scope="At least one travel endpoint is required and no home airport default is available.")
     departure_date = _representative_departure_date(request)
 
     results = []
@@ -982,14 +1001,14 @@ def plan_travel(request: str) -> str:
             return result
         flight_artifact = getattr(result, "artifact", None)
         if not isinstance(flight_artifact, dict):
-            return ThinkingResult("The travel provider did not return schedule evidence for every itinerary leg.", status="unavailable", scope="At least one itinerary leg had no schedule artifact.")
+            return ThinkingResult(localized_response("travel_schedule_missing"), status="unavailable", scope="At least one itinerary leg had no schedule artifact.")
         offer = flight_artifact.get("offer")
         if not isinstance(offer, dict):
-            return ThinkingResult("The travel provider returned an incomplete flight schedule.", status="unavailable", scope="At least one itinerary leg had an incomplete schedule artifact.")
+            return ThinkingResult(localized_response("travel_schedule_incomplete"), status="unavailable", scope="At least one itinerary leg had an incomplete schedule artifact.")
         legs.append({"departure": offer.get("departure"), "arrival": offer.get("arrival")})
         offers = result.evidence.get("offers") if isinstance(result.evidence, dict) else None
         if not isinstance(offers, list) or not offers:
-            return ThinkingResult("The travel provider returned no usable flight offers.", status="unavailable", scope="At least one itinerary leg had no bounded offer list.")
+            return ThinkingResult(localized_response("travel_offers_missing"), status="unavailable", scope="At least one itinerary leg had no bounded offer list.")
         leg_offers.append(offers)
         leg_contexts.append(
             {
@@ -997,14 +1016,10 @@ def plan_travel(request: str) -> str:
                 for key in ("route", "departure_date", "currency", "retrieved_at")
             }
         )
-        results.append(f"Leg {index}: {result}")
+        results.append(localized_response("travel_plan_leg", index=index, result=result))
         artifact = artifact or flight_artifact
 
-    text = (
-        f"Representative future date: {departure_date}.\n"
-        + "\n".join(results)
-        + "\n\nSchedule evidence retrieved. Use assess_itinerary with the returned Artifact reference to check the retrieved flight chronology."
-    )
+    text = localized_response("travel_plan_result", date=departure_date, legs="\n".join(results))
     plan_artifact = {
         "type": "travel_plan",
         "request": request,
@@ -1039,6 +1054,21 @@ def _assess_itinerary_legs(legs: list) -> str:
     return "Retrieved itinerary is chronologically feasible between its flight legs."
 
 
+def _display_itinerary_assessment(assessment: str) -> str:
+    """Translate presentation only; feasibility decisions remain structured separately."""
+    if assessment == "Retrieved itinerary is chronologically feasible between its flight legs.":
+        return localized_response("itinerary_chronology_feasible")
+    if assessment == "No chronologically compatible itinerary exists among the retrieved offer combinations.":
+        return localized_response("itinerary_no_combination")
+    match = re.fullmatch(r"Leg (\d+) arrives before it departs\.", assessment)
+    if match:
+        return localized_response("itinerary_leg_arrival_before_departure", index=match.group(1))
+    match = re.fullmatch(r"Leg (\d+) departs before leg (\d+) arrives\.", assessment)
+    if match:
+        return localized_response("itinerary_leg_departure_before_arrival", index=match.group(1), previous=match.group(2))
+    return _schedule_error(assessment)
+
+
 def _best_retrieved_itinerary(leg_offers: list) -> list | None:
     """Return the first chronologically compatible bounded offer combination."""
     if not isinstance(leg_offers, list) or not leg_offers or any(
@@ -1069,7 +1099,7 @@ def assess_itinerary(artifact_id: str) -> str:
     legs = data.get("legs") if isinstance(data, dict) else None
     if not isinstance(legs, list):
         return ThinkingResult(
-            "That itinerary artifact is unavailable.", status="needs_input", scope="A valid travel-plan artifact reference is required."
+            localized_response("travel_artifact_unavailable"), status="needs_input", scope="A valid travel-plan artifact reference is required."
         )
     leg_offers = data.get("leg_offers") if isinstance(data, dict) else None
     best_legs = _best_retrieved_itinerary(leg_offers) if leg_offers is not None else legs
@@ -1081,14 +1111,14 @@ def assess_itinerary(artifact_id: str) -> str:
         re.IGNORECASE,
     ):
         return ThinkingResult(
-            f"Preliminary assessment: {assessment} The requested activity timing cannot be confirmed without exact local windows.",
+            localized_response("itinerary_preliminary", assessment=_display_itinerary_assessment(assessment)),
             evidence={"artifact_id": artifact_id, "legs_checked": len(legs), "activity_windows_checked": False, "schedule_assessment": assessment},
             scope="This preliminary result covers bounded retrieved flight combinations, not the requested activity windows.",
             next_actions=("search_flights",),
         )
     status = "evidence" if "feasible" in assessment.lower() else "rejected"
     return ThinkingResult(
-        assessment,
+        _display_itinerary_assessment(assessment),
         status=status,
         evidence={"artifact_id": artifact_id, "legs_checked": len(legs), "combination_checked": best_legs is not None},
         scope="Only bounded retrieved flight combinations were checked; requested activity windows need additional evidence.",
@@ -1102,9 +1132,9 @@ def evaluate_itinerary(legs_json: str, windows_json: str) -> str:
         legs = json.loads(legs_json)
         windows = json.loads(windows_json)
     except (TypeError, json.JSONDecodeError):
-        return "legs_json and windows_json must each be valid JSON arrays."
+        return localized_response("itinerary_invalid_json")
     if not isinstance(legs, list) or not isinstance(windows, list):
-        return "legs_json and windows_json must each be JSON arrays."
+        return localized_response("itinerary_not_arrays")
     return _evaluate_itinerary(legs, windows)
 
 
@@ -1120,16 +1150,16 @@ def search_hotels(
 ) -> str:
     """Return bounded, normalized accommodation options without booking actions."""
     if not isinstance(location, str) or not location.strip():
-        return ThinkingResult("A city or location is required for hotel search.", status="needs_input", scope="A hotel-search location is required.")
+        return ThinkingResult(localized_response("travel_hotel_location_required"), status="needs_input", scope="A hotel-search location is required.")
     try:
         check_in, check_out = _date(check_in, "check_in"), _date(check_out, "check_out")
         adults, children = _positive(adults, "adults"), _positive(children, "children")
     except ValueError as exc:
         return ThinkingResult(str(exc), status="needs_input", scope="The requested hotel dates or guest counts are invalid.")
     if check_out <= check_in:
-        return ThinkingResult("check_out must be after check_in.", status="needs_input", scope="The requested hotel dates are invalid.")
+        return ThinkingResult(localized_response("travel_hotel_dates_invalid"), status="needs_input", scope="The requested hotel dates are invalid.")
     if adults < 1:
-        return ThinkingResult("At least one adult is required.", status="needs_input", scope="At least one adult is required.")
+        return ThinkingResult(localized_response("travel_adult_required"), status="needs_input", scope="At least one adult is required.")
     result = _search(
         {
             "engine": "google_hotels",
@@ -1146,7 +1176,7 @@ def search_hotels(
         return ThinkingResult(str(result["error"]), status="unavailable", scope="The hotel provider did not return offers.")
     properties = (result.get("properties") or [])[:MAX_OFFERS]
     if not properties:
-        return ThinkingResult("No hotel offers matched those constraints.", status="rejected", scope="No retrieved hotel offer matched the requested location and dates.", next_actions=("search_hotels",))
+        return ThinkingResult(localized_response("travel_hotels_empty"), status="rejected", scope="No retrieved hotel offer matched the requested location and dates.", next_actions=("search_hotels",))
     lines = []
     offers = []
     for index, item in enumerate(properties, 1):
@@ -1155,17 +1185,17 @@ def search_hotels(
         total = (item.get("total_rate") or {}).get("lowest") or "price unavailable"
         rating = item.get("overall_rating", "rating unavailable")
         address = item.get("address") or "address unavailable"
-        cancellation = (
-            "free cancellation"
-            if item.get("free_cancellation")
-            else "cancellation terms unavailable"
-        )
-        lines.append(
-            f"{index}. {item.get('name', 'Unnamed property')}; total {total}; rating {rating}; {address}; {cancellation}."
-        )
+        lines.append(localized_response(
+            "travel_hotel_summary", index=index,
+            name=item.get('name', localized_response("travel_unnamed_property")),
+            total=localized_response("travel_price_unavailable") if total == "price unavailable" else total,
+            rating=localized_response("travel_no_rating") if rating == "rating unavailable" else rating,
+            address=localized_response("travel_no_address") if address == "address unavailable" else address,
+            cancellation=localized_response("travel_free_cancellation" if item.get("free_cancellation") else "travel_cancellation_unknown"),
+        ))
         offers.append({"name": str(item.get("name") or "Unnamed property"), "total": total, "rating": rating, "address": str(address), "free_cancellation": bool(item.get("free_cancellation"))})
     return ThinkingResult(
-        "Google Hotels results (prices can change):\n" + "\n".join(lines),
+        localized_response("travel_hotels_title") + "\n" + "\n".join(lines),
         evidence={"location": location.strip(), "check_in": check_in, "check_out": check_out, "offers": offers},
         scope=f"Up to {len(offers)} retrieved hotel offers in {location.strip()} for {check_in} to {check_out}.",
         next_actions=("search_hotels",),

@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Optional
 
 import utils.local_time as _local_time
+from core.satellite_context import current_response_language
+from utils.response_language import response
 
 from . import notes_obsidian, notes_root, notes_storage
 from ._config import config
@@ -373,12 +375,12 @@ def insert_at_obsidian_cursor(text: str) -> str:
     """Ask the connected Obsidian plugin to insert text at its active cursor."""
     text = text.strip()
     if not text:
-        return "What would you like me to insert?"
+        return response("obsidian_insert_empty")
     if not _obsidian_edit_allowed():
-        return "Obsidian editing is disabled in the dashboard for safety."
+        return response("obsidian_disabled")
     if not _send_obsidian_command({"type": "insert", "text": text}):
-        return "Obsidian isn't connected, so I can't insert text at its cursor."
-    return "Sent that text to the cursor in your active Obsidian note."
+        return response("obsidian_insert_disconnected")
+    return response("obsidian_insert_sent")
 
 
 @tool(
@@ -394,12 +396,12 @@ def rename_active_obsidian_note(title: str) -> str:
     """Ask the connected Obsidian plugin to rename its active note."""
     title = title.strip()
     if not title:
-        return "What would you like to call the active note?"
+        return response("obsidian_rename_empty")
     if not _obsidian_edit_allowed():
-        return "Obsidian editing is disabled in the dashboard for safety."
+        return response("obsidian_disabled")
     if not _send_obsidian_command({"type": "rename_active", "title": title}):
-        return "Obsidian isn't connected, so I can't rename its active note."
-    return f"Sent a request to rename the active Obsidian note to '{title}'."
+        return response("obsidian_rename_disconnected")
+    return response("obsidian_rename_sent", title=title)
 
 
 @tool(
@@ -414,10 +416,10 @@ def rename_active_obsidian_note(title: str) -> str:
 def delete_active_obsidian_note() -> str:
     """Ask the connected Obsidian plugin to delete its active note."""
     if not _obsidian_edit_allowed():
-        return "Obsidian editing is disabled in the dashboard for safety."
+        return response("obsidian_disabled")
     if not _send_obsidian_command({"type": "delete_active"}):
-        return "Obsidian isn't connected, so I can't delete its active note."
-    return "Sent a request to delete the active Obsidian note."
+        return response("obsidian_delete_disconnected")
+    return response("obsidian_delete_sent")
 
 
 @tool(
@@ -433,12 +435,12 @@ def replace_selected_obsidian_text(text: str) -> str:
     """Ask the connected plugin to replace its active editor selection."""
     text = text.strip()
     if not text:
-        return "What should replace the selected text?"
+        return response("obsidian_replace_empty")
     if not _obsidian_edit_allowed():
-        return "Obsidian editing is disabled in the dashboard for safety."
+        return response("obsidian_disabled")
     if not _send_obsidian_command({"type": "replace_selection", "text": text}):
-        return "Obsidian isn't connected, so I can't replace selected text."
-    return "Sent a request to replace the selected text in Obsidian."
+        return response("obsidian_replace_disconnected")
+    return response("obsidian_replace_sent")
 
 
 def warm_index() -> bool:
@@ -467,9 +469,9 @@ def warm_index() -> bool:
 def list_notes() -> str:
     notes = list(_iter_notes())
     if not notes:
-        return "You don't have any notes saved yet."
+        return response("notes_empty")
     titles = [p.stem.replace("-", " ") for p in notes]
-    return f"You have {len(titles)} notes: {', '.join(titles)}."
+    return response("notes_list", count=len(titles), titles=", ".join(titles))
 
 
 @tool(
@@ -483,12 +485,12 @@ def list_notes() -> str:
 def read_note(title: str) -> str:
     note = _find_note(title) or _find_note_semantic(title)
     if note is None:
-        return f"I couldn't find a note about {title}."
+        return response("note_not_found", title=title)
     try:
         raw = notes_storage.read_markdown(note)
     except OSError as e:
         logger.error(f"Failed to read {note}: {e}")
-        return f"I couldn't read the {title} note."
+        return response("note_read_failed", title=title)
     title_spoken = note.stem.replace("-", " ")
     # Don't speak the title twice — the prefix below already announces it, so
     # strip a leading `# <title>` header from the body if present.
@@ -496,9 +498,9 @@ def read_note(title: str) -> str:
     truncated = ""
     if len(text) > MAX_READ_CHARS:
         text = text[:MAX_READ_CHARS]
-        truncated = " (note continues)"
+        truncated = response("note_continues")
     return ArtifactText(
-        f"Note '{title_spoken}': {text}{truncated}",
+        response("note_read", title=title_spoken, text=text, continuation=truncated),
         {
             "type": "note",
             "title": title_spoken,
@@ -524,22 +526,22 @@ def write_note(title: str, content: str) -> str:
     # have to re-dispatch to append_to_note.
     if path.exists():
         if not body:
-            return f"The {title} note already exists; there was nothing to add."
+            return response("note_already_exists", title=title)
         try:
             notes_storage.append_markdown(path, f"\n{body}\n")
         except OSError as e:
             logger.error(f"Failed to append to {path}: {e}")
-            return f"I couldn't update the {title} note."
+            return response("note_update_failed", title=title)
         _after_write(path)
-        return f"Added to your existing '{title}' note."
+        return response("note_updated", title=title)
     header = f"# {title.strip()}\n\n"
     try:
         notes_storage.write_markdown(path, header + body + "\n")
     except OSError as e:
         logger.error(f"Failed to write {path}: {e}")
-        return f"I couldn't save the {title} note."
+        return response("note_save_failed", title=title)
     _after_write(path)
-    return f"Saved a new note called '{title}'."
+    return response("note_saved", title=title)
 
 
 @tool(
@@ -553,18 +555,14 @@ def write_note(title: str, content: str) -> str:
 def append_to_note(title: str, content: str) -> str:
     line = content.strip()
     if not line:
-        return "There was nothing to append."
+        return response("note_append_empty")
     # A literal title can exact-match a dated journal (e.g. "2026 06 05" →
     # daily/2026-06-05.md). Refuse it: a named append must never edit a daily
     # log — that's another day's journal. Daily entries go through
     # append_to_today (today only).
     literal = _find_note(title)
     if literal is not None and _is_daily_note(literal):
-        return (
-            f"Reactive question: {title!r} is a dated daily journal — I won't "
-            "write to a past day's log. Save this to a general note instead: "
-            "write_note to create one, or append_to_note to an existing named note."
-        )
+        return "Reactive question: " + response("notes_daily_write_denied", title=repr(title)) + " Save this to a general note instead: write_note to create one, or append_to_note to an existing named note."
     # Semantic fallback is write-guarded (stricter score, no daily notes) so a
     # loose nearest-by-meaning match can't silently corrupt an unrelated file.
     note = literal or _find_note_semantic(
@@ -573,19 +571,15 @@ def append_to_note(title: str, content: str) -> str:
     if note is None:
         # No confident match — bounce back so the agent picks a real title or
         # creates the note, rather than guessing or speaking a dead end.
-        existing = ", ".join(_appendable_titles()) or "none"
-        return (
-            f"Reactive question: I couldn't find an existing note titled "
-            f"{title!r} to append to. Existing notes: {existing}. Append to one "
-            f"of those by its exact title, or create a new note with write_note."
-        )
+        existing = ", ".join(_appendable_titles()) or response("notes_none")
+        return "Reactive question: " + response("notes_append_target_missing", title=repr(title), existing=existing) + " Append to one of those by its exact title, or create a new note with write_note."
     try:
         notes_storage.append_markdown(note, f"\n- {line}\n")
     except OSError as e:
         logger.error(f"Failed to append to {note}: {e}")
-        return f"I couldn't append to the {title} note."
+        return response("note_append_failed", title=title)
     _after_write(note)
-    return f"Added to your {note.stem.replace('-', ' ')} note."
+    return response("note_appended", title=note.stem.replace('-', ' '))
 
 
 @tool(
@@ -599,7 +593,7 @@ def append_to_note(title: str, content: str) -> str:
 def append_to_today(content: str) -> str:
     line = content.strip()
     if not line:
-        return "There was nothing to log."
+        return response("daily_log_empty")
     path = _today_path()
     now = _local_time.now()
     timestamp = now.strftime("%H:%M")
@@ -610,9 +604,9 @@ def append_to_today(content: str) -> str:
         notes_storage.append_markdown(path, f"- {timestamp} {line}\n")
     except OSError as e:
         logger.error(f"Failed to append to {path}: {e}")
-        return "I couldn't update today's note."
+        return response("daily_log_failed")
     _after_write(path)
-    return f"Logged at {timestamp} in today's note."
+    return response("daily_log_saved", time=timestamp)
 
 
 @tool(
@@ -633,22 +627,22 @@ def read_today(date: Optional[str] = None) -> str:
     if not _DATE_RE.match(date_str):
         date_str = _local_time.now().strftime("%Y-%m-%d")
     today_str = _local_time.now().strftime("%Y-%m-%d")
-    when = "today" if date_str == today_str else f"on {date_str}"
+    when = response("daily_when_today") if date_str == today_str else response("daily_when_date", date=date_str)
 
     path = _daily_base() / f"{date_str}.md"
     if not path.exists():
-        return f"You don't have any notes logged {when}."
+        return response("daily_not_found", when=when)
     try:
         raw = notes_storage.read_markdown(path)
     except OSError as e:
         logger.error(f"Failed to read daily note {path}: {e}")
-        return f"I couldn't read your note {when}."
+        return response("daily_read_failed", when=when)
     text = _to_spoken(raw)
     truncated = ""
     if len(text) > MAX_READ_CHARS:
         text = text[:MAX_READ_CHARS]
-        truncated = " (note continues)"
-    return f"Your note {when}: {text}{truncated}"
+        truncated = response("note_continues")
+    return response("daily_read", when=when, text=text, continuation=truncated)
 
 
 def _truncate_snippet(snippet: str, limit: int = 240) -> str:
@@ -726,7 +720,7 @@ def _semantic_search(query: str) -> list[tuple[str, str]]:
 def search_notes(query: str) -> str:
     query = (query or "").strip()
     if not query:
-        return "Please give me something to search for."
+        return response("notes_search_empty")
 
     # Fuse both backends. Keyword hits lead (an exact term match is the
     # strongest signal); semantic hits fill in reworded / topical matches the
@@ -752,17 +746,17 @@ def search_notes(query: str) -> str:
 
     last_retrieval["chunks"] = len(fused)
     if not fused:
-        return f"I didn't find anything about {query} in your notes."
-    parts = "; ".join(f"in '{title}': {snippet}" for title, snippet in fused)
+        return response("notes_search_not_found", query=query)
+    parts = "; ".join(response("notes_search_result_item", title=title, snippet=snippet) for title, snippet in fused)
     # `Reactive question:` routes the hits back through the agent loop so the
     # SLM filters / summarises them rather than speaking raw matches. The
     # caveat matters: semantic hits are nearest-by-meaning and may not contain
     # the query term, so the agent must not claim a note mentions it blindly.
     n = len(fused)
+    language = current_response_language.get()
+    plural = ("s" if n != 1 else "") if language == "fr" else "" if language == "de" else _match_plural(n)
     return ArtifactText(
-        f"Reactive question: Found {n} possible match{_match_plural(n)} for "
-        f"'{query}' in the user's notes (matched by keyword or by topic, so "
-        f"some may not contain '{query}' literally). {parts}.",
+        "Reactive question: " + response("notes_search_results", count=n, plural=plural, query=query, items=parts),
         {
             "type": "notes_search",
             "query": query[:120],
@@ -782,7 +776,7 @@ def search_notes(query: str) -> str:
 def remember_fact(content: str) -> str:
     fact = (content or "").strip()
     if not fact:
-        return "There was nothing to remember."
+        return response("fact_empty")
     path = notes_root.get_notes_root() / f"{FACTS_NOTE}.md"
     timestamp = _local_time.now().strftime("%Y-%m-%d")
     try:
@@ -791,9 +785,9 @@ def remember_fact(content: str) -> str:
         notes_storage.append_markdown(path, f"- [{timestamp}] {fact}\n")
     except OSError as e:
         logger.error(f"Failed to append fact: {e}")
-        return "I couldn't save that fact."
+        return response("fact_save_failed")
     _after_write(path)
-    return "Got it, I'll remember that."
+    return response("fact_saved")
 
 
 def recall_facts() -> str:

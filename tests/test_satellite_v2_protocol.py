@@ -89,6 +89,17 @@ def test_invalid_token_is_rejected(monkeypatch):
         assert ws.receive_json()["code"] == "auth"
 
 
+def test_mandatory_auth_rejects_tokenless_with_empty_list(monkeypatch):
+    import server.config_store as config_store
+
+    monkeypatch.setattr(config_store, "read_config", lambda *a, **k: {
+        "satellite_token_required": True, "satellite_tokens": [],
+    })
+    with _client(_stub_assistant()).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello(token=None))
+        assert ws.receive_json()["code"] == "auth"
+
+
 def test_only_640_byte_s16le_uplink_frames_are_accepted():
     assistant = _stub_assistant()
     chunk_q = assistant.connect_satellite.return_value

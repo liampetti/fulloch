@@ -160,6 +160,7 @@ def classify_step(raw: Optional[object]) -> StepResult:
 # inform the user — dropped when speaking the observation directly on the no-LLM
 # tier, which has no SLM to act on them.
 _AGENT_DIRECTIVE = re.compile(r"^(tell|ask|let|suggest|confirm|remind|prompt)\b", re.I)
+_NON_EN_DIRECTIVE = re.compile(r"^(try|retry|save|append|summari[sz]e)\b", re.I)
 
 
 def reactive_to_speech(text: str) -> str:
@@ -174,12 +175,19 @@ def reactive_to_speech(text: str) -> str:
     msg = text.lstrip()
     if msg.startswith(REACTIVE_PREFIX):
         msg = msg[len(REACTIVE_PREFIX) :].strip()
+    from core.satellite_context import current_response_language
+
     kept = [
         s.strip()
         for s in re.split(r"(?<=[.?!])\s+", msg)
         if s.strip() and not _AGENT_DIRECTIVE.match(s.strip())
+        and (current_response_language.get() == "en" or not _NON_EN_DIRECTIVE.match(s.strip()))
     ]
-    return " ".join(kept).strip() or "Sorry, I couldn't do that."
+    if kept:
+        return " ".join(kept).strip()
+    from utils.response_language import response
+
+    return response("agent_reactive_fallback")
 
 
 # Hard cap on agent re-calls per turn. 1 initial + up to 5 replans = 6.

@@ -10,6 +10,8 @@ from collections import Counter
 from typing import Optional
 
 import utils.local_time as _local_tz
+from core.satellite_context import current_response_language
+from utils.response_language import response as localized_response
 
 from . import ha_client as client
 from .tool_registry import ArtifactText
@@ -46,7 +48,7 @@ def get_temperature(entity: str) -> str:
 
     state = client._get_state(entity_id)
     if state is None:
-        return f"Sorry, I couldn't find a temperature reading for {entity}."
+        return localized_response("temperature_missing", target=entity)
 
     attrs = state.get("attributes", {})
     current = attrs.get("current_temperature")
@@ -66,12 +68,13 @@ def get_temperature(entity: str) -> str:
 
     friendly = client._friendly_for(entity_id)
     if temp is None:
-        return f"I couldn't read a temperature for {friendly}."
+        return localized_response("temperature_unreadable", target=friendly)
 
-    unit = _temperature_unit(attrs)
+    unit = _spoken_temperature_unit(attrs)
     if current is not None and target is not None and current != target:
-        return f"{friendly} is {_format_reading(current)} {unit}, set to {_format_reading(target)} {unit}"
-    return f"{friendly} is {_format_reading(temp)} {unit}"
+        return localized_response("temperature_with_target", target=friendly, value=_format_reading(current),
+                                  setpoint=_format_reading(target), unit=unit)
+    return localized_response("temperature_current", target=friendly, value=_format_reading(temp), unit=unit)
 
 
 def _format_reading(value) -> str:
@@ -88,27 +91,36 @@ def _format_entity_state(entity_id: str, state: dict) -> str:
     friendly_name = state.get("attributes", {}).get("friendly_name", entity_id)
 
     attrs = state.get("attributes", {})
-    details = [f"{friendly_name} is {entity_state}"]
+    known_states = {"on", "off", "open", "closed", "unlocked", "locked", "unknown", "unavailable"}
+    spoken_state = localized_response(f"state_{entity_state}") if isinstance(entity_state, str) and entity_state in known_states else entity_state
+    details = [localized_response("entity_state", target=friendly_name, state=spoken_state)]
 
     if "brightness" in attrs and attrs["brightness"] is not None:
         brightness_pct = int((attrs["brightness"] / 255) * 100)
-        details.append(f"brightness: {brightness_pct}%")
+        details.append(localized_response("entity_brightness", value=brightness_pct))
     if "temperature" in attrs:
-        details.append(f"temperature: {attrs['temperature']}°")
+        details.append(localized_response("entity_temperature", value=attrs['temperature']))
     if "current_temperature" in attrs:
-        details.append(f"current temperature: {attrs['current_temperature']}°")
+        details.append(localized_response("entity_current_temperature", value=attrs['current_temperature']))
     if "hvac_action" in attrs:
-        details.append(f"hvac action: {attrs['hvac_action']}")
+        details.append(localized_response("entity_hvac_action", value=attrs['hvac_action']))
     if "humidity" in attrs:
-        details.append(f"humidity: {attrs['humidity']}%")
+        details.append(localized_response("entity_humidity", value=attrs['humidity']))
     if "current_position" in attrs:
-        details.append(f"position: {attrs['current_position']}% open")
+        details.append(localized_response("entity_position", value=attrs['current_position']))
     if "current_valve_position" in attrs:
-        details.append(f"position: {attrs['current_valve_position']}% open")
+        details.append(localized_response("entity_position", value=attrs['current_valve_position']))
     if "battery_level" in attrs:
-        details.append(f"battery: {attrs['battery_level']}%")
+        details.append(localized_response("entity_battery", value=attrs['battery_level']))
 
     return ", ".join(details)
+
+
+def _spoken_domain(domain: str) -> str:
+    if current_response_language.get() == "en":
+        return domain
+    known = {"light", "switch", "sensor", "climate", "fan", "cover", "lock", "media_player", "binary_sensor"}
+    return localized_response(f"domain_{domain}") if domain in known else domain
 
 
 def _entity_status_artifact(entity_id: str, state: dict) -> dict:
@@ -184,16 +196,16 @@ def _overview_group(label: str, kind: str, entities: list[str]) -> dict | None:
 def get_home_overview() -> str:
     """Summarise voice-enabled live Home Assistant states by safety-relevant group."""
     if not client.HA_TOKEN:
-        return "Home Assistant isn't set up."
+        return localized_response("ha_not_configured", "error")
     try:
         response = client._get("/api/states")
         response.raise_for_status()
         states = response.json()
     except Exception as exc:
         logger.warning("HA home overview failed: %s", exc)
-        return "I couldn't reach Home Assistant."
+        return localized_response("ha_unreachable", "error")
     if not isinstance(states, list):
-        return "I couldn't read Home Assistant's current states."
+        return localized_response("overview_unreadable")
 
     groups = {"lights": [], "openings": [], "locks": [], "active": []}
     inactive = {"off", "idle", "standby", "unavailable", "unknown"}
@@ -232,11 +244,12 @@ def get_home_overview() -> str:
     ]
     if not artifact_groups:
         return ArtifactText(
-            "Everything looks settled at home.", {"type": "home_overview", "groups": []}
+            localized_response("overview_settled"), {"type": "home_overview", "groups": []}
         )
-    spoken = ", ".join(f"{group['count']} {group['label'].lower()}" for group in artifact_groups)
+    spoken = ", ".join(localized_response(f"overview_{group['kind']}", count=group["count"])
+                       for group in artifact_groups)
     return ArtifactText(
-        f"Home overview: {spoken}.", {"type": "home_overview", "groups": artifact_groups}
+        localized_response("overview_summary", groups=spoken), {"type": "home_overview", "groups": artifact_groups}
     )
 
 
@@ -299,14 +312,14 @@ def _energy_history(entity_id: str) -> list[dict]:
 def get_energy_overview() -> str:
     """Read standard HA energy sensors and return only readings that exist."""
     if not client.HA_TOKEN:
-        return "Home Assistant isn't set up."
+        return localized_response("ha_not_configured", "error")
     try:
         response = client._get("/api/states")
         response.raise_for_status()
         states = response.json()
     except Exception as exc:
         logger.warning("HA energy overview failed: %s", exc)
-        return "I couldn't reach Home Assistant."
+        return localized_response("ha_unreachable", "error")
     metrics = {}
     for item in states if isinstance(states, list) else []:
         entity_id = item.get("entity_id") or ""
@@ -328,7 +341,7 @@ def get_energy_overview() -> str:
             "entity_id": entity_id,
         }
     if not metrics:
-        return "I couldn't find any Home Assistant energy sensors."
+        return localized_response("energy_no_sensors")
     consumption = metrics.get("consumption")
     history = _energy_history(consumption["entity_id"]) if consumption else []
     artifact_metrics = [
@@ -336,11 +349,11 @@ def get_energy_overview() -> str:
         for metric in metrics.values()
     ]
     bits = [
-        f"{metric['label']} is {metric['value']:g} {metric['unit']}".strip()
+        localized_response("energy_reading", label=metric['label'], value=f"{metric['value']:g}", unit=metric['unit']).strip()
         for metric in metrics.values()
     ]
     return ArtifactText(
-        "Energy overview: " + ", ".join(bits) + ".",
+        localized_response("energy_overview", readings=", ".join(bits)),
         {
             "type": "energy",
             "metrics": artifact_metrics,
@@ -358,14 +371,14 @@ def get_energy_overview() -> str:
 def get_security_overview() -> str:
     """Read safety-relevant state only, keeping camera details deliberately minimal."""
     if not client.HA_TOKEN:
-        return "Home Assistant isn't set up."
+        return localized_response("ha_not_configured", "error")
     try:
         response = client._get("/api/states")
         response.raise_for_status()
         states = response.json()
     except Exception as exc:
         logger.warning("HA security overview failed: %s", exc)
-        return "I couldn't reach Home Assistant."
+        return localized_response("ha_unreachable", "error")
     findings = {"openings": [], "locks": [], "cameras": [], "camera_issues": []}
     for item in states if isinstance(states, list) else []:
         entity_id = item.get("entity_id") or ""
@@ -412,18 +425,18 @@ def get_security_overview() -> str:
         "groups": groups,
     }
     if not attention:
-        camera_text = f" {len(findings['cameras'])} cameras online." if findings["cameras"] else ""
+        camera_text = localized_response("security_cameras_online", count=len(findings['cameras'])) if findings["cameras"] else ""
         return ArtifactText(
-            "Security check: no open entries or unlocked locks." + camera_text, artifact
+            localized_response("security_settled") + camera_text, artifact
         )
     bits = []
     if findings["openings"]:
-        bits.append(f"{len(findings['openings'])} open entries")
+        bits.append(localized_response("security_open_entries", count=len(findings['openings'])))
     if findings["locks"]:
-        bits.append(f"{len(findings['locks'])} unlocked locks")
+        bits.append(localized_response("security_unlocked_locks", count=len(findings['locks'])))
     if findings["camera_issues"]:
-        bits.append(f"{len(findings['camera_issues'])} cameras unavailable")
-    return ArtifactText("Security attention: " + ", ".join(bits) + ".", artifact)
+        bits.append(localized_response("security_cameras_unavailable", count=len(findings['camera_issues'])))
+    return ArtifactText(localized_response("security_attention", findings=", ".join(bits)), artifact)
 
 
 @client.tool(
@@ -445,10 +458,7 @@ def get_entity_state(entity: str) -> str:
         # the SLM hedging with several candidate names for the same entity
         # in one turn — replans instead of having every failed guess joined
         # verbatim into the spoken reply alongside a successful one.
-        return (
-            f"Reactive question: Couldn't find an entity matching "
-            f"{client._friendly_for(entity_id)!r}. Try a different name or be more specific."
-        )
+        return "Reactive question: " + localized_response("ha_entity_not_found", entity=repr(client._friendly_for(entity_id))) + " Try a different name or be more specific."
 
     artifact = (
         _media_artifact(entity_id, state)
@@ -477,15 +487,12 @@ def list_entities_in_area(area: str, domain: Optional[str] = None) -> str:
         domain: Optional domain filter, e.g. 'light', 'switch', 'sensor', 'climate'.
     """
     if not client.HA_TOKEN:
-        return "Home Assistant isn't set up."
+        return localized_response("ha_not_configured", "error")
 
     area_id = client._resolve_area(area)
     floor_id = client._resolve_floor(area) if area_id is None else None
     if area_id is None and floor_id is None:
-        return (
-            f"Reactive question: Couldn't find an area matching {area!r}. "
-            f"Try a different room name or be more specific."
-        )
+        return "Reactive question: " + localized_response("ha_area_not_found", area=repr(area)) + " Try a different room name or be more specific."
 
     entity_ids = (
         client._area_entities(area_id, domain)
@@ -498,13 +505,12 @@ def list_entities_in_area(area: str, domain: Optional[str] = None) -> str:
         client._AREA_MAP.get(area_id, area) if area_id else client._FLOOR_MAP.get(floor_id, area)
     )
     if not entity_ids:
-        scoped = f"{domain} " if domain else ""
-        return f"I don't see any {scoped}entities in {area_name}."
+        scoped = f"{_spoken_domain(domain)} " if domain else ""
+        return localized_response("area_no_entities", scope=scoped, area=area_name)
 
     names = sorted({client._friendly_for(eid) for eid in entity_ids}, key=str.lower)
-    return f"{area_name} has: " + ", ".join(names[:5]) + (
-        ", amongst others" if len(names) > 5 else ""
-        )
+    return localized_response("area_has_entities", area=area_name, names=", ".join(names[:5]),
+                              more=localized_response("area_among_others") if len(names) > 5 else "")
 
 
 @client.tool(
@@ -521,15 +527,12 @@ def get_entities_in_area_state(
 ) -> str:
     """Get current state for every voice-enabled entity in an HA area."""
     if not client.HA_TOKEN:
-        return "Home Assistant isn't set up."
+        return localized_response("ha_not_configured", "error")
 
     area_id = client._resolve_area(area)
     floor_id = client._resolve_floor(area) if area_id is None else None
     if area_id is None and floor_id is None:
-        return (
-            f"Reactive question: Couldn't find an area matching {area!r}. "
-            "Try a different room name or be more specific."
-        )
+        return "Reactive question: " + localized_response("ha_area_not_found", area=repr(area)) + " Try a different room name or be more specific."
 
     entity_ids = [
         entity_id
@@ -544,12 +547,12 @@ def get_entities_in_area_state(
         client._AREA_MAP.get(area_id, area) if area_id else client._FLOOR_MAP.get(floor_id, area)
     )
     if not entity_ids:
-        scoped = f"{domain} " if domain else ""
-        return f"I don't see any {scoped}entities in {area_name}."
+        scoped = f"{_spoken_domain(domain)} " if domain else ""
+        return localized_response("area_no_entities", scope=scoped, area=area_name)
 
     state_filter = (only_state or "").lower().strip()
     if state_filter not in ("", "on", "off"):
-        return "The state filter must be 'on' or 'off'."
+        return localized_response("area_bad_filter")
 
     details = []
     artifacts = []
@@ -564,10 +567,15 @@ def get_entities_in_area_state(
             artifacts.append(_entity_status_artifact(entity_id, state))
 
     if not details and state_filter:
-        scoped = f"{domain}s" if domain else "entities"
-        return f"No {scoped} are {state_filter} in {area_name}."
+        language = current_response_language.get()
+        if language in {"fr", "de"}:
+            scoped = f"{_spoken_domain(domain)} " if domain else ""
+        else:
+            scoped = f"{domain}s" if domain else "entities"
+        state = localized_response(f"state_{state_filter}")
+        return localized_response("area_none_in_state", scope=scoped, state=state, area=area_name)
     if not details:
-        return f"I couldn't read any entity states in {area_name}."
+        return localized_response("area_state_unreadable", area=area_name)
     text = "; ".join(details)
     return ArtifactText(
         text,
@@ -579,6 +587,11 @@ def _temperature_unit(attrs: dict) -> str:
     """Map HA's temperature_unit attribute to a spoken phrase."""
     raw = (attrs.get("temperature_unit") or "").upper()
     return "degrees Fahrenheit" if "F" in raw else "degrees Celsius"
+
+
+def _spoken_temperature_unit(attrs: dict) -> str:
+    return localized_response("weather_fahrenheit" if "F" in (attrs.get("temperature_unit") or "").upper()
+                              else "weather_celsius")
 
 
 # HA returns weather as machine condition slugs (homeassistant.components.weather):
@@ -607,6 +620,19 @@ _WEATHER_CONDITIONS = {
     "windy-variant": "windy",
 }
 
+_WEATHER_RESPONSE_KEYS = {
+    "clear": "weather_clear", "cloudy": "weather_cloudy", "severe weather": "weather_severe",
+    "foggy": "weather_fog", "hail": "weather_hail", "thunderstorms": "weather_thunder",
+    "partly cloudy": "weather_partly_cloudy", "heavy rain": "weather_heavy_rain",
+    "rainy": "weather_rain", "snowy": "weather_snow", "sleet": "weather_sleet",
+    "sunny": "weather_sunny", "windy": "weather_windy", "unknown": "weather_unknown",
+}
+
+
+def _spoken_weather_condition(condition: str) -> str:
+    key = _WEATHER_RESPONSE_KEYS.get(condition)
+    return localized_response(key) if key else condition
+
 
 def _humanize_condition(state: Optional[str]) -> str:
     """HA weather condition slug → spoken phrase (closed set; hyphen-swap fallback)."""
@@ -617,18 +643,18 @@ def _humanize_condition(state: Optional[str]) -> str:
 
 
 def _format_day(label: str, day: dict, unit: str) -> str:
-    cond = _humanize_condition(day.get("condition"))
+    cond = _spoken_weather_condition(_humanize_condition(day.get("condition")))
     hi = day.get("temperature")
     lo = day.get("templow")
     precip = day.get("precipitation_probability")
 
-    bits = [f"{label} {cond}"] if cond else [label]
+    bits = [localized_response("weather_day_condition", day=label, condition=cond)] if cond else [label]
     if lo is not None and hi is not None:
-        bits.append(f"{round(lo)} to {round(hi)} {unit}")
+        bits.append(localized_response("weather_range", low=round(lo), high=round(hi), unit=unit))
     elif hi is not None:
-        bits.append(f"high {round(hi)} {unit}")
+        bits.append(localized_response("weather_high", high=round(hi), unit=unit))
     if precip is not None:
-        bits.append(f"{int(precip)} percent chance of rain")
+        bits.append(localized_response("weather_rain_chance", value=int(precip)))
     return " ".join(bits)
 
 
@@ -703,10 +729,10 @@ def _weather_history_summary(entity_id: str, start: _dt.date, days: int, unit: s
         hist = (resp.json() or [[]])[0]
     except Exception as e:
         logger.warning(f"HA weather history for {entity_id} failed: {e}")
-        return f"Reactive question: Could not fetch weather history for {entity_id!r}. Tell the user there was an error."
+        return "Reactive question: " + localized_response("history_weather_failed", target=repr(entity_id)) + " Tell the user there was an error."
 
     if not hist:
-        return f"No weather history recorded for {client._friendly_for(entity_id)} on {start}."
+        return localized_response("weather_history_missing", target=client._friendly_for(entity_id), date=start)
 
     today = _local_tz.today()
     yesterday = today - _dt.timedelta(days=1)
@@ -727,19 +753,29 @@ def _weather_history_summary(entity_id: str, start: _dt.date, days: int, unit: s
             entry["temps"].append(float(temp))
 
     if not daily:
-        return f"No usable weather data found for {start}."
+        return localized_response("weather_history_unusable", date=start)
 
-    parts = [
-        f"Weather history for {client._friendly_for(entity_id).replace('forecast', '').strip()}"
-    ]
+    parts = [localized_response("weather_history_title", target=client._friendly_for(entity_id).replace('forecast', '').strip())]
     for day in sorted(daily):
         data = daily[day]
-        label = "Today" if day == today else "Yesterday" if day == yesterday else day.strftime("%A")
+        language = current_response_language.get()
+        if day == today:
+            label = localized_response("weather_today")
+        elif day == yesterday:
+            label = localized_response("weather_yesterday")
+        elif language in {"fr", "de"}:
+            from babel.dates import format_date
+
+            label = format_date(day, "EEEE", locale=language)
+        else:
+            label = day.strftime("%A")
         cond = Counter(data["conditions"]).most_common(1)[0][0] if data["conditions"] else "unknown"
-        bits = [f"{label} {cond}"]
+        bits = [localized_response("weather_day_condition", day=label, condition=_spoken_weather_condition(cond))]
         if data["temps"]:
             lo, hi = round(min(data["temps"])), round(max(data["temps"]))
-            bits.append(f"{lo} to {hi} {unit}" if lo != hi else f"{lo} {unit}")
+            spoken_unit = localized_response("weather_fahrenheit" if "Fahrenheit" in unit else "weather_celsius")
+            bits.append(localized_response("weather_range", low=lo, high=hi, unit=spoken_unit)
+                        if lo != hi else f"{lo} {spoken_unit}")
         parts.append(" ".join(bits))
     return ". ".join(parts) + "."
 
@@ -785,7 +821,7 @@ def get_weather_forecast(
         start = today
 
     if not client.HA_TOKEN:
-        return "Home Assistant isn't set up."
+        return localized_response("ha_not_configured", "error")
 
     entity_id = client._DEFAULT_WEATHER_ENTITY
     if location:
@@ -795,14 +831,11 @@ def get_weather_forecast(
 
     state = client._get_state(entity_id)
     if state is None:
-        return (
-            f"Reactive question: Weather entity {entity_id!r} not found in "
-            f"Home Assistant. Tell the user which entity to configure, or "
-            f"suggest renaming a `weather.*` entity so autodetect picks it up."
-        )
+        return "Reactive question: " + localized_response("ha_weather_entity_not_found", entity=repr(entity_id)) + " Tell the user which entity to configure, or suggest renaming a `weather.*` entity so autodetect picks it up."
 
     attrs = state.get("attributes", {})
     unit = _temperature_unit(attrs)
+    spoken_unit = _spoken_temperature_unit(attrs)
 
     if start < today:
         return _weather_history_summary(entity_id, start, days, unit)
@@ -810,12 +843,13 @@ def get_weather_forecast(
     current_cond = _humanize_condition(state.get("state")) or "unknown"
     current_temp = attrs.get("temperature")
 
-    parts = [f"Forecast for {client._friendly_for(entity_id).replace('forecast', '')}"]
+    parts = [localized_response("weather_forecast", target=client._friendly_for(entity_id).replace('forecast', ''))]
     if start == today:
         if current_temp is not None:
-            parts.append(f"currently {current_cond} at {round(current_temp)} {unit}")
+            parts.append(localized_response("weather_current_temperature", condition=_spoken_weather_condition(current_cond),
+                                            temperature=round(current_temp), unit=spoken_unit))
         else:
-            parts.append(f"currently {current_cond}")
+            parts.append(localized_response("weather_current", condition=_spoken_weather_condition(current_cond)))
 
     try:
         response = client._post(
@@ -841,12 +875,18 @@ def get_weather_forecast(
         if count >= days:
             break
         if day_date == today:
-            label = "Today"
+            label = localized_response("weather_today")
         elif day_date == today + _dt.timedelta(days=1):
-            label = "Tomorrow"
+            label = localized_response("weather_tomorrow")
         else:
-            label = day_date.strftime("%A")
-        parts.append(_format_day(label, day, unit))
+            language = current_response_language.get()
+            if language in {"fr", "de"}:
+                from babel.dates import format_date
+
+                label = format_date(day_date, "EEEE", locale=language)
+            else:
+                label = day_date.strftime("%A")
+        parts.append(_format_day(label, day, spoken_unit))
         count += 1
 
     text = ". ".join(parts) + "."
@@ -1054,7 +1094,7 @@ def get_entity_history(
             for a date-only start, or start+2h for a datetime start.
     """
     if not client.HA_TOKEN:
-        return "Home Assistant isn't set up."
+        return localized_response("ha_not_configured", "error")
 
     entity_id = client._resolve_entity(entity)
     # If resolution failed to produce a valid entity_id, try domain-specific fallbacks
@@ -1063,10 +1103,7 @@ def get_entity_history(
         if any(t in entity.lower() for t in weather_terms):
             entity_id = client._DEFAULT_WEATHER_ENTITY
         else:
-            return (
-                f"Reactive question: Could not resolve '{entity}' to a Home Assistant entity. "
-                f"Ask the user for the exact entity ID (e.g. 'light.kitchen', 'sensor.outdoor_temperature')."
-            )
+            return "Reactive question: " + localized_response("ha_entity_unresolved", entity=entity) + " Ask the user for the exact entity ID (e.g. 'light.kitchen', 'sensor.outdoor_temperature')."
 
     if not start or not start.strip():
         # No date given — default to a recent window so "when was X last on"
@@ -1077,7 +1114,7 @@ def get_entity_history(
         try:
             start_dt, default_end_dt, _ = _parse_history_start(start)
         except ValueError:
-            return f"Reactive question: Could not parse start '{start}'. Ask the user to clarify the date."
+            return "Reactive question: " + localized_response("history_parse_failed", start=start) + " Ask the user to clarify the date."
 
     end_dt = _parse_history_end(end, default_end_dt)
 
@@ -1091,15 +1128,15 @@ def get_entity_history(
         )
     except Exception as e:
         logger.warning(f"HA history query for {entity_id} failed: {e}")
-        return f"Reactive question: Could not fetch history for '{entity}'. Tell the user there was an error."
+        return "Reactive question: " + localized_response("history_fetch_failed", target=entity) + " Tell the user there was an error."
 
     if not states:
         if start and start.strip():
-            window = f"{start}" + (f" to {end}" if end else "")
-            window = f"on {window}"
+            window = localized_response("history_window_range", start=start, end=end) if end else start
+            window = localized_response("history_window_on", window=window)
         else:
-            window = f"in the last {HISTORY_DEFAULT_LOOKBACK_DAYS} days"
-        return f"No recorded state changes for {client._friendly_for(entity_id)} {window}."
+            window = localized_response("history_window_last_days", days=HISTORY_DEFAULT_LOOKBACK_DAYS)
+        return localized_response("history_no_states", target=client._friendly_for(entity_id), window=window)
 
     artifact_states = states
     friendly = client._friendly_for(entity_id)
@@ -1113,12 +1150,25 @@ def get_entity_history(
             ts = client._normalise_ha_timestamp(ts_str)
             ts_date = ts.date()
             if ts_date == today:
-                day_label = "today"
+                day_label = localized_response("calendar_today")
             elif ts_date == yesterday:
-                day_label = "yesterday"
+                day_label = localized_response("calendar_yesterday")
             else:
-                day_label = ts.strftime("%A")
-            return f"{day_label} at {ts.strftime('%I:%M %p').lstrip('0')}"
+                language = current_response_language.get()
+                if language in {"fr", "de"}:
+                    from babel.dates import format_date
+
+                    day_label = format_date(ts.date(), "EEEE", locale=language)
+                else:
+                    day_label = ts.strftime("%A")
+            language = current_response_language.get()
+            if language in {"fr", "de"}:
+                from babel.dates import format_time
+
+                time_label = format_time(ts, format="short", locale=language)
+            else:
+                time_label = ts.strftime('%I:%M %p').lstrip('0')
+            return localized_response("history_when", day=day_label, time=time_label)
         except Exception:
             return ts_str
 
@@ -1127,12 +1177,15 @@ def get_entity_history(
     if truncated:
         states = states[-MAX_RESULTS:]
 
-    lines = [f"History for {friendly}"]
+    lines = [localized_response("history_title", target=friendly)]
     for s in states:
-        lines.append(f"{_when(s)}: {s.get('state', 'unknown')}")
+        state = s.get("state", "unknown")
+        if isinstance(state, str) and state in {"on", "off", "open", "closed", "unlocked", "locked", "unknown", "unavailable"}:
+            state = localized_response(f"state_{state}")
+        lines.append(f"{_when(s)}: {state}")
 
     if truncated:
-        lines.append(f"showing the last {MAX_RESULTS} changes only")
+        lines.append(localized_response("history_truncated", count=MAX_RESULTS))
 
     text = ". ".join(lines) + "."
     current = client._get_state(entity_id)
@@ -1161,14 +1214,12 @@ def get_conversation_history(start: str, end: Optional[str] = None) -> str:
     raw timestamped list back line by line.
     """
     if not client.HA_TOKEN:
-        return "Home Assistant isn't set up."
+        return localized_response("ha_not_configured", "error")
 
     try:
         start_dt, default_end_dt, _ = _parse_history_start(start)
     except ValueError:
-        return (
-            f"Reactive question: Could not parse start '{start}'. Ask the user to clarify the date."
-        )
+        return "Reactive question: " + localized_response("history_parse_failed", start=start) + " Ask the user to clarify the date."
 
     end_dt = _parse_history_end(end, default_end_dt)
     now = _local_tz.now()
@@ -1180,11 +1231,11 @@ def get_conversation_history(start: str, end: Optional[str] = None) -> str:
         bot_states = _fetch_history_states("sensor.fulloch_last_response", start_dt, end_dt)
     except Exception as e:
         logger.warning(f"HA conversation history query failed: {e}")
-        return "Reactive question: Could not fetch the conversation history. Tell the user there was an error."
+        return "Reactive question: " + localized_response("history_conversation_failed") + " Tell the user there was an error."
 
     # Merge both sensors into a single timeline tagged by speaker, then sort
     # by timestamp so each user question sits next to the reply it drew.
-    events = [(s, "You") for s in user_states] + [(s, "Fulloch") for s in bot_states]
+    events = [(s, localized_response("history_user")) for s in user_states] + [(s, "Fulloch") for s in bot_states]
     events.sort(
         key=lambda it: client._normalise_ha_timestamp(
             it[0].get("last_changed") or it[0].get("last_updated") or ""
@@ -1204,19 +1255,32 @@ def get_conversation_history(start: str, end: Optional[str] = None) -> str:
             ts = client._normalise_ha_timestamp(ts_str)
             ts_date = ts.date()
             if ts_date == today:
-                day_label = "today"
+                day_label = localized_response("calendar_today")
             elif ts_date == yesterday:
-                day_label = "yesterday"
+                day_label = localized_response("calendar_yesterday")
             else:
-                day_label = ts.strftime("%A")
-            time_label = ts.strftime("%I:%M %p").lstrip("0")
-            lines.append(f"{day_label} at {time_label} — {speaker}: {state_val}")
+                language = current_response_language.get()
+                if language in {"fr", "de"}:
+                    from babel.dates import format_date
+
+                    day_label = format_date(ts.date(), "EEEE", locale=language)
+                else:
+                    day_label = ts.strftime("%A")
+            language = current_response_language.get()
+            if language in {"fr", "de"}:
+                from babel.dates import format_time
+
+                time_label = format_time(ts, format="short", locale=language)
+            else:
+                time_label = ts.strftime("%I:%M %p").lstrip("0")
+            when = localized_response("history_when", day=day_label, time=time_label)
+            lines.append(f"{when} — {speaker}: {state_val}")
         except Exception:
             lines.append(f"{speaker}: {state_val}")
 
     if not lines:
-        window = f"{start}" + (f" to {end}" if end else "")
-        return f"No recorded conversation for {window}."
+        window = localized_response("history_window_range", start=start, end=end) if end else start
+        return localized_response("history_no_conversation", window=window)
 
     # Keep the most recent exchanges if the window is busy — the tail is what
     # "what did we talk about" usually means, and caps the replan payload.
@@ -1226,8 +1290,7 @@ def get_conversation_history(start: str, end: Optional[str] = None) -> str:
 
     transcript = "\n".join(lines)
     return (
-        "Reactive question: Below is the earlier conversation transcript "
-        "(the user's questions and your replies). Summarise for the user what "
+        "Reactive question: " + localized_response("history_transcript_intro") + " Summarise for the user what "
         "was discussed, grouped by topic, in a sentence or two — do NOT read it "
         "back line by line, and do NOT re-research those topics with another "
         "tool.\n" + transcript

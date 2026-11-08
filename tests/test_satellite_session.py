@@ -302,6 +302,32 @@ class TestSetSatelliteSink:
 
 
 class TestTargetedProactiveSpeech:
+    def test_pytorch_pocket_receives_the_turn_language(self):
+        a = _make_assistant()
+        a._tts_backend = "pocket-tts-pytorch"
+        a._tts_module = MagicMock()
+        a._turn_local.response_language = "fr"
+
+        a.speak_stream("Il est 09:05.", None)
+
+        assert a._tts_module.speak_stream.call_args.args[0] == "Il est neuf heures cinq."
+        assert a._tts_module.speak_stream.call_args.kwargs["language"] == "fr"
+
+    @pytest.mark.parametrize("language,text,expected", [
+        ("en", "The time is 2:30 PM.", "The time is two thirty PM."),
+        ("de", "Es ist 22:18 Uhr.", "Es ist zweiundzwanzig Uhr achtzehn."),
+        ("fr", "Il est 09:05.", "Il est neuf heures cinq."),
+    ])
+    def test_tts_boundary_uses_turn_language_without_changing_display_text(self, language, text, expected):
+        a = _make_assistant()
+        a._tts_module = MagicMock()
+        a._turn_local.response_language = language
+
+        a.speak_stream(text, None)
+
+        assert a._tts_module.speak_stream.call_args.args[0] == expected
+        assert ":" in text
+
     def test_explicit_target_uses_its_own_sink(self):
         a = _make_assistant()
         a.models_ready.set()

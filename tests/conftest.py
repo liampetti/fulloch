@@ -72,6 +72,7 @@ STUBBED_MODULES: set[str] = set()
 def _isolate_thinking_checkpoints(tmp_path, monkeypatch):
     """Prevent durable test checkpoints from leaking between test cases."""
     monkeypatch.setenv("FULLOCH_THINKING_CHECKPOINT_DIR", str(tmp_path / "thinking-checkpoints"))
+    monkeypatch.setenv("FULLOCH_CONVERSATION_DB", str(tmp_path / "conversations.sqlite3"))
 
 
 @pytest.fixture

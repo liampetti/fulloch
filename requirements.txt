@@ -13,9 +13,13 @@
 # `pip freeze` inside the built image (see README).
 
 # Core dependencies
+filelock==3.20.3
+esp-idf-nvs-partition-gen==0.1.7
 numpy==2.2.6
 setuptools==80.9.0
 word2number==1.1
+num2words==0.5.14
+langid==1.1.6
 hassil>=2.1.0
 requests==2.32.5
 

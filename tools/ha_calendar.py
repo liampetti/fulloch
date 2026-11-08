@@ -11,6 +11,8 @@ from typing import Optional
 
 import utils.local_time as _local_tz
 from core.datetime_utils import tts_friendly_event_summary
+from core.satellite_context import current_response_language
+from utils.response_language import response as localized_response
 
 from . import ha_client as client
 from .tool_registry import ArtifactText
@@ -125,7 +127,7 @@ def _ha_get_events(day: str) -> str:
     """Common body for whats_on and its day-specific aliases."""
     calendars = _read_calendars()
     if not calendars:
-        return "No calendar is configured in Home Assistant."
+        return localized_response("calendar_no_calendar")
 
     start_iso, end_iso = _calendar_window(day)
     response = client._call_service_with_response(
@@ -138,7 +140,7 @@ def _ha_get_events(day: str) -> str:
         },
     )
     if not response:
-        return "I couldn't reach your calendar."
+        return localized_response("calendar_unreachable")
 
     raw_events: list[dict] = []
     for cal in calendars:
@@ -221,18 +223,26 @@ def _relative_day_phrase(start_dt: _dt.datetime, now: _dt.datetime) -> str:
     get relative phrasing and far ones get a full calendar date."""
     delta_days = (start_dt.date() - now.date()).days
     if delta_days == 0:
-        return "today"
+        return localized_response("calendar_today")
     if delta_days == 1:
-        return "tomorrow"
+        return localized_response("calendar_tomorrow")
     if delta_days == -1:
-        return "yesterday"
-    weekday = start_dt.strftime("%A")
+        return localized_response("calendar_yesterday")
+    language = current_response_language.get()
+    if language in {"fr", "de"}:
+        from babel.dates import format_date
+
+        weekday = format_date(start_dt.date(), "EEEE", locale=language)
+    else:
+        weekday = start_dt.strftime("%A")
     if 2 <= delta_days <= 6:
-        return f"this {weekday}"
+        return localized_response("calendar_this_weekday", day=weekday)
     if 7 <= delta_days <= 13:
-        return f"next {weekday}"
+        return localized_response("calendar_next_weekday", day=weekday)
     if -6 <= delta_days <= -2:
-        return f"last {weekday}"
+        return localized_response("calendar_last_weekday", day=weekday)
+    if language in {"fr", "de"}:
+        return format_date(start_dt.date(), "full", locale=language)
     return start_dt.strftime("%A, %B %-d")
 
 
@@ -246,12 +256,12 @@ def _calendar_match_observation(matches: list[dict]) -> str:
     details = []
     for event in matches:
         start = client._normalise_ha_timestamp(event["start"])
-        summary = event.get("summary") or "an event"
+        summary = event.get("summary") or localized_response("calendar_untitled")
         if event.get("all_day"):
-            details.append(f"{summary}: start date {start.date().isoformat()} (all day)")
+            details.append(localized_response("calendar_match_all_day", summary=summary, date=start.date().isoformat()))
         else:
-            details.append(f"{summary}: starts {start.isoformat()}")
-    return "Reactive question: Calendar search found: " + "; ".join(details) + "."
+            details.append(localized_response("calendar_match_timed", summary=summary, time=start.isoformat()))
+    return "Reactive question: " + localized_response("calendar_matches", events="; ".join(details))
 
 
 _CALENDAR_MATCH_STOPWORDS = frozenset(
@@ -297,17 +307,18 @@ def _ha_get_events_name(
     in `day`'s fixed window, or within `limit` days either side of now."""
     calendars = _read_calendars()
     if not calendars:
-        return "No calendar is configured in Home Assistant."
+        return localized_response("calendar_no_calendar")
 
     if day:
         start_iso, end_iso = _calendar_window(day)
-        range_description = day.replace("_", " ")
+        range_key = {"today": "calendar_today", "tomorrow": "calendar_tomorrow", "this_week": "calendar_this_week"}.get(day)
+        range_description = localized_response(range_key) if range_key else day.replace("_", " ")
     else:
         days = _parse_lookback_days(limit)
         now = _local_tz.now()
         start_iso = (now - _dt.timedelta(days=days)).isoformat()
         end_iso = (now + _dt.timedelta(days=days)).isoformat()
-        range_description = f"{days} days before or after today"
+        range_description = localized_response("calendar_search_range", days=days)
 
     response = client._call_service_with_response(
         "calendar",
@@ -319,7 +330,7 @@ def _ha_get_events_name(
         },
     )
     if not response:
-        return "I couldn't reach your calendar."
+        return localized_response("calendar_unreachable")
 
     raw_events: list[dict] = []
     for cal in calendars:
@@ -352,7 +363,7 @@ def _ha_get_events_name(
         ]
 
     if not matches:
-        return f"I couldn't find any events matching '{event_description}' in {range_description}."
+        return localized_response("calendar_no_match", event=event_description, range=range_description)
 
     matches.sort(key=lambda e: client._normalise_ha_timestamp(e["start"]))
     return ArtifactText(
@@ -472,15 +483,12 @@ def create_calendar_event(
     """
     calendar = _reminder_calendar_entity()
     if not calendar:
-        return (
-            "User question: No reminder calendar is configured in Fulloch. "
-            "Would you like me to save this as a note instead?"
-        )
+        return "User question: " + localized_response("calendar_reminder_unconfigured")
 
     try:
         start_dt = _dt.date.fromisoformat(date)
     except ValueError:
-        return "I couldn't parse that date — please provide it as YYYY-MM-DD."
+        return localized_response("calendar_bad_date")
 
     extra: dict = {"summary": summary}
 
@@ -488,13 +496,13 @@ def create_calendar_event(
         try:
             hour, minute = (int(p) for p in time.split(":")[:2])
         except (ValueError, AttributeError):
-            return "I couldn't parse that time — please use HH:MM format."
+            return localized_response("calendar_bad_time")
         start_datetime = _dt.datetime.combine(start_dt, _dt.time(hour, minute))
         if end_time:
             try:
                 eh, em = (int(p) for p in end_time.split(":")[:2])
             except (ValueError, AttributeError):
-                return "I couldn't parse the end time — please use HH:MM format."
+                return localized_response("calendar_bad_end_time")
             end_datetime = _dt.datetime.combine(start_dt, _dt.time(eh, em))
         else:
             end_datetime = start_datetime + _dt.timedelta(hours=1)
@@ -508,9 +516,19 @@ def create_calendar_event(
     if rrule:
         extra["rrule"] = rrule
 
-    recurrence_label = f" ({recurrence})" if recurrence != "none" else ""
-    time_label = f" at {time}" if time else ""
-    success = f"Added '{summary}'{time_label} on {start_dt.strftime('%A %-d %B')}{recurrence_label}"
+    recurrence_value = (localized_response(f"calendar_recurrence_{recurrence.lower()}")
+                        if recurrence.lower() in {"daily", "weekly", "monthly"} else recurrence)
+    recurrence_label = f" ({recurrence_value})" if recurrence != "none" else ""
+    time_label = localized_response("calendar_created_time", time=time) if time else ""
+    language = current_response_language.get()
+    if language in {"fr", "de"}:
+        from babel.dates import format_date
+
+        date_label = format_date(start_dt, "full", locale=language)
+    else:
+        date_label = start_dt.strftime('%A %-d %B')
+    success = localized_response("calendar_created", summary=summary, time=time_label,
+                                 date=date_label, recurrence=recurrence_label)
     return client._call_service(
         "calendar", "create_event", calendar, extra, success_message=success
     )
@@ -537,16 +555,13 @@ def add_todo_item(item: str) -> str:
         item: The item text to add (e.g. "eggs", "call the plumber").
     """
     if not client.TODO_ENTITY:
-        return (
-            "User question: No todo list is configured in Home Assistant. "
-            "Would you like me to add this to a note instead?"
-        )
+        return "User question: " + localized_response("todo_unconfigured_add")
     return client._call_service(
         "todo",
         "add_item",
         client.TODO_ENTITY,
         {"item": item},
-        success_message=f"Added '{item}' to your list",
+        success_message=localized_response("todo_added", item=item),
     )
 
 
@@ -558,20 +573,24 @@ def add_todo_item(item: str) -> str:
 def get_todo_items() -> str:
     """Return pending (incomplete) items from the configured HA todo list."""
     if not client.TODO_ENTITY:
-        return (
-            "User question: No todo list is configured in Home Assistant. "
-            "Would you like me to check your notes instead?"
-        )
+        return "User question: " + localized_response("todo_unconfigured_read")
     items = _fetch_pending_todo_items()
     if items is None:
-        return "I couldn't reach your todo list."
+        return localized_response("todo_unreachable")
     names = [i.get("summary", "") for i in items if i.get("summary")]
     if not names:
-        return "Your list is empty."
+        return localized_response("todo_empty")
     if len(names) == 1:
-        text = f"You have one item: {names[0]}."
+        text = localized_response("todo_one", item=names[0])
     else:
-        text = f"You have {len(names)} items: {', '.join(names[:-1])}, and {names[-1]}."
+        language = current_response_language.get()
+        if language in {"fr", "de"}:
+            from babel.lists import format_list
+
+            items = format_list(names, locale=language)
+        else:
+            items = f"{', '.join(names[:-1])}, and {names[-1]}"
+        text = localized_response("todo_multiple", count=len(names), items=items)
     return ArtifactText(text, {"type": "todos", "items": names[:20]})
 
 
@@ -599,12 +618,12 @@ def complete_todo_item(item: str) -> str:
         item: The item text to mark done (fuzzy-matched against pending items).
     """
     if not client.TODO_ENTITY:
-        return "User question: No todo list is configured in Home Assistant."
+        return "User question: " + localized_response("todo_unconfigured")
     items = _fetch_pending_todo_items()
     if items is None:
-        return "I couldn't reach your todo list."
+        return localized_response("todo_unreachable")
     if not items:
-        return f"There's nothing pending on your list matching '{item}'."
+        return localized_response("todo_no_pending_match", item=item)
 
     query = item.lower().strip()
     match = next((i for i in items if query in (i.get("summary") or "").lower()), None)
@@ -614,7 +633,7 @@ def complete_todo_item(item: str) -> str:
         if close:
             match = next((i for i in items if (i.get("summary") or "") == close[0]), None)
     if match is None:
-        return f"I couldn't find '{item}' on your list."
+        return localized_response("todo_not_found", item=item)
 
     summary = match.get("summary", item)
     return client._call_service(
@@ -622,5 +641,5 @@ def complete_todo_item(item: str) -> str:
         "update_item",
         client.TODO_ENTITY,
         {"item": summary, "status": "completed"},
-        success_message=f"Checked off '{summary}'",
+        success_message=localized_response("todo_completed", item=summary),
     )

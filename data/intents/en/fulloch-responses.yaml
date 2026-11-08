@@ -3,6 +3,577 @@ schema_version: 1
 source_revision: "2025.6.23"
 provenance: "Fulloch-specific responses; not copied from Home Assistant."
 responses:
+  stage_queued: {success: ["Queued"]}
+  stage_thinking: {success: ["Thinking"]}
+  stage_input: {success: ["Input needed"]}
+  stage_paused: {success: ["Paused for foreground conversation"]}
+  stage_report_ready: {success: ["Report ready"]}
+  stage_notes_ready: {success: ["Research notes ready"]}
+  stage_resuming: {success: ["Resuming saved research checkpoint"]}
+  stage_planning: {success: ["Planning research"]}
+  stage_synthesising: {success: ["Synthesising report"]}
+  stage_wait_backend: {success: ["Waiting for research backend recovery"]}
+  stage_recover_section: {success: ["Recovering empty research section"]}
+  stage_wait_quiet: {success: ["Queued, waiting for a quiet moment"]}
+  stage_researching: {success: ["Researching {title}"]}
+  stage_analysing: {success: ["Analysing {title}"]}
+  stage_writing_section: {success: ["Writing research section {index}"]}
+  stage_checking_section: {success: ["Checking research section {index}"]}
+  stage_saving_section: {success: ["Saving supported subsection: {title}"]}
+  stage_reviewing: {success: ["Reviewing retained sources ({current}/{total} passages)"]}
+  report_not_produced: {success: ["No report was produced."]}
+  report_additional_facts: {success: ["Additional source facts"]}
+  report_no_summary: {success: ["No summary is available."]}
+  report_no_findings: {success: ["No findings are available."]}
+  report_flight_offers_heading: {success: ["## Retrieved Flight Offers"]}
+  report_flight_offers_intro: {success: ["Bounded Google Flights results retrieved for this investigation. Fares and schedules can change."]}
+  report_flight_route: {success: ["{origin} to {destination} on {date}"]}
+  report_flight_return: {success: [", returning {date}"]}
+  report_flight_nonstop: {success: ["nonstop"]}
+  report_flight_stops: {success: ["{count} stop{plural}"]}
+  report_flight_stops_unknown: {success: ["stops unavailable"]}
+  report_flight_departure_unknown: {success: ["departure unavailable"]}
+  report_flight_arrival_unknown: {success: ["arrival unavailable"]}
+  report_flight_oneway: {success: ["{index}. {airlines}: {departure} to {arrival} ({stops}{duration}{price})."]}
+  report_flight_roundtrip: {success: ["{index}. {airlines}: outbound {out_departure} to {out_arrival}; return {back_departure} to {back_arrival} (round trip{price})."]}
+  report_flight_retrieved: {success: [" Retrieved {timestamp}."]}
+  report_flight_source: {success: ["- [Google Flights: {route}](https://www.google.com/travel/flights?q={query}) via SerpApi.{retrieved}"]}
+  report_flight_live_heading: {success: ["### Live travel search"]}
+  report_heading_summary: {success: ["Summary"]}
+  report_heading_conclusions: {success: ["Conclusions"]}
+  report_heading_references: {success: ["References"]}
+  report_heading_chapters: {success: ["Chapters"]}
+  report_heading_research_notes: {success: ["Research Notes"]}
+  report_heading_under_answered: {success: ["Under-answered"]}
+  report_metadata: {success: ["**Type:** Deep Think {type}\n\n**Generated:** {timestamp}\n\n**Objective:** {objective}"]}
+  report_type_report: {success: ["Report"]}
+  report_type_notes: {success: ["Research Notes"]}
+  report_completed_fallback: {success: ["I completed the research report."]}
+  report_unavailable: {success: ["I can't retrieve that completed report right now."]}
+  report_full_prefix: {success: ["Here is the full report. "]}
+  report_short_prefix: {success: ["Here's the short version. "]}
+  report_full_offer: {success: [" The full report is saved in Fulloch Reports. Would you like me to read the full report?"]}
+  report_no_answer: {success: ["The report does not answer that."]}
+  web_bad_query: {success: ["Use a non-empty task-specific search query."]}
+  web_bad_profile: {success: ["Use conversation or research profile."]}
+  web_bad_category: {success: ["Use auto, general, or news category."]}
+  web_bad_time_range: {success: ["Use day, week, month, year, or no time range."]}
+  web_bad_page: {success: ["Use a page between 1 and 3."]}
+  web_today: {success: ["Today is {date}."]}
+  web_retrieved: {success: ["A web search has retrieved the following information:"]}
+  web_source: {success: ["From {url}{scope}: {snippet}"]}
+  web_no_results: {success: ["The web search returned no usable results. Tell the user you couldn't find anything on this right now; do not invent an answer and do not save this as a note."]}
+  web_scope_global: {success: [" (Global news)"]}
+  web_scope_regional: {success: [" (Regional news)"]}
+  web_scope_local: {success: [" (Local news)"]}
+  agent_repeat_request: {success: ["Sorry, can you repeat that"]}
+  agent_summary_failed: {success: ["The search results could not be summarised; original source material has been retained."]}
+  agent_research_needs_model: {success: ["Research requires an available language model."]}
+  agent_web_needs_model: {success: ["Web findings require an available summariser."]}
+  assistant_starting: {success: ["The assistant is still starting up. Try again in a moment."]}
+  research_attempt_stopped: {success: ["The attempt stopped during {stage}."]}
+  research_match_ambiguous: {success: ["I found multiple research tasks that could match. Please identify the task by its topic or task ID."]}
+  research_match_missing: {success: ["I couldn't match that topic to a research task in this conversation. Please give the task topic or ID."]}
+  research_multiple_tasks: {success: ["There are multiple research tasks in this conversation. Which topic or task ID do you mean?"]}
+  research_no_task: {success: ["I don't have a research job linked to this conversation, so I can't confirm that work started. What topic should I investigate?"]}
+  research_failure_detail: {success: ["The last attempt stopped during {stage}: {reason}"]}
+  research_partial_link: {success: [" Saved partial work: {link}."]}
+  research_waiting_input: {success: ["The investigation is waiting for your clarification."]}
+  research_failed_stage: {success: ["The last attempt stopped during {stage}."]}
+  research_stage_status: {success: ["The job is {status} at stage: {stage}."]}
+  research_last_stage_status: {success: ["The last job is {status} at stage: {stage}."]}
+  research_task_reason: {success: ["For '{task}': {reason}"]}
+  research_task_status: {success: ["I did queue '{task}'. Its status is {status}; current stage: {stage}."]}
+  research_task_failed: {success: ["The last attempt for '{task}' failed: {reason}"]}
+  research_task_ready: {success: ["The job for '{task}' is ready. I haven't started a separate search for this follow-up."]}
+  research_task_last_status: {success: ["The last job for '{task}' is {status}."]}
+  research_status_queued: {success: ["queued"]}
+  research_status_running: {success: ["running"]}
+  research_status_paused: {success: ["paused"]}
+  research_status_needs_input: {success: ["needs_input"]}
+  research_status_failed: {success: ["failed"]}
+  research_status_ready: {success: ["ready"]}
+  research_status_cancelled: {success: ["cancelled"]}
+  thinking_not_ready: {success: ["Deliberate thinking is not ready yet."]}
+  thinking_memory_cooldown: {success: ["System memory protection is cooling down. Please try again later."]}
+  thinking_tasks_ambiguous: {success: ["Several research tasks could match. Please specify the task topic or ID."]}
+  thinking_tasks_multiple: {success: ["Several research tasks are available. Please specify the topic or task ID."]}
+  thinking_topic_required: {success: ["I need the research topic this refers to before I can continue."]}
+  thinking_queue_failed: {success: ["I couldn't queue that research task."]}
+  calc_million_one: {success: ["{value} million"]}
+  calc_billion_one: {success: ["{value} billion"]}
+  calc_trillion_one: {success: ["{value} trillion"]}
+  conversation_listening: {success: ["I'm listening."]}
+  reminder_prefix: {success: ["Just a reminder -"]}
+  history_transcript_intro: {success: ["Below is the earlier conversation transcript (the user's questions and your replies)."]}
+  notes_none: {success: ["none"]}
+  ha_entity_not_found: {success: ["Couldn't find an entity matching {entity}."]}
+  ha_area_not_found: {success: ["Couldn't find an area matching {area}."]}
+  ha_weather_entity_not_found: {success: ["Weather entity {entity} not found in Home Assistant."]}
+  ha_entity_unresolved: {success: ["Could not resolve '{entity}' to a Home Assistant entity."]}
+  notes_daily_write_denied: {success: ["{title} is a dated daily journal — I won't write to a past day's log."]}
+  notes_append_target_missing: {success: ["I couldn't find an existing note titled {title} to append to. Existing notes: {existing}."]}
+  ha_invalid_service_data: {success: ["The data for the {service} call wasn't valid JSON."]}
+  spotify_unconfigured: {success: ["Spotify isn't set up yet. Add spotify_client_id, spotify_client_secret and spotify_refresh_token to data/credentials.json."]}
+  spotify_no_match: {success: ["No confident Spotify match for {query}."]}
+  busy_phrase: {success: ["I'm helping in another room right now."]}
+  notes_search_result_item: {success: ["in '{title}': {snippet}"]}
+  notes_search_results: {success: ["Found {count} possible match{plural} for '{query}' in the user's notes (matched by keyword or by topic, so some may not contain '{query}' literally). {items}."]}
+  travel_param_date: {success: ["{field} must use YYYY-MM-DD."]}
+  travel_param_integer: {success: ["{field} must be a whole number."]}
+  travel_param_range: {success: ["{field} must be between 0 and {maximum}."]}
+  travel_field_return_date: {success: ["return_date"]}
+  travel_field_check_in: {success: ["check_in"]}
+  travel_field_check_out: {success: ["check_out"]}
+  travel_field_adults: {success: ["adults"]}
+  travel_field_children: {success: ["children"]}
+  report_memory_stop: {success: ["I stopped that research because system memory was overloaded. I'll cool down for five minutes; please ask me to try again afterwards if you want."]}
+  report_partial_saved: {success: ["Partial report saved"]}
+  report_notes_unverified: {success: ["I've saved research notes, but the requested analysis is not yet verified."]}
+  report_partial_open: {success: ["I've saved a partial research report; some questions remain open."]}
+  report_saved: {success: ["I've saved the research report."]}
+  report_summary_question: {success: ["Would you like a short summary?"]}
+  ha_service_failed: {error: ["I couldn't confirm the Home Assistant operation for {target}."]}
+  ha_target_override: {error: ["Service data cannot override the selected entity. No command was sent."]}
+  ha_target_unverified: {error: ["I couldn't verify the Home Assistant target {target}. No command was sent."]}
+  ha_target_rejected: {error: ["Couldn't find an entity matching {target}."]}
+  agent_confirmation_failed: {success: ["I couldn't confirm that the requested action was completed."]}
+  agent_result_unconfirmed: {success: ["I couldn't confirm the result of {action}."]}
+  agent_web_unconfirmed: {success: ["I couldn't confirm that the requested web check completed."]}
+  agent_reactive_fallback: {success: ["Sorry, I couldn't do that."]}
+  calc_no_expression: {success: ["The user asked for a calculation but no expression was given."]}
+  calc_bad_expression: {success: ["Could not evaluate the expression {expression}."]}
+  calc_bad_dates: {success: ["Could not parse one of the dates."]}
+  calc_bad_weekday: {success: ["That doesn't look like a weekday."]}
+  calc_bad_amount: {success: ["The amount to convert wasn't a number."]}
+  calc_missing_unit: {success: ["Say which unit you'd like that converted to."]}
+  calc_incompatible_units: {success: ["{source} and {target} measure different things, so they can't be converted."]}
+  calc_unknown_units: {success: ["Couldn't convert {source} to {target} — one of the units wasn't recognised."]}
+  calendar_reminder_unconfigured: {success: ["No reminder calendar is configured in Fulloch. Would you like me to save this as a note instead?"]}
+  todo_unconfigured_add: {success: ["No todo list is configured in Home Assistant. Would you like me to add this to a note instead?"]}
+  todo_unconfigured_read: {success: ["No todo list is configured in Home Assistant. Would you like me to check your notes instead?"]}
+  todo_unconfigured: {success: ["No todo list is configured in Home Assistant."]}
+  history_window_on: {success: ["on {window}"]}
+  history_window_last_days: {success: ["in the last {days} days"]}
+  history_window_range: {success: ["{start} to {end}"]}
+  history_no_states: {success: ["No recorded state changes for {target} {window}."]}
+  history_no_conversation: {success: ["No recorded conversation for {window}."]}
+  history_title: {success: ["History for {target}"]}
+  history_truncated: {success: ["showing the last {count} changes only"]}
+  history_when: {success: ["{day} at {time}"]}
+  history_user: {success: ["You"]}
+  history_parse_failed: {success: ["Could not parse start '{start}'."]}
+  history_fetch_failed: {success: ["Could not fetch history for '{target}'."]}
+  history_conversation_failed: {success: ["Could not fetch the conversation history."]}
+  history_weather_failed: {success: ["Could not fetch weather history for {target}."]}
+  travel_plan_places: {success: ["Describe at least two places to plan a trip."]}
+  travel_home_unknown: {success: ["Name a destination; a home airport could not be inferred from the household timezone."]}
+  travel_schedule_missing: {success: ["The travel provider did not return schedule evidence for every itinerary leg."]}
+  travel_schedule_incomplete: {success: ["The travel provider returned an incomplete flight schedule."]}
+  travel_offers_missing: {success: ["The travel provider returned no usable flight offers."]}
+  travel_plan_leg: {success: ["Leg {index}: {result}"]}
+  travel_plan_result: {success: ["Representative future date: {date}.\n{legs}\n\nSchedule evidence retrieved. Use assess_itinerary with the returned Artifact reference to check the retrieved flight chronology."]}
+  travel_artifact_unavailable: {success: ["That itinerary artifact is unavailable."]}
+  travel_duplicate_search: {success: ["Equivalent flight constraints were already retrieved for this investigation."]}
+  travel_outbound_mismatch: {success: ["The flight provider returned an outbound schedule that did not match the requested route or date."]}
+  travel_outbound_not_selectable: {success: ["The flight provider did not return a selectable outbound itinerary for the requested return journey."]}
+  travel_return_mismatch: {success: ["The flight provider returned return-leg schedules that did not match the requested route or date."]}
+  travel_schedule_mismatch: {success: ["The flight provider returned schedules that did not match the requested route or date."]}
+  research_paper_unknown_year: {success: ["year unknown"]}
+  research_paper_citations: {success: [", cited {count} times"]}
+  research_paper_entry: {success: ["{title} ({year}{citations}). {digest} [{source}: {id}]"]}
+  research_missing_query: {success: ["Ask what papers to search for."]}
+  research_bad_count: {success: ["Choose between 1 and {max} paper results."]}
+  research_unknown_source: {success: ["Unknown paper source {source}."]}
+  research_unavailable: {success: ["Paper search is temporarily unavailable."]}
+  research_not_found: {success: ["I couldn't find papers matching {query}."]}
+  research_paper_unavailable: {success: ["That paper is unavailable in the supplied search artifact."]}
+  research_paper_invalid: {success: ["That paper record is invalid."]}
+  research_paper_detail: {success: ["{title}. {digest} DOI: {doi}. Source: {source} {id}. URL: {url}."]}
+  research_not_supplied: {success: ["not supplied"]}
+  research_wolfram_disabled: {success: ["Wolfram is not enabled."]}
+  research_wolfram_unavailable: {success: ["Wolfram is unavailable: {error}"]}
+  color_rgb_invalid: {success: ["I need three numbers for an RGB colour."]}
+  color_unreadable: {success: ["I couldn't read the colour {color}."]}
+  color_unknown: {success: ["I don't know the colour {color}."]}
+  device_service_sent: {success: ["{service} {target}"]}
+  vacuum_start: {success: ["Started {target}"]}
+  vacuum_resume: {success: ["Resumed {target}"]}
+  vacuum_pause: {success: ["Paused {target}"]}
+  vacuum_stop: {success: ["Stopped {target}"]}
+  vacuum_dock: {success: ["Sending {target} to dock"]}
+  vacuum_locate: {success: ["Locating {target}"]}
+  vacuum_invalid: {success: ["I don't know how to '{action}' a vacuum — try start, pause, stop, dock, or locate."]}
+  calendar_match_all_day: {success: ["{summary}: start date {date} (all day)"]}
+  calendar_match_timed: {success: ["{summary}: starts {time}"]}
+  calendar_matches: {success: ["Calendar search found: {events}."]}
+  calendar_today: {success: ["today"]}
+  calendar_tomorrow: {success: ["tomorrow"]}
+  calendar_yesterday: {success: ["yesterday"]}
+  calendar_this_week: {success: ["this week"]}
+  calendar_this_weekday: {success: ["this {day}"]}
+  calendar_next_weekday: {success: ["next {day}"]}
+  calendar_last_weekday: {success: ["last {day}"]}
+  calendar_search_range: {success: ["{days} days before or after today"]}
+  calendar_no_match: {success: ["I couldn't find any events matching '{event}' in {range}."]}
+  agent_not_completed: {success: ["Not completed: {tasks}."]}
+  agent_research_correction: {success: ["Thanks, I'll continue that investigation with the proposed correction."]}
+  agent_model_failed: {success: ["I couldn't continue because the language model failed."]}
+  agent_plan_failed: {success: ["Sorry, I couldn't continue the plan."]}
+  agent_steps_incomplete: {success: ["I couldn't finish the remaining steps."]}
+  agent_compose_failed: {success: ["I couldn't compose the final answer."]}
+  agent_translation_unavailable: {success: ["I couldn't provide that response in the requested language."]}
+  agent_live_lookup_unavailable: {success: ["I couldn't verify that information with the available tools."]}
+  agent_no_progress: {success: ["I couldn't make progress after one correction; the current plan repeated without a new result."]}
+  agent_failed: {success: ["Sorry, I couldn't finish that."]}
+  agent_research_unavailable: {success: ["Background research is unavailable right now; I haven't queued an investigation."]}
+  satellite_unavailable: {success: ["No voice satellites are available right now."]}
+  satellite_target_not_found: {success: ["No connected voice satellite is named {target}."]}
+  satellite_target_ambiguous: {success: ["More than one connected satellite matches {target}: {names}."]}
+  satellite_message_empty: {success: ["What message should I send?"]}
+  satellite_announcement_busy: {success: ["The assistant is already delivering announcements. Try again shortly."]}
+  energy_no_sensors: {success: ["I couldn't find any Home Assistant energy sensors."]}
+  energy_reading: {success: ["{label} is {value} {unit}"]}
+  energy_overview: {success: ["Energy overview: {readings}."]}
+  security_settled: {success: ["Security check: no open entries or unlocked locks."]}
+  security_cameras_online: {success: [" {count} cameras online."]}
+  security_attention: {success: ["Security attention: {findings}."]}
+  security_open_entries: {success: ["{count} open entries"]}
+  security_unlocked_locks: {success: ["{count} unlocked locks"]}
+  security_cameras_unavailable: {success: ["{count} cameras unavailable"]}
+  itinerary_preliminary: {success: ["Preliminary assessment: {assessment} The requested activity timing cannot be confirmed without exact local windows."]}
+  itinerary_field_window_start: {success: ["stop window {index} start"]}
+  itinerary_field_window_end: {success: ["stop window {index} end"]}
+  itinerary_field_departure: {success: ["leg {index} departure"]}
+  itinerary_field_arrival: {success: ["leg {index} arrival"]}
+  itinerary_windows_count: {success: ["Provide one stop window for the journey start and each leg destination."]}
+  itinerary_window_object: {success: ["Stop window {index} must be an object."]}
+  itinerary_window_order: {success: ["Stop window {index} ends before it starts."]}
+  itinerary_leg_object: {success: ["Leg {index} must be an object."]}
+  itinerary_leg_arrival_before_departure: {success: ["Leg {index} arrives before it departs."]}
+  itinerary_leg_departure_before_arrival: {success: ["Leg {index} departs before leg {previous} arrives."]}
+  itinerary_early_departure: {success: ["Leg {index} leaves {place} at {actual} before its requested window begins at {bound}."]}
+  itinerary_late_arrival: {success: ["Leg {index} reaches {place} at {actual}, after its requested window ends at {bound}."]}
+  itinerary_not_feasible: {success: ["Itinerary is not feasible:\n- {failures}"]}
+  itinerary_feasible: {success: ["Itinerary is feasible within the supplied local-time windows."]}
+  itinerary_chronology_feasible: {success: ["Retrieved itinerary is chronologically feasible between its flight legs."]}
+  itinerary_no_combination: {success: ["No chronologically compatible itinerary exists among the retrieved offer combinations."]}
+  itinerary_invalid_json: {success: ["legs_json and windows_json must each be valid JSON arrays."]}
+  itinerary_not_arrays: {success: ["legs_json and windows_json must each be JSON arrays."]}
+  itinerary_timestamp_invalid: {success: ["{field} must be an ISO timestamp with a UTC offset."]}
+  itinerary_offset_missing: {success: ["{field} must include a UTC offset."]}
+  area_no_entities: {success: ["I don't see any {scope}entities in {area}."]}
+  area_has_entities: {success: ["{area} has: {names}{more}"]}
+  area_among_others: {success: [", amongst others"]}
+  area_bad_filter: {success: ["The state filter must be 'on' or 'off'."]}
+  area_none_in_state: {success: ["No {scope} are {state} in {area}."]}
+  area_state_unreadable: {success: ["I couldn't read any entity states in {area}."]}
+  domain_light: {success: ["light"]}
+  domain_switch: {success: ["switch"]}
+  domain_sensor: {success: ["sensor"]}
+  domain_climate: {success: ["climate"]}
+  domain_fan: {success: ["fan"]}
+  domain_cover: {success: ["cover"]}
+  domain_lock: {success: ["lock"]}
+  domain_media_player: {success: ["media player"]}
+  domain_binary_sensor: {success: ["binary sensor"]}
+  overview_unreadable: {success: ["I couldn't read Home Assistant's current states."]}
+  overview_settled: {success: ["Everything looks settled at home."]}
+  overview_summary: {success: ["Home overview: {groups}."]}
+  overview_lights: {success: ["{count} lights on"]}
+  overview_openings: {success: ["{count} open"]}
+  overview_locks: {success: ["{count} unlocked"]}
+  overview_active: {success: ["{count} active"]}
+  area_not_found: {error: ["I couldn't find the selected room. No command was sent. Please select the room again."]}
+  area_lookup_failed: {error: ["I couldn't look up the lights in the selected room. No command was sent."]}
+  area_lookup_invalid: {error: ["I couldn't read the lights in the selected room. No command was sent."]}
+  area_no_lights: {error: ["I couldn't find any lights available for control in the selected room. No command was sent."]}
+  unsupported_domain: {error: ["That device type is not supported. No command was sent."]}
+  location_not_found: {error: ["I couldn't find that room or floor. No command was sent."]}
+  location_no_devices: {error: ["I couldn't find any available devices there. No command was sent."]}
+  invalid_temperature: {error: ["I couldn't read that temperature. No command was sent."]}
+  unsupported_operation: {error: ["That operation is not supported. No command was sent."]}
+  timer_status_id: {success: ["Timer {timer_id} has {duration} remaining"]}
+  timer_status_list: {success: ["Timer status:\n{timers}"]}
+  timer_cancelled_id: {success: ["Timer {timer_id} cancelled"]}
+  report_failed_partial: {success: ["I couldn't complete that report, but I've saved the supported partial work and research notes."]}
+  report_failed_search_model: {success: ["I ran into a model error, and web search was unavailable, so I couldn't complete that report."]}
+  report_failed_search: {success: ["Web search was unavailable, so I couldn't gather the sources needed for that report."]}
+  report_failed_model: {success: ["I ran into a model error, so I couldn't complete that report."]}
+  report_failed: {success: ["I couldn't complete that report."]}
+  finance_auth_failed: {success: ["Finance search authentication failed; update serpapi_api_key in credentials.json."]}
+  finance_unavailable: {success: ["Finance search is temporarily unavailable."]}
+  finance_invalid_response: {success: ["Finance search returned an invalid response."]}
+  finance_provider_rejected: {success: ["Finance search provider rejected the request."]}
+  entity_state: {success: ["{target} is {state}"]}
+  entity_brightness: {success: ["brightness: {value}%"]}
+  entity_temperature: {success: ["temperature: {value}°"]}
+  entity_current_temperature: {success: ["current temperature: {value}°"]}
+  entity_hvac_action: {success: ["hvac action: {value}"]}
+  entity_humidity: {success: ["humidity: {value}%"]}
+  entity_position: {success: ["position: {value}% open"]}
+  entity_battery: {success: ["battery: {value}%"]}
+  state_on: {success: ["on"]}
+  state_off: {success: ["off"]}
+  state_open: {success: ["open"]}
+  state_closed: {success: ["closed"]}
+  state_unlocked: {success: ["unlocked"]}
+  state_locked: {success: ["locked"]}
+  state_unknown: {success: ["unknown"]}
+  state_unavailable: {success: ["unavailable"]}
+  travel_not_configured: {success: ["Travel planning is not configured; add serpapi_api_key to credentials.json."]}
+  travel_auth_failed: {success: ["Travel search authentication failed; update serpapi_api_key in credentials.json."]}
+  travel_provider_rejected: {success: ["Travel search provider rejected the request{detail}"]}
+  travel_unavailable: {success: ["Travel search is temporarily unavailable."]}
+  travel_invalid_response: {success: ["Travel search returned an invalid response."]}
+  travel_failed: {success: ["Travel search could not be completed."]}
+  current_date_and_time: {success: ["{date}, {time}."]}
+  travel_origin_destination_dates: {success: ["Describe the origin, destination, and travel dates."]}
+  travel_origin_destination: {success: ["Name both the origin and destination city or airport."]}
+  travel_departure_date: {success: ["State the departure date in a form such as 17 January 2027."]}
+  travel_endpoints_required: {success: ["Origin and destination airport or city names are required."]}
+  travel_invalid_endpoints: {success: ["Use a real origin and destination city or IATA airport code."]}
+  travel_departure_invalid: {success: ["departure_date must use YYYY-MM-DD; use a future date for flight schedules."]}
+  travel_return_invalid: {success: ["return_date must be after departure_date."]}
+  travel_adult_required: {success: ["At least one adult is required."]}
+  travel_cabin_stops_invalid: {success: ["cabin_class must be economy, premium_economy, business, or first; max_stops must be 0, 1, or 2."]}
+  travel_flights_empty: {success: ["No flight offers matched those constraints."]}
+  travel_hotel_location_required: {success: ["A city or location is required for hotel search."]}
+  travel_hotel_dates_invalid: {success: ["check_out must be after check_in."]}
+  travel_hotels_empty: {success: ["No hotel offers matched those constraints."]}
+  travel_past_dates: {success: ["Those flight dates are in the past. Did you mean {dates}?"]}
+  travel_carrier_unavailable: {success: ["carrier unavailable"]}
+  travel_duration: {success: ["{duration} minutes"]}
+  travel_duration_unavailable: {success: ["duration unavailable"]}
+  travel_price_unavailable: {success: ["price unavailable"]}
+  travel_time_unavailable: {success: ["time unavailable"]}
+  travel_schedule: {success: ["{airport} local {time}{offset}"]}
+  travel_flight_summary: {success: ["{carrier}; depart {departure}; arrive {arrival}; {stops} stops; {duration}; quoted price {price}."]}
+  travel_round_trip_summary: {success: ["{carrier}; outbound {out_departure} to {out_arrival}; return {back_departure} to {back_arrival}; provider-quoted fare {price}"]}
+  travel_round_trip_title: {success: ["Google Flights round-trip results (prices can change):"]}
+  travel_flights_title: {success: ["Google Flights results (prices can change):"]}
+  travel_resolved_route: {success: ["Representative future date: {date}. Resolved route: {origin} ({origin_code}) to {destination} ({destination_code}).\n{results}"]}
+  travel_hotels_title: {success: ["Google Hotels results (prices can change):"]}
+  travel_hotel_summary: {success: ["{index}. {name}; total {total}; rating {rating}; {address}; {cancellation}."]}
+  travel_no_rating: {success: ["rating unavailable"]}
+  travel_no_address: {success: ["address unavailable"]}
+  travel_free_cancellation: {success: ["free cancellation"]}
+  travel_cancellation_unknown: {success: ["cancellation terms unavailable"]}
+  travel_unnamed_property: {success: ["Unnamed property"]}
+  calendar_recurrence_daily: {success: ["daily"]}
+  calendar_recurrence_weekly: {success: ["weekly"]}
+  calendar_recurrence_monthly: {success: ["monthly"]}
+  calendar_no_events: {success: ["You have no events scheduled."]}
+  calendar_untitled: {success: ["an event"]}
+  calendar_event_all_day: {success: ["All day on {day}, {summary}."]}
+  calendar_event_timed: {success: ["At {time} on {day}, {summary}."]}
+  calendar_created: {success: ["Added '{summary}'{time} on {date}{recurrence}"]}
+  calendar_created_time: {success: [" at {time}"]}
+  color_red: {success: ["red"]}
+  color_green: {success: ["green"]}
+  color_blue: {success: ["blue"]}
+  color_yellow: {success: ["yellow"]}
+  color_orange: {success: ["orange"]}
+  color_purple: {success: ["purple"]}
+  color_pink: {success: ["pink"]}
+  color_white: {success: ["white"]}
+  color_warm_white: {success: ["warm white"]}
+  color_cool_white: {success: ["cool white"]}
+  color_cyan: {success: ["cyan"]}
+  color_magenta: {success: ["magenta"]}
+  device_on: {success: ["{target} on"]}
+  device_on_brightness: {success: ["{target} on at {value} percent"]}
+  device_off: {success: ["{target} off"]}
+  device_toggle: {success: ["Toggled {target}"]}
+  device_room_on: {success: ["Lights on in {area}"]}
+  device_room_on_brightness: {success: ["Lights on in {area} at {value} percent"]}
+  device_room_off: {success: ["Lights off in {area}"]}
+  device_room_toggle: {success: ["Toggled the lights in {area}"]}
+  device_room_brightness: {success: ["Lights in {area} at {value} percent"]}
+  device_brightness: {success: ["{target} at {value} percent"]}
+  device_color: {success: ["{target} set to {color}"]}
+  device_climate: {success: ["{target} set to {value} degrees"]}
+  device_invalid_brightness: {success: ["I couldn't read that brightness percentage."]}
+  ack_generic: {success: ["Okay."]}
+  ack_music: {success: ["Finding that."]}
+  ack_web: {success: ["Looking it up."]}
+  daily_when_today: {success: ["today"]}
+  daily_when_date: {success: ["on {date}"]}
+  daily_not_found: {success: ["You don't have any notes logged {when}."]}
+  daily_read_failed: {success: ["I couldn't read your note {when}."]}
+  daily_read: {success: ["Your note {when}: {text}{continuation}"]}
+  calc_scientific: {success: ["{mantissa} times ten to the power of {exponent}"]}
+  calc_undefined: {success: ["undefined"]}
+  calc_infinity: {success: ["infinity"]}
+  calc_negative_infinity: {success: ["negative infinity"]}
+  calc_million: {success: ["{value} million"]}
+  calc_billion: {success: ["{value} billion"]}
+  calc_trillion: {success: ["{value} trillion"]}
+  calc_date: {success: ["Calendar date: {date}."]}
+  calc_date_range: {success: ["Calendar range: {start} through {end}."]}
+  calc_same_day: {success: ["Those are the same day."]}
+  calc_days_between: {success: ["There are {count} {unit} between those two dates."]}
+  calc_date_of: {success: ["That falls on {date}."]}
+  calc_conversion: {success: ["{source} is {result}."]}
+  spotify_playing_music: {success: ["Playing music on spotify"]}
+  spotify_playing_playlist: {success: ['Playing your playlist "{name}"']}
+  spotify_playing_artist: {success: ["Playing {name} on Spotify"]}
+  spotify_playing_track: {success: ["Playing {name} by {artist}"]}
+  spotify_missing_query: {success: ["Please provide either artist and song, playlist name, or a search query"]}
+  spotify_play_failed: {success: ["Unable to play your request on Spotify"]}
+  obsidian_insert_empty: {success: ["What would you like me to insert?"]}
+  obsidian_disabled: {success: ["Obsidian editing is disabled in the dashboard for safety."]}
+  obsidian_insert_disconnected: {success: ["Obsidian isn't connected, so I can't insert text at its cursor."]}
+  obsidian_insert_sent: {success: ["Sent that text to the cursor in your active Obsidian note."]}
+  obsidian_rename_empty: {success: ["What would you like to call the active note?"]}
+  obsidian_rename_disconnected: {success: ["Obsidian isn't connected, so I can't rename its active note."]}
+  obsidian_rename_sent: {success: ["Sent a request to rename the active Obsidian note to '{title}'."]}
+  obsidian_delete_disconnected: {success: ["Obsidian isn't connected, so I can't delete its active note."]}
+  obsidian_delete_sent: {success: ["Sent a request to delete the active Obsidian note."]}
+  obsidian_replace_empty: {success: ["What should replace the selected text?"]}
+  obsidian_replace_disconnected: {success: ["Obsidian isn't connected, so I can't replace selected text."]}
+  obsidian_replace_sent: {success: ["Sent a request to replace the selected text in Obsidian."]}
+  notes_list: {success: ["You have {count} notes: {titles}."]}
+  note_read: {success: ["Note '{title}': {text}{continuation}"]}
+  note_continues: {success: [" (note continues)"]}
+  notes_search_empty: {success: ["Please give me something to search for."]}
+  notes_search_not_found: {success: ["I didn't find anything about {query} in your notes."]}
+  finance_not_configured: {success: ["Finance research is not configured; add serpapi_api_key to credentials.json."]}
+  finance_bad_symbol: {success: ["Ask for a stock symbol such as NASDAQ:TSLA."]}
+  finance_bad_window: {success: ["Choose a chart window from 1D, 5D, 1M, 6M, YTD, 1Y, 5Y, or MAX."]}
+  finance_not_found: {success: ["I couldn't find information on that stock."]}
+  finance_unverified_symbol: {success: ["I couldn't verify an instrument for {symbol}."]}
+  finance_wrong_symbol: {success: ["I couldn't verify that the returned listing matches {symbol}."]}
+  finance_bad_currency: {success: ["Use three-letter ISO currency codes, such as AUD and USD."]}
+  finance_same_currency: {success: ["Choose two different currencies."]}
+  finance_bad_amount: {success: ["Use a non-negative numeric amount."]}
+  finance_missing_rate: {success: ["I retrieved {base}/{quote} but the provider did not supply a numeric rate."]}
+  finance_empty_watchlist: {success: ["No finance watchlist is configured."]}
+  finance_watchlist_failed: {success: ["I couldn't retrieve the configured watchlist."]}
+  finance_market_failed: {success: ["I couldn't retrieve a broad market snapshot."]}
+  weather_history_missing: {success: ["No weather history recorded for {target} on {date}."]}
+  weather_history_unusable: {success: ["No usable weather data found for {date}."]}
+  weather_history_title: {success: ["Weather history for {target}"]}
+  weather_yesterday: {success: ["Yesterday"]}
+  finance_percent: {success: ["{value} percent"]}
+  finance_no_price: {success: ["price not supplied"]}
+  finance_quote: {success: ["{name} is trading at {price}."]}
+  finance_quote_exchange: {success: ["{name} is trading at {price} on {exchange}."]}
+  finance_up: {success: ["It is up {amount}"]}
+  finance_down: {success: ["It is down {amount}"]}
+  finance_movement_percent: {success: ["{detail}, or {percent}."]}
+  finance_movement: {success: ["{detail}."]}
+  finance_moved: {success: ["It has moved {percent}."]}
+  finance_conversion: {success: ["{amount} {base} is approximately {conversion} {quote}."]}
+  finance_timestamps: {success: ["Quote timestamp: {quoted}; retrieved {retrieved}; {cache}."]}
+  finance_no_timestamp: {success: ["provider timestamp not supplied"]}
+  finance_cache_bypass: {success: ["cache bypass requested"]}
+  finance_cache_allowed: {success: ["provider cache allowed (up to one hour)"]}
+  temperature_missing: {success: ["Sorry, I couldn't find a temperature reading for {target}."]}
+  temperature_unreadable: {success: ["I couldn't read a temperature for {target}."]}
+  temperature_current: {success: ["{target} is {value} {unit}"]}
+  temperature_with_target: {success: ["{target} is {value} {unit}, set to {setpoint} {unit}"]}
+  weather_forecast: {success: ["Forecast for {target}"]}
+  weather_current: {success: ["currently {condition}"]}
+  weather_current_temperature: {success: ["currently {condition} at {temperature} {unit}"]}
+  weather_day_condition: {success: ["{day} {condition}"]}
+  weather_range: {success: ["{low} to {high} {unit}"]}
+  weather_high: {success: ["high {high} {unit}"]}
+  weather_rain_chance: {success: ["{value} percent chance of rain"]}
+  weather_today: {success: ["Today"]}
+  weather_tomorrow: {success: ["Tomorrow"]}
+  weather_celsius: {success: ["degrees Celsius"]}
+  weather_fahrenheit: {success: ["degrees Fahrenheit"]}
+  weather_unknown: {success: ["unknown"]}
+  weather_clear: {success: ["clear"]}
+  weather_cloudy: {success: ["cloudy"]}
+  weather_severe: {success: ["severe weather"]}
+  weather_fog: {success: ["foggy"]}
+  weather_hail: {success: ["hail"]}
+  weather_thunder: {success: ["thunderstorms"]}
+  weather_partly_cloudy: {success: ["partly cloudy"]}
+  weather_heavy_rain: {success: ["heavy rain"]}
+  weather_rain: {success: ["rainy"]}
+  weather_snow: {success: ["snowy"]}
+  weather_sleet: {success: ["sleet"]}
+  weather_sunny: {success: ["sunny"]}
+  weather_windy: {success: ["windy"]}
+  research_queued: {success: ["I'm still working on an earlier task. I've queued this one next."]}
+  research_started: {success: ["I'll look into that and let you know when I'm done."]}
+  satellite_announcement_queued: {success: ["Announcement queued for {target}."]}
+  timer_extended: {success: ["Timer {timer_id} extended by {duration}"]}
+  timer_not_found: {error: ["Timer {timer_id} not found"]}
+  fallback_no_ai: {success: ["I can only handle supported local commands right now."]}
+  fallback_ai_unreachable: {success: ["I can't reach the AI server right now. Basic commands still work."]}
+  fallback_tool_unavailable: {success: ["I don't have a tool for that setup yet."]}
+  device_locked: {success: ["Locked {target}"]}
+  device_unlocked: {success: ["Unlocked {target}"]}
+  device_opened: {success: ["Opened {target}"]}
+  device_closed: {success: ["Closed {target}"]}
+  device_stopped: {success: ["Stopped {target}"]}
+  device_position: {success: ["{target} set to {value} percent open"]}
+  device_fan_speed: {success: ["{target} speed set to {value} percent"]}
+  device_scene: {success: ["Scene {target} activated"]}
+  device_script: {success: ["Running {target}"]}
+  calendar_no_calendar: {success: ["No calendar is configured in Home Assistant."]}
+  calendar_unreachable: {success: ["I couldn't reach your calendar."]}
+  calendar_bad_date: {success: ["I couldn't parse that date — please provide it as YYYY-MM-DD."]}
+  calendar_bad_time: {success: ["I couldn't parse that time — please use HH:MM format."]}
+  calendar_bad_end_time: {success: ["I couldn't parse the end time — please use HH:MM format."]}
+  todo_added: {success: ["Added '{item}' to your list"]}
+  todo_unreachable: {success: ["I couldn't reach your todo list."]}
+  todo_empty: {success: ["Your list is empty."]}
+  todo_one: {success: ["You have one item: {item}."]}
+  todo_multiple: {success: ["You have {count} items: {items}."]}
+  todo_no_pending_match: {success: ["There's nothing pending on your list matching '{item}'."]}
+  todo_not_found: {success: ["I couldn't find '{item}' on your list."]}
+  todo_completed: {success: ["Checked off '{item}'"]}
+  media_no_speakers: {success: ["I don't know which speakers to adjust."]}
+  media_invalid_volume: {success: ["I couldn't read that volume percentage."]}
+  media_no_device: {success: ["I don't know which device to switch."]}
+  media_volume_set: {success: ["{target} volume {value}"]}
+  media_louder: {success: ["{target} louder"]}
+  media_quieter: {success: ["{target} quieter"]}
+  media_source: {success: ["{target} switched to {source}"]}
+  media_paused: {success: ["{target} paused"]}
+  media_resumed: {success: ["{target} resumed"]}
+  media_skipped: {success: ["{target} skipped"]}
+  media_previous: {success: ["{target} back a track"]}
+  media_muted: {success: ["{target} muted"]}
+  media_unmuted: {success: ["{target} unmuted"]}
+  spotify_paused: {success: ["Spotify paused"]}
+  spotify_resumed: {success: ["Spotify resumed"]}
+  spotify_skipped: {success: ["Skipped to the next track on Spotify"]}
+  spotify_previous: {success: ["Back a track on Spotify"]}
+  spotify_no_device: {success: ["Couldn't control Spotify — no active device found."]}
+  media_no_pause: {success: ["I don't know which player to pause."]}
+  media_no_resume: {success: ["I don't know which player to resume."]}
+  media_no_skip: {success: ["I don't know which player to skip on."]}
+  media_no_previous: {success: ["I don't know which player to skip back on."]}
+  media_no_louder: {success: ["I don't know which speakers to turn up."]}
+  media_no_quieter: {success: ["I don't know which speakers to turn down."]}
+  media_no_mute: {success: ["I don't know which speakers to mute."]}
+  notes_empty: {success: ["You don't have any notes saved yet."]}
+  note_not_found: {success: ["I couldn't find a note about {title}."]}
+  note_read_failed: {success: ["I couldn't read the {title} note."]}
+  note_already_exists: {success: ["The {title} note already exists; there was nothing to add."]}
+  note_update_failed: {success: ["I couldn't update the {title} note."]}
+  note_updated: {success: ["Added to your existing '{title}' note."]}
+  note_save_failed: {success: ["I couldn't save the {title} note."]}
+  note_saved: {success: ["Saved a new note called '{title}'."]}
+  note_append_empty: {success: ["There was nothing to append."]}
+  note_append_failed: {success: ["I couldn't append to the {title} note."]}
+  note_appended: {success: ["Added to your {title} note."]}
+  daily_log_empty: {success: ["There was nothing to log."]}
+  daily_log_failed: {success: ["I couldn't update today's note."]}
+  daily_log_saved: {success: ["Logged at {time} in today's note."]}
+  fact_empty: {success: ["There was nothing to remember."]}
+  fact_save_failed: {success: ["I couldn't save that fact."]}
+  fact_saved: {success: ["Got it, I'll remember that."]}
+  calculation_result:
+    success: ["That comes to {value}."]
+  calculation_divide_by_zero:
+    success: ["That would be dividing by zero, which has no answer."]
   time:
     success:
       - "The time is {time}."

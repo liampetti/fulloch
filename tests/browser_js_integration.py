@@ -9,7 +9,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -139,6 +139,8 @@ class BrowserModules(unittest.TestCase):
         self.intent_prepare_error = False
         self.config_error = False
         self.history = [{"role": "assistant", "source": "startup", "ts": 1, "content": "Hello"}]
+        self.entities = None
+        self.entity_update_error = False
         self.page.route("**/*", self.route)
 
     def tearDown(self):
@@ -159,6 +161,17 @@ class BrowserModules(unittest.TestCase):
         if path == "/fulloch_animate.png":
             return route.fulfill(path=ROOT / "utils/fulloch_animate.png", content_type="image/png")
         self.requests.append((path, route.request.method, route.request.post_data))
+        if self.entities is not None and path in ("/entities", "/entities/bulk"):
+            if route.request.method == "POST":
+                if self.entity_update_error:
+                    return route.fulfill(status=500, body="{}", content_type="application/json")
+                body = json.loads(route.request.post_data)
+                ids = body.get("entity_ids", [body.get("entity_id")])
+                for entity in self.entities:
+                    if entity["entity_id"] in ids:
+                        entity["denied"] = body["denied"]
+            return route.fulfill(body=json.dumps({"available": True, "entities": self.entities}),
+                                 content_type="application/json")
         if (path == "/setup/intent-languages" and self.intent_prepare_error) or (
             path == "/config" and route.request.method == "PUT" and self.config_error
         ):
@@ -182,6 +195,125 @@ class BrowserModules(unittest.TestCase):
 
     def emit(self, event):
         self.page.evaluate("ev => boundary.streams.at(-1).emit(ev)", event)
+
+    def test_entity_groups_bulk_search_and_failure(self):
+        self.entities = [
+            {"entity_id": "light.a", "name": "Desk", "domain": "light", "denied": False},
+            {"entity_id": "light.b", "name": "Hall", "domain": "light", "denied": False},
+            {"entity_id": "lock.door", "name": "Door", "domain": "lock", "denied": True},
+        ]
+        self.open_chat()
+        self.page.get_by_role("tab", name="Entities").click()
+        groups = self.page.locator(".entity-group")
+        self.page.wait_for_function("document.querySelectorAll('.entity-group').length === 2")
+        self.assertEqual(groups.evaluate_all("els => els.map(e => e.open)"), [False, False])
+        self.page.locator(".entity-group summary").first.focus()
+        self.page.keyboard.press("Enter")
+        self.assertTrue(groups.first.evaluate("el => el.open"))
+
+        self.page.locator("#entity-search").fill("Desk")
+        self.assertTrue(groups.first.evaluate("el => el.open"))
+        self.page.get_by_role("button", name="Block all light entities").click()
+        self.page.wait_for_function("document.querySelector('#entities-allow-all').disabled === false && "
+                                    "document.querySelector('[aria-label=\"Block all light entities\"]').disabled")
+        self.assertTrue(self.entities[0]["denied"])
+        self.assertTrue(self.entities[1]["denied"])
+        self.assertTrue(self.entities[2]["denied"])
+        request = [json.loads(body) for path, method, body in self.requests
+                   if path == "/entities/bulk" and method == "POST"][-1]
+        self.assertEqual(set(request["entity_ids"]), {"light.a", "light.b"})
+
+        self.page.locator("#entities-allow-all").click()
+        self.page.wait_for_function("document.querySelector('#entities-allow-all').disabled && "
+                                    "!document.querySelector('#entities-block-all').disabled")
+        self.assertTrue(all(not entity["denied"] for entity in self.entities))
+        self.assertTrue(groups.first.evaluate("el => el.open"))
+
+        self.page.locator('[aria-label="Allow voice control of Desk"]').evaluate(
+            "el => { el.checked = false; el.dispatchEvent(new Event('change', {bubbles: true})); }"
+        )
+        self.page.wait_for_function("!document.querySelector('[aria-label=\"Allow all light entities\"]').disabled")
+        self.assertTrue(self.entities[0]["denied"])
+        self.page.get_by_role("button", name="Allow all light entities").click()
+        self.page.wait_for_function("document.querySelector('[aria-label=\"Allow all light entities\"]').disabled && "
+                                    "!document.querySelector('[aria-label=\"Block all light entities\"]').disabled")
+        self.assertTrue(all(not entity["denied"] for entity in self.entities))
+
+        self.entity_update_error = True
+        self.page.locator("#entities-block-all").click()
+        self.page.get_by_role("alert").wait_for(state="visible")
+        self.assertTrue(all(not entity["denied"] for entity in self.entities))
+        self.assertTrue(self.page.locator('[aria-label="Allow voice control of Desk"]').is_checked())
+        self.assertTrue(groups.first.evaluate("el => el.open"))
+        self.entity_update_error = False
+        self.page.reload()
+        self.page.get_by_role("tab", name="Entities").click()
+        self.page.wait_for_function("document.querySelectorAll('.entity-group').length === 2")
+        self.assertEqual(groups.evaluate_all("els => els.map(e => e.open)"), [False, False])
+        groups.first.locator("summary").click()
+        self.assertTrue(self.page.locator('[aria-label="Allow voice control of Desk"]').is_checked())
+
+    def test_conversation_menu_save_list_search_load_delete_and_clear(self):
+        self.history = [{"role": "user", "source": "text", "ts": 1, "content": "Current chat"}]
+        snapshots = [{"id": f"id-{i}", "title": f"Chat {i}", "created_at": 1700000000 + i} for i in range(25)]
+
+        def route_conversation(route):
+            path = urlparse(route.request.url).path
+            if path == "/conversations/status":
+                return route.fulfill(json={"persisted": True})
+            if path == "/conversations" and route.request.method == "POST":
+                return route.fulfill(json={"id": "new-id", "created_at": 1700000000})
+            if path == "/conversations" or path == "/conversations/search":
+                offset = int(parse_qs(urlparse(route.request.url).query).get("offset", [0])[0])
+                if path.endswith("search"):
+                    offset = route.request.post_data_json["offset"]
+                    entries = [item for item in snapshots if item["id"] == "id-3"]
+                else:
+                    entries = snapshots
+                return route.fulfill(json={"conversations": entries[offset:offset + 20],
+                                           "next_offset": offset + 20 if offset + 20 < len(entries) else None})
+            if path.endswith("/load"):
+                self.assertEqual(route.request.post_data_json["current"], "save")
+                self.history = [{"role": "user", "source": "text", "ts": 4, "content": "Restored chat"}]
+                return route.fulfill(json={"ok": True, "saved": {"id": "saved-current", "created_at": 1700000000}})
+            if route.request.method == "DELETE":
+                snapshots[:] = [item for item in snapshots if item["id"] != path.rsplit("/", 1)[-1]]
+                return route.fulfill(json={"ok": True})
+            return route.fulfill(status=404)
+
+        self.page.route("**/conversations**", route_conversation)
+        self.open_chat()
+        self.page.get_by_text("Current chat", exact=True).wait_for()
+        button = self.page.get_by_role("button", name="Conversation options")
+        button.click()
+        self.page.get_by_role("button", name="Save conversation", exact=True).click()
+        self.page.locator("#conversation-status").wait_for(state="visible")
+        self.assertIn("new-id", self.page.locator("#conversation-status").inner_text())
+        button.click()
+        self.page.get_by_role("button", name="Saved conversations", exact=True).click()
+        self.page.wait_for_function("document.querySelectorAll('.conversation-item').length === 20")
+        self.page.locator("#conversation-list").evaluate("el => { el.scrollTop = el.scrollHeight; }")
+        self.page.wait_for_function("document.querySelectorAll('.conversation-item').length === 25")
+        search = self.page.get_by_role("searchbox", name="Search saved conversations")
+        search.fill("garden")
+        search.press("Enter")
+        self.page.wait_for_function("document.querySelectorAll('.conversation-item').length === 1")
+        self.page.once("dialog", lambda dialog: dialog.accept())
+        self.page.get_by_role("button", name="Delete saved conversation Chat 3").click()
+        self.page.get_by_text("No saved conversations found.").wait_for()
+        self.page.get_by_role("button", name="Clear", exact=True).click()
+        self.page.wait_for_function("document.querySelectorAll('.conversation-item').length === 20")
+        self.page.once("dialog", lambda dialog: dialog.accept())
+        self.page.locator(".conversation-load").first.click()
+        self.page.get_by_text("Restored chat", exact=True).wait_for()
+        self.assertIn("saved-current", self.page.locator("#conversation-status").inner_text())
+        button.click()
+        self.page.keyboard.press("Escape")
+        self.assertTrue(self.page.locator("#conversation-menu").is_hidden())
+        button.click()
+        self.page.once("dialog", lambda dialog: dialog.accept())
+        self.page.get_by_role("button", name="Clear conversation", exact=True).click()
+        self.page.get_by_text("Conversation cleared.").wait_for()
 
     def test_protocol_events_do_not_render_in_history_or_live_chat(self):
         self.history.append({"type": "assistant.stand_down_after_tts", "satellite_id": "kitchen"})
@@ -538,6 +670,68 @@ class BrowserModules(unittest.TestCase):
         self.assertEqual(document.inner_text(), "example report")
         self.assertEqual(document.get_attribute("href"), "/documents/Fulloch/example-report.md")
         self.assertEqual(document.get_attribute("target"), "_blank")
+
+    def test_document_semantic_search_results_clear_errors_and_stale_responses(self):
+        self.documents = {"documents": [{"path": "Folder/a note.md", "title": "a note"}]}
+
+        def search_route(route):
+            query = route.request.post_data_json["query"]
+            if query == "failure":
+                return route.fulfill(status=503, json={"detail": "unavailable"})
+            results = [] if query == "empty" else [{
+                "path": "Folder/a note.md", "title": f"Match {query}",
+                "excerpt": "<img src=x onerror=alert(1)> relevant excerpt",
+            }]
+            return route.fulfill(json={"results": results})
+
+        self.page.route("**/api/documents/search", search_route)
+        self.open_chat()
+        self.page.get_by_role("tab", name="Documents", exact=True).click()
+        self.page.locator(".documents-folder summary").wait_for()
+        search = self.page.get_by_role("searchbox", name="Search documents by meaning")
+        search.fill("herbs")
+        search.press("Enter")
+        result = self.page.locator(".document-search-result")
+        self.assertEqual(result.locator("a").inner_text(), "Match herbs")
+        self.assertEqual(result.locator("a").get_attribute("href"), "/documents/Folder/a%20note.md")
+        self.assertEqual(result.locator("a").get_attribute("target"), "_blank")
+        self.assertIn("<img", result.locator(".document-search-excerpt").inner_text())
+        self.assertEqual(result.locator("img").count(), 0)
+        self.assertTrue(self.page.locator("#documents-sort").is_disabled())
+        self.page.get_by_role("button", name="Clear", exact=True).click()
+        self.assertFalse(self.page.locator("#documents-sort").is_disabled())
+        self.page.locator(".documents-folder summary").click()
+        self.assertEqual(self.page.locator(".document-file").inner_text(), "a note")
+
+        search.fill("empty")
+        search.press("Enter")
+        self.page.get_by_text("No matching documents found.").wait_for()
+        search.fill("failure")
+        search.press("Enter")
+        self.page.get_by_text("Could not search documents. Please try again.").wait_for()
+
+        self.page.evaluate("""() => {
+          const original = window.fetch;
+          window.fetch = async (...args) => {
+            if (args[0] === '/api/documents/search' && JSON.parse(args[1].body).query === 'old') {
+              await new Promise(resolve => { window.releaseOldDocumentSearch = resolve; });
+              const response = await original(...args);
+              window.oldDocumentFinished = true;
+              return response;
+            }
+            return original(...args);
+          };
+        }""")
+        search.fill("old")
+        search.press("Enter")
+        self.page.wait_for_function("typeof window.releaseOldDocumentSearch === 'function'")
+        search.fill("new")
+        search.press("Enter")
+        self.page.get_by_text("Match new", exact=True).wait_for()
+        self.page.evaluate("window.releaseOldDocumentSearch()")
+        self.page.wait_for_function("window.oldDocumentFinished === true")
+        self.page.wait_for_function("document.querySelector('.document-file')?.textContent === 'Match new'")
+        self.assertEqual(self.page.locator(".document-file").inner_text(), "Match new")
 
     def test_report_card_keeps_mobile_navigation_reachable(self):
         self.page.set_viewport_size({"width": 375, "height": 667})

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from . import config_store
+from . import config_store, satellite_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,18 @@ class _RecoverySession:
 def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: "Lifecycle") -> None:
     """Attach the native voice-satellite endpoint."""
     recovery_sessions: dict[str, _RecoverySession] = {}
+    active_sockets: dict[WebSocket, tuple[str, object]] = {}
+
+    async def revalidate_satellite_connections() -> None:
+        config = config_store.read_config(context.config_path)
+        for socket, (device_id, token) in list(active_sockets.items()):
+            if not satellite_tokens.authenticate(config, device_id, token):
+                try:
+                    await socket.close(code=1008, reason="satellite credential revoked")
+                except RuntimeError:
+                    pass
+
+    context.revalidate_satellite_connections = revalidate_satellite_connections
 
     async def expire_session(session: _RecoverySession) -> None:
         await asyncio.sleep(SATELLITE_V2_RESUME_SECONDS)
@@ -141,14 +153,13 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                 any(channel not in (1, 2) or isinstance(channel, bool) for channel in supported_uplink_channels)):
             await reject("protocol", "invalid AEC uplink channels")
             return
-        config = config_store.read_config()
+        config = config_store.read_config(context.config_path)
         satellite_config = config.get("satellite")
         preferred_uplink_channels = satellite_config.get("uplink_channels", 1) if isinstance(satellite_config, dict) else 1
         uplink_channels = 2 if preferred_uplink_channels == 2 and 2 in supported_uplink_channels else 1
         uplink_bytes = SATELLITE_V2_UPLINK_BYTES * uplink_channels
         auth_token = first.get("token")
-        tokens = config.get("satellite_tokens") or []
-        if tokens and not any(auth_token and secrets.compare_digest(str(auth_token), str(token)) for token in tokens):
+        if not satellite_tokens.authenticate(config, device["id"].strip(), auth_token):
             await reject("auth", "invalid token")
             return
 
@@ -217,15 +228,31 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
         session.connection = connection_id
         satellite_id = session.satellite_id
         tts_q, protocol_events = session.tts_q, session.protocol_events
-        await ws.send_json({
-            "type": "satellite.welcome", "session_id": satellite_id,
-            "protocol": {"major": SATELLITE_V2_PROTOCOL_MAJOR, "minor": client_minor},
-            "audio": {
-                "uplink": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": uplink_channels,
-                           "frame_duration_ms": 20},
-                "downlink": {"encoding": "pcm_s16le", "sample_rate_hz": SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ, "channels": 1},
-            },
-        })
+        # No await between the configuration check and registration: migration
+        # can therefore revalidate every session admitted under the old policy.
+        active_sockets[ws] = (device["id"].strip(), auth_token)
+        committed = context.satellite_provisioning.confirm(device["id"].strip(), auth_token)
+        if not satellite_tokens.authenticate(
+            config_store.read_config(context.config_path), device["id"].strip(), auth_token
+        ):
+            active_sockets.pop(ws, None)
+            await reject("auth", "invalid token")
+            return
+        try:
+            if committed:
+                await revalidate_satellite_connections()
+            await ws.send_json({
+                "type": "satellite.welcome", "session_id": satellite_id,
+                "protocol": {"major": SATELLITE_V2_PROTOCOL_MAJOR, "minor": client_minor},
+                "audio": {
+                    "uplink": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": uplink_channels,
+                               "frame_duration_ms": 20},
+                    "downlink": {"encoding": "pcm_s16le", "sample_rate_hz": SATELLITE_V2_DOWNLINK_SAMPLE_RATE_HZ, "channels": 1},
+                },
+            })
+        except Exception:
+            active_sockets.pop(ws, None)
+            raise
         if session.turn_id is not None:
             await ws.send_json({"type": "assistant.state", "state": "speaking", "turn_id": session.turn_id})
             requested_seq = resume["next_seq"] if isinstance(resume, dict) else session.next_seq
@@ -455,6 +482,7 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
                     pass
             await asyncio.gather(*done, return_exceptions=True)
         finally:
+            active_sockets.pop(ws, None)
             # A resumed socket may already own this logical session. Never let
             # an old handler tear down its replacement.
             if session.connection == connection_id:

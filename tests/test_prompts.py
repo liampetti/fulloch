@@ -253,6 +253,19 @@ class TestAgentPromptShape:
         assert '"find_calendar_event"' in examples
         assert '"whats_on"' not in examples
 
+    @pytest.mark.parametrize("today,christmas", [
+        ("2026-11-08", "2026-12-25"),
+        ("2026-12-25", "2026-12-25"),
+        ("2026-12-26", "2027-12-25"),
+    ])
+    def test_christmas_date_example_rolls_over(self, notes_dir, monkeypatch, today, christmas):
+        from datetime import date
+
+        monkeypatch.setattr(prompts._local_time, "today", lambda: date.fromisoformat(today))
+        examples = prompts._intent_examples()
+        assert f'"args": ["today", "{christmas}"]' in examples
+        assert "{{NEXT_CHRISTMAS}}" not in examples
+
     def test_capability_summary_only_names_available_tool_categories(self, notes_dir, monkeypatch):
         monkeypatch.setattr(
             tool_registry,

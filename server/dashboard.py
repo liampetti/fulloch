@@ -34,6 +34,7 @@ from .routes_chat import (
     register_chat_routes,
 )
 from .routes_obsidian import register_obsidian_routes
+from .routes_satellite_provisioning import register_satellite_provisioning_routes
 from .routes_setup import (
     ConfigUpdateRequest,
     HaTestRequest,
@@ -49,6 +50,7 @@ from .routes_setup import (
     start_auto_download,
 )
 from .satellite_protocols import register_satellite_routes
+from .satellite_provisioning import ProvisioningTransactions
 from .tls_dispatcher import _pick_free_local_port, start_tls_dispatcher
 
 # Preserve public imports while implementations belong to their route modules.
@@ -94,6 +96,12 @@ def create_app(
 
     lifecycle = context.lifecycle
     app = FastAPI(title="Fulloch Dashboard")
+    context.satellite_provisioning = ProvisioningTransactions(context.config_path)
+
+    @app.on_event("shutdown")
+    def close_satellite_provisioning():
+        context.satellite_provisioning.close()
+
     register_satellite_routes(app, context, lifecycle)
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR), check_dir=False), name="static")
 
@@ -142,6 +150,7 @@ def create_app(
     register_chat_routes(app, context, require_ready=_require_ready, static_dir=_STATIC_DIR)
     register_setup_routes(app, context, require_ready=_require_ready, static_dir=_STATIC_DIR)
     register_auth_routes(app, context)
+    register_satellite_provisioning_routes(app, context)
     register_obsidian_routes(app, context)
     return app
 
@@ -190,6 +199,7 @@ def start_dashboard(
 
     app = create_app(assistant, lifecycle=lifecycle, context=context)
     if ssl_kwargs:
+        app.state.satellite_dashboard_certificate = Path(ssl_certfile).read_text(encoding="utf-8")
         backend_port = _pick_free_local_port()
         uvicorn_config = uvicorn.Config(
             app,

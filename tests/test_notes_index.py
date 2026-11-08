@@ -208,6 +208,35 @@ class TestSearch:
         results = stub_index.search("anything")
         assert results == []
 
+    def test_document_search_deduplicates_before_limit_and_filters_allowed_files(self, stub_index, monkeypatch):
+        monkeypatch.setattr(stub_index, "scan", lambda: None)
+        monkeypatch.setattr(stub_index, "_embed", lambda texts: np.array([[1.0, 0.0]], dtype=np.float32))
+        stub_index._chunks = [
+            notes_index.Chunk("hidden.md", 1, "hidden", np.array([0.99, 0.0])),
+            notes_index.Chunk("one.md", 1, "best one", np.array([0.95, 0.0])),
+            notes_index.Chunk("one.md", 4, "second one", np.array([0.90, 0.0])),
+            notes_index.Chunk("two.md", 1, "second file", np.array([0.80, 0.0])),
+            notes_index.Chunk("three.md", 1, "low score", np.array([0.10, 0.0])),
+        ]
+        results = stub_index.search_documents(
+            "topic", allowed_files={"one.md", "two.md", "three.md"}, k=2, min_score=0.25,
+        )
+        assert [(chunk.file, chunk.text) for _, chunk in results] == [
+            ("one.md", "best one"), ("two.md", "second file"),
+        ]
+        assert len(stub_index.search_documents("topic", allowed_files={"three.md"})) == 0
+
+    def test_scan_ignores_symlinks_outside_notes_root(self, stub_index, notes_dir, tmp_path):
+        (notes_dir / "visible.md").write_text("a normal document with useful contents")
+        outside = tmp_path / "outside.md"
+        outside.write_text("this document is outside the notes folder")
+        (notes_dir / "outside.md").symlink_to(outside)
+        (notes_dir / "broken.md").symlink_to(tmp_path / "missing.md")
+
+        stub_index.scan()
+
+        assert {chunk.file for chunk in stub_index._chunks} == {"visible.md"}
+
 
 class TestWriteHook:
     """Verify the notes.py write tools trigger _after_write → indexing."""

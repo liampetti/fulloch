@@ -130,6 +130,24 @@ def test_completed_mutation_is_not_repeated_on_replan(turn):
     assert turn.stats.tool_dispatches == 2
 
 
+def test_exchange_conversion_is_spoken_without_card_metadata(turn):
+    artifact = {"type": "finance_exchange_rate", "exchange_rate": {
+        "amount": 214, "converted_amount": 148.40258, "quoted_at": "2026-11-06",
+    }}
+    al.tool_registry.register_tool(
+        lambda base, quote, amount: ThinkingResult(
+            "214 AUD is approximately 148.40 USD.", evidence={"exchange_rate": artifact["exchange_rate"]},
+            artifact=artifact, scope="One exchange rate quote.",
+        ), name="get_exchange_rate",
+    )
+    turn.catch.return_value = {"actions": [{"intent": "get_exchange_rate", "args": ["AUD", "USD", 214]}]}
+
+    assert turn.loop.run("Convert 214 AUD to USD") == "214 AUD is approximately 148.40 USD."
+    observations = [event.args[1] for event in turn.host._emit_agent_event.call_args_list
+                    if event.args[0] == "observation"]
+    assert observations[-1]["artifact"] == artifact
+
+
 def test_distinct_identical_actions_in_original_plan_are_not_suppressed(turn):
     timer = Mock(side_effect=["First timer started.", "Second timer started."])
     al.tool_registry.register_tool(lambda seconds: timer(seconds), name="start_countdown")

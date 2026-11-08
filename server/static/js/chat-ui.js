@@ -16,6 +16,16 @@ export function createChatUI({ connectSpeaker, onThinking, getChatContext = () =
   const sendBtn = document.getElementById('send');
   const statusDot = document.getElementById('status-dot');
   const statusText = document.getElementById('status-text');
+  const conversationControls = document.getElementById('conversation-controls');
+  const conversationContextHint = document.getElementById('conversation-context-hint');
+  const conversationStatus = document.getElementById('conversation-status');
+  const conversationMenuButton = document.getElementById('conversation-menu-button');
+  const conversationMenu = document.getElementById('conversation-menu');
+  const conversationList = document.getElementById('conversation-list');
+  const conversationItems = document.getElementById('conversation-items');
+  const conversationMore = document.getElementById('conversation-more');
+  const conversationListStatus = document.getElementById('conversation-list-status');
+  const conversationSearch = document.getElementById('conversation-search');
   // When on, every turn's trace group + stats panel start expanded.
   let alwaysDetail = !!window.FULLOCH_DASHBOARD_PREFS.show_turn_details;
 
@@ -149,7 +159,7 @@ export function createChatUI({ connectSpeaker, onThinking, getChatContext = () =
     cards.clear();
     // Remove all message/trace/typing elements, restore the empty state
     [...chat.children].forEach(el => {
-      if (el !== empty) el.remove();
+      if (el !== empty && el !== conversationControls && el !== conversationContextHint && el !== conversationStatus) el.remove();
     });
     if (!chat.contains(empty)) {
       // Re-create the empty state node if it was removed
@@ -373,6 +383,11 @@ export function createChatUI({ connectSpeaker, onThinking, getChatContext = () =
     // already-rendered assistant message keyed by ref_ts. Handled before the
     // dedup guard since it carries its own later ts.
     if (ev.role === 'reset') { resetUI(); return; }
+    if (ev.role === 'conversation_loaded') { resetUI(); loadHistory(); return; }
+    if (ev.role === 'conversation_storage_error') {
+      showConversationStatus('Warning: this conversation could not be saved to disk. Do not rely on it surviving a restart.');
+      return;
+    }
     if (ev.role === 'thinking') {
       onThinking(ev);
       return;
@@ -545,6 +560,7 @@ export function createChatUI({ connectSpeaker, onThinking, getChatContext = () =
   const loadHistory = async () => {
     try {
       const r = await fetch('/history');
+      if (!r.ok) throw new Error(`status ${r.status}`);
       const items = await r.json();
       if (lifetime.destroyed) return;
       if (!items.length) return;
@@ -554,6 +570,143 @@ export function createChatUI({ connectSpeaker, onThinking, getChatContext = () =
       console.warn('history failed', e);
     }
   };
+
+  let conversationOffset = 0;
+  let conversationQuery = '';
+  let conversationLoading = false;
+  let conversationListVersion = 0;
+  const closeConversationPopovers = () => {
+    conversationMenu.hidden = true;
+    conversationList.hidden = true;
+    conversationMenuButton.setAttribute('aria-expanded', 'false');
+    conversationListVersion++;
+  };
+  const conversationRequest = async (url, options = {}) => {
+    const result = await fetch(url, options);
+    if (!result.ok) {
+      const body = await result.json().catch(() => ({}));
+      throw new Error(typeof body.detail === 'string' ? body.detail : 'Please try again.');
+    }
+    return result.json();
+  };
+  const showConversationStatus = (message) => {
+    conversationStatus.hidden = false;
+    conversationStatus.textContent = message;
+  };
+  const loadSavedPage = async (reset = false) => {
+    if (reset) {
+      conversationListVersion++;
+      conversationOffset = 0;
+      conversationItems.replaceChildren();
+      conversationList.scrollTop = 0;
+    }
+    if (conversationLoading || conversationOffset === null) return;
+    const version = conversationListVersion;
+    conversationLoading = true;
+    conversationMore.hidden = true;
+    conversationListStatus.textContent = 'Loading…';
+    try {
+      const data = conversationQuery
+        ? await conversationRequest('/conversations/search', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: conversationQuery, offset: conversationOffset }),
+        })
+        : await conversationRequest(`/conversations?offset=${conversationOffset}`);
+      if (version !== conversationListVersion) return;
+      for (const item of data.conversations || []) {
+        const row = document.createElement('div');
+        row.className = 'conversation-item';
+        const load = document.createElement('button');
+        load.type = 'button'; load.className = 'conversation-load';
+        load.textContent = item.title || 'Conversation';
+        const date = document.createElement('small');
+        date.textContent = `${new Date(item.created_at * 1000).toLocaleString()} · ${item.id}`;
+        load.appendChild(date);
+        load.addEventListener('click', async () => {
+          let current = 'clear';
+          if (chat.querySelector('.msg.user')) {
+            if (window.confirm('Save the current conversation before loading this one?')) current = 'save';
+            else if (!window.confirm('Discard the current conversation and load the saved one?')) return;
+          }
+          try {
+            const loaded = await conversationRequest(`/conversations/${encodeURIComponent(item.id)}/load`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ current }),
+            });
+            closeConversationPopovers();
+            resetUI();
+            await loadHistory();
+            const saved = loaded.saved
+              ? `Previous conversation saved ${new Date(loaded.saved.created_at * 1000).toLocaleString()} · ${loaded.saved.id}. ` : '';
+            showConversationStatus(`${saved}Conversation loaded. Older messages may be outside the assistant’s working context.`);
+          } catch (error) { conversationListStatus.textContent = `Could not load conversation: ${error.message}`; }
+        });
+        const remove = document.createElement('button');
+        remove.type = 'button'; remove.textContent = '🗑';
+        remove.setAttribute('aria-label', `Delete saved conversation ${item.title || item.id}`);
+        remove.addEventListener('click', async () => {
+          if (!window.confirm('Delete this saved conversation?')) return;
+          try {
+            await conversationRequest(`/conversations/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+            loadSavedPage(true);
+          } catch (error) { conversationListStatus.textContent = `Could not delete conversation: ${error.message}`; }
+        });
+        row.append(load, remove);
+        conversationItems.appendChild(row);
+      }
+      conversationOffset = data.next_offset;
+      conversationMore.hidden = conversationOffset === null;
+      conversationListStatus.textContent = conversationItems.childElementCount ? '' : 'No saved conversations found.';
+    } catch (error) {
+      if (version === conversationListVersion) conversationListStatus.textContent = `Could not list conversations: ${error.message}`;
+    } finally {
+      conversationLoading = false;
+      if (version !== conversationListVersion && !conversationList.hidden) loadSavedPage();
+    }
+  };
+  lifetime.listen(conversationMenuButton, 'click', () => {
+    if (!conversationMenu.hidden || !conversationList.hidden) { closeConversationPopovers(); return; }
+    conversationMenu.hidden = false;
+    conversationMenuButton.setAttribute('aria-expanded', 'true');
+  });
+  lifetime.listen(document.getElementById('conversation-save'), 'click', async () => {
+    try {
+      const saved = await conversationRequest('/conversations', { method: 'POST' });
+      closeConversationPopovers();
+      showConversationStatus(`Saved ${new Date(saved.created_at * 1000).toLocaleString()} · ${saved.id}`);
+    } catch (error) { showConversationStatus(`Could not save conversation: ${error.message}`); }
+  });
+  lifetime.listen(document.getElementById('conversation-clear'), 'click', async () => {
+    if (!window.confirm('Clear the current conversation? Saved conversations, notes and reports will be kept.')) return;
+    try {
+      await conversationRequest('/reset', { method: 'POST' });
+      closeConversationPopovers();
+      resetUI();
+      showConversationStatus('Conversation cleared.');
+    } catch (error) { showConversationStatus(`Could not clear conversation: ${error.message}`); }
+  });
+  lifetime.listen(document.getElementById('conversation-list-open'), 'click', () => {
+    conversationMenu.hidden = true;
+    conversationList.hidden = false;
+    conversationSearch.value = '';
+    conversationQuery = '';
+    loadSavedPage(true);
+  });
+  lifetime.listen(document.getElementById('conversation-search-form'), 'submit', (event) => {
+    event.preventDefault(); conversationQuery = conversationSearch.value.trim(); loadSavedPage(true);
+  });
+  lifetime.listen(document.getElementById('conversation-search-clear'), 'click', () => {
+    conversationSearch.value = ''; conversationQuery = ''; loadSavedPage(true);
+  });
+  lifetime.listen(conversationMore, 'click', () => loadSavedPage());
+  lifetime.listen(conversationList, 'scroll', () => {
+    if (conversationList.scrollHeight - conversationList.scrollTop - conversationList.clientHeight < 50) loadSavedPage();
+  });
+  lifetime.listen(document, 'click', (event) => {
+    if (!conversationControls.contains(event.target)) closeConversationPopovers();
+  });
+  lifetime.listen(document, 'keydown', (event) => {
+    if (event.key === 'Escape') closeConversationPopovers();
+  });
 
   const startStream = () => {
     if (lifetime.destroyed) return;
@@ -642,6 +795,10 @@ export function createChatUI({ connectSpeaker, onThinking, getChatContext = () =
     await loadWakeHint();
     if (lifetime.destroyed) return;
     await loadHistory();
+    try {
+      const status = await conversationRequest('/conversations/status');
+      if (status.persisted === false) showConversationStatus('Warning: this conversation could not be saved to disk. Do not rely on it surviving a restart.');
+    } catch (e) { console.warn('conversation storage status failed', e); }
     if (!lifetime.destroyed) startStream();
   };
   const destroy = () => {

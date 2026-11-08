@@ -5,6 +5,11 @@ import re
 from utils.intents import StepKind, StepResult
 
 PROMPT_STRIP_CHARS = " ,.!?;:"
+_SUMMARY_REFUSAL = re.compile(
+    r"^(?:i(?:'m|’m| am) (?:not able|unable) to answer|"
+    r"i (?:can't|cannot|couldn't|could not) (?:answer|summari[sz]e))\b",
+    re.IGNORECASE,
+)
 
 
 def normalise_search_query(args) -> str | None:
@@ -69,12 +74,19 @@ class TurnSearch:
 
     def accept(self, query: str | None, summary: str, original: StepResult) -> StepResult:
         self.latest = summary
-        if summary not in self.summaries:
+        outcome = original.outcome
+        if _SUMMARY_REFUSAL.match(summary.strip()) and (outcome is None or outcome.get("status") == "evidence"):
+            outcome = {"evidence": {}, "next_actions": [], "artifact": original.artifact,
+                       "recovery": {}, **(outcome or {}), "status": "rejected",
+                       "scope": "The search summary could not answer from the retrieved sources."}
+        successful = outcome is None or outcome.get("status") == "evidence"
+        if successful and summary not in self.summaries:
             self.summaries.append(summary)
         step = StepResult(StepKind.NORMAL, summary, in_output=True,
-                          artifact=original.artifact, outcome=original.outcome,
+                          artifact=original.artifact, outcome=outcome,
                           raw_text=original.raw_text if original.raw_text is not None else str(original.text))
-        if query is not None:
+        # A failed retrieval must remain retryable, including with the same query.
+        if query is not None and successful:
             self._cache[query] = step
         return step
 

@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
+from filelock import FileLock
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedBase, CommentedMap
 
@@ -23,6 +24,15 @@ from .config_schema import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = "./data/config.yml"
+def mutate_config(mutator, path: str = DEFAULT_CONFIG_PATH):
+    """Atomically apply a mutation to the latest configuration document."""
+    lock_path = os.path.abspath(path) + ".lock"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with FileLock(lock_path):
+        doc = _load_doc(path)
+        result = mutator(doc)
+        _atomic_dump(doc, path)
+        return result
 
 
 class ConfigValidationError(ValueError):
@@ -203,10 +213,11 @@ def update_config(updates: dict, path: str = DEFAULT_CONFIG_PATH) -> list:
     """Validate and atomically apply a {dotted_path: value} map."""
     coerced = validate_updates(updates)
 
-    doc = _load_doc(path)
-    for f, value in coerced:
-        _set_value(doc, f.section, f.name, value)
-    _atomic_dump(doc, path)
+    def apply(doc):
+        for f, value in coerced:
+            _set_value(doc, f.section, f.name, value)
+
+    mutate_config(apply, path)
     return [{"path": f.path, "apply": f.apply, "value": value} for f, value in coerced]
 
 
@@ -285,7 +296,6 @@ def write_models(models: dict, path: str = DEFAULT_CONFIG_PATH) -> None:
     for domain in DOMAINS:
         if domain in models and not is_offerable(resolved[domain]["spec"]):
             raise ValueError(f"models.{domain}: this backend is not available in the running image")
-    doc = _load_doc(path)
     block = CommentedMap()
     for domain in ("asr", "tts", "llm", "wakeword"):
         if domain in models:
@@ -293,8 +303,7 @@ def write_models(models: dict, path: str = DEFAULT_CONFIG_PATH) -> None:
             for k, v in models[domain].items():
                 inner[k] = v
             block[domain] = inner
-    doc["models"] = block
-    _atomic_dump(doc, path)
+    mutate_config(lambda doc: doc.__setitem__("models", block), path)
 
 
 def set_llm_model_name(name: str, path: str = DEFAULT_CONFIG_PATH) -> None:
@@ -304,12 +313,13 @@ def set_llm_model_name(name: str, path: str = DEFAULT_CONFIG_PATH) -> None:
     a restart without rewriting backend / base_url. Raises KeyError if
     there's no structured `models.llm` block to patch.
     """
-    doc = _load_doc(path)
-    models = doc.get("models")
-    if models is None or "llm" not in models:
-        raise KeyError("models.llm not configured")
-    models["llm"]["model"] = name
-    _atomic_dump(doc, path)
+    def apply(doc):
+        models = doc.get("models")
+        if models is None or "llm" not in models:
+            raise KeyError("models.llm not configured")
+        models["llm"]["model"] = name
+
+    mutate_config(apply, path)
 
 
 def _backends_view() -> dict:

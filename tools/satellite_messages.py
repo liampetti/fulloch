@@ -1,9 +1,11 @@
 """Tools for sending spoken announcements to connected voice satellites."""
 
+import contextvars
 import re
 import threading
 
 from core.satellite_context import get_current_assistant
+from utils.response_language import response
 
 from .tool_registry import tool
 
@@ -48,20 +50,20 @@ def send_satellite_message(target: str, message: str) -> str:
     """Queue a spoken message for one named, connected voice satellite."""
     assistant = get_current_assistant()
     if assistant is None:
-        return "Reactive question: No voice satellites are available right now."
+        return "Reactive question: " + response("satellite_unavailable")
     matches = _matching_satellites(assistant, target)
     if not matches:
-        return f"Reactive question: No connected voice satellite is named {target!r}."
+        return "Reactive question: " + response("satellite_target_not_found", target=repr(target))
     if len(matches) > 1:
         names = ", ".join(name for _satellite_id, name in matches)
-        return f"Reactive question: More than one connected satellite matches {target!r}: {names}. Ask which one to use."
+        return "Reactive question: " + response("satellite_target_ambiguous", target=repr(target), names=names) + " Ask which one to use."
 
     satellite_id, name = matches[0]
     text = message.strip()
     if not text:
-        return "Reactive question: Ask what message to send."
+        return "Reactive question: " + response("satellite_message_empty")
     if not _announcement_slots.acquire(blocking=False):
-        return "Reactive question: The assistant is already delivering announcements. Try again shortly."
+        return "Reactive question: " + response("satellite_announcement_busy")
 
     def _deliver() -> None:
         try:
@@ -69,5 +71,6 @@ def send_satellite_message(target: str, message: str) -> str:
         finally:
             _announcement_slots.release()
 
-    threading.Thread(target=_deliver, daemon=True, name="satellite-message").start()
-    return f"Announcement queued for {name}."
+    context = contextvars.copy_context()
+    threading.Thread(target=context.run, args=(_deliver,), daemon=True, name="satellite-message").start()
+    return response("satellite_announcement_queued", target=name)

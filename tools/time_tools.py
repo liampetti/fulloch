@@ -1,7 +1,9 @@
 """Time and timer/alarm tools. (Weather lives in the Home Assistant tool.)"""
 
+import os
 import threading
 import time
+from pathlib import Path
 from typing import Dict, Optional
 
 import utils.local_time as _local_time
@@ -10,6 +12,7 @@ from core.satellite_context import (
     current_timer_response_language,
 )
 from utils.duration import parse_duration
+from utils.number_words import number_words
 
 from .tool_registry import OutcomeText, tool
 
@@ -66,90 +69,16 @@ def _timer_artifact() -> dict:
     return {"type": "timers", "timers": entries}
 
 
-# Word forms used by `get_current_time` below. The output emits dates and
-# times entirely in words so ASR round-trips it back to (near-)identical
-# text — the self-echo check in core/assistant.py uses substring matching
-# against the spoken text, and digits in the spoken side don't match
-# their word-form transcription (e.g., "21" vs "twenty-first").
-_ONES = (
-    "",
-    "one",
-    "two",
-    "three",
-    "four",
-    "five",
-    "six",
-    "seven",
-    "eight",
-    "nine",
-    "ten",
-    "eleven",
-    "twelve",
-    "thirteen",
-    "fourteen",
-    "fifteen",
-    "sixteen",
-    "seventeen",
-    "eighteen",
-    "nineteen",
-)
-_TENS = ("", "", "twenty", "thirty", "forty", "fifty")
-_DAY_ORDINALS = (
-    "",
-    "first",
-    "second",
-    "third",
-    "fourth",
-    "fifth",
-    "sixth",
-    "seventh",
-    "eighth",
-    "ninth",
-    "tenth",
-    "eleventh",
-    "twelfth",
-    "thirteenth",
-    "fourteenth",
-    "fifteenth",
-    "sixteenth",
-    "seventeenth",
-    "eighteenth",
-    "nineteenth",
-    "twentieth",
-    "twenty-first",
-    "twenty-second",
-    "twenty-third",
-    "twenty-fourth",
-    "twenty-fifth",
-    "twenty-sixth",
-    "twenty-seventh",
-    "twenty-eighth",
-    "twenty-ninth",
-    "thirtieth",
-    "thirty-first",
-)
-
-
-def _num_words(n: int) -> str:
-    """Cardinal English words for 0..59 (enough for minutes / years-of-century)."""
-    if n < 20:
-        return _ONES[n] or "zero"
-    tens, ones = divmod(n, 10)
-    if ones == 0:
-        return _TENS[tens]
-    return f"{_TENS[tens]}-{_ONES[ones]}"
-
-
 def _year_words(y: int) -> str:
-    """Pronounceable year, e.g. 2026 → 'twenty twenty-six', 2005 → 'twenty oh five'."""
+    """Use the conventional split-year pronunciation for English speech."""
     if y < 1000 or y > 2999:
-        return str(y)
+        return number_words(y)
     century, rest = divmod(y, 100)
     if rest == 0:
-        return f"{_num_words(century)} hundred"
+        return f"{number_words(century)} hundred"
     if rest < 10:
-        return f"{_num_words(century)} oh {_num_words(rest)}"
-    return f"{_num_words(century)} {_num_words(rest)}"
+        return f"{number_words(century)} oh {number_words(rest)}"
+    return f"{number_words(century)} {number_words(rest)}"
 
 
 @tool(
@@ -167,20 +96,53 @@ def get_current_time() -> str:
     the time response can't loop back as a fake follow-up turn.
     """
     now = _local_time.now()
+    from core.satellite_context import current_response_language
+
+    language = current_response_language.get()
+    if language.replace("_", "-").split("-", 1)[0].lower() != "en":
+        from babel.core import UnknownLocaleError
+
+        from core.satellite_context import current_response_intents_dir
+        from core.text_utils import spoken_for_tts
+        from utils.fastpath_responses import format_local_datetime, load_responses, render_response
+
+        try:
+            values = format_local_datetime(now, language)
+            seed = Path(os.environ.get("FULLOCH_SEED_DIR", "/app/seed")) / "intents"
+            if not seed.is_dir():
+                seed = Path(__file__).resolve().parent.parent / "data" / "intents"
+            text = None
+            base = language.replace("_", "-").split("-", 1)[0]
+            for candidate in dict.fromkeys((language, base)):
+                for directory in (current_response_intents_dir.get(), seed):
+                    text = render_response(load_responses(directory, candidate), "current_date_and_time", "success", values)
+                    if text:
+                        break
+                if text:
+                    break
+            if text:
+                return OutcomeText(spoken_for_tts(text, language), success=True,
+                                   code="current_time", values={"datetime": now})
+        except (ValueError, TypeError, UnknownLocaleError):
+            pass
+        # A missing translation must not inject English number words into a
+        # different language; leave the numeric date/time for the caller.
+        return OutcomeText(now.isoformat(sep=" "), success=True, code="current_time",
+                           values={"datetime": now})
     day_name = now.strftime("%A")
     month_name = now.strftime("%B")
-    day_word = _DAY_ORDINALS[now.day]
+    day_word = number_words(now.day, language, ordinal=True)
     year_word = _year_words(now.year)
     hour_12 = now.hour % 12 or 12
-    hour_word = _ONES[hour_12]
+    hour_word = number_words(hour_12, language)
     ampm = "a m" if now.hour < 12 else "p m"
     minute = now.minute
     if minute == 0:
         time_part = f"at {hour_word} {ampm}"
     elif minute < 10:
-        time_part = f"at {hour_word} oh {_num_words(minute)} {ampm}"
+        time_part = f"at {hour_word} oh {number_words(minute, language)} {ampm}"
     else:
-        time_part = f"at {hour_word} {_num_words(minute)} {ampm}"
+        time_part = f"at {hour_word} {number_words(minute, language)} {ampm}"
     return OutcomeText(
         f"{day_name} {month_name} {day_word} {year_word} {time_part}",
         success=True, code="current_time", values={"datetime": now},
@@ -207,6 +169,8 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
     """
 
     def on_timer_complete(timer_id: str, reminder: Optional[str], language: str, intents_dir: str):
+        from core.satellite_context import current_response_intents_dir, current_response_language
+
         with _timers_lock:
             active_timers.pop(timer_id, None)
         text = reminder or "Your timer is up."
@@ -218,12 +182,17 @@ def start_countdown(duration: str, message: Optional[str] = None) -> str:
             except Exception:  # noqa: BLE001 — never suppress an alarm due to localization
                 pass
         if _speak_proactive:
+            language_token = current_response_language.set(language)
+            directory_token = current_response_intents_dir.set(intents_dir)
             try:
                 _speak_proactive(text, alarm=True)
             except Exception as e:
                 import logging
 
                 logging.getLogger(__name__).warning(f"Timer speak failed: {e}")
+            finally:
+                current_response_intents_dir.reset(directory_token)
+                current_response_language.reset(language_token)
 
     try:
         seconds = _parse_duration(duration)

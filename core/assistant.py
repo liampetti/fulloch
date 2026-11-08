@@ -54,6 +54,7 @@ from .research_task import (
     task_status_intent,
 )
 from .satellite import SatelliteSession
+from .satellite_context import current_response_language
 from .satellite_context import current_satellite_id as _current_satellite_id
 from .slm import RemoteUnreachable, generate_slm, load_slm
 from .telemetry import event as telemetry_event
@@ -1280,10 +1281,23 @@ class Assistant:
                     key = (event["summary"], date_part)
                     if key not in self._spoken_reminders:
                         self._spoken_reminders[key] = mono_now + _REMINDER_EXPIRY_S
-                        prefix = random.choice(REMINDER_PREFIX_PHRASES)
-                        text = f"{prefix} {event['summary']}"
-                        logger.info(f"Speaking reminder: {text!r}")
-                        self.speak_proactive(text)
+                        from core.satellite_context import (
+                            current_response_intents_dir,
+                            current_response_language,
+                        )
+                        from utils.response_language import detect_response_language, response
+
+                        language = detect_response_language(event["summary"])
+                        language_token = current_response_language.set(language)
+                        dir_token = current_response_intents_dir.set(getattr(self, "_hassil_intents_dir", "./data/intents"))
+                        try:
+                            prefix = response("reminder_prefix") or random.choice(REMINDER_PREFIX_PHRASES)
+                            text = f"{prefix} {event['summary']}"
+                            logger.info(f"Speaking reminder: {text!r}")
+                            self.speak_proactive(text)
+                        finally:
+                            current_response_intents_dir.reset(dir_token)
+                            current_response_language.reset(language_token)
                     else:
                         logger.debug(f"Reminder suppressed (already spoken): {event['summary']!r}")
             except Exception:
@@ -1319,7 +1333,12 @@ class Assistant:
         history = self._history_for_id(satellite_id)
         satellite = self.satellites.get(satellite_id)
         last_turn_end = getattr(satellite, "last_turn_end", 0.0)
-        if history and last_turn_end and time.monotonic() - last_turn_end > CHAT_SESSION_TIMEOUT_S:
+        restored = getattr(self, "_restored_voice_context", None)
+        if satellite_id != "dashboard-text" and isinstance(restored, dict) and satellite_id in restored:
+            last_turn_end = max(last_turn_end, restored.pop(satellite_id))
+            if satellite is not None:
+                satellite.last_turn_end = last_turn_end
+        if satellite_id != "dashboard-text" and history and last_turn_end and time.monotonic() - last_turn_end > CHAT_SESSION_TIMEOUT_S:
             history.clear()
             if satellite is not None:
                 satellite.skip_followup_self_echo = False
@@ -1744,6 +1763,8 @@ class Assistant:
 
     def research_task_follow_up(self, satellite_id: str | None, user_prompt: str) -> str | None:
         """Answer task-status complaints from the task record; never queue them."""
+        from utils.response_language import research_stage, response
+
         intent = task_status_intent(user_prompt)
         if intent is None:
             return None
@@ -1752,42 +1773,46 @@ class Assistant:
         if selector_match and jobs:
             job, ambiguous = match_research_task(selector_match.group(1), jobs)
             if ambiguous:
-                return "I found multiple research tasks that could match. Please identify the task by its topic or task ID."
+                return response("research_match_ambiguous")
             if job is None:
-                return "I couldn't match that topic to a research task in this conversation. Please give the task topic or ID."
+                return response("research_match_missing")
         else:
             unique = {str(item.snapshot.task_record.get("task_id") or item.id): item for item in jobs}
             if len(unique) > 1:
-                return "There are multiple research tasks in this conversation. Which topic or task ID do you mean?"
+                return response("research_multiple_tasks")
             job = next(iter(unique.values()), None)
         if job is None:
-            return "I don't have a research job linked to this conversation, so I can't confirm that work started. What topic should I investigate?"
+            return response("research_no_task")
         status = job.status.value
+        stage = research_stage(job.stage)
+        label = response(f"research_status_{status.lower()}") if status in {
+            "QUEUED", "RUNNING", "PAUSED", "NEEDS_INPUT", "FAILED", "READY", "CANCELLED"
+        } else status.lower()
         if intent == "why_not":
             failure_reason = str(job.snapshot.task_record.get("failure_reason") or job.error or "")
-            failure_stage = str(job.snapshot.task_record.get("failure_stage") or job.stage)
+            failure_stage = research_stage(str(job.snapshot.task_record.get("failure_stage") or job.stage))
             partial_link = str(job.snapshot.task_record.get("partial_artifact_link") or "")
             if failure_reason:
-                reason = f"The last attempt stopped during {failure_stage}: {failure_reason}"
+                reason = response("research_failure_detail", stage=failure_stage, reason=failure_reason)
                 if partial_link:
-                    reason += f" Saved partial work: {partial_link}."
+                    reason += response("research_partial_link", link=partial_link)
             elif status == "NEEDS_INPUT":
-                reason = "The investigation is waiting for your clarification."
+                reason = response("research_waiting_input")
             elif status == "FAILED":
-                reason = f"The last attempt stopped during {job.stage}."
+                reason = response("research_failed_stage", stage=stage)
             elif status in {"QUEUED", "RUNNING", "PAUSED"}:
-                reason = f"The job is {status.lower()} at stage: {job.stage}."
+                reason = response("research_stage_status", status=label, stage=stage)
             else:
-                reason = f"The last job is {status.lower()} at stage: {job.stage}."
-            return f"For '{job.snapshot.task}': {reason}"
+                reason = response("research_last_stage_status", status=label, stage=stage)
+            return response("research_task_reason", task=job.snapshot.task, reason=reason)
         if status in {"QUEUED", "RUNNING", "PAUSED", "NEEDS_INPUT"}:
-            return f"I did queue '{job.snapshot.task}'. Its status is {status.lower()}; current stage: {job.stage}."
+            return response("research_task_status", task=job.snapshot.task, status=label, stage=stage)
         if status == "FAILED":
-            reason = job.error or f"The attempt stopped during {job.stage}."
-            return f"The last attempt for '{job.snapshot.task}' failed: {reason}"
+            reason = job.error or response("research_attempt_stopped", stage=stage)
+            return response("research_task_failed", task=job.snapshot.task, reason=reason)
         if status == "READY":
-            return f"The job for '{job.snapshot.task}' is ready. I haven't started a separate search for this follow-up."
-        return f"The last job for '{job.snapshot.task}' is {status.lower()}."
+            return response("research_task_ready", task=job.snapshot.task)
+        return response("research_task_last_status", task=job.snapshot.task, status=label)
 
     def resume_pending_thinking_task(self, satellite_id: str | None, user_input: str) -> bool:
         """Resume a pending deep-think clarification on an unambiguous confirmation."""
@@ -2327,10 +2352,26 @@ class Assistant:
         self._turn_local.sink = _safe_sink(sat.tts_sink)
         self._turn_local.tts_active_event = sat.tts_active
         try:
-            self.play_chunks(chunks, sr, session=self.tts_session)
-            # Cached playback bypasses speak_proactive(), so explicitly open
-            # the native satellite's follow-up state after this acknowledgement.
-            playback_end = time.monotonic() + sum(len(chunk) for chunk in chunks) / sr
+            matcher = getattr(self, "_hassil_fastpath", None)
+            languages = {language for language, _ in getattr(matcher, "tables", ())}
+            language = next(iter(languages)) if len(languages) == 1 else "en"
+            if language == "en":
+                self.play_chunks(chunks, sr, session=self.tts_session)
+                playback_end = time.monotonic() + sum(len(chunk) for chunk in chunks) / sr
+            else:
+                from core.satellite_context import (
+                    current_response_intents_dir,
+                    current_response_language,
+                )
+                from utils.response_language import response
+
+                language_token = current_response_language.set(language)
+                dir_token = current_response_intents_dir.set(getattr(self, "_hassil_intents_dir", "./data/intents"))
+                try:
+                    playback_end = self.speak_stream(response("conversation_listening"), self.voice_clone_prompt, session=self.tts_session)
+                finally:
+                    current_response_intents_dir.reset(dir_token)
+                    current_response_language.reset(language_token)
             self._mark_turn_end(sat.id, playback_end)
         except Exception:
             logger.exception("Conversation-mode acknowledgement playback failed")
@@ -2409,10 +2450,22 @@ class Assistant:
             "tts_active_event": getattr(self._turn_local, "tts_active_event", None),
         }
         lock = self._tts_lock_for_sink(sink)
+        from core.satellite_context import current_response_language
+
+        language = getattr(self._turn_local, "response_language", None) or current_response_language.get()
+        if getattr(self, "_tts_backend", None) == "pocket-tts-pytorch":
+            from .tts_pocket import _speech_language
+
+            language = _speech_language(text, language)
+            kwargs["language"] = language
         if lock is None:
-            return self._tts_module.speak_stream(spoken_for_tts(text), prompt, **kwargs)
+            return self._tts_module.speak_stream(
+                spoken_for_tts(text, language), prompt, **kwargs
+            )
         with lock:
-            return self._tts_module.speak_stream(spoken_for_tts(text), prompt, **kwargs)
+            return self._tts_module.speak_stream(
+                spoken_for_tts(text, language), prompt, **kwargs
+            )
 
     def _prepare_delivery_request(self, user_prompt: str, sat: SatelliteSession) -> str:
         """Extract delivery controls and retain the cross-backend quiet setting."""
@@ -2621,7 +2674,19 @@ class Assistant:
             return ""
 
         if not self.models_ready.wait(timeout=120):
-            return "The assistant is still starting up. Try again in a moment."
+            from core.satellite_context import (
+                current_response_intents_dir,
+                current_response_language,
+            )
+            from utils.response_language import detect_response_language, response
+
+            language_token = current_response_language.set(detect_response_language(prompt))
+            dir_token = current_response_intents_dir.set(getattr(self, "_hassil_intents_dir", "./data/intents"))
+            try:
+                return response("assistant_starting")
+            finally:
+                current_response_intents_dir.reset(dir_token)
+                current_response_language.reset(language_token)
 
         # Strip a leading wakeword if the user typed "Computer, ..." — keeps
         # parity with the voice path's pre-handle wakeword stripping. Uses
@@ -2705,6 +2770,8 @@ class Assistant:
         cache: Optional[list] = None,
         sink: Optional["queue.Queue"] = None,
         tts_active_event: Optional[threading.Event] = None,
+        language: Optional[str] = None,
+        intents_dir: Optional[str] = None,
     ) -> None:
         """Play one pre-rendered ack chunk. Safe no-op if the cache is empty
         (e.g. an early failure before `_warm_and_announce` populated it).
@@ -2727,14 +2794,39 @@ class Assistant:
         if tts_active_event is not None:
             self._turn_local.tts_active_event = tts_active_event
         try:
-            self.play_chunks(chunks, sr, session=session or self.tts_session)
+            from core.satellite_context import (
+                current_response_intents_dir,
+                current_response_language,
+            )
+
+            lang = language or current_response_language.get()
+            if lang != "en":
+                from utils.response_language import response
+
+                key = ("ack_music" if c is self.music_search_stall_cache else
+                       "ack_web" if c is self.web_search_stall_cache else "ack_generic")
+                lang_token = current_response_language.set(lang)
+                dir_token = current_response_intents_dir.set(intents_dir or current_response_intents_dir.get())
+                previous_language = getattr(self._turn_local, "response_language", None)
+                self._turn_local.response_language = lang
+                try:
+                    self.speak_stream(response(key), self.voice_clone_prompt, session=session or self.tts_session)
+                finally:
+                    current_response_intents_dir.reset(dir_token)
+                    current_response_language.reset(lang_token)
+                    if previous_language is None:
+                        self._turn_local.__dict__.pop("response_language", None)
+                    else:
+                        self._turn_local.response_language = previous_language
+            else:
+                self.play_chunks(chunks, sr, session=session or self.tts_session)
         except Exception:
             logger.exception("ack playback failed")
         finally:
             self._turn_local.sink = prev_sink
             self._turn_local.tts_active_event = prev_active
 
-    def _play_busy_phrase(self, sat: SatelliteSession) -> bool:
+    def _play_busy_phrase(self, sat: SatelliteSession, language: str = "en") -> bool:
         """Play a `BUSY_PHRASES` clip on `sat`'s own sink — the audible
         bounce when `sat` loses the `TurnArbiter` to another satellite (or
         the dashboard's text turn). Not wrapped in a turn, so resolves
@@ -2748,7 +2840,22 @@ class Assistant:
         self._turn_local.sink = _safe_sink(sat.tts_sink)
         self._turn_local.tts_active_event = sat.tts_active
         try:
-            self.play_chunks(chunks, sr, session=self.tts_session)
+            if language == "en":
+                self.play_chunks(chunks, sr, session=self.tts_session)
+            else:
+                from core.satellite_context import (
+                    current_response_intents_dir,
+                    current_response_language,
+                )
+                from utils.response_language import response
+
+                language_token = current_response_language.set(language)
+                dir_token = current_response_intents_dir.set(getattr(self, "_hassil_intents_dir", "./data/intents"))
+                try:
+                    self.speak_stream(response("busy_phrase"), self.voice_clone_prompt, session=self.tts_session)
+                finally:
+                    current_response_intents_dir.reset(dir_token)
+                    current_response_language.reset(language_token)
         except Exception:
             logger.exception("busy-phrase playback failed")
         finally:
@@ -2767,9 +2874,11 @@ class Assistant:
         (see the `if cleaned:` guards in `_run_turn` / `_run_half_duplex`).
         Otherwise it returns the phrase for the caller to speak/show.
         """
-        phrase = NO_AI_PHRASES[0]
+        from utils.response_language import response
+
+        phrase = response("fallback_no_ai") or NO_AI_PHRASES[0]
         self._record_spoken(phrase)
-        if source == "voice" and self.no_ai_cache:
+        if source == "voice" and phrase == NO_AI_PHRASES[0] and self.no_ai_cache:
             self._emit_turn_event("assistant", phrase, "voice", satellite_id=satellite_id)
             chunks, sr = self.no_ai_cache[0]
             try:
@@ -2789,13 +2898,15 @@ class Assistant:
         `_speak_no_ai_fallback`: records phrase in `_history`; voice path plays
         the pre-rendered clip and returns "" so the caller doesn't double-speak.
         """
-        phrase = LLM_ERROR_PHRASES[0]
+        from utils.response_language import response
+
+        phrase = response("fallback_ai_unreachable") or LLM_ERROR_PHRASES[0]
         thread_id = satellite_id or _current_satellite_id.get() or "dashboard-text"
         self._backend_status_events[thread_id] = {
             "state": "OUTAGE", "occurred_at": time.time(),
             "generation": getattr(self.slm_model, "_fulloch_process_generation", 0),
         }
-        if source == "voice" and self.llm_error_cache:
+        if source == "voice" and phrase == LLM_ERROR_PHRASES[0] and self.llm_error_cache:
             self._emit_turn_event("assistant", phrase, "voice", satellite_id=satellite_id)
             chunks, sr = self.llm_error_cache[0]
             try:
@@ -2817,9 +2928,11 @@ class Assistant:
         pre-rendered clip, emits the assistant bubble, and returns "" so the
         caller doesn't speak it again. Otherwise returns the phrase to speak/show.
         """
-        phrase = TOOL_UNAVAILABLE_PHRASES[0]
+        from utils.response_language import response
+
+        phrase = response("fallback_tool_unavailable") or TOOL_UNAVAILABLE_PHRASES[0]
         self._record_spoken(phrase)
-        if source == "voice" and self.tool_unavailable_cache:
+        if source == "voice" and phrase == TOOL_UNAVAILABLE_PHRASES[0] and self.tool_unavailable_cache:
             self._emit_turn_event("assistant", phrase, "voice", satellite_id=satellite_id)
             chunks, sr = self.tool_unavailable_cache[0]
             try:
@@ -2930,7 +3043,10 @@ class Assistant:
             # the arbiter — bounce audibly on this satellite's own sink
             # rather than interleaving into the winner's turn.
             logger.info("Turn bounced (busy): satellite %s", satellite_id)
-            if not self._play_busy_phrase(sat):
+            from utils.response_language import detect_response_language
+
+            language = detect_response_language(user_prompt)
+            if not self._play_busy_phrase(sat, **({"language": language} if language != "en" else {})):
                 self._satellite_idle(sat)
             return
         self._satellite_thinking(sat)
@@ -2947,6 +3063,9 @@ class Assistant:
         self._maybe_reset_session(satellite_id)
         self._emit_turn_event("user", user_prompt, "voice", satellite_id=satellite_id)
         agent_prompt = self._prepare_delivery_request(user_prompt, sat)
+        from utils.response_language import detect_response_language
+
+        self._turn_local.response_language = detect_response_language(agent_prompt)
         self._turn_local.tts_gain = sat.tts_gain
         if agent_prompt != user_prompt:
             logger.debug(
@@ -2987,6 +3106,9 @@ class Assistant:
                 kwargs={
                     "sink": getattr(self._turn_local, "sink", None),
                     "tts_active_event": getattr(self._turn_local, "tts_active_event", None),
+                    **({"language": self._turn_local.response_language,
+                        "intents_dir": getattr(self, "_hassil_intents_dir", "./data/intents")}
+                       if getattr(self._turn_local, "response_language", "en") != "en" else {}),
                 },
                 daemon=True,
             )
@@ -3046,6 +3168,7 @@ class Assistant:
             self._turn_local.sink = None
             self._turn_local.tts_active_event = None
             self._turn_local.tts_gain = 1.0
+            self._turn_local.__dict__.pop("response_language", None)
             self._turn_arbiter.release(satellite_id)
             self._queue_idle_history_summary(satellite_id)
         # A stop stands down without a follow-up window.
@@ -3076,7 +3199,10 @@ class Assistant:
             # A different satellite (or the dashboard's text turn) owns the
             # arbiter — bounce audibly rather than interleaving into it.
             logger.info("Turn bounced (busy): satellite %s", satellite_id)
-            if not self._play_busy_phrase(sat):
+            from utils.response_language import detect_response_language
+
+            language = detect_response_language(user_prompt)
+            if not self._play_busy_phrase(sat, **({"language": language} if language != "en" else {})):
                 self._satellite_idle(sat)
             return
         self._satellite_thinking(sat)
@@ -3174,6 +3300,9 @@ class Assistant:
             self._maybe_reset_session(satellite_id)
             self._emit_turn_event("user", user_prompt, "voice", satellite_id=satellite_id)
             agent_prompt = self._prepare_delivery_request(user_prompt, sat)
+            from utils.response_language import detect_response_language
+
+            self._turn_local.response_language = detect_response_language(agent_prompt)
             self._turn_local.tts_gain = sat.tts_gain
             if agent_prompt != user_prompt:
                 logger.debug(
@@ -3204,6 +3333,9 @@ class Assistant:
                     kwargs={
                         "sink": getattr(self._turn_local, "sink", None),
                         "tts_active_event": getattr(self._turn_local, "tts_active_event", None),
+                        **({"language": self._turn_local.response_language,
+                            "intents_dir": getattr(self, "_hassil_intents_dir", "./data/intents")}
+                           if getattr(self._turn_local, "response_language", "en") != "en" else {}),
                     },
                     daemon=True,
                 )
@@ -3235,8 +3367,15 @@ class Assistant:
             # fallback clip (and emitted its bubble), so don't speak again.
             playback_end = None
             if cleaned:
-                # Recorded for self-echo suppression in `_check_barge_in`.
-                sat.last_spoken_text = cleaned.lower()
+                # ASR may transcribe spoken numbers as either words or digits.
+                # Retain both the actual TTS text and display form for echo checks.
+                language = getattr(self._turn_local, "response_language", None) or current_response_language.get()
+                if self._tts_backend == "pocket-tts-pytorch":
+                    from .tts_pocket import _speech_language
+
+                    language = _speech_language(cleaned, language)
+                spoken = spoken_for_tts(cleaned, language)
+                sat.last_spoken_text = (f"{spoken} {cleaned}" if spoken != cleaned else cleaned).lower()
                 # Emit before speaking so the dashboard reveals the text while TTS
                 # plays. Barge-in may cut speech short; the full text still shows,
                 # while _history is reconciled to the spoken text via _record_spoken.
@@ -3278,6 +3417,7 @@ class Assistant:
             self._turn_local.sink = None
             self._turn_local.tts_active_event = None
             self._turn_local.tts_gain = 1.0
+            self._turn_local.__dict__.pop("response_language", None)
             self._turn_arbiter.release(satellite_id)
             self._queue_idle_history_summary(satellite_id)
 

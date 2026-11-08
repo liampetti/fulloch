@@ -87,27 +87,31 @@ class ActionEvidence:
         return False
 
     def response(self) -> str:
+        from utils.response_language import response
+
         parts = []
         for action, step in self.records:
             if step.kind is StepKind.REACTIVE:
                 text = reactive_to_speech(step.text)
             elif step.kind is StepKind.ERROR or not step.in_output:
-                text = f"I couldn't confirm the result of {action['intent'].replace('_', ' ')}."
+                text = response("agent_result_unconfirmed", action=action['intent'].replace('_', ' '))
             else:
                 text = step.text.strip()
             if text and text not in parts:
                 parts.append(text)
-        return " ".join(parts) or FALLBACK
+        return " ".join(parts) or response("agent_confirmation_failed")
 
     def research_response(self) -> str:
+        from utils.response_language import response
+
         parts = []
         for _action, step in self.research_records:
             if step.kind is StepKind.REACTIVE:
                 text = reactive_to_speech(step.text)
             elif step.kind is StepKind.ERROR or not step.in_output:
-                text = "I couldn't confirm that the requested web check completed."
+                text = response("agent_web_unconfirmed")
             else:
                 text = step.text.strip()
             if text and text not in parts:
                 parts.append(text)
-        return " ".join(parts) or FALLBACK
+        return " ".join(parts) or response("agent_confirmation_failed")

@@ -23,6 +23,7 @@ def matchers(monkeypatch):
     ("de", "um wie viel uhr ist das", "get_current_time", []),
     ("de", "wie viel uhr ist das", "get_current_time", []),
     ("de", "wie viel uhr ist es", "get_current_time", []),
+    ("de", "wie spät ist das", "get_current_time", []),
     ("fr", "quelle heure est il", "get_current_time", []),
     ("es", "qué hora es", "get_current_time", []),
     ("fr", "quelle est la date", "get_current_time", []),

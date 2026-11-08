@@ -11,6 +11,7 @@ latency and no network call — everything runs on-device:
   - date maths via `python-dateutil`
 """
 
+import ast
 import logging
 import math
 import re
@@ -31,7 +32,9 @@ from dateutil.relativedelta import (
 )
 
 import utils.local_time as _local_time
+from core.satellite_context import current_response_language
 from utils.locale import household_locale
+from utils.response_language import response
 
 from .thinking_playbooks import thinking_playbook
 from .tool_registry import tool
@@ -61,12 +64,17 @@ def _sig2(x: float) -> str:
     return f"{round(x, d):.{max(d, 0)}f}".rstrip("0").rstrip(".") or "0"
 
 
+def _spoken_decimal(value: str) -> str:
+    return value.replace(".", ",") if current_response_language.get() in {"fr", "de"} else value
+
+
 def _scientific(x: float) -> str:
     """Spoken scientific notation: 1.2e-5 -> '1.2 times ten to the power of minus 5'."""
     mant, exp = f"{x:.2e}".split("e")
     e = int(exp)
-    sign = "minus " if e < 0 else ""
-    return f"{_trim2(float(mant))} times ten to the power of {sign}{abs(e)}"
+    language = current_response_language.get()
+    sign = ("moins " if language == "fr" else "minus ") if e < 0 else ""
+    return response("calc_scientific", mantissa=_spoken_decimal(_trim2(float(mant))), exponent=f"{sign}{abs(e)}")
 
 
 def _fmt_number(x) -> str:
@@ -84,9 +92,9 @@ def _fmt_number(x) -> str:
     except (TypeError, ValueError):
         return str(x)
     if math.isnan(n):
-        return "undefined"
+        return response("calc_undefined")
     if math.isinf(n):
-        return "infinity" if n > 0 else "negative infinity"
+        return response("calc_infinity" if n > 0 else "calc_negative_infinity")
     if n == 0:
         return "0"
 
@@ -96,12 +104,14 @@ def _fmt_number(x) -> str:
     if mag >= 1e6:
         for scale, name in _SCALE_WORDS:
             if mag >= scale:
-                return f"{_trim2(n / scale)} {name}"
+                value = _trim2(n / scale)
+                singular = "_one" if abs(float(value)) == 1 else ""
+                return response(f"calc_{name}{singular}", value=_spoken_decimal(value))
     if mag < 0.001:
         return _scientific(n)
     if mag < 0.01:
-        return _sig2(n)
-    return _trim2(n)
+        return _spoken_decimal(_sig2(n))
+    return _spoken_decimal(_trim2(n))
 
 
 # --------------------------------------------------------------------------
@@ -150,6 +160,61 @@ _NAMES = dict(simpleeval.DEFAULT_NAMES)
 _NAMES.update({"pi": math.pi, "e": math.e, "tau": math.tau})
 
 
+_NESTED_DATE_TOOL = re.compile(r"\bdays_between\b", re.IGNORECASE)
+_EXPR_TOKENS = re.compile(
+    r"(?P<quoted>'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\")"
+    r"|(?P<grouped>(?<![\w.,])\d{1,3}(?:,\d{3})+(?![\d,]))"
+    r"|(?P<name>[a-zA-Z_]\w*)|(?P<open>\()|(?P<close>\))|(?P<other>.)",
+    re.DOTALL,
+)
+
+
+def parse_nested_days_between(expression: str) -> tuple[str, str] | None:
+    """Recognize only a complete date-tool call with two literal safe dates."""
+    if not isinstance(expression, str) or len(expression) > 256:
+        return None
+    try:
+        node = ast.parse(expression.strip(), mode="eval").body
+    except (ValueError, SyntaxError, RecursionError):
+        return None
+    if (not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name)
+            or node.func.id != "days_between" or node.keywords or len(node.args) != 2):
+        return None
+    values = []
+    for arg in node.args:
+        if not isinstance(arg, ast.Constant) or not isinstance(arg.value, str):
+            return None
+        value = arg.value.strip()
+        if value.lower() not in {"today", "tomorrow", "yesterday"}:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value, flags=re.ASCII):
+                return None
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                return None
+        values.append(value)
+    return values[0], values[1]
+
+
+def _strip_thousands_separators(text: str) -> str:
+    """Keep function argument commas; only unambiguous outside-call groups are stripped."""
+    result = []
+    parens = []
+    last_token = None
+    for match in _EXPR_TOKENS.finditer(text):
+        kind, value = match.lastgroup, match.group()
+        if kind == "open":
+            parens.append(last_token == "name" or any(parens))
+        elif kind == "close" and parens:
+            parens.pop()
+        if kind == "grouped" and not any(parens):
+            value = value.replace(",", "")
+        result.append(value)
+        if not value.isspace():
+            last_token = kind
+    return "".join(result)
+
+
 def _normalize_expr(text: str) -> str:
     """Lightly rewrite natural phrasing into a plain math expression.
 
@@ -159,7 +224,8 @@ def _normalize_expr(text: str) -> str:
     """
     s = (text or "").strip().lower().rstrip("?.")
     s = re.sub(r"^(what(?:'s| is)?|whats|calculate|compute|evaluate|how much is)\s+", "", s)
-    s = re.sub(r"[£$€,]", "", s)  # currency + thousands sep
+    s = re.sub(r"[£$€]", "", s)
+    s = _strip_thousands_separators(s)
     s = re.sub(r"(\d+(?:\.\d+)?)\s*%\s*of\s+", r"(\1/100)*", s)  # "15% of 340"
     s = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"(\1/100)", s)  # standalone "n%"
     s = s.replace("^", "**")
@@ -184,30 +250,27 @@ def _normalize_expr(text: str) -> str:
 )
 def calculate(expression: str) -> str:
     """Safely evaluate an arithmetic expression string."""
+    if _NESTED_DATE_TOOL.search(expression or ""):
+        return ("Reactive question: " + response("calc_bad_expression", expression=repr(expression))
+                + " Call days_between directly with two date arguments; do not put tool calls inside calculate.")
     if calendar := _calendar_reference(expression):
         start, end = calendar
         if start == end:
-            return f"Calendar date: {start.isoformat()}."
-        return f"Calendar range: {start.isoformat()} through {end.isoformat()}."
+            return response("calc_date", date=start.isoformat())
+        return response("calc_date_range", start=start.isoformat(), end=end.isoformat())
     if offset := _iso_date_offset(expression):
-        return f"Calendar date: {offset.isoformat()}."
+        return response("calc_date", date=offset.isoformat())
     expr = _normalize_expr(expression)
     if not expr:
-        return (
-            "Reactive question: The user asked for a calculation but no "
-            "expression was given. Ask them what they'd like calculated."
-        )
+        return "Reactive question: " + response("calc_no_expression") + " Ask them what they'd like calculated."
     try:
         result = simpleeval.simple_eval(expr, functions=_FUNCS, names=_NAMES)
     except ZeroDivisionError:
-        return "That would be dividing by zero, which has no answer."
+        return response("calculation_divide_by_zero")
     except Exception as e:
         logger.debug(f"calculate failed for {expression!r} (normalised {expr!r}): {e}")
-        return (
-            f"Reactive question: Could not evaluate the expression {expression!r}. "
-            f"Tell the user you couldn't work that out and ask them to rephrase."
-        )
-    return f"That comes to {_fmt_number(result)}."
+        return "Reactive question: " + response("calc_bad_expression", expression=repr(expression)) + " Tell the user you couldn't work that out and ask them to rephrase."
+    return response("calculation_result", value=_fmt_number(result))
 
 
 # --------------------------------------------------------------------------
@@ -353,6 +416,11 @@ def _iso_date_offset(value: str) -> date | None:
 
 def _friendly_date(d: date) -> str:
     """Speakable date, e.g. 'Sunday 14 June 2026' (no leading zero on the day)."""
+    language = current_response_language.get()
+    if language in {"fr", "de"}:
+        from babel.dates import format_date
+
+        return format_date(d, "full", locale=language)
     return f"{d.strftime('%A')} {d.day} {d.strftime('%B %Y')}"
 
 
@@ -371,15 +439,18 @@ def days_between(date_a: str, date_b: str) -> str:
         a = _parse_date(date_a)
         b = _parse_date(date_b)
     except Exception:
-        return (
-            "Reactive question: Could not parse one of the dates. Ask the user "
-            "to clarify the dates."
-        )
+        return "Reactive question: " + response("calc_bad_dates") + " Ask the user to clarify the dates."
     n = abs((b - a).days)
     if n == 0:
-        return "Those are the same day."
-    unit = "day" if n == 1 else "days"
-    return f"There are {n} {unit} between those two dates."
+        return response("calc_same_day")
+    language = current_response_language.get()
+    if language == "fr":
+        unit = "jour" if n == 1 else "jours"
+    elif language == "de":
+        unit = "Tag" if n == 1 else "Tage"
+    else:
+        unit = "day" if n == 1 else "days"
+    return response("calc_days_between", count=n, unit=unit)
 
 
 @tool(
@@ -395,9 +466,7 @@ def date_of(weekday: str, which: str = "next") -> str:
     """Return the absolute date of a named weekday relative to today."""
     wd = _WEEKDAYS.get((weekday or "").strip().lower())
     if wd is None:
-        return (
-            "Reactive question: That doesn't look like a weekday. Ask the user which day they mean."
-        )
+        return "Reactive question: " + response("calc_bad_weekday") + " Ask the user which day they mean."
     mod = (which or "next").strip().lower()
     today = _local_time.today()
     if mod in ("this", "coming", "upcoming"):
@@ -410,7 +479,7 @@ def date_of(weekday: str, which: str = "next") -> str:
         result = today + relativedelta(weekday=wd(+1))
         if result == today:
             result = today + relativedelta(weeks=+1)
-    return f"That falls on {_friendly_date(result)}."
+    return response("calc_date_of", date=_friendly_date(result))
 
 
 # --------------------------------------------------------------------------
@@ -467,7 +536,7 @@ def convert_units(value: float, from_unit: str, to_unit: str | None = None) -> s
     try:
         v = float(value)
     except (TypeError, ValueError):
-        return "Reactive question: The amount to convert wasn't a number. Ask the user to clarify."
+        return "Reactive question: " + response("calc_bad_amount") + " Ask the user to clarify."
 
     frm = _pint_unit(from_unit)
     try:
@@ -482,18 +551,28 @@ def convert_units(value: float, from_unit: str, to_unit: str | None = None) -> s
             elif source.check("[length] / [time]"):
                 display_to = f"{locale.distance_unit} / hour"
             else:
-                return "Reactive question: Say which unit you'd like that converted to."
+                return "Reactive question: " + response("calc_missing_unit")
         to = _pint_unit(display_to)
         result = source.to(to)
     except pint.DimensionalityError:
-        return (
-            f"Reactive question: {from_unit!r} and {to_unit!r} measure different "
-            f"things, so they can't be converted. Tell the user that."
-        )
+        return "Reactive question: " + response("calc_incompatible_units", source=repr(from_unit), target=repr(to_unit)) + " Tell the user that."
     except Exception as e:
         logger.debug(f"convert_units failed ({from_unit!r}->{to_unit!r}): {e}")
-        return (
-            f"Reactive question: Couldn't convert {from_unit!r} to {to_unit!r} — "
-            f"one of the units wasn't recognised. Ask the user to rephrase."
-        )
-    return f"{_fmt_number(v)} {from_unit} is {_fmt_number(result.magnitude)} {display_to}."
+        return "Reactive question: " + response("calc_unknown_units", source=repr(from_unit), target=repr(to_unit)) + " Ask the user to rephrase."
+    language = current_response_language.get()
+    if language in {"fr", "de"}:
+        from babel.units import UnknownUnitError, format_unit
+
+        def spoken_quantity(value, unit, fallback):
+            name = str(unit).replace("degree_Celsius", "celsius").replace("degree_Fahrenheit", "fahrenheit")
+            try:
+                return format_unit(value, name, locale=language)
+            except (UnknownUnitError, ValueError, KeyError):
+                return f"{_fmt_number(value)} {fallback}"
+
+        source_text = spoken_quantity(v, source.units, from_unit)
+        result_text = spoken_quantity(result.magnitude, result.units, display_to)
+    else:
+        source_text = f"{_fmt_number(v)} {from_unit}"
+        result_text = f"{_fmt_number(result.magnitude)} {display_to}"
+    return response("calc_conversion", source=source_text, result=result_text)

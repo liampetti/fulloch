@@ -64,7 +64,7 @@ _LOCAL_SUPPLEMENTS = {
         # Common ASR substitution for "wie viel Uhr ist es". Keep it
         # narrowly anchored to the entire question; don't consume locations or
         # future-time qualifiers.
-        "HassGetCurrentTime": ["(wie viel|wieviel) uhr ist das"],
+        "HassGetCurrentTime": ["(wie viel|wieviel) uhr ist das", "wie spät ist das"],
         "HassMediaPause": ["stopp", "(pausiere|stoppe) [die|meine] musik", "halte [die|meine] musik an"],
         "HassMediaUnpause": ["(spiele|spiel) [die|meine] musik weiter", "setze [die|meine] musik fort"],
         "FullochVolumeUp": ["lauter", "(mach|mache|stell|stelle) [die] musik lauter"],

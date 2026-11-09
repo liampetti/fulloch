@@ -3,3 +3,5 @@ CLAUDE.md export-ignore
 docs/ export-ignore
 scripts/wakeword/** export-ignore
 transfer_to_pub_dir.sh export-ignore
+sat_prebuild.sh export-ignore
+tests/test_sat_prebuild.py export-ignore

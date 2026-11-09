@@ -317,7 +317,7 @@ def test_bundled_response_packs_match_english_placeholders():
 def test_note_search_translates_the_result_wrapper(monkeypatch):
     from tools import notes
 
-    monkeypatch.setattr(notes, "_keyword_search", lambda _query: [("Cuisine", "pain"), ("Liste", "lait")])
+    monkeypatch.setattr(notes, "_keyword_search", lambda _query: [("Cuisine", "pain", "Cuisine.md"), ("Liste", "lait", "Liste.md")])
     monkeypatch.setattr(notes, "_semantic_search", lambda _query: [])
     language_token = current_response_language.set("fr")
     dir_token = current_response_intents_dir.set(str(ROOT))

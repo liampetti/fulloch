@@ -7,8 +7,11 @@ the consumer sends each frame to the browser immediately.
 
 import importlib.resources
 import logging
+import os
 import queue
 import re
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -178,12 +181,21 @@ def _weights_cached(language: str) -> bool:
 def _download_language(language: str) -> None:
     global _download_active
     try:
-        from huggingface_hub import snapshot_download
-
         from .backends import pocket_pytorch_snapshots
 
+        # Runtime model loading is deliberately offline. Use a separate process
+        # for this explicit download rather than changing Hugging Face's global
+        # offline flag (and HTTP sessions) for unrelated inference threads.
+        env = os.environ.copy()
+        env["HF_HUB_OFFLINE"] = "0"
         for repo, files, revision in pocket_pytorch_snapshots(language):
-            snapshot_download(repo_id=repo, allow_patterns=list(files), revision=revision)
+            subprocess.run(
+                [sys.executable, "-c",
+                 "import sys; from huggingface_hub import snapshot_download; "
+                 "snapshot_download(repo_id=sys.argv[1], revision=sys.argv[2], allow_patterns=sys.argv[3:])",
+                 repo, revision, *files],
+                env=env, check=True,
+            )
         if not _weights_cached(language):
             raise RuntimeError("Pocket TTS language download is incomplete")
         with _download_lock:

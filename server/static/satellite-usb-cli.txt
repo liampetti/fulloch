@@ -39,10 +39,24 @@ public PEM certificate at the trust prompt; the HTTPS hostname must match it.
 Supply a separate public server certificate when the satellite connects through
 a different TLS endpoint. Never provide a private key.
 
+For the active dashboard certificate, leave the satellite certificate prompt
+blank. Setup automatically uses the existing Fulloch Home CA public certificate
+when it signed the dashboard, or the dashboard certificate if self-signed.
+The CA file must be alongside the dashboard certificate as fulloch-home-ca.crt.
+
 Select the board's serial port (for example /dev/ttyACM0, /dev/ttyUSB0, or
 COM3); your user may need serial-port permissions. The satellite WSS hostname
 must be reachable from the board and match its certificate. Do not use a Docker
 bridge address unless it is reachable on the Wi-Fi network.
+
+The dashboard uses the browser's timezone and checks its POSIX rules against
+recent history and the next five years of available timezone data. If they do
+not match or cannot be represented by the device, it stops
+setup rather than silently choosing the wrong time. The CLI accepts a POSIX TZ
+string manually, for example PST8PDT,M3.2.0,M11.1.0 for Pacific time. Choose
+a rule supported by ESP-IDF newlib; an invalid or unsupported rule may display
+the wrong time. A fixed offset does not follow daylight-saving changes.
+Timezone laws may change after setup; update the rule and reprovision if needed.
 
 Enabling mandatory authentication disconnects tokenless devices: ALL existing
 tokenless satellites must be reprovisioned. Existing registered tokens remain

@@ -506,6 +506,7 @@ def read_note(title: str) -> str:
             "title": title_spoken,
             "excerpt": text[:500],
             "truncated": bool(truncated),
+            "path": _document_path(note),
         },
     )
 
@@ -652,8 +653,19 @@ def _truncate_snippet(snippet: str, limit: int = 240) -> str:
     return snippet
 
 
-def _keyword_search(query: str) -> list[tuple[str, str]]:
-    """`AND`-of-terms full-text search → `(title, snippet)` hits.
+def _document_path(path: Path) -> str | None:
+    """Return a viewer-safe path relative to the current notes root."""
+    try:
+        relative = path.resolve().relative_to(notes_root.get_notes_root().resolve())
+    except (OSError, ValueError):
+        return None
+    if any(part.startswith('.') for part in relative.parts) or relative.suffix != '.md':
+        return None
+    return relative.as_posix()
+
+
+def _keyword_search(query: str) -> list[tuple[str, str, str | None]]:
+    """`AND`-of-terms full-text search → `(title, snippet, path)` hits.
 
     A note matches when *every* meaningful query term appears somewhere in it
     (order-independent, plural-tolerant — see `_term_in`). The surfaced snippet
@@ -664,7 +676,7 @@ def _keyword_search(query: str) -> list[tuple[str, str]]:
     terms = _query_terms(query)
     if not terms:
         return []
-    hits: list[tuple[str, str]] = []
+    hits: list[tuple[str, str, str | None]] = []
     for path in _iter_notes():
         try:
             content = notes_storage.read_markdown(path, errors="ignore")
@@ -680,24 +692,25 @@ def _keyword_search(query: str) -> list[tuple[str, str]]:
                 best_line, best_score = line, score
         snippet = _to_spoken(best_line).strip()
         if snippet:
-            hits.append((path.stem.replace("-", " "), snippet))
+            hits.append((path.stem.replace("-", " "), snippet, _document_path(path)))
         if len(hits) >= MAX_SEARCH_MATCHES:
             break
     return hits
 
 
-def _semantic_search(query: str) -> list[tuple[str, str]]:
-    """Embedding search → `(title, snippet)` hits clearing `SEMANTIC_MIN_SCORE`."""
+def _semantic_search(query: str) -> list[tuple[str, str, str | None]]:
+    """Embedding search → `(title, snippet, path)` hits clearing `SEMANTIC_MIN_SCORE`."""
     try:
         results = _get_index().search(query, k=SEMANTIC_TOP_K)
     except Exception as e:
         logger.error(f"Semantic search failed: {e}")
         return []
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str | None]] = []
     for score, chunk in results:
         if score < SEMANTIC_MIN_SCORE:
             continue
-        out.append((Path(chunk.file).stem.replace("-", " "), chunk.text.strip()))
+        out.append((Path(chunk.file).stem.replace("-", " "), chunk.text.strip(),
+                    _document_path(notes_root.get_notes_root() / chunk.file)))
     return out
 
 
@@ -726,28 +739,28 @@ def search_notes(query: str) -> str:
     # strongest signal); semantic hits fill in reworded / topical matches the
     # keyword pass can't reach. Dedupe so a paragraph that also satisfied the
     # keyword match isn't surfaced twice.
-    fused: list[tuple[str, str]] = []
+    fused: list[tuple[str, str, str | None]] = []
     seen: set[tuple[str, str]] = set()
-    for title, snippet in _keyword_search(query) + _semantic_search(query):
+    for title, snippet, path in _keyword_search(query) + _semantic_search(query):
         if not snippet:
             continue
-        key = (title.lower(), snippet.lower())
+        key = ((path or title).lower(), snippet.lower())
         # Skip a hit whose snippet is already contained in (or contains) one we
         # kept for the same note — keyword lines are often a subset of the
         # semantic paragraph from the same file.
         if any(
-            t == title.lower() and (snippet.lower() in s or s in snippet.lower()) for t, s in seen
+            t == key[0] and (snippet.lower() in s or s in snippet.lower()) for t, s in seen
         ):
             continue
         seen.add(key)
-        fused.append((title, _truncate_snippet(snippet)))
+        fused.append((title, _truncate_snippet(snippet), path))
         if len(fused) >= MAX_HYBRID_MATCHES:
             break
 
     last_retrieval["chunks"] = len(fused)
     if not fused:
         return response("notes_search_not_found", query=query)
-    parts = "; ".join(response("notes_search_result_item", title=title, snippet=snippet) for title, snippet in fused)
+    parts = "; ".join(response("notes_search_result_item", title=title, snippet=snippet) for title, snippet, _path in fused)
     # `Reactive question:` routes the hits back through the agent loop so the
     # SLM filters / summarises them rather than speaking raw matches. The
     # caveat matters: semantic hits are nearest-by-meaning and may not contain
@@ -760,7 +773,7 @@ def search_notes(query: str) -> str:
         {
             "type": "notes_search",
             "query": query[:120],
-            "matches": [{"title": title, "excerpt": snippet[:300]} for title, snippet in fused],
+            "matches": [{"title": title, "excerpt": snippet[:300], "path": path} for title, snippet, path in fused],
         },
     )
 

@@ -1,11 +1,13 @@
 """Ephemeral provisioning lifecycle, independent of profiles and transports."""
 
+import re
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import satellite_tokens
+from . import config_store, satellite_tokens
 
 
 @dataclass
@@ -57,6 +59,23 @@ class ProvisioningTransactions:
                 satellite_tokens.cancel_candidate(device_id, transaction_id, self.config_path)
                 self._attempts.pop(transaction_id, None)
                 raise
+
+    def prepare_new(self, name: str, generate: Callable[[str, str], bytes], *, occupied=()) -> str:
+        """Allocate and reserve a new identity without replacing a registered device."""
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Device name is required")
+        slug = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+        slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")[:55].rstrip("-") or "satellite"
+        with self._lock:
+            config = config_store.read_config(self.config_path)
+            used = {str(value).lower() for value in occupied if isinstance(value, str)}
+            used.update(str(key).lower() for key in (config.get("satellite_token_owners") or {}))
+            used.update(str(key).lower() for key in (config.get("satellite_token_candidates") or {}))
+            number = 1
+            while f"{slug}-{number:02d}" in used:
+                number += 1
+            device_id = f"{slug}-{number:02d}"
+            return self.prepare(device_id, lambda token: generate(device_id, token))
 
     def artifact(self, transaction_id: str) -> bytes | None:
         with self._lock:

@@ -26,7 +26,7 @@ def _edit_manifest(path, edit):
 
 def test_packaged_release_is_valid():
     manifest, images = satellite_usb.load_release()
-    assert manifest["firmware_version"] == "0.1.0"
+    assert manifest["firmware_version"] == satellite_usb.DEFAULT_RELEASE.name
     assert set(images) == {
         "bootloader.bin",
         "partition-table.bin",
@@ -40,6 +40,8 @@ def test_firmware_release_matches_satellite_repository_when_available():
     sibling = Path(__file__).resolve().parents[2] / "local-satellite"
     if not sibling.is_dir():
         pytest.skip("satellite checkout not available")
+    if satellite_usb.DEFAULT_RELEASE.name != "0.1.0":
+        pytest.skip("locally built releases are not copied to the satellite checkout")
     source = sibling / "firmware" / "waveshare-rev2" / "0.1.0"
     if not source.is_dir():
         pytest.fail("satellite checkout is missing the expected firmware release")
@@ -55,6 +57,21 @@ def test_corruption_and_missing_image_are_rejected(release):
         satellite_usb.load_release(release)
     (release / "bootloader.bin").unlink()
     with pytest.raises(satellite_usb.ArtifactError):
+        satellite_usb.load_release(release)
+
+
+def test_legacy_alias_does_not_accept_a_different_application(release):
+    manifest, _ = satellite_usb.load_release(release)
+    if manifest["firmware_version"] != "1":
+        pytest.skip("only release 1 is a legacy alias")
+    app = release / "application.bin"
+    content = bytearray(app.read_bytes())
+    content[-1] ^= 1
+    app.write_bytes(content)
+    _edit_manifest(
+        release, lambda m: m["images"][3].update(sha256=hashlib.sha256(content).hexdigest())
+    )
+    with pytest.raises(satellite_usb.ArtifactError, match="version"):
         satellite_usb.load_release(release)
 
 

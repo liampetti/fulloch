@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y \
     espeak-ng \
     libsndfile1 \
     procps \
+    network-manager \
     && rm -rf /var/lib/apt/lists/*
 
 # Route ALSA's default device through PulseAudio (same as the GPU image).

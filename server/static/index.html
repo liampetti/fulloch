@@ -83,7 +83,7 @@
   <main>
     <section id="chat" class="view">
       <div id="conversation-controls" class="conversation-controls">
-        <button type="button" id="conversation-menu-button" class="conversation-menu-button" aria-label="Conversation options" aria-expanded="false">⋮</button>
+        <button type="button" id="conversation-menu-button" class="conversation-menu-button" aria-label="Conversation options" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="6" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="18" r="1.7"/></svg></button>
         <div id="conversation-menu" class="conversation-popover" hidden>
           <button type="button" id="conversation-save">Save conversation</button>
           <button type="button" id="conversation-clear">Clear conversation</button>
@@ -191,36 +191,37 @@
     <p id="sat-setup-support" role="status"></p>
     <p>For a private or self-signed certificate, install the server's public CA certificate in your browser or operating system trust store, then open the dashboard at the matching HTTPS hostname. Never paste a private key.</p>
     <p>WebSerial unavailable? <a href="/static/satellite-usb-cli.txt" target="_blank" rel="noopener">Use the interactive USB CLI fallback</a>.</p>
+    <p>The browser will ask you to choose a USB device. Look for <strong>Espressif USB JTAG/serial</strong> and disconnect other ESP32 boards if unsure. Only select the Waveshare Rev 2: the USB identifier alone cannot distinguish it from other ESP32 devices.</p>
     <form id="sat-setup-form" autocomplete="off">
       <fieldset id="sat-setup-fields">
         <legend>Device and network</legend>
         <div class="sat-setup-grid">
-          <label>Device ID <input name="device_id" required maxlength="64" placeholder="kitchen-01"></label>
           <label>Device name <input name="device_name" required maxlength="64" placeholder="Kitchen"></label>
-          <label>POSIX timezone <input name="timezone" required maxlength="64" value="UTC0"></label>
-          <label>Wi-Fi network <input name="wifi_ssid" required maxlength="32"></label>
+          <label>Wi-Fi network <input name="wifi_ssid" list="sat-setup-networks" required maxlength="32" placeholder="Choose or type a network"><datalist id="sat-setup-networks"></datalist></label>
           <label>Wi-Fi password <input name="wifi_password" type="password" required maxlength="63" autocomplete="new-password"></label>
           <label>Server WSS URL <input name="server_url" type="url" required placeholder="wss://fulloch.local:8765/ws/satellite-v2"></label>
         </div>
         <p>Use a LAN hostname or IP reachable by the satellite, not a Docker bridge address. The certificate must match this host. If the address or certificate changes, reprovision the device.</p>
-        <label>Public server certificate (PEM, optional if using the active dashboard certificate)<textarea name="certificate" rows="3" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
+        <p id="sat-setup-wifi-status" role="status"></p>
+        <details><summary>Additional options</summary>
         <div class="sat-setup-grid">
-          <label>Speaker volume (%) <input name="volume" type="number" min="0" max="100" value="50" required></label>
+          <label>Speaker volume (%) <input name="volume" type="number" min="0" max="100" value="80" required></label>
           <label>Display rotation <select name="rotation"><option value="0">0°</option><option value="180">180°</option></select></label>
           <label>Music service <select name="music"><option value="none">Disabled</option><option value="sonos">Sonos</option><option value="spotify">Spotify</option></select></label>
         </div>
         <label class="sat-setup-check"><input name="aec" type="checkbox" checked> Enable echo cancellation</label>
-        <div id="sat-setup-sonos" hidden><label>Sonos host <input name="sonos_host" maxlength="63"></label></div>
+        <div id="sat-setup-sonos" hidden><label>Sonos host <input name="sonos_host" list="sat-setup-sonos-hosts" maxlength="63" placeholder="Choose or enter a host"><datalist id="sat-setup-sonos-hosts"></datalist></label><p id="sat-setup-sonos-status" role="status"></p></div>
         <div id="sat-setup-spotify" class="sat-setup-grid" hidden>
           <label>Spotify client ID <input name="spotify_id" maxlength="256"></label>
           <label>Spotify client secret <input name="spotify_secret" type="password" maxlength="256" autocomplete="new-password"></label>
           <label>Spotify refresh token <input name="spotify_token" type="password" maxlength="512" autocomplete="new-password"></label>
         </div>
+        </details>
         <label class="sat-setup-check"><input name="migration" type="checkbox" required> I understand that all existing tokenless satellites must be reprovisioned and agree to enable mandatory token authentication.</label>
+        <label class="sat-setup-check"><input name="show_all_ports" type="checkbox"> Show all serial ports if the board is not listed</label>
       </fieldset>
       <div class="sat-setup-actions">
-        <button id="sat-setup-prepare" class="satellite-action" type="submit">Validate and prepare</button>
-        <button id="sat-setup-flash" class="satellite-action" type="button" hidden>Choose USB device and flash</button>
+        <button id="sat-setup-prepare" class="satellite-action" type="submit">Deploy to USB</button>
         <button id="sat-setup-cancel" class="satellite-action quiet" type="button">Cancel</button>
       </div>
     </form>

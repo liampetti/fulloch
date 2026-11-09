@@ -200,6 +200,9 @@ def start_dashboard(
     app = create_app(assistant, lifecycle=lifecycle, context=context)
     if ssl_kwargs:
         app.state.satellite_dashboard_certificate = Path(ssl_certfile).read_text(encoding="utf-8")
+        ca_path = Path(ssl_certfile).parent / "fulloch-home-ca.crt"
+        if ca_path.is_file():
+            app.state.satellite_dashboard_ca_path = ca_path
         backend_port = _pick_free_local_port()
         uvicorn_config = uvicorn.Config(
             app,

@@ -20,16 +20,14 @@ os.environ.setdefault("FULLOCH_HA_ALIAS_RETRIES", "0")
 # Import-time config readers use the checked-in example for reproducibility.
 # Runtime config/credential writes are sandboxed by each test's path or chdir.
 _REPO_ROOT = Path(__file__).parent.parent
-os.environ.setdefault("FULLOCH_CONFIG_PATH", str(_REPO_ROOT / "data" / "config.example.yml"))
+os.environ["FULLOCH_CONFIG_PATH"] = str(_REPO_ROOT / "data" / "config.example.yml")
+_IMPORT_SANDBOX = tempfile.TemporaryDirectory(prefix="fulloch-tests-")
 os.environ["THINKING_SOURCE_STORE_DIR"] = str(
-    Path(tempfile.gettempdir()) / "fulloch_test_thinking_sources",
+    Path(_IMPORT_SANDBOX.name) / "thinking-sources",
 )
 
 # Isolate persisted login sessions before AppContext is imported.
-os.environ.setdefault(
-    "FULLOCH_SESSIONS_PATH",
-    str(Path(tempfile.gettempdir()) / "fulloch_test_dashboard_sessions.json"),
-)
+os.environ["FULLOCH_SESSIONS_PATH"] = str(Path(_IMPORT_SANDBOX.name) / "sessions.json")
 
 # Force a token-free HA env for the suite: tools.home_assistant loads its
 # alias map lazily on first tool use, gated on HA_TOKEN. With no token that
@@ -70,8 +68,11 @@ STUBBED_MODULES: set[str] = set()
 
 @pytest.fixture(autouse=True)
 def _isolate_thinking_checkpoints(tmp_path, monkeypatch):
-    """Prevent durable test checkpoints from leaking between test cases."""
+    """Keep persisted test data out of the user's files and other test cases."""
     monkeypatch.setenv("FULLOCH_THINKING_CHECKPOINT_DIR", str(tmp_path / "thinking-checkpoints"))
+    monkeypatch.setenv("THINKING_SOURCE_STORE_DIR", str(tmp_path / "thinking-sources"))
+    monkeypatch.setenv("FULLOCH_SESSIONS_PATH", str(tmp_path / "sessions.json"))
+    monkeypatch.setenv("FULLOCH_TASK_LEDGER", str(tmp_path / "task-ledger.json"))
     monkeypatch.setenv("FULLOCH_CONVERSATION_DB", str(tmp_path / "conversations.sqlite3"))
 
 

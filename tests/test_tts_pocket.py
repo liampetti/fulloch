@@ -255,7 +255,7 @@ def test_language_download_is_single_flight_and_offline_failure_is_throttled(mon
     tts._request_language_download("french_24l")
     tts._request_language_download("german")
     assert len(threads) == 1
-    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=Mock(side_effect=OSError("offline"))))
+    monkeypatch.setattr(tts.subprocess, "run", Mock(side_effect=OSError("offline")))
     threads[0]["target"](*threads[0]["args"])
     assert tts._download_active is None
     tts._request_language_download("french_24l")
@@ -269,15 +269,18 @@ def test_background_download_uses_pinned_weights_and_tokenizer(monkeypatch):
     monkeypatch.setattr(tts, "_download_active", "french_24l")
     monkeypatch.setattr(tts, "_download_failures", {})
     monkeypatch.setattr(tts, "_weights_cached", lambda _: True)
-    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=download))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr(tts.subprocess, "run", download)
 
     tts._download_language("french_24l")
 
-    download.assert_called_once_with(
-        repo_id=tts.MIRROR_REPO,
-        allow_patterns=["languages/french_24l/model.safetensors", "languages/french_24l/tokenizer.model"],
-        revision=tts.MIRROR_REVISION,
-    )
+    args, kwargs = download.call_args
+    assert args[0][:2] == [sys.executable, "-c"]
+    assert args[0][3:] == [tts.MIRROR_REPO, tts.MIRROR_REVISION,
+                           "languages/french_24l/model.safetensors", "languages/french_24l/tokenizer.model"]
+    assert kwargs["env"]["HF_HUB_OFFLINE"] == "0"
+    assert tts.os.environ["HF_HUB_OFFLINE"] == "1"
+    assert kwargs["check"] is True
     assert tts._download_active is None
 
 

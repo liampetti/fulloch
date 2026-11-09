@@ -167,6 +167,7 @@ class TestWriteRead:
             "title": "boiler",
             "excerpt": "Vaillant ecoTEC",
             "truncated": False,
+            "path": "boiler.md",
         }
 
     def test_read_does_not_repeat_title(self, notes_dir):
@@ -387,6 +388,15 @@ class TestSearch:
         assert result.artifact["type"] == "notes_search"
         assert result.artifact["query"] == "vaillant"
         assert result.artifact["matches"][0]["title"] == "boiler"
+        assert result.artifact["matches"][0]["path"] == "boiler.md"
+
+    def test_search_preserves_nested_duplicate_titles(self, notes_dir, monkeypatch):
+        for folder in ("one", "two"):
+            (notes_dir / folder).mkdir()
+            (notes_dir / folder / "same.md").write_text("Shared keyword", encoding="utf-8")
+        monkeypatch.setattr(notes, "_semantic_search", lambda _query: [])
+        matches = notes.search_notes("keyword").artifact["matches"]
+        assert {match["path"] for match in matches} == {"one/same.md", "two/same.md"}
 
 
 class TestQueryTerms:

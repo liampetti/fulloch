@@ -89,6 +89,7 @@ RUN apt-get update && apt-get install -y \
     libasound2-plugins \
     libpulse0 \
     procps \
+    network-manager \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

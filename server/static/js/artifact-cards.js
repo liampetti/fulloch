@@ -504,6 +504,17 @@ export function createArtifactCards({ submitCommand }) {
     return card;
   };
 
+  const noteLink = (path) => {
+    if (typeof path !== 'string' || !path.endsWith('.md') ||
+        path.split('/').some(part => !part || part.startsWith('.'))) return null;
+    const link = document.createElement('a');
+    link.href = '/documents/' + path.split('/').map(encodeURIComponent).join('/');
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.title = 'Open full note in a new tab';
+    return link;
+  };
+
   const renderNoteCard = (data) => {
     if (!data || data.type !== 'note' || typeof data.title !== 'string' || typeof data.excerpt !== 'string') return null;
     const card = document.createElement('section');
@@ -516,11 +527,17 @@ export function createArtifactCards({ submitCommand }) {
     heading.append(title);
     const excerpt = document.createElement('p');
     excerpt.textContent = data.excerpt;
-    card.append(heading, excerpt);
+    const link = noteLink(data.path);
+    const content = link || card;
+    if (link) {
+      link.className = 'note-card-link';
+      card.append(link);
+    }
+    content.append(heading, excerpt);
     if (data.truncated) {
       const more = document.createElement('small');
       more.textContent = 'Note continues';
-      card.append(more);
+      content.append(more);
     }
     return card;
   };
@@ -538,7 +555,7 @@ export function createArtifactCards({ submitCommand }) {
     card.append(heading);
     for (const match of data.matches) {
       if (typeof match?.title !== 'string' || typeof match?.excerpt !== 'string') continue;
-      const row = document.createElement('div');
+      const row = noteLink(match.path) || document.createElement('div');
       row.className = 'notes-search-match';
       const matchTitle = document.createElement('strong');
       matchTitle.textContent = match.title;
@@ -596,19 +613,21 @@ export function createArtifactCards({ submitCommand }) {
       let url;
       try { url = new URL(source.url); } catch { continue; }
       if (!['http:', 'https:'].includes(url.protocol)) continue;
-      const item = document.createElement('details');
+      const item = document.createElement('div');
       item.className = 'web-source';
+      const details = document.createElement('details');
       const summary = document.createElement('summary');
+      summary.textContent = `${source.host} — Show excerpt`;
       const link = document.createElement('a');
       link.href = url.href;
       link.target = '_blank';
       link.rel = 'noopener noreferrer';
-      link.textContent = source.host;
-      link.addEventListener('click', event => event.stopPropagation());
-      summary.append(link);
+      link.textContent = 'Open source';
+      link.setAttribute('aria-label', `Open source ${source.host} in a new tab`);
       const evidence = document.createElement('p');
       evidence.textContent = source.evidence;
-      item.append(summary, evidence);
+      details.append(summary, evidence);
+      item.append(details, link);
       card.append(item);
     }
     return card;
@@ -624,18 +643,25 @@ export function createArtifactCards({ submitCommand }) {
     const title = document.createElement('strong');
     title.textContent = data.title;
     heading.append(title);
-    card.append(heading);
     const created = document.createElement('time');
     created.dateTime = new Date(data.created_at * 1000).toISOString();
     created.textContent = `Created ${new Date(data.created_at * 1000).toLocaleString()}`;
     const summary = document.createElement('p');
     summary.textContent = data.summary;
+    const preview = document.createElement('a');
+    preview.className = 'report-preview-link';
+    preview.href = data.report_url;
+    preview.target = '_blank';
+    preview.rel = 'noopener noreferrer';
+    preview.title = 'Open full report in a new tab';
+    preview.append(heading, created, summary);
     const download = document.createElement('a');
+    download.className = 'report-card-link';
     download.href = data.report_url;
     download.target = '_blank';
     download.rel = 'noopener';
     download.textContent = 'Open full report';
-    card.append(created, summary, download);
+    card.append(preview, download);
     return card;
   };
 
@@ -737,10 +763,20 @@ export function createArtifactCards({ submitCommand }) {
     const title = document.createElement('strong');
     title.textContent = data.title;
     heading.append(title);
-    card.append(heading);
     const summary = document.createElement('p');
     summary.textContent = data.summary;
-    card.append(summary);
+    if (validReportUrl(data.report_url)) {
+      const preview = document.createElement('a');
+      preview.className = 'report-preview-link';
+      preview.href = data.report_url;
+      preview.target = '_blank';
+      preview.rel = 'noopener noreferrer';
+      preview.title = 'Open full report in a new tab';
+      preview.append(heading, summary);
+      card.append(preview);
+    } else {
+      card.append(heading, summary);
+    }
     const source = data.data;
     if (type === 'finance_report') {
        if (source?.type === 'finance_quote') appendFinanceQuote(card, source.quote);
@@ -784,8 +820,16 @@ export function createArtifactCards({ submitCommand }) {
       const papers = source?.type === 'paper_search' ? source.papers : source?.type === 'paper_detail' ? [source.paper] : [];
       if (Array.isArray(papers)) for (const paper of papers.slice(0, 3)) {
         if (typeof paper?.title !== 'string') continue;
-        const item = document.createElement('div');
+        let paperUrl;
+        try { paperUrl = new URL(paper.url); } catch { /* No usable paper link. */ }
+        const item = document.createElement(paperUrl && ['http:', 'https:'].includes(paperUrl.protocol) ? 'a' : 'div');
         item.className = 'domain-report-row';
+        if (item.tagName === 'A') {
+          item.href = paperUrl.href;
+          item.target = '_blank';
+          item.rel = 'noopener noreferrer';
+          item.title = 'Open paper in a new tab';
+        }
         item.textContent = [paper.title, paper.year && String(paper.year), paper.source].filter(Boolean).join(' · ');
         card.append(item);
       }
@@ -831,6 +875,17 @@ export function createArtifactCards({ submitCommand }) {
     const stops = Number.isFinite(offer.stops) ? (offer.stops ? `${offer.stops} stop${offer.stops === 1 ? '' : 's'}` : 'Nonstop') : 'Stops unavailable';
     const details = Array.isArray(offer.segments) ? offer.segments : [];
     card.innerHTML = `<div class="flight-plan-kicker"><span>Recommended flight</span><span>Prices can change</span></div><div class="flight-plan-route"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13.5h6l3.5 6 1.5-.5-1.5-5.5H20a1.5 1.5 0 0 0 0-3h-7.5L14 5l-1.5-.5L9 10.5H3z"/></svg><strong>${escapeHtml(route)}</strong><b>${escapeHtml(price)}</b></div><div class="flight-plan-meta"><span>${escapeHtml(airlines)}</span><span>${escapeHtml(flightDuration(offer.duration_minutes))}</span><span>${escapeHtml(stops)}</span></div>`;
+    if (validReportUrl(data.report_url)) {
+      const preview = document.createElement('a');
+      preview.className = 'report-preview-link';
+      preview.href = data.report_url;
+      preview.target = '_blank';
+      preview.rel = 'noopener noreferrer';
+      preview.title = 'Open full report in a new tab';
+      const routeElement = card.querySelector('.flight-plan-route');
+      routeElement.replaceWith(preview);
+      preview.append(routeElement);
+    }
     if (details.length) {
       const detail = document.createElement('details');
       detail.className = 'flight-plan-legs';
@@ -844,7 +899,7 @@ export function createArtifactCards({ submitCommand }) {
       }
       card.append(detail);
     }
-    if (typeof data.report_url === 'string' && data.report_url.startsWith('/reports/')) {
+    if (validReportUrl(data.report_url)) {
       const report = document.createElement('a');
       report.className = 'flight-report-link';
       report.href = data.report_url;

@@ -170,7 +170,7 @@ export function createChatUI({ connectSpeaker, onThinking, getChatContext = () =
         <div class="logo-lg"><img src="/logo.png" alt=""></div>
         <p class="wake-hint" id="wake-hint" hidden></p>
         <p>Use <b>Conversation</b> for hands-free chat without a wakeword. If rooms are available, choose this device's room when prompted so home commands target the right place.</p>`;
-      chat.prepend(div);
+      chat.appendChild(div);
       loadWakeHint();
     }
     lastTs = 0;
@@ -517,7 +517,7 @@ export function createChatUI({ connectSpeaker, onThinking, getChatContext = () =
     wrap.append(...artifacts, bubble, meta);
     if (ev.role === 'assistant') pendingArtifacts = [];
     if (isStartup) {
-      chat.prepend(wrap);
+      conversationStatus.after(wrap);
       startupMessage = wrap;
     } else {
       chat.appendChild(wrap);
@@ -672,7 +672,8 @@ export function createChatUI({ connectSpeaker, onThinking, getChatContext = () =
     try {
       const saved = await conversationRequest('/conversations', { method: 'POST' });
       closeConversationPopovers();
-      showConversationStatus(`Saved ${new Date(saved.created_at * 1000).toLocaleString()} · ${saved.id}`);
+      showConversationStatus(`Conversation saved. ${new Date(saved.created_at * 1000).toLocaleString()} · ${saved.id}`);
+      conversationStatus.scrollIntoView({ block: 'nearest' });
     } catch (error) { showConversationStatus(`Could not save conversation: ${error.message}`); }
   });
   lifetime.listen(document.getElementById('conversation-clear'), 'click', async () => {

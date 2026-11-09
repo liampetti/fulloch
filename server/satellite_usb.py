@@ -17,7 +17,7 @@ _IMAGES = (
     ("ota-data.bin", 0x19000, 0x2000),
     ("application.bin", 0x20000, 0x300000),
 )
-DEFAULT_RELEASE = Path(__file__).parent / "firmware" / "waveshare-rev2" / "0.1.0"
+DEFAULT_RELEASE = Path(__file__).parent / "firmware" / "waveshare-rev2" / "2"
 
 
 def load_release(directory: Path = DEFAULT_RELEASE) -> tuple[dict, dict[str, bytes]]:
@@ -92,10 +92,18 @@ def load_release(directory: Path = DEFAULT_RELEASE) -> tuple[dict, dict[str, byt
         ):
             raise ArtifactError("firmware partition table does not match the Rev 2 flash layout")
         app = contents["application.bin"]
+        # Release 1 relabels the original 0.1.0 image without modifying its
+        # integrity-protected binary. Later releases must match exactly.
+        legacy_v1 = (
+            version == "1"
+            and hashlib.sha256(app).hexdigest()
+            == "9ed6a9d985effa0fb9b83a19318a2a4e97215f0c3a258a0d31adf5ae65a89050"
+            and app[48:80].split(b"\0", 1)[0] == b"0.1.0"
+        )
         if (
             len(app) < 80
             or struct.unpack_from("<I", app, 32)[0] != 0xABCD5432
-            or app[48:80].split(b"\0", 1)[0] != version.encode("ascii")
+            or (app[48:80].split(b"\0", 1)[0] != version.encode("ascii") and not legacy_v1)
         ):
             raise ArtifactError("firmware application version does not match the manifest")
         return manifest, contents

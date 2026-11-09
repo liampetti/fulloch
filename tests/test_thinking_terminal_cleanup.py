@@ -10,11 +10,14 @@ from core.thinking_source_store import load_document, store_document
 def wait_terminal(manager, job_id):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        job = manager._jobs[job_id]
-        if job.status in {JobStatus.READY, JobStatus.FAILED} and not (
-            manager._checkpoint_dir / f"{job_id}.json"
-        ).exists():
-            return job
+        # Terminal cleanup removes the checkpoint before the source files, all
+        # under this lock. Do not mistake that intermediate state for completion.
+        with manager._lock:
+            job = manager._jobs[job_id]
+            if job.status in {JobStatus.READY, JobStatus.FAILED} and not (
+                manager._checkpoint_dir / f"{job_id}.json"
+            ).exists():
+                return job
         time.sleep(0.01)
     pytest.fail("job did not finish cleanup")
 

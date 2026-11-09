@@ -288,6 +288,7 @@ class BrowserModules(unittest.TestCase):
         button.click()
         self.page.get_by_role("button", name="Save conversation", exact=True).click()
         self.page.locator("#conversation-status").wait_for(state="visible")
+        self.assertIn("Conversation saved.", self.page.locator("#conversation-status").inner_text())
         self.assertIn("new-id", self.page.locator("#conversation-status").inner_text())
         button.click()
         self.page.get_by_role("button", name="Saved conversations", exact=True).click()
@@ -314,6 +315,7 @@ class BrowserModules(unittest.TestCase):
         self.page.once("dialog", lambda dialog: dialog.accept())
         self.page.get_by_role("button", name="Clear conversation", exact=True).click()
         self.page.get_by_text("Conversation cleared.").wait_for()
+        self.assertLess(button.bounding_box()["y"] - self.page.locator("#chat").bounding_box()["y"], 30)
 
     def test_protocol_events_do_not_render_in_history_or_live_chat(self):
         self.history.append({"type": "assistant.stand_down_after_tts", "satellite_id": "kitchen"})
@@ -1079,6 +1081,56 @@ class BrowserModules(unittest.TestCase):
         self.assertEqual(self.page.locator(".artifact script, .note-card p b, a[href^='javascript:']").count(), 0)
         self.assertIn("<script>bad()</script>", self.page.locator(".weather-title").inner_text())
         self.assertEqual(self.page.locator(".web-source a").get_attribute("rel"), "noopener noreferrer")
+
+    def test_note_artifacts_link_to_exact_documents(self):
+        self.open_chat()
+        self.emit({"role": "assistant", "source": "text", "ts": 2, "content": "Result",
+                   "artifact": {"type": "note", "title": "Note", "excerpt": "Text", "path": "folder/My note.md"}})
+        self.emit({"role": "assistant", "source": "text", "ts": 3, "content": "Result",
+                   "artifact": {"type": "notes_search", "query": "Note", "matches": [
+                       {"title": "Report", "excerpt": "Text", "path": "fulloch-reports/report #1.md"},
+                       {"title": "Unsafe", "excerpt": "Text", "path": "../other.md"},
+                       {"title": "Old", "excerpt": "Text"}]}})
+        note = self.page.locator('.note-card a')
+        self.assertEqual(note.get_attribute('href'), '/documents/folder/My%20note.md')
+        self.assertEqual(note.get_attribute('target'), '_blank')
+        result = self.page.locator('.notes-search-match').first
+        self.assertEqual(result.get_attribute('href'), '/documents/fulloch-reports/report%20%231.md')
+        self.assertEqual(result.get_attribute('rel'), 'noopener noreferrer')
+        self.assertEqual(self.page.locator('.notes-search-match:not(a)').count(), 2)
+
+    def test_report_paper_and_web_source_links(self):
+        self.open_chat()
+        url = '/reports/fulloch-reports/2026-09-11-1234abcd'
+        report = {"title": "Report", "summary": "Summary", "created_at": 1, "report_url": url}
+        artifacts = [
+            {"type": "generated_report", **report},
+            {"type": "research_report", **report, "data": {"type": "paper_search", "papers": [
+                {"title": "Paper", "url": "https://example.com/paper"},
+                {"title": "Unsafe", "url": "javascript:bad()"}]}},
+            {"type": "travel_report", "title": "No link", "summary": "Summary", "created_at": 1},
+            {"type": "flight_plan", "route": {"origin": "A", "destination": "B"}, "offer": {}, "report_url": url},
+            {"type": "web_research", "query": "Topic", "sources": [
+                {"url": "https://example.com", "host": "Example", "evidence": "Excerpt"}]},
+        ]
+        for ts, artifact in enumerate(artifacts, 2):
+            self.emit({"role": "assistant", "source": "text", "ts": ts, "content": "Result", "artifact": artifact})
+        previews = self.page.locator('.report-preview-link')
+        self.assertEqual(previews.count(), 3)
+        for preview in previews.all():
+            self.assertEqual(preview.get_attribute('href'), url)
+            self.assertEqual(preview.get_attribute('target'), '_blank')
+        self.assertEqual(self.page.locator('.travel_report .report-preview-link').count(), 0)
+        paper = self.page.locator('.research_report a.domain-report-row')
+        self.assertEqual(paper.get_attribute('href'), 'https://example.com/paper')
+        self.assertEqual(paper.get_attribute('rel'), 'noopener noreferrer')
+        self.assertEqual(self.page.locator('.research_report div.domain-report-row').count(), 1)
+        source = self.page.locator('.web-source')
+        self.assertIn('Show excerpt', source.locator('summary').inner_text())
+        source.locator('summary').click()
+        self.assertTrue(source.locator('p').is_visible())
+        self.assertEqual(source.locator('a').inner_text(), 'Open source')
+        self.assertEqual(source.locator('a').get_attribute('target'), '_blank')
 
     def test_install_ignores_stale_progress_and_destroyed_loading(self):
         self.open_chat()

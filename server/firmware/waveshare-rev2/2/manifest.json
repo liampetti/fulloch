@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "board": "waveshare_touch_lcd_185c_box_rev2",
-  "firmware_version": "0.1.0",
+  "firmware_version": "2",
   "flash_size": 16777216,
   "images": [
     {
       "file": "bootloader.bin",
       "offset": 0,
       "size": 20928,
-      "sha256": "de93e9bf086e0b2b77b1cd9b393aa70b88db7a2f233e83d6ae16a8fa5ee55709"
+      "sha256": "1d5f3446415a0f55ac69e5752de9b304ed6681dd87d8b7ce4a6fb6b412bc9ecb"
     },
     {
       "file": "partition-table.bin",
@@ -25,8 +25,8 @@
     {
       "file": "application.bin",
       "offset": 131072,
-      "size": 1909424,
-      "sha256": "9ed6a9d985effa0fb9b83a19318a2a4e97215f0c3a258a0d31adf5ae65a89050"
+      "size": 1910128,
+      "sha256": "0f37960c57e9cff9b9ec34b20c36c0ee1f80bfb5cb7a798bd45b57df828521fc"
     }
   ],
   "nvs": {

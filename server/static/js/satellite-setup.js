@@ -2,6 +2,7 @@
 const BASE = '/api/satellite-provisioning';
 const HEADERS = { 'X-Fulloch-Provisioning': '1' };
 const RECOVERY = 'USB writes cannot be undone. Re-enter your secrets and flash again if the device does not connect.';
+const ESP32_USB = { usbVendorId: 0x303a, usbProductId: 0x1001 };
 
 export function createSatelliteSetup({ root = document, serial = navigator.serial,
   secure = window.isSecureContext, request = window.fetch.bind(window),
@@ -10,7 +11,6 @@ export function createSatelliteSetup({ root = document, serial = navigator.seria
   const form = root.getElementById('sat-setup-form');
   const fields = root.getElementById('sat-setup-fields');
   const prepare = root.getElementById('sat-setup-prepare');
-  const flash = root.getElementById('sat-setup-flash');
   const cancel = root.getElementById('sat-setup-cancel');
   const support = root.getElementById('sat-setup-support');
   const message = root.getElementById('sat-setup-message');
@@ -50,7 +50,6 @@ export function createSatelliteSetup({ root = document, serial = navigator.seria
     fields.disabled = false;
     prepare.disabled = !secure || !serial;
     prepare.hidden = false;
-    flash.hidden = true;
     cancel.textContent = finished || cancelled ? 'Close' : 'Cancel';
   }
   function payload() {
@@ -61,8 +60,8 @@ export function createSatelliteSetup({ root = document, serial = navigator.seria
     const player = input('music').value;
     const config = {
       schema_version: 1,
-      device: { id: input('device_id').value.trim(), name: input('device_name').value.trim(), timezone: input('timezone').value.trim() },
-      server: { url: url.href, certificate_pem: input('certificate').value.trim() },
+      device: { id: '', name: input('device_name').value.trim(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '' },
+      server: { url: url.href, certificate_pem: '' },
       audio: { speaker_volume_percent: Number(input('volume').value), aec_enabled: input('aec').checked },
       display: { rotation_degrees: Number(input('rotation').value) },
       music: { player },
@@ -76,11 +75,37 @@ export function createSatelliteSetup({ root = document, serial = navigator.seria
       if (!input('spotify_id').value.trim() || !input('spotify_secret').value || !input('spotify_token').value) throw new Error('Enter all Spotify credentials.');
       credentials.spotify = { client_id: input('spotify_id').value.trim(), client_secret: input('spotify_secret').value, refresh_token: input('spotify_token').value };
     }
-    return { config, credentials };
+    return { config, credentials, auto_setup: true };
   }
   function musicChanged() {
     root.getElementById('sat-setup-sonos').hidden = input('music').value !== 'sonos';
     root.getElementById('sat-setup-spotify').hidden = input('music').value !== 'spotify';
+    if (input('music').value === 'sonos') discoverSonos();
+  }
+  function options(id, values) {
+    const list = root.getElementById(id);
+    list.replaceChildren(...values.map(value => {
+      const option = root.createElement('option'); option.value = value; return option;
+    }));
+  }
+  async function discoverWifi() {
+    const note = root.getElementById('sat-setup-wifi-status');
+    note.textContent = 'Looking for Wi-Fi networks…';
+    try {
+      const { networks } = await (await api('/waveshare/wifi')).json();
+      options('sat-setup-networks', networks);
+      note.textContent = networks.length ? 'Choose a network or type its name.' : 'No networks detected. Type the Wi-Fi network name.';
+    } catch (_) { note.textContent = 'Wi-Fi discovery unavailable. Type the network name.'; }
+  }
+  async function discoverSonos() {
+    const note = root.getElementById('sat-setup-sonos-status');
+    note.textContent = 'Looking for Sonos speakers…';
+    try {
+      const { hosts } = await (await api('/waveshare/sonos')).json();
+      options('sat-setup-sonos-hosts', hosts);
+      if (hosts.length && !input('sonos_host').value) input('sonos_host').value = hosts[0];
+      note.textContent = hosts.length ? 'Choose a detected speaker or enter another host.' : 'No Sonos speakers detected. Enter the host manually.';
+    } catch (_) { note.textContent = 'Sonos discovery unavailable. Enter the host manually.'; }
   }
   input('music').addEventListener('change', musicChanged);
   async function open() {
@@ -93,7 +118,7 @@ export function createSatelliteSetup({ root = document, serial = navigator.seria
     prepare.disabled = true;
     support.textContent = !secure
       ? 'USB setup needs HTTPS in a secure context. Open the dashboard using its trusted HTTPS certificate, or use the CLI fallback below.'
-      : !serial ? 'WebSerial is unavailable. Use a supported Chromium browser over trusted HTTPS, or use the CLI fallback below.' : 'Review the server address and certificate before continuing.';
+      : !serial ? 'WebSerial is unavailable. Use a supported Chromium browser over trusted HTTPS, or use the CLI fallback below.' : 'The dashboard certificate or its local CA will be used automatically.';
     dialog.showModal();
     try {
       const response = await request('/status', { cache: 'no-store' });
@@ -103,38 +128,13 @@ export function createSatelliteSetup({ root = document, serial = navigator.seria
         support.textContent = 'Enable a dashboard password in Settings → Security, then sign in before setup.';
       } else {
         prepare.disabled = !secure || !serial;
+        discoverWifi();
       }
     } catch (_) {
       prepare.disabled = true;
       support.textContent = 'Cannot verify dashboard password protection. Check the connection and sign in.';
     }
   }
-  form.addEventListener('submit', async event => {
-    event.preventDefault();
-    if (busy || !secure || !serial || !form.reportValidity()) return;
-    let data;
-    try { data = payload(); } catch (error) { status(error.message); return; }
-    busy = true; inflight = true; cancelled = false; fields.disabled = true; prepare.disabled = true;
-    status('Enabling authentication and validating the device bundle…');
-    try {
-      await api('/migration', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm_tokenless_reprovisioning: true }) });
-      current();
-      const response = await api('/waveshare/transactions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-      transaction = (await response.json()).transaction_id;
-      current();
-      manifest = await (await api('/waveshare/manifest')).json();
-      current();
-      artifact = new Uint8Array(await (await api(`/transactions/${encodeURIComponent(transaction)}/nvs`)).arrayBuffer());
-      current();
-      if (artifact.length !== manifest.nvs.size) throw new Error('The NVS image does not match the firmware manifest.');
-      prepare.hidden = true; flash.hidden = false; flash.disabled = false;
-      status('Bundle validated. Choose the USB device and flash within five minutes.');
-    } catch (error) {
-      await cleanup();
-      if (!cancelled) status(`${error.message} ${RECOVERY}`);
-      idle();
-    } finally { inflight = false; data = null; resetSecrets(); }
-  });
   async function downloadImages() {
     const images = [];
     for (const image of manifest.images) {
@@ -147,13 +147,31 @@ export function createSatelliteSetup({ root = document, serial = navigator.seria
     images.push({ data: artifact, address: manifest.nvs.offset });
     return images;
   }
-  flash.addEventListener('click', async () => {
-    if (!busy || !transaction || cancelled) return;
-    // This must be the first asynchronous operation in the user gesture.
-    flash.disabled = true; inflight = true;
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (busy || !secure || !serial || !form.reportValidity()) return;
+    let data;
+    try { data = payload(); } catch (error) { status(error.message); return; }
+    const showAll = input('show_all_ports').checked;
+    busy = true; inflight = true; cancelled = false; fields.disabled = true; prepare.disabled = true;
+    let connecting = false;
     try {
-      const port = await serial.requestPort();
+      // WebSerial requires the chooser directly in the user's gesture.
+      const port = await serial.requestPort(showAll ? {} : { filters: [ESP32_USB] });
       current();
+      progress.value = 0; progress.hidden = false;
+      status('Enabling authentication and validating the device bundle…');
+      await api('/migration', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm_tokenless_reprovisioning: true }) });
+      current();
+      const response = await api('/waveshare/transactions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+      transaction = (await response.json()).transaction_id;
+      data = null; resetSecrets();
+      current();
+      manifest = await (await api('/waveshare/manifest')).json();
+      current();
+      artifact = new Uint8Array(await (await api(`/transactions/${encodeURIComponent(transaction)}/nvs`)).arrayBuffer());
+      current();
+      if (artifact.length !== manifest.nvs.size) throw new Error('The NVS image does not match the firmware manifest.');
       status('Checking firmware and connecting to the board…');
       const state = await (await api(`/transactions/${encodeURIComponent(transaction)}`)).json();
       current();
@@ -167,7 +185,9 @@ export function createSatelliteSetup({ root = document, serial = navigator.seria
       transport.trace = () => {};
       const loader = new ESPLoader({ transport, baudrate: 115200, debugLogging: false,
         terminal: { clean() {}, write() {}, writeLine() {} } });
+      connecting = true;
       await loader.main();
+      connecting = false;
       current();
       if (loader.chip?.CHIP_NAME !== 'ESP32-S3') throw new Error('This is not an ESP32-S3. Use the Waveshare Rev 2 board.');
       progress.hidden = false;
@@ -180,10 +200,26 @@ export function createSatelliteSetup({ root = document, serial = navigator.seria
           status(`Flashing image ${index + 1} of ${images.length}: ${progress.value}%`);
         } });
       current();
-      await loader.after('hard_reset');
-      await transport.disconnect(); transport = null;
+      // esptool-js 0.7.1's hard_reset only releases RTS, so explicitly pulse
+      // EN with GPIO0 released. This starts the flashed app, not the ROM loader.
+      let resetFailed = false;
+      try {
+        await transport.setDTR(false);
+        try {
+          await transport.setRTS(true);
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } finally {
+          await transport.setRTS(false);
+        }
+      } catch (_) { resetFailed = true; }
+      // A successful reset may disconnect the USB serial device itself.
+      try { await transport.disconnect(); } catch (_) { /* Device may have rebooted. */ }
+      transport = null;
       artifact = null;
-      status('Flash complete. Waiting for the expected device to authenticate…');
+      current();
+      status(resetFailed
+        ? 'Flash complete, but automatic restart failed. Press the device reset button; waiting for authentication…'
+        : 'Flash complete. Waiting for the expected device to authenticate…');
       while (true) {
         current();
         const result = await (await api(`/transactions/${encodeURIComponent(transaction)}`)).json();
@@ -198,10 +234,22 @@ export function createSatelliteSetup({ root = document, serial = navigator.seria
     } catch (error) {
       if (transport) { try { await transport.disconnect(); } catch (_) {} transport = null; }
       await cleanup();
-      if (!cancelled) status(`${error.name === 'NotFoundError' ? 'No USB device selected.' : error.message} ${RECOVERY}`);
+      if (!cancelled) {
+        if (error.name === 'NotFoundError') {
+          status('No USB device selected. Re-enter your secrets and try again.');
+        } else if (connecting && (error.name === 'NetworkError' || /failed to open serial port/i.test(error.message))) {
+          const platform = navigator.userAgentData?.platform || navigator.platform || '';
+          const linux = /linux/i.test(platform)
+            ? ' On Linux, check serial-port permissions: run sudo usermod -aG dialout "$USER", then log out completely and back in before reopening the browser.'
+            : '';
+          status(`Could not open or connect to the USB serial port. No firmware was written. Close serial monitors and other apps using the board, reconnect its USB cable, and try again.${linux} If it still fails, check that another service is not using the port. Re-enter your secrets to retry.`);
+        } else {
+          status(`${error.message} ${RECOVERY}`);
+        }
+      }
       idle();
     } finally {
-      inflight = false;
+      inflight = false; data = null; resetSecrets();
     }
   });
   async function stop() {

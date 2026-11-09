@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from scripts.create_local_ca import issue_certificates
 from server import satellite_bundle, satellite_waveshare
 
 
@@ -106,3 +107,37 @@ def test_generates_real_nvs_with_installed_generator():
     cert = _certificate([x509.DNSName("device.example")])
     image = satellite_waveshare.generate_nvs(*_bundle("device.example", cert))
     assert len(image) == 0x10000
+
+
+def test_dashboard_ca_is_verified_and_leaf_identity_is_checked(tmp_path):
+    ca_path, leaf_path, _ = issue_certificates(tmp_path, ["device.example"], [], False)
+    leaf = leaf_path.read_text()
+    trust = satellite_waveshare.dashboard_trust_certificate(leaf, ca_path)
+    assert trust == ca_path.read_text()
+    config, credentials = _bundle("device.example", trust)
+    satellite_waveshare.validate_bundle(config, credentials, identity_certificate=leaf)
+    assert (
+        len(satellite_waveshare.generate_nvs(config, credentials, identity_certificate=leaf))
+        == 0x10000
+    )
+    config["server"]["url"] = "wss://wrong.example/ws/satellite-v2"
+    with pytest.raises(satellite_bundle.BundleError, match="does not match"):
+        satellite_waveshare.validate_bundle(config, credentials, identity_certificate=leaf)
+
+
+def test_dashboard_certificate_rejects_missing_or_unrelated_ca(tmp_path):
+    _, leaf_path, _ = issue_certificates(tmp_path / "one", ["device.example"], [], False)
+    other_ca, _, _ = issue_certificates(tmp_path / "two", ["device.example"], [], False)
+    leaf = leaf_path.read_text()
+    for ca in (None, other_ca, tmp_path / "missing"):
+        with pytest.raises(satellite_bundle.BundleError, match="local CA"):
+            satellite_waveshare.dashboard_trust_certificate(leaf, ca)
+
+
+def test_self_signed_dashboard_ignores_stale_ca(tmp_path):
+    from core.tls_certs import ensure_self_signed_cert
+
+    cert_path, _ = ensure_self_signed_cert(str(tmp_path / "dashboard"))
+    other_ca, _, _ = issue_certificates(tmp_path / "other", [], [], False)
+    cert = open(cert_path, encoding="utf-8").read()
+    assert satellite_waveshare.dashboard_trust_certificate(cert, other_ca) == cert

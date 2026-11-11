@@ -884,6 +884,19 @@ def register_chat_routes(
         ha.set_entity_denied(entity_id, req.denied)
         return JSONResponse({"available": True, "entities": ha.list_entities()})
 
+    @app.post("/entities/refresh")
+    def entities_refresh() -> JSONResponse:
+        require_ready()
+        from tools._config import config
+
+        if "home_assistant" not in config:
+            raise HTTPException(status_code=404, detail="Home Assistant not configured")
+        from tools import ha_client
+
+        if not ha_client.refresh_entities():
+            raise HTTPException(status_code=502, detail="Could not refresh Home Assistant entities")
+        return JSONResponse({"available": True, "entities": ha_client.list_entities()})
+
     @app.post("/entities/bulk")
     def entities_set_bulk(req: EntitiesDenyRequest) -> JSONResponse:
         require_ready()

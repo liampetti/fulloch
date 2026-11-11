@@ -193,6 +193,100 @@ def test_voice_fast_path_still_uses_satellite_room(room_chat):
     assert current_satellite_ha_area.get() is None
 
 
+@pytest.mark.parametrize("text", ["turn off the light", "turn off light"])
+def test_voice_hassil_singular_light_targets_satellite_room(room_chat, tmp_path, text):
+    _http, assistant, post = room_chat
+    assistant.configure_hassil(["en"], str(tmp_path / "intents"))
+    assistant.llm_enabled = True
+    assistant.satellites["office-voice"] = SatelliteSession(
+        id="office-voice", chunk_q=None, ha_area="downstairs_office",
+    )
+    assistant._handle_wakeword(text, source="voice", satellite_id="office-voice")
+    post.assert_called_once_with("/api/services/light/turn_off", json={
+        "entity_id": ["light.office", "light.office_pendant"],
+    })
+    assistant._generate_with_context_recovery.assert_not_called()
+
+
+@pytest.mark.parametrize("text", ["turn off light", "turn off the lights"])
+def test_native_handshake_location_drives_voice_room_fastpath(room_chat, tmp_path, monkeypatch, text):
+    http, assistant, post = room_chat
+    monkeypatch.setitem(ha_client._ENTITY_ALIASES, "light", "light.entry_light")
+    monkeypatch.setitem(ha_client._ENTITY_ALIASES_MULTI, "light", ["light.entry_light"])
+    assistant.configure_hassil(["en"], str(tmp_path / "intents"))
+    assistant.llm_enabled = True
+    with http.websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json({
+            "type": "satellite.hello", "protocol": {"name": "satellite-v2", "major": 2, "minor": 4},
+            "device": {"id": "office-01", "name": "Downstairs Office"}, "capabilities": {},
+        })
+        session_id = ws.receive_json()["session_id"]
+        assert assistant.satellites[session_id].ha_area == "Downstairs Office"
+        assistant._handle_wakeword(text, source="voice", satellite_id=session_id)
+        post.assert_called_once_with("/api/services/light/turn_off", json={
+            "entity_id": ["light.office", "light.office_pendant"],
+        })
+        assistant._generate_with_context_recovery.assert_not_called()
+
+
+def test_native_handshake_location_reaches_model_and_bare_light_tool(room_chat, tmp_path):
+    http, assistant, post = room_chat
+    assistant.configure_hassil(["en"], str(tmp_path / "intents"))
+    assistant.llm_enabled = True
+    assistant.replan_stall_cache = []
+    assistant._generate_with_context_recovery = Mock(return_value=json.dumps({
+        "actions": [{"intent": "turn_off", "args": ["light"]}],
+    }))
+    with http.websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json({
+            "type": "satellite.hello", "protocol": {"name": "satellite-v2", "major": 2, "minor": 4},
+            "device": {"id": "office-01", "name": "Downstairs Office"}, "capabilities": {},
+        })
+        session_id = ws.receive_json()["session_id"]
+        assistant._handle_wakeword("please switch the light off now", source="voice", satellite_id=session_id)
+        prompt = assistant._generate_with_context_recovery.call_args.kwargs["system_prompt"]
+        assert "Downstairs Office" in prompt
+        post.assert_called_once_with("/api/services/light/turn_off", json={
+            "entity_id": ["light.office", "light.office_pendant"],
+        })
+
+
+@pytest.mark.parametrize("language,text", [
+    ("de", "schalte das licht aus"), ("fr", "éteins la lumière"),
+])
+def test_native_handshake_location_works_for_multilingual_intents(room_chat, language, text):
+    from pathlib import Path
+
+    from utils.hassil_fastpath import HassilFastPath
+
+    http, assistant, post = room_chat
+    assistant._hassil_fastpath = HassilFastPath([language], str(Path(__file__).parent / "fixtures/hassil"))
+    with http.websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json({
+            "type": "satellite.hello", "protocol": {"name": "satellite-v2", "major": 2, "minor": 4},
+            "device": {"id": "office-01", "name": "Downstairs Office"}, "capabilities": {},
+        })
+        session_id = ws.receive_json()["session_id"]
+        assistant._handle_wakeword(text, source="voice", satellite_id=session_id)
+        post.assert_called_once_with("/api/services/light/turn_off", json={
+            "entity_id": ["light.office", "light.office_pendant"],
+        })
+        assistant._generate_with_context_recovery.assert_not_called()
+
+
+def test_invalid_native_location_does_not_fall_through_to_entry_light(room_chat, tmp_path):
+    http, assistant, post = room_chat
+    assistant.configure_hassil(["en"], str(tmp_path / "intents"))
+    with http.websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json({
+            "type": "satellite.hello", "protocol": {"name": "satellite-v2", "major": 2, "minor": 4},
+            "device": {"id": "office-01", "name": "Office"}, "capabilities": {},
+        })
+        session_id = ws.receive_json()["session_id"]
+        assistant._handle_wakeword("turn off light", source="voice", satellite_id=session_id)
+        post.assert_not_called()
+
+
 def test_room_default_keeps_denylist_enforcement(room_chat, monkeypatch):
     http, _assistant, post = room_chat
     monkeypatch.setattr(ha_client, "_DENIED_ENTITIES", frozenset({"light.office_pendant"}))

@@ -32,6 +32,19 @@ def test_entities_unavailable_without_ha(monkeypatch):
     r = client.get("/entities")
     assert r.status_code == 200
     assert r.json() == {"available": False, "entities": []}
+    assert client.post("/entities/refresh").status_code == 404
+
+
+def test_entities_refresh_endpoint(monkeypatch):
+    import tools._config as cfg
+
+    monkeypatch.setattr(cfg, "config", {"home_assistant": {}})
+    monkeypatch.setattr(ha, "refresh_entities", lambda: True)
+    monkeypatch.setattr(ha, "list_entities", lambda: [{"entity_id": "light.new"}])
+    client = TestClient(create_app(_stub_assistant()))
+    assert client.post("/entities/refresh").json()["entities"] == [{"entity_id": "light.new"}]
+    monkeypatch.setattr(ha, "refresh_entities", lambda: False)
+    assert client.post("/entities/refresh").status_code == 502
 
 
 def test_entities_list_and_toggle(monkeypatch, tmp_path):

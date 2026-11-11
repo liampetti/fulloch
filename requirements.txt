@@ -88,6 +88,7 @@ librosa==0.11.0   # Qwen3-ASR ONNX backend (asr.backend: qwen-onnx) mel features
 sentencepiece==0.2.1  # Pocket TTS ONNX tokenizer
 scipy==1.15.3         # Pocket TTS WAV reference resampling
 pocket-tts==2.1.0     # official Kyutai Pocket TTS PyTorch streaming backend
+tokenizers>=0.21,<0.24  # Pocket TTS JSON tokenizers (Egyptian and Wolof)
 
 # These packages require special install flags - see Dockerfile
 # qwen-tts: pip install --no-deps git+https://github.com/liampetti/Qwen3-TTS-streaming.git@97da215

@@ -8,7 +8,7 @@ export function createWizard({ state, voice, doInstall }) {
   const sel = state.sel;
   const preset = () => (state.schema.tier_presets || []).find(t => t.id === sel.tier);
   let preparationGeneration = 0;
-  const intentToTts = { en: 'english', fr: 'french', de: 'german', it: 'italian', pt: 'portuguese', es: 'spanish' };
+  const intentToTts = { en: 'english', fr: 'french', de: 'german', it: 'italian', pt: 'portuguese', es: 'spanish', nl: 'dutch', zh: 'chinese', hi: 'hindi', ar: 'egyptian', wo: 'wolof' };
 
   function refreshTtsLanguage() {
     const backend = sel.models?.tts?.backend || state.schema.default_backends?.tts;

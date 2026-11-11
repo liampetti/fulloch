@@ -181,7 +181,7 @@ SCHEMA: tuple = (
     Field(
         "general", "tts_language", "enum", "Voice", "english",
         "Pretrained TTS language weights, used only by supported models. Restart required.",
-        choices=("english", "french", "german", "italian", "portuguese", "spanish"),
+        choices=("english", "french", "german", "italian", "portuguese", "spanish", "dutch", "chinese", "hindi", "egyptian", "wolof"),
     ),
     Field(
         "general",

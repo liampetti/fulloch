@@ -120,6 +120,7 @@
     </section>
 
     <section id="entities" class="view" hidden>
+      <button type="button" id="entities-refresh">Refresh from Home Assistant</button>
       <div id="entities-all-controls" class="entity-bulk-controls" hidden>
         <span>All entities</span>
         <button type="button" id="entities-allow-all">Allow all</button>
@@ -196,12 +197,13 @@
       <fieldset id="sat-setup-fields">
         <legend>Device and network</legend>
         <div class="sat-setup-grid">
-          <label>Device name <input name="device_name" required maxlength="64" placeholder="Kitchen"></label>
+          <label>Device location <input name="device_location" list="sat-setup-areas" required maxlength="64" placeholder="Choose an area or enter a location"><datalist id="sat-setup-areas"></datalist></label>
           <label>Wi-Fi network <input name="wifi_ssid" list="sat-setup-networks" required maxlength="32" placeholder="Choose or type a network"><datalist id="sat-setup-networks"></datalist></label>
           <label>Wi-Fi password <input name="wifi_password" type="password" required maxlength="63" autocomplete="new-password"></label>
           <label>Server WSS URL <input name="server_url" type="url" required placeholder="wss://fulloch.local:8765/ws/satellite-v2"></label>
         </div>
-        <p>Use a LAN hostname or IP reachable by the satellite, not a Docker bridge address. The certificate must match this host. If the address or certificate changes, reprovision the device.</p>
+        <p id="sat-setup-area-status" role="status">Choose a Home Assistant area or enter a custom location.</p>
+        <p>Device location must exactly match a Home Assistant area name or ID for room-local commands. Use a LAN hostname or IP reachable by the satellite, not a Docker bridge address. The certificate must match this host. If the address or certificate changes, reprovision the device.</p>
         <p id="sat-setup-wifi-status" role="status"></p>
         <details><summary>Additional options</summary>
         <div class="sat-setup-grid">

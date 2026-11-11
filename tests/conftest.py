@@ -4,8 +4,10 @@ Pytest configuration and fixtures for Fulloch tests.
 
 import importlib
 import importlib.machinery
+import ipaddress
 import json
 import os
+import socket
 import sys
 import tempfile
 import types
@@ -13,6 +15,49 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+# Tests must not download models or depend on external services. The socket
+# guard also applies when code explicitly overrides the Hugging Face offline
+# flags (as the downloader does); loopback and Unix sockets remain available.
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+_original_getaddrinfo = socket.getaddrinfo
+_original_connect = socket.socket.connect
+_original_connect_ex = socket.socket.connect_ex
+
+
+def _local_host(host):
+    if isinstance(host, bytes):
+        host = host.decode("ascii")
+    if host in (None, "localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _offline_getaddrinfo(host, *args, **kwargs):
+    if not _local_host(host):
+        raise OSError(f"External network access is disabled in tests: {host}")
+    return _original_getaddrinfo(host, *args, **kwargs)
+
+
+def _offline_connect(sock, address):
+    if sock.family in (socket.AF_INET, socket.AF_INET6) and not _local_host(address[0]):
+        raise OSError(f"External network access is disabled in tests: {address}")
+    return _original_connect(sock, address)
+
+
+def _offline_connect_ex(sock, address):
+    if sock.family in (socket.AF_INET, socket.AF_INET6) and not _local_host(address[0]):
+        raise OSError(f"External network access is disabled in tests: {address}")
+    return _original_connect_ex(sock, address)
+
+
+socket.getaddrinfo = _offline_getaddrinfo
+socket.socket.connect = _offline_connect
+socket.socket.connect_ex = _offline_connect_ex
 
 # Disable HA startup retries before test modules import the integration.
 os.environ.setdefault("FULLOCH_HA_ALIAS_RETRIES", "0")

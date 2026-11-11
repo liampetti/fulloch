@@ -46,6 +46,56 @@ def test_multilingual_named_lights(matcher, text):
     assert matcher.match(text) == {"actions": [{"intent": "turn_on", "args": ["light.kitchen_lights"]}]}
 
 
+@pytest.mark.parametrize("text", [
+    "turn off the light", "turn off light", "turn off the lights",
+    "schalte das licht aus", "éteins la lumière",
+])
+def test_room_local_light_commands_in_installed_languages(matcher, text):
+    from core.satellite_context import current_satellite_ha_area
+
+    token = current_satellite_ha_area.set("office")
+    try:
+        assert matcher.match(text) == {"actions": [{"intent": "turn_off", "args": ["lights"]}]}
+    finally:
+        current_satellite_ha_area.reset(token)
+
+
+def test_whole_house_lights_are_not_interpreted_as_room_local(matcher):
+    from core.satellite_context import current_satellite_ha_area
+
+    token = current_satellite_ha_area.set("office")
+    try:
+        assert matcher.match("turn off all the lights") is None
+    finally:
+        current_satellite_ha_area.reset(token)
+
+
+@pytest.mark.parametrize("text", ["turn off light", "turn off the light"])
+def test_bare_light_prefers_room_over_a_real_light_alias(matcher, monkeypatch, text):
+    from core.satellite_context import current_satellite_ha_area
+
+    monkeypatch.setattr(ha_client, "_ENTITY_ALIASES", {"light": "light.entry"})
+    monkeypatch.setattr(ha_client, "_ENTITY_ALIASES_MULTI", {"light": ["light.entry"]})
+    token = current_satellite_ha_area.set("office")
+    try:
+        assert matcher.match(text) == {"actions": [{"intent": "turn_off", "args": ["lights"]}]}
+    finally:
+        current_satellite_ha_area.reset(token)
+
+
+def test_room_context_does_not_override_explicitly_named_light(matcher):
+    from core.satellite_context import current_satellite_ha_area
+
+    token = current_satellite_ha_area.set("office")
+    try:
+        result = matcher.match("turn off the kitchen lights")
+        assert result is None or result == {
+            "actions": [{"intent": "turn_off", "args": ["light.kitchen_lights"]}]
+        }
+    finally:
+        current_satellite_ha_area.reset(token)
+
+
 @pytest.mark.parametrize("text, language", [
     ("turn on the kitchen lights", "en"),
     ("allume la lumière de la cuisine", "fr"),

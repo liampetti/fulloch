@@ -36,22 +36,22 @@ def test_load_tts_uses_selected_mirror_and_device(monkeypatch, tmp_path):
     )
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    (config_dir / "french_24l.yaml").write_text(
-        "weights_path: hf://kyutai/pocket-tts/languages/french_24l/model.safetensors@revision\n"
+    (config_dir / "english_2026-04.yaml").write_text(
+        "weights_path: old\n"
         "weights_path_without_voice_cloning: hf://fallback\n"
-        "  tokenizer_path: hf://kyutai/pocket-tts-without-voice-cloning/languages/french_24l/tokenizer.model@revision\n"
+        "flow_lm:\n  lookup_table:\n    tokenizer_path: old\n"
     )
     monkeypatch.setattr(tts.importlib.resources, "files", lambda _: tmp_path)
 
-    tts.load_tts(language="french_24l", device="cpu")
+    tts.load_tts(language="french", device="cpu")
 
     assert calls["temp"] == 0.7 and calls["lsd_decode_steps"] == 1
-    assert f"hf://{tts.MIRROR_REPO}/languages/french_24l/model.safetensors@{tts.MIRROR_REVISION}" in calls["config_contents"]
+    assert f"hf://{tts.MIRROR_REPO}/french/model.safetensors@{tts.MIRROR_REVISION}" in calls["config_contents"]
     assert "weights_path_without_voice_cloning" not in calls["config_contents"]
-    assert f"hf://{tts.MIRROR_REPO}/languages/french_24l/tokenizer.model@{tts.MIRROR_REVISION}" in calls["config_contents"]
+    assert f"hf://{tts.MIRROR_REPO}/french/tokenizer.model@{tts.MIRROR_REVISION}" in calls["config_contents"]
 
 
-@pytest.mark.parametrize("language", ["english_2026-04", "french_24l", "german", "italian", "portuguese", "spanish"])
+@pytest.mark.parametrize("language", ["english", "french", "german", "italian", "portuguese", "spanish", "dutch", "chinese", "hindi"])
 def test_bundled_language_configs_use_mirror_for_weights_and_tokenizer(monkeypatch, language):
     from importlib import resources
 
@@ -77,9 +77,73 @@ def test_bundled_language_configs_use_mirror_for_weights_and_tokenizer(monkeypat
     monkeypatch.setattr(tts.importlib.resources, "files", lambda _: configs)
     tts.load_tts(language=language)
     assert calls["device"] == "cpu"
-    assert f"languages/{language}/model.safetensors@{tts.MIRROR_REVISION}" in calls["config"]
-    assert f"languages/{language}/tokenizer.model@{tts.MIRROR_REVISION}" in calls["config"]
+    path = "alt/hindi" if language == "hindi" else language
+    assert f"{path}/model.safetensors@{tts.MIRROR_REVISION}" in calls["config"]
+    assert f"{path}/tokenizer.model@{tts.MIRROR_REVISION}" in calls["config"]
     assert "weights_path_without_voice_cloning" not in calls["config"]
+
+
+def test_local_language_override_loads_only_local_files(monkeypatch, tmp_path):
+    import yaml
+
+    seen = {}
+    class Model:
+        @classmethod
+        def load_model(cls, **kwargs):
+            seen.update(yaml.safe_load(Path(kwargs["config"]).read_text()))
+            return cls()
+        def to(self, device):
+            return self
+        def eval(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "pocket_tts", SimpleNamespace(TTSModel=Model))
+    config = tmp_path / "custom.yaml"
+    config.write_text("weights_path: old\nflow_lm:\n  lookup_table:\n    tokenizer_path: old\n")
+    weights = tmp_path / "custom.safetensors"
+    tokenizer = tmp_path / "custom.model"
+    weights.touch()
+    tokenizer.touch()
+    override = {"config": str(config), "weights": str(weights), "tokenizer": str(tokenizer)}
+    tts._load_model("french", "cpu", {"language_models": {"french": override}})
+    assert seen["weights_path"] == str(weights)
+    assert seen["flow_lm"]["lookup_table"]["tokenizer_path"] == str(tokenizer)
+    weights.unlink()
+    with pytest.raises(FileNotFoundError):
+        tts._load_model("french", "cpu", {"language_models": {"french": override}})
+
+
+@pytest.mark.parametrize("language,vocab", [("egyptian", 79), ("wolof", 3000)])
+def test_json_tokenizer_adapter_is_scoped_and_restored(monkeypatch, language, vocab):
+    pocket_tts = pytest.importorskip("pocket_tts")
+    tokenizers = pytest.importorskip("tokenizers")
+    from pocket_tts.conditioners import text as text_module
+    from pocket_tts.utils import utils
+
+    original = text_module.SentencePieceTokenizer
+    fake_tokenizer = SimpleNamespace(
+        get_vocab_size=lambda: vocab,
+        encode=lambda text: SimpleNamespace(ids=[1, 2]),
+        decode=lambda ids: "words",
+    )
+    monkeypatch.setattr(tokenizers.Tokenizer, "from_file", lambda _: fake_tokenizer)
+    monkeypatch.setattr(utils, "download_if_necessary", lambda path: path)
+
+    class Model:
+        @classmethod
+        def load_model(cls, **kwargs):
+            tokenizer = text_module.SentencePieceTokenizer(vocab, "tokenizer.json")
+            assert tokenizer("test").tokens.tolist() == [[1, 2]]
+            assert tokenizer.sp.decode([1, 2]) == "words"
+            return cls()
+        def to(self, device):
+            return self
+        def eval(self):
+            pass
+
+    monkeypatch.setattr(pocket_tts, "TTSModel", Model)
+    tts._load_model(language, "cpu", {})
+    assert text_module.SentencePieceTokenizer is original
 
 
 def test_unsupported_speed_is_ignored_with_explicit_warning(caplog):
@@ -141,8 +205,9 @@ def test_pocket_native_stream_forwards_pcm_without_waiting_for_completion(monkey
 
 
 @pytest.mark.parametrize("locale,expected", [
-    ("en-US", "english_2026-04"), ("fr-FR", "french_24l"), ("de", "german"),
-    ("it", "italian"), ("pt-BR", "portuguese"), ("es", "spanish"), ("sv", None),
+    ("en-US", "english"), ("fr-FR", "french"), ("de", "german"),
+    ("it", "italian"), ("pt-BR", "portuguese"), ("es", "spanish"),
+    ("nl", "dutch"), ("zh", "chinese"), ("hi", "hindi"), ("sv", None),
 ])
 def test_locale_maps_only_supported_models(locale, expected):
     assert tts._language_model(locale) == expected
@@ -153,7 +218,7 @@ def test_uncached_language_falls_back_and_requests_download(monkeypatch, tmp_pat
 
     default, default_voice = object(), object()
     monkeypatch.setattr(tts, "_model", default)
-    monkeypatch.setattr(tts, "_default_language", "english_2026-04")
+    monkeypatch.setattr(tts, "_default_language", "english")
     monkeypatch.setattr(tts, "_alternate", None)
     monkeypatch.setattr(tts, "_load_failures", {})
     monkeypatch.setattr(tts, "_weights_cached", lambda _: False)
@@ -162,7 +227,7 @@ def test_uncached_language_falls_back_and_requests_download(monkeypatch, tmp_pat
     job = tts._Job("bonjour", default_voice, None, TtsSession(), "fr", tmp_path / "voice.wav")
 
     assert tts._select_job_model(job) == (default, default_voice)
-    download.assert_called_once_with("french_24l")
+    download.assert_called_once_with("french")
 
 
 def test_alternate_loads_on_cpu_and_is_reused_without_cuda_model(monkeypatch, tmp_path):
@@ -173,7 +238,7 @@ def test_alternate_loads_on_cpu_and_is_reused_without_cuda_model(monkeypatch, tm
     alternate = SimpleNamespace(get_state_for_audio_prompt=Mock(return_value="french voice"))
     load = Mock(return_value=alternate)
     monkeypatch.setattr(tts, "_model", default)
-    monkeypatch.setattr(tts, "_default_language", "english_2026-04")
+    monkeypatch.setattr(tts, "_default_language", "english")
     monkeypatch.setattr(tts, "_alternate", None)
     monkeypatch.setattr(tts, "_load_failures", {})
     monkeypatch.setattr(tts, "_load_options", {"temperature": 0.6})
@@ -184,9 +249,28 @@ def test_alternate_loads_on_cpu_and_is_reused_without_cuda_model(monkeypatch, tm
 
     assert tts._select_job_model(job) == (alternate, "french voice")
     assert tts._select_job_model(job) == (alternate, "french voice")
-    load.assert_called_once_with("french_24l", "cpu", {"temperature": 0.6})
+    load.assert_called_once_with("french", "cpu", {"temperature": 0.6})
     alternate.get_state_for_audio_prompt.assert_called_once_with(voice_path)
     assert tts._model is default
+
+
+def test_custom_alternate_does_not_request_mirror_download(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+
+    default, voice = object(), object()
+    alternate = SimpleNamespace(get_state_for_audio_prompt=Mock(return_value="custom voice"))
+    monkeypatch.setattr(tts, "_model", default)
+    monkeypatch.setattr(tts, "_default_language", "english")
+    monkeypatch.setattr(tts, "_alternate", None)
+    monkeypatch.setattr(tts, "_load_failures", {})
+    monkeypatch.setattr(tts, "_load_options", {"language_models": {"french": {"config": "custom"}}})
+    cache = Mock(side_effect=AssertionError("custom model must not inspect mirror"))
+    monkeypatch.setattr(tts, "_weights_cached", cache)
+    monkeypatch.setattr(tts, "_enough_alternate_ram", lambda: True)
+    monkeypatch.setattr(tts, "_load_model", Mock(return_value=alternate))
+    job = tts._Job("bonjour", voice, None, TtsSession(), "fr", tmp_path / "voice.wav")
+    assert tts._select_job_model(job) == (alternate, "custom voice")
+    cache.assert_not_called()
 
 
 def test_new_language_replaces_cpu_alternate_and_custom_voice_falls_back(monkeypatch, tmp_path):
@@ -197,7 +281,7 @@ def test_new_language_replaces_cpu_alternate_and_custom_voice_falls_back(monkeyp
     old_path = tmp_path / "old.wav"
     load = Mock(return_value=new_model)
     monkeypatch.setattr(tts, "_model", default)
-    monkeypatch.setattr(tts, "_default_language", "english_2026-04")
+    monkeypatch.setattr(tts, "_default_language", "english")
     monkeypatch.setattr(tts, "_alternate", ("german", old_path, old_model, "old voice"))
     monkeypatch.setattr(tts, "_load_failures", {})
     monkeypatch.setattr(tts, "_weights_cached", lambda _: True)
@@ -208,7 +292,7 @@ def test_new_language_replaces_cpu_alternate_and_custom_voice_falls_back(monkeyp
     load.assert_not_called()
     job = tts._Job("bonjour", voice, None, TtsSession(), "fr", tmp_path / "new.wav")
     assert tts._select_job_model(job) == (new_model, "new voice")
-    assert tts._alternate[:2] == ("french_24l", tmp_path / "new.wav")
+    assert tts._alternate[:2] == ("french", tmp_path / "new.wav")
     assert load.call_args.args[1] == "cpu"
 
 
@@ -217,7 +301,7 @@ def test_low_ram_and_load_failure_retain_default(monkeypatch, tmp_path):
 
     default, voice = object(), object()
     monkeypatch.setattr(tts, "_model", default)
-    monkeypatch.setattr(tts, "_default_language", "english_2026-04")
+    monkeypatch.setattr(tts, "_default_language", "english")
     monkeypatch.setattr(tts, "_alternate", None)
     monkeypatch.setattr(tts, "_load_failures", {})
     monkeypatch.setattr(tts, "_weights_cached", lambda _: True)
@@ -252,13 +336,13 @@ def test_language_download_is_single_flight_and_offline_failure_is_throttled(mon
     monkeypatch.setattr(tts, "_download_failures", {})
     monkeypatch.setattr(tts.time, "monotonic", lambda: 1000.0)
     monkeypatch.setattr(tts.threading, "Thread", lambda **kw: threads.append(kw) or SimpleNamespace(start=Mock()))
-    tts._request_language_download("french_24l")
+    tts._request_language_download("french")
     tts._request_language_download("german")
     assert len(threads) == 1
     monkeypatch.setattr(tts.subprocess, "run", Mock(side_effect=OSError("offline")))
     threads[0]["target"](*threads[0]["args"])
     assert tts._download_active is None
-    tts._request_language_download("french_24l")
+    tts._request_language_download("french")
     assert len(threads) == 1
 
 
@@ -266,18 +350,18 @@ def test_background_download_uses_pinned_weights_and_tokenizer(monkeypatch):
     from unittest.mock import Mock
 
     download = Mock()
-    monkeypatch.setattr(tts, "_download_active", "french_24l")
+    monkeypatch.setattr(tts, "_download_active", "french")
     monkeypatch.setattr(tts, "_download_failures", {})
     monkeypatch.setattr(tts, "_weights_cached", lambda _: True)
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setattr(tts.subprocess, "run", download)
 
-    tts._download_language("french_24l")
+    tts._download_language("french")
 
     args, kwargs = download.call_args
     assert args[0][:2] == [sys.executable, "-c"]
     assert args[0][3:] == [tts.MIRROR_REPO, tts.MIRROR_REVISION,
-                           "languages/french_24l/model.safetensors", "languages/french_24l/tokenizer.model"]
+                           "french/model.safetensors", "french/tokenizer.model"]
     assert kwargs["env"]["HF_HUB_OFFLINE"] == "0"
     assert tts.os.environ["HF_HUB_OFFLINE"] == "1"
     assert kwargs["check"] is True
@@ -310,7 +394,7 @@ def test_streaming_worker_uses_alternate_then_default_without_extra_gpu_model(mo
     alternate = SimpleNamespace(get_state_for_audio_prompt=Mock(return_value="french state"))
     calls = []
     monkeypatch.setattr(tts, "_model", default)
-    monkeypatch.setattr(tts, "_default_language", "english_2026-04")
+    monkeypatch.setattr(tts, "_default_language", "english")
     monkeypatch.setattr(tts, "_alternate", None)
     monkeypatch.setattr(tts, "_load_failures", {})
     monkeypatch.setattr(tts, "_voice_binding", (voice, tmp_path / "voice.wav"))

@@ -63,7 +63,7 @@ class ProvisioningTransactions:
     def prepare_new(self, name: str, generate: Callable[[str, str], bytes], *, occupied=()) -> str:
         """Allocate and reserve a new identity without replacing a registered device."""
         if not isinstance(name, str) or not name.strip():
-            raise ValueError("Device name is required")
+            raise ValueError("Device location is required")
         slug = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
         slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")[:55].rstrip("-") or "satellite"
         with self._lock:

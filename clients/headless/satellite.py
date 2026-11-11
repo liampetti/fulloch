@@ -283,7 +283,7 @@ class HeadlessSatellite:
             "protocol": {"name": "satellite-v2", "major": 2, "minor": 4},
             "device": {
                 "id": sat.get("id", "headless-satellite"),
-                "name": sat.get("room", "Headless satellite"),
+                "name": sat.get("location", sat.get("room")) or "",
                 "firmware": sat.get("firmware", "dev"),
                 "build": sat.get("build", "dev"),
                 "board": sat.get("board", "headless"),

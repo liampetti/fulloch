@@ -94,7 +94,7 @@ def provision(client, url):
         print("Cancelled; no changes made.")
         return 1
     device = ask("Device ID")
-    name = ask("Device name")
+    name = ask("Device location (Home Assistant area name or ID)")
     timezone = ask("POSIX timezone", "UTC0")
     ssid = ask("Wi-Fi network")
     wifi_password = getpass.getpass("Wi-Fi password: ")
@@ -120,6 +120,7 @@ def provision(client, url):
     player = ask("Music service: none, sonos, spotify", "none").lower()
     config = {
         "schema_version": 1,
+        # Firmware schema v1 retains "name" as the wire/storage key for location.
         "device": {"id": device, "name": name, "timezone": timezone},
         "server": {"url": server_url, "certificate_pem": certificate},
         "audio": {"speaker_volume_percent": volume, "aec_enabled": True},

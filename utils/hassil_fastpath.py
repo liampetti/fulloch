@@ -45,6 +45,7 @@ class FastPathEmission(dict):
 
 
 _DEFAULT_AREA = "__fulloch_default_media_target__"
+_SATELLITE_AREA = "__fulloch_satellite_area__"
 _LOCAL_INTENTS = frozenset({
     "HassGetCurrentTime", "HassGetCurrentDate", "HassGetWeather",
     "HassStartTimer", "HassCancelTimer", "HassTimerStatus",
@@ -222,6 +223,32 @@ class HassilFastPath:
         # a broader area command through another sentence pattern.
         if blocked:
             return None
+        # HA's language packs contain room-local light sentences that require
+        # an area in conversation context. Supply a sentinel, not a real area:
+        # only accept matches which explicitly copy it into the area slot, and
+        # let the existing light tool resolve the current room safely.
+        from core.satellite_context import current_satellite_ha_area
+
+        if current_satellite_ha_area.get():
+            # A real entity alias named "light" must not capture a bare
+            # room-local command before HA's generic light sentence can match.
+            # Keep area/floor slots, but omit entity names only for this probe;
+            # explicit names still use the normal matcher below.
+            room_slots = {**slots, "name": TextSlotList.from_strings([])}
+            for language, table in self.tables:
+                for variant in _transcript_variants(text):
+                    try:
+                        result = recognize(variant, table, slot_lists=room_slots, intent_context={"area": _SATELLITE_AREA})
+                        if result:
+                            values = {key: entity.value for key, entity in result.entities.items()}
+                            if (values.get("area") == _SATELLITE_AREA
+                                    and values.get("domain") == "light"
+                                    and set(values) == {"area", "domain"}
+                                    and result.intent.name in {"HassTurnOn", "HassTurnOff"}):
+                                action = {"intent": "turn_on" if result.intent.name == "HassTurnOn" else "turn_off", "args": ["lights"]}
+                                return FastPathEmission(action, language, result.intent.name, {"name": "@satellite-lights"})
+                    except Exception:  # noqa: BLE001
+                        logger.exception("HassIL room matching failed for %s", language)
         for language, table in self.tables:
             for variant in _transcript_variants(text):
                 try:

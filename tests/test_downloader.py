@@ -276,8 +276,8 @@ def test_plan_downloads_pocket_tts_pytorch_weights_into_hub_cache():
     assets = [a for a in dl.plan_assets(resolved) if a.key.startswith("tts:pocket-tts-pytorch")]
 
     assert len(assets) == 1
-    assert assets[0].repo == "lunahr/pocket-tts-ungated"
-    assert assets[0].allow == ["languages/english_2026-04/model.safetensors", "languages/english_2026-04/tokenizer.model"]
+    assert assets[0].repo == "lookbe/pocket-tts-6l"
+    assert assets[0].allow == ["english/model.safetensors", "english/tokenizer.model"]
     assert all(asset.kind == "snapshot" for asset in assets)
     assert all(asset.revision for asset in assets)
 
@@ -287,9 +287,9 @@ def test_pocket_pytorch_download_and_presence_follow_language(tmp_path):
 
     resolved = resolve_models({"tts": {"backend": "pocket-tts-pytorch"}}, "french")
     asset = next(a for a in dl.plan_assets(resolved, models_dir=str(tmp_path)) if a.key == "tts:pocket-tts-pytorch")
-    assert asset.allow == ["languages/french_24l/model.safetensors", "languages/french_24l/tokenizer.model"]
+    assert asset.allow == ["french/model.safetensors", "french/tokenizer.model"]
     assert not _asset_present(resolved["tts"], str(tmp_path))
-    snapshot = tmp_path / "hub" / "models--lunahr--pocket-tts-ungated" / "snapshots" / asset.revision
+    snapshot = tmp_path / "hub" / "models--lookbe--pocket-tts-6l" / "snapshots" / asset.revision
     for filename in asset.allow:
         path = snapshot / filename
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -301,7 +301,7 @@ def test_pocket_pytorch_download_and_presence_follow_language(tmp_path):
 def test_pinned_snapshot_does_not_accept_another_revision_or_missing_files(tmp_path):
     resolved = resolve_models({"tts": {"backend": "pocket-tts-pytorch"}})
     asset = next(a for a in dl.plan_assets(resolved, models_dir=str(tmp_path))
-                 if a.repo == "lunahr/pocket-tts-ungated")
+                 if a.repo == "lookbe/pocket-tts-6l")
     root = Path(asset.dest) / f"models--{asset.repo.replace('/', '--')}"
     root.mkdir(parents=True)
     (root / dl.COMPLETE_SENTINEL).touch()
@@ -313,6 +313,24 @@ def test_pinned_snapshot_does_not_accept_another_revision_or_missing_files(tmp_p
     tokenizer = root / "snapshots" / asset.revision / asset.allow[1]
     tokenizer.touch()
     assert dl._already_present(asset)
+
+
+def test_custom_pocket_language_uses_local_assets_instead_of_download(tmp_path):
+    from core.setup import _asset_present
+
+    paths = {key: str(tmp_path / key) for key in ("config", "weights", "tokenizer")}
+    resolved = resolve_models({"tts": {"backend": "pocket-tts-pytorch", "language_models": {"french": paths}}}, "french")
+    assert not any(a.key == "tts:pocket-tts-pytorch" for a in dl.plan_assets(resolved))
+    assert not _asset_present(resolved["tts"], str(tmp_path))
+    for path in paths.values():
+        Path(path).touch()
+    assert _asset_present(resolved["tts"], str(tmp_path))
+
+
+def test_invalid_custom_pocket_language_is_rejected():
+    import pytest
+    with pytest.raises(ValueError, match="language override"):
+        resolve_models({"tts": {"backend": "pocket-tts-pytorch", "language_models": {"french": {"weights": "missing"}}}})
 
 
 def test_plan_downloads_audio8_checkpoint_into_hub_cache():

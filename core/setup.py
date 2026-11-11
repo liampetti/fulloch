@@ -118,11 +118,17 @@ def _asset_present(domain_cfg: dict, models_dir: str) -> bool:
     if spec is not None and spec.backend == "pocket-tts-pytorch":
         from .backends import pocket_pytorch_snapshots
 
+        opts = domain_cfg.get("opts", {})
+        language = opts.get("language", "english")
+        override = (opts.get("language_models") or {}).get(language)
+        if override:
+            return (isinstance(override, dict) and set(override) == {"config", "weights", "tokenizer"}
+                    and all(isinstance(p, str) and Path(p).expanduser().is_file() for p in override.values()))
         # The selected language's weights and tokenizer must both be cached.
         return all(
             all((_hub_dir(repo, models_dir) / "snapshots" / revision / filename).is_file()
                 for filename in allow)
-            for repo, allow, revision in pocket_pytorch_snapshots(domain_cfg.get("opts", {}).get("language", "english_2026-04"))
+            for repo, allow, revision in pocket_pytorch_snapshots(language)
         )
     if spec is not None and spec.hf_files:
         root = Path(model)

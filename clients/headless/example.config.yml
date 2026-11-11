@@ -11,7 +11,8 @@ server:
   token: "my-satellite-token"   # matched against satellite_tokens in the server's config.yml
 
 satellite:
-  room: "kitchen"               # label shown in the busy banner on other satellites
+  location: "Kitchen"           # Exact Home Assistant area name or ID; also shown as the device label.
+  # Older configurations using `room` remain supported.
 
 audio:
   # mic_device: null            # sounddevice input device name or index

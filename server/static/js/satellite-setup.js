@@ -60,7 +60,8 @@ export function createSatelliteSetup({ root = document, serial = navigator.seria
     const player = input('music').value;
     const config = {
       schema_version: 1,
-      device: { id: '', name: input('device_name').value.trim(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '' },
+      // The existing firmware stores the location in its device.name field.
+      device: { id: '', name: input('device_location').value.trim(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '' },
       server: { url: url.href, certificate_pem: '' },
       audio: { speaker_volume_percent: Number(input('volume').value), aec_enabled: input('aec').checked },
       display: { rotation_degrees: Number(input('rotation').value) },
@@ -97,6 +98,30 @@ export function createSatelliteSetup({ root = document, serial = navigator.seria
       note.textContent = networks.length ? 'Choose a network or type its name.' : 'No networks detected. Type the Wi-Fi network name.';
     } catch (_) { note.textContent = 'Wi-Fi discovery unavailable. Type the network name.'; }
   }
+  async function discoverAreas() {
+    const note = root.getElementById('sat-setup-area-status');
+    options('sat-setup-areas', []);
+    note.textContent = 'Looking for Home Assistant areas…';
+    try {
+      const response = await request('/ha/areas', { cache: 'no-store' });
+      if (!response.ok) throw new Error('Area lookup failed');
+      const { available, areas } = await response.json();
+      const valid = Array.isArray(areas) ? areas.filter(area =>
+        area && typeof area.name === 'string' && area.name.trim() && typeof area.id === 'string' && area.id.trim()) : [];
+      const counts = new Map();
+      valid.forEach(area => counts.set(area.name.toLocaleLowerCase(), (counts.get(area.name.toLocaleLowerCase()) || 0) + 1));
+      const list = root.getElementById('sat-setup-areas');
+      list.replaceChildren(...valid.map(area => {
+        const option = root.createElement('option');
+        option.value = counts.get(area.name.toLocaleLowerCase()) > 1 ? area.id : area.name;
+        option.label = area.name;
+        return option;
+      }));
+      note.textContent = available && valid.length
+        ? 'Choose an area or enter a custom location.'
+        : 'No Home Assistant areas available. Enter a custom location.';
+    } catch (_) { note.textContent = 'Could not load Home Assistant areas. Enter a custom location.'; }
+  }
   async function discoverSonos() {
     const note = root.getElementById('sat-setup-sonos-status');
     note.textContent = 'Looking for Sonos speakers…';
@@ -129,6 +154,7 @@ export function createSatelliteSetup({ root = document, serial = navigator.seria
       } else {
         prepare.disabled = !secure || !serial;
         discoverWifi();
+        discoverAreas();
       }
     } catch (_) {
       prepare.disabled = true;

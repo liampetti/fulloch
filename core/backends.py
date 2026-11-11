@@ -512,18 +512,18 @@ _register(
         experimental=True,
         display_name="Pocket TTS PyTorch (CPU/GPU voice clone)",
         loader="core.tts_pocket:load_tts",
-        default_model="lunahr/pocket-tts-ungated",
+        default_model="lookbe/pocket-tts-6l",
         hf_snapshots=(
             (
-                "lunahr/pocket-tts-ungated",
-                ("languages/english_2026-04/model.safetensors", "languages/english_2026-04/tokenizer.model"),
-                "d03cd73415a8d46d8eb115c7b524aebb0a729f4a",
+                "lookbe/pocket-tts-6l",
+                ("english/model.safetensors", "english/tokenizer.model"),
+                "eda74b8dfa99876b660e95088fbf30f8af6e1f44",
             ),
         ),
         download_size_gb=0.5,
         vram_gb=1.0,
         ram_gb=1.5,
-        deps=("pocket_tts",),
+        deps=("pocket_tts", "tokenizers"),
         notes="Kyutai PyTorch CPU/GPU backend with native PCM streaming; multilingual cloning weights use a "
         "pinned third-party public mirror, no Hugging Face login required.",
     )
@@ -863,8 +863,10 @@ TTS_MODEL_LANGUAGES = {
         "portuguese": "portuguese", "spanish": "spanish",
     },
     "pocket-tts-pytorch": {
-        "english": "english_2026-04", "french": "french_24l", "german": "german",
+        "english": "english", "french": "french", "german": "german",
         "italian": "italian", "portuguese": "portuguese", "spanish": "spanish",
+        "dutch": "dutch", "chinese": "chinese", "hindi": "hindi",
+        "egyptian": "egyptian", "wolof": "wolof",
     },
 }
 
@@ -872,9 +874,11 @@ TTS_MODEL_LANGUAGES = {
 def pocket_pytorch_snapshots(language: str) -> tuple:
     if language not in TTS_MODEL_LANGUAGES["pocket-tts-pytorch"].values():
         raise ValueError(f"Unsupported Pocket TTS language {language!r}")
-    return (("lunahr/pocket-tts-ungated",
-             (f"languages/{language}/model.safetensors", f"languages/{language}/tokenizer.model"),
-             "d03cd73415a8d46d8eb115c7b524aebb0a729f4a"),)
+    path = "alt/hindi" if language == "hindi" else language
+    tokenizer = "tokenizer.json" if language in {"egyptian", "wolof"} else "tokenizer.model"
+    return (("lookbe/pocket-tts-6l",
+             (f"{path}/model.safetensors", f"{path}/{tokenizer}"),
+             "eda74b8dfa99876b660e95088fbf30f8af6e1f44"),)
 
 
 def resolve_models(config_models: Optional[dict], tts_language: Optional[str] = None) -> dict:
@@ -929,6 +933,16 @@ def resolve_models(config_models: Optional[dict], tts_language: Optional[str] = 
             if language not in TTS_MODEL_LANGUAGES[backend]:
                 raise ValueError(f"Unsupported TTS language {language!r} for {backend}")
             opts["language"] = TTS_MODEL_LANGUAGES[backend][language]
+            if backend == "pocket-tts-pytorch" and "language_models" in opts:
+                overrides = opts["language_models"]
+                if not isinstance(overrides, dict):
+                    raise ValueError("models.tts.language_models must be a mapping")
+                for key, entry in overrides.items():
+                    if (key not in TTS_MODEL_LANGUAGES[backend].values()
+                            or not isinstance(entry, dict)
+                            or set(entry) != {"config", "weights", "tokenizer"}
+                            or not all(isinstance(path, str) and path.strip() for path in entry.values())):
+                        raise ValueError(f"Invalid Pocket TTS language override {key!r}: expected config, weights and tokenizer local paths")
         resolved[domain] = {
             "backend": backend,
             "model": model,

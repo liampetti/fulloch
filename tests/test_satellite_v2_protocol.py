@@ -67,6 +67,41 @@ def test_hello_returns_exact_welcome_audio_contract():
     }
     assert welcome["session_id"]
     assert assistant.connect_satellite.call_args.kwargs["device_id"] == "kitchen-01"
+    assert assistant.connect_satellite.call_args.kwargs["ha_area"] == "Kitchen"
+    assert assistant.connect_satellite.call_args.kwargs["ha_area_name"] == "Kitchen"
+
+
+@pytest.mark.parametrize("name", [None, "", "   "])
+def test_nameless_native_satellite_does_not_use_device_id_as_area(name):
+    assistant = _stub_assistant()
+    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello(device={"id": "kitchen-01", "name": name}))
+        ws.receive_json()
+    assert assistant.connect_satellite.call_args.kwargs["ha_area"] is None
+
+
+@pytest.mark.parametrize("name", [42, "bad\nroom", "x" * 65])
+def test_invalid_native_location_is_rejected(name):
+    assistant = _stub_assistant()
+    with _client(assistant).websocket_connect("/ws/satellite-v2") as ws:
+        ws.send_json(_hello(device={"id": "kitchen-01", "name": name}))
+        assert ws.receive_json()["code"] == "protocol"
+    assistant.connect_satellite.assert_not_called()
+
+
+@pytest.mark.parametrize("satellite,expected", [
+    ({"location": "Downstairs Office"}, "Downstairs Office"),
+    ({"room": "Kitchen"}, "Kitchen"),
+    ({"location": "Office", "room": "Old room"}, "Office"),
+    ({}, ""),
+])
+def test_headless_location_and_legacy_room_use_existing_wire_name(satellite, expected):
+    from clients.headless.satellite import HeadlessSatellite
+
+    client = HeadlessSatellite.__new__(HeadlessSatellite)
+    client.cfg = {"server": {}, "satellite": satellite}
+    client.satellite_id = None
+    assert json.loads(client._build_hello_msg())["device"]["name"] == expected
 
 
 @pytest.mark.parametrize("message", [

@@ -104,7 +104,7 @@ _ALIAS_FETCH_RETRIES = int(os.environ.get("FULLOCH_HA_ALIAS_RETRIES", "15"))
 _ALIAS_FETCH_BACKOFF_S = 2.0
 
 
-def _fetch_entity_aliases() -> tuple:
+def _fetch_entity_aliases(retries: int = _ALIAS_FETCH_RETRIES) -> Optional[tuple]:
     """Fetch every entity's friendly_name from HA on the first use.
 
     Returns `(aliases, aliases_multi)`:
@@ -117,35 +117,35 @@ def _fetch_entity_aliases() -> tuple:
         dropped — e.g. a `climate.*` named "Upstairs" that lost the key to a
         `light.*` also named "Upstairs".
 
-    Both are empty if HA is unreachable or no token is configured — direct
+    Returns None if HA is unreachable or no token is configured — direct
     entity_ids still resolve via the `'.' in name` fallback in `_resolve_entity`.
     """
     if not HA_TOKEN:
         logger.warning("Home Assistant token not configured; entity aliases unavailable")
-        return {}, {}
+        return None
 
     states = None
-    for attempt in range(1, _ALIAS_FETCH_RETRIES + 1):
+    for attempt in range(1, retries + 1):
         try:
             response = _get("/api/states")
             response.raise_for_status()
             states = response.json()
             break
         except Exception as e:
-            if attempt < _ALIAS_FETCH_RETRIES:
+            if attempt < retries:
                 logger.info(
-                    f"HA aliases fetch attempt {attempt}/{_ALIAS_FETCH_RETRIES} "
+                    f"HA aliases fetch attempt {attempt}/{retries} "
                     f"failed ({e}); retrying in {_ALIAS_FETCH_BACKOFF_S}s"
                 )
                 time.sleep(_ALIAS_FETCH_BACKOFF_S)
             else:
                 logger.warning(
                     f"Could not fetch entity aliases from {HA_URL} after "
-                    f"{_ALIAS_FETCH_RETRIES} attempts: {e}"
+                    f"{retries} attempts: {e}"
                 )
-                return {}, {}
+                return None
     if states is None:
-        return {}, {}
+        return None
 
     aliases: dict = {}
     aliases_multi: dict = {}
@@ -187,6 +187,9 @@ _AREA_MAP: dict = {}
 _FLOOR_MAP: dict = {}
 _loaded = False
 _load_lock = threading.Lock()
+_refresh_thread_lock = threading.Lock()
+_refresh_thread = None
+_REFRESH_INTERVAL_S = 300
 
 
 def _render_template(template: str) -> Optional[str]:
@@ -205,7 +208,7 @@ def _render_template(template: str) -> Optional[str]:
         return None
 
 
-def _fetch_area_map() -> dict:
+def _fetch_area_map() -> Optional[dict]:
     """Fetch `{area_id: display_name}` for every HA area via templates.
 
     Empty if HA is unreachable/unconfigured or has no areas defined — callers
@@ -213,38 +216,42 @@ def _fetch_area_map() -> dict:
     """
     ids_raw = _render_template("{{ areas() | list | tojson }}")
     if ids_raw is None:
-        return {}
+        return None
     try:
         area_ids = json.loads(ids_raw)
     except (ValueError, TypeError):
         logger.warning(f"Could not parse HA areas() template response: {ids_raw!r}")
-        return {}
+        return None
     names_raw = _render_template("{{ areas() | map('area_name') | list | tojson }}")
     try:
-        names = json.loads(names_raw) if names_raw else []
+        names = json.loads(names_raw) if names_raw is not None else None
     except (ValueError, TypeError):
-        names = []
+        return None
+    if names is None:
+        return None
     if len(names) != len(area_ids):
         names = area_ids
     logger.info(f"Fetched {len(area_ids)} areas from Home Assistant")
     return {area_id: (name or area_id) for area_id, name in zip(area_ids, names, strict=True)}
 
 
-def _fetch_floor_map() -> dict:
+def _fetch_floor_map() -> Optional[dict]:
     """Fetch `{floor_id: display_name}` for every HA floor via templates."""
     ids_raw = _render_template("{{ floors() | list | tojson }}")
     if ids_raw is None:
-        return {}
+        return None
     try:
         floor_ids = json.loads(ids_raw)
     except (ValueError, TypeError):
         logger.warning(f"Could not parse HA floors() template response: {ids_raw!r}")
-        return {}
+        return None
     names_raw = _render_template("{{ floors() | map('floor_name') | list | tojson }}")
     try:
-        names = json.loads(names_raw) if names_raw else []
+        names = json.loads(names_raw) if names_raw is not None else None
     except (ValueError, TypeError):
-        names = []
+        return None
+    if names is None:
+        return None
     if len(names) != len(floor_ids):
         names = floor_ids
     logger.info(f"Fetched {len(floor_ids)} floors from Home Assistant")
@@ -893,29 +900,67 @@ CALENDAR_ENTITY = None
 TODO_ENTITY = None
 
 
-def _ensure_loaded() -> None:
-    """Fetch the entity alias map + autodetect role entities, once, on first use.
-
-    Deferred out of import time so importing this module has NO network side
-    effects: a stray import can't connect to HA. Idempotent and thread-safe.
-    With no token configured there's nothing to fetch, so it's a cheap no-op
-    that stays re-checkable in case a token is set later.
-    """
+def _refresh_locked(initial: bool = False) -> bool:
+    """Refresh under _load_lock, preserving each cache on fetch failure."""
     global _loaded, _ENTITY_ALIASES, _ENTITY_ALIASES_MULTI, _AREA_MAP, _FLOOR_MAP
     global _DEFAULT_WEATHER_ENTITY, SPOTIFY_ENTITY, TV_ENTITY, AVR_ENTITY
     global CALENDAR_ENTITY, TODO_ENTITY
-    if _loaded or not HA_TOKEN:
+    if not HA_TOKEN:
+        return False
+    aliases = _fetch_entity_aliases() if initial else _fetch_entity_aliases(retries=1)
+    if aliases is None:
+        return False
+    areas = _fetch_area_map()
+    floors = _fetch_floor_map()
+    _ENTITY_ALIASES, _ENTITY_ALIASES_MULTI = aliases
+    if areas is not None:
+        _AREA_MAP = areas
+    if floors is not None:
+        _FLOOR_MAP = floors
+    _DEFAULT_WEATHER_ENTITY = _autodetect_weather_entity()
+    SPOTIFY_ENTITY = _autodetect_spotify_entity()
+    TV_ENTITY = _autodetect_tv_entity()
+    AVR_ENTITY = _autodetect_avr_entity()
+    CALENDAR_ENTITY = _autodetect_calendar_entity()
+    TODO_ENTITY = _autodetect_todo_entity()
+    _loaded = True
+    return True
+
+
+def refresh_entities() -> bool:
+    """Refresh discovery now; return False if entity discovery failed."""
+    if HA_TOKEN:
+        _start_refresh_thread()
+    with _load_lock:
+        return _refresh_locked()
+
+
+def _start_refresh_thread() -> None:
+    global _refresh_thread
+    with _refresh_thread_lock:
+        if _refresh_thread is not None and _refresh_thread.is_alive():
+            return
+
+        def run():
+            while True:
+                time.sleep(_REFRESH_INTERVAL_S)
+                try:
+                    refresh_entities()
+                except Exception:
+                    logger.exception("Home Assistant periodic discovery failed")
+
+        _refresh_thread = threading.Thread(target=run, name="ha-cache-refresh", daemon=True)
+        _refresh_thread.start()
+
+
+def _ensure_loaded() -> None:
+    """Load discovery on first use and start periodic refresh, without import I/O."""
+    if not HA_TOKEN:
+        return
+    _start_refresh_thread()
+    if _loaded:
         return
     with _load_lock:
         if _loaded:
             return
-        _ENTITY_ALIASES, _ENTITY_ALIASES_MULTI = _fetch_entity_aliases()
-        _AREA_MAP = _fetch_area_map()
-        _FLOOR_MAP = _fetch_floor_map()
-        _DEFAULT_WEATHER_ENTITY = _autodetect_weather_entity()
-        SPOTIFY_ENTITY = _autodetect_spotify_entity()
-        TV_ENTITY = _autodetect_tv_entity()
-        AVR_ENTITY = _autodetect_avr_entity()
-        CALENDAR_ENTITY = _autodetect_calendar_entity()
-        TODO_ENTITY = _autodetect_todo_entity()
-        _loaded = True
+        _refresh_locked(initial=True)

@@ -163,6 +163,17 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
             await reject("auth", "invalid token")
             return
 
+        # Existing firmware sends its provisioned location as device.name.
+        # Keep that wire field for compatibility, but never treat the device
+        # ID (or a missing/invalid name) as a Home Assistant room.
+        location = device.get("name")
+        if location is not None:
+            if (not isinstance(location, str) or len(location.encode("utf-8")) > 64
+                    or any(ord(char) < 32 or ord(char) == 127 for char in location)):
+                await reject("protocol", "invalid device location")
+                return
+            location = location.strip() or None
+
         resume = first.get("resume")
         session = None
         if isinstance(resume, dict):
@@ -193,8 +204,8 @@ def register_satellite_v2_route(app: FastAPI, context: "AppContext", lifecycle: 
         if session.satellite_id not in recovery_sessions:
             try:
                 chunk_q = context.assistant.connect_satellite(
-                    session.satellite_id, label=device.get("name") or device["id"], auth_token=auth_token,
-                    device_id=session.device_id,
+                    session.satellite_id, label=location or device["id"], auth_token=auth_token,
+                    device_id=session.device_id, ha_area=location, ha_area_name=location,
                 )
             except ConversationModeUnavailable as error:
                 await reject("conversation_mode_active", str(error))

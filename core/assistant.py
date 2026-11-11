@@ -2153,13 +2153,11 @@ class Assistant:
         `label`/`server_vad`/`auth_token`/`device_id` are the satellite-v2 forward-compat
         fields (#12/#13) — the browser path leaves them at their defaults
         (`None`/`True`/`None`/`None`); only the `/ws/satellite-v2` handler passes
-        real values. `ha_area` (#14, 6b) IS set by the browser path too, from
-        the `?area=` query param on `/ws/satellite` — the user's one-time
-        room picker choice, persisted client-side in `localStorage`.
-        `ha_area_name` is that same choice's display name (`?area_name=`),
-        used only for the `satellite_label` fallback in `_emit_turn_event`/
-        `_emit_agent_event` — never for area-scoping logic, which always goes
-        through `ha_area`'s id.
+        real values. Browser satellites pass their selected HA area ID from
+        `?area=` and display name from `?area_name=`. Native satellites pass
+        their provisioned device location (sent as device.name) as `ha_area`
+        and `ha_area_name`. Room-local actions resolve that name or ID against
+        Home Assistant rather than treating the display label as an entity.
         """
         # A reboot can establish a new WebSocket before the previous TCP
         # connection is declared dead. A native device ID has one active

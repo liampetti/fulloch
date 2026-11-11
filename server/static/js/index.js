@@ -352,6 +352,7 @@ const satellite = createBrowserSatellite({
   const entitiesAllowAll = document.getElementById('entities-allow-all');
   const entitiesBlockAll = document.getElementById('entities-block-all');
   const entitiesError = document.getElementById('entities-error');
+  const entitiesRefresh = document.getElementById('entities-refresh');
   let allEntities = [];
   let entitiesBusy = false;
   let entitiesRequestVersion = 0;
@@ -483,12 +484,14 @@ const satellite = createBrowserSatellite({
       if (version !== entitiesRequestVersion) return;
       if (!data.available) {
         allEntities = [];
+        entitiesRefresh.hidden = true;
         entitiesAllControls.hidden = true;
         entitiesList.innerHTML =
           '<div class="entities-empty">Home Assistant isn\'t configured.</div>';
         entitiesHint.hidden = true;
         return;
       }
+      entitiesRefresh.hidden = false;
       entitiesHint.hidden = false;
       allEntities = data.entities || [];
       renderEntities();
@@ -503,7 +506,34 @@ const satellite = createBrowserSatellite({
     }
   };
 
+  // The server refreshes HA in the background; update an open view as well.
+  setInterval(() => {
+    if (!document.getElementById('entities').hidden) loadEntities();
+  }, 30000);
+
   entitySearch.addEventListener('input', renderEntities);
+  entitiesRefresh.addEventListener('click', async () => {
+    if (entitiesBusy) return;
+    entitiesBusy = true;
+    entitiesRefresh.disabled = true;
+    entitiesError.hidden = true;
+    ++entitiesRequestVersion;
+    renderEntities();
+    try {
+      const r = await fetch('/entities/refresh', { method: 'POST' });
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      const data = await r.json();
+      allEntities = data.entities || [];
+    } catch (err) {
+      console.error('entity refresh failed', err);
+      entitiesError.textContent = 'Could not refresh from Home Assistant. Showing the previous list.';
+      entitiesError.hidden = false;
+    } finally {
+      entitiesBusy = false;
+      entitiesRefresh.disabled = false;
+      renderEntities();
+    }
+  });
   entitiesAllowAll.addEventListener('click', () => setEntitiesDenied(allEntities, false));
   entitiesBlockAll.addEventListener('click', () => setEntitiesDenied(allEntities, true));
 

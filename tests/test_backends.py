@@ -164,8 +164,8 @@ def test_pocket_gguf_backend_metadata_and_cpu_gating():
 def test_pocket_pytorch_backend_metadata_and_cpu_gating():
     pocket = b.get_spec("tts", "pocket-tts-pytorch")
     assert pocket.loader == "core.tts_pocket:load_tts"
-    assert pocket.hf_snapshots[0][0] == "lunahr/pocket-tts-ungated"
-    assert pocket.hf_snapshots[0][1] == ("languages/english_2026-04/model.safetensors", "languages/english_2026-04/tokenizer.model")
+    assert pocket.hf_snapshots[0][0] == "lookbe/pocket-tts-6l"
+    assert pocket.hf_snapshots[0][1] == ("english/model.safetensors", "english/tokenizer.model")
     assert b.is_offerable(pocket, "gpu") is True
     assert b.is_offerable(pocket, "cpu") is True
 

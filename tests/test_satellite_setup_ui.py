@@ -42,7 +42,7 @@ def page(browser):
 
 
 HARNESS = """
-async ({secure=true, supported=true, auth=true, fail=false, expire=false, expireAfter=false, pauseFlash=false, pausePrepare=false, prepareFail=false, openFail=false, selectCancel=false, wrongChip=false, resetFail=false, pauseConfirm=false} = {}) => {
+async ({secure=true, supported=true, auth=true, fail=false, expire=false, expireAfter=false, pauseFlash=false, pausePrepare=false, prepareFail=false, openFail=false, selectCancel=false, wrongChip=false, resetFail=false, pauseConfirm=false, areasFail=false, areas=[]} = {}) => {
   window.calls = []; window.writes = []; window.resetSignals = []; window.flashCount = 0;
   const bytes = new Uint8Array([1,2,3]);
   const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
@@ -52,6 +52,7 @@ async ({secure=true, supported=true, auth=true, fail=false, expire=false, expire
   const request = async (url, options={}) => {
     calls.push({url, method:options.method || 'GET', body:options.body});
     if (url === '/status') return Response.json({auth_enabled:auth});
+    if (url === '/ha/areas') return areasFail ? Response.json({}, {status:503}) : Response.json({available:true, areas});
     if (url.endsWith('/waveshare/wifi')) return Response.json({networks:['Home Wi-Fi']});
     if (url.endsWith('/waveshare/sonos')) return Response.json({hosts:['192.168.1.10']});
     if (url.endsWith('/migration')) return Response.json({token_required:true});
@@ -99,10 +100,35 @@ async ({secure=true, supported=true, auth=true, fail=false, expire=false, expire
 
 
 def fill(page):
-    page.locator('[name="device_name"]').fill("Kitchen")
+    page.locator('[name="device_location"]').fill("Kitchen")
     page.locator('[name="wifi_ssid"]').fill("network")
     page.locator('[name="wifi_password"]').fill("private-password")
     page.locator('[name="migration"]').check()
+
+
+def test_device_location_suggests_ha_areas_and_accepts_custom(page):
+    page.evaluate(HARNESS, {"areas": [
+        {"id": "downstairs_office", "name": "Downstairs Office"},
+        {"id": "kitchen", "name": "Kitchen"},
+    ]})
+    page.wait_for_function("document.querySelectorAll('#sat-setup-areas option').length === 2")
+    assert page.locator("#sat-setup-areas option").evaluate_all("options => options.map(o => o.value)") == ["Downstairs Office", "Kitchen"]
+    assert page.get_by_label("Device location").get_attribute("list") == "sat-setup-areas"
+    page.get_by_label("Device location").fill("Custom room")
+    assert page.get_by_label("Device location").input_value() == "Custom room"
+
+
+def test_device_location_stays_editable_when_ha_is_unavailable(page):
+    page.evaluate(HARNESS, {"areasFail": True})
+    page.get_by_text("Could not load Home Assistant areas. Enter a custom location.").wait_for()
+    page.get_by_label("Device location").fill("Custom room")
+    assert page.get_by_label("Device location").input_value() == "Custom room"
+
+
+def test_duplicate_area_names_suggest_unambiguous_ids(page):
+    page.evaluate(HARNESS, {"areas": [{"id": "office_1", "name": "Office"}, {"id": "office_2", "name": "Office"}]})
+    page.wait_for_function("document.querySelectorAll('#sat-setup-areas option').length === 2")
+    assert page.locator("#sat-setup-areas option").evaluate_all("options => options.map(o => o.value)") == ["office_1", "office_2"]
 
 
 def test_success_requires_authenticated_confirmation_and_uses_manifest_offsets(page):

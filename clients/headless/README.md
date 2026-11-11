@@ -13,7 +13,7 @@ From a computer with this repository and SSH access to the Pi:
 1. Add a long random token to `satellite_tokens` in the server's
    `data/config.yml` and restart the server.
 2. Copy `clients/headless/example.config.yml` to `clients/headless/config.yml`.
-   Set the server address, matching token, and room. If using a private CA,
+   Set the server address, matching token, and `satellite.location` to the exact Home Assistant area name or ID. Older `satellite.room` configurations remain supported. If using a private CA,
    set `server.ca_cert` to the **remote** path
    `/home/<pi-user>/fulloch-client/certs/fulloch-home-ca.crt` (adjust for your
    Pi user and `SATELLITE_DIR`).

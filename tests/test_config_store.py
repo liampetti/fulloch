@@ -98,6 +98,11 @@ def test_tts_model_language_is_restart_setting(tmp_path):
     cs.update_config({"general.tts_language": "french"}, path)
     assert cs.read_config(path)["general"]["tts_language"] == "french"
     assert "french" in cs.settings_view(path)["tts_model_languages"]["pocket-tts-onnx"]
+    languages = cs.settings_view(path)["tts_model_languages"]
+    assert {"dutch", "chinese", "hindi", "egyptian", "wolof"} <= set(languages["pocket-tts-pytorch"])
+    assert "wolof" not in languages["pocket-tts-onnx"]
+    cs.update_config({"general.tts_language": "wolof"}, path)
+    assert cs.read_config(path)["general"]["tts_language"] == "wolof"
 
 
 def test_thinking_settings_expose_only_valid_slot_choices(tmp_path):

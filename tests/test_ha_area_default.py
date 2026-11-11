@@ -159,6 +159,27 @@ def satellite_with_area():
 
 
 class TestBareLightAreaEntities:
+    @pytest.mark.parametrize("location", ["office", "upstairs office", "missing room"])
+    def test_native_location_never_fuzzy_matches_another_room(self, monkeypatch, location):
+        monkeypatch.setattr(devices, "_current_satellite_ha_area", lambda: location)
+        monkeypatch.setattr(client, "_AREA_MAP", {"downstairs_office": "Downstairs Office"})
+        service = MagicMock()
+        monkeypatch.setattr(client, "_call_service", service)
+        assert devices.turn_off("light").operation_outcome.code == "area_not_found"
+        service.assert_not_called()
+
+    def test_native_location_matches_area_name_case_insensitively(self, monkeypatch):
+        monkeypatch.setattr(devices, "_current_satellite_ha_area", lambda: "downstairs office")
+        monkeypatch.setattr(client, "_AREA_MAP", {"downstairs_office": "Downstairs Office"})
+        monkeypatch.setattr(client, "_DENIED_ENTITIES", set())
+        monkeypatch.setattr(client, "_render_template", lambda _: '["light.office"]')
+        assert devices._bare_light_area_entities("light") == (["light.office"], "Downstairs Office")
+
+    def test_duplicate_area_names_are_not_guessed(self, monkeypatch):
+        monkeypatch.setattr(devices, "_current_satellite_ha_area", lambda: "Office")
+        monkeypatch.setattr(client, "_AREA_MAP", {"office_1": "Office", "office_2": "Office"})
+        assert devices.turn_off("light").operation_outcome.code == "area_not_found"
+
     def test_resolves_area_lights_excluding_denied(self, satellite_with_area):
 
         entities = ["light.kitchen_ceiling", "light.kitchen_lamp", "switch.kitchen_kettle"]

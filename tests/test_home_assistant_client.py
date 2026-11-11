@@ -134,6 +134,69 @@ def test_ensure_loaded_is_noop_without_token(monkeypatch):
     assert client.SPOTIFY_ENTITY == "media_player.spotify"  # patch not clobbered
 
 
+def test_refresh_updates_entities_and_preserves_failed_location_fetches(monkeypatch):
+    for name, value in (
+        ("HA_TOKEN", "token"), ("_loaded", True),
+        ("_ENTITY_ALIASES", {"old": "light.old"}),
+        ("_ENTITY_ALIASES_MULTI", {"old": ["light.old"]}),
+        ("_AREA_MAP", {"kitchen": "Kitchen"}), ("_FLOOR_MAP", {"ground": "Ground"}),
+        ("_DENIED_ENTITIES", frozenset({"light.new"})),
+        ("_DEFAULT_WEATHER_ENTITY", None), ("SPOTIFY_ENTITY", None),
+        ("TV_ENTITY", None), ("AVR_ENTITY", None), ("CALENDAR_ENTITY", None), ("TODO_ENTITY", None),
+    ):
+        monkeypatch.setattr(client, name, value)
+    monkeypatch.setattr(client, "_start_refresh_thread", lambda: None)
+    monkeypatch.setattr(client, "_fetch_entity_aliases", lambda **kw: ({"new": "light.new"}, {"new": ["light.new"]}))
+    monkeypatch.setattr(client, "_fetch_area_map", lambda: None)
+    monkeypatch.setattr(client, "_fetch_floor_map", lambda: {})
+    assert client.refresh_entities()
+    assert client._resolve_entity("new") == "light.new"
+    assert client._AREA_MAP == {"kitchen": "Kitchen"}
+    assert client._FLOOR_MAP == {}
+    assert client.list_entities()[0]["denied"] is True
+
+    monkeypatch.setattr(client, "_fetch_entity_aliases", lambda **kw: None)
+    assert not client.refresh_entities()
+    assert client._resolve_entity("new") == "light.new"
+    assert client._loaded
+
+
+def test_failed_initial_load_remains_retryable(monkeypatch):
+    monkeypatch.setattr(client, "HA_TOKEN", "token")
+    monkeypatch.setattr(client, "_loaded", False)
+    monkeypatch.setattr(client, "_start_refresh_thread", lambda: None)
+    monkeypatch.setattr(client, "_fetch_entity_aliases", lambda: None)
+    client._ensure_loaded()
+    assert not client._loaded
+
+
+def test_periodic_refresh_waits_five_minutes_and_retries(monkeypatch):
+    class StopLoop(BaseException):
+        pass
+
+    sleeps = []
+    refreshes = []
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            raise StopLoop()
+
+    thread = MagicMock()
+    monkeypatch.setattr(client, "_refresh_thread", None)
+    monkeypatch.setattr(client.time, "sleep", sleep)
+    monkeypatch.setattr(client, "refresh_entities", lambda: refreshes.append(True))
+    target = {}
+    def make_thread(**kwargs):
+        target.update(kwargs)
+        return thread
+    monkeypatch.setattr(client.threading, "Thread", make_thread)
+    client._start_refresh_thread()
+    with pytest.raises(StopLoop):
+        target["target"]()
+    assert sleeps == [300, 300, 300]
+    assert len(refreshes) == 2
+
+
 def test_resolve_entity_without_domain_keeps_first_wins():
     """No domain hint → first registration order entity (unchanged behaviour)."""
     with patch(

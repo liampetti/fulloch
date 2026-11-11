@@ -113,10 +113,19 @@ def _bare_light_area_entities(entity: str) -> Optional[tuple[list, str] | str]:
     # Browser satellites send a selected HA area_id from /ha/areas. Accept
     # that trusted ID directly when the local area-name cache isn't available;
     # malformed/stale IDs simply produce no entities from HA's template API.
-    area_id = client._resolve_area(ha_area) or ha_area
-    if client._AREA_MAP and area_id not in client._AREA_MAP:
-        logger.debug("Satellite HA area %r is not in the loaded HA area map", ha_area)
-        return _failure("I couldn't find the selected room. No command was sent. Please select the room again.", "area_not_found", area=ha_area)
+    # A provisioned native location is a room name, not necessarily an ID.
+    # Require an exact, unambiguous match: the general spoken-area resolver's
+    # fuzzy match could otherwise turn "office" into the wrong office.
+    area_id = ha_area
+    if client._AREA_MAP:
+        key = ha_area.strip().casefold()
+        ids = [area for area in client._AREA_MAP if area.casefold() == key]
+        if not ids:
+            ids = [area for area, name in client._AREA_MAP.items() if name.casefold() == key]
+        if len(ids) != 1:
+            logger.debug("Satellite HA area %r is missing or ambiguous", ha_area)
+            return _failure("I couldn't find the selected room. No command was sent. Please select the room again.", "area_not_found", area=ha_area)
+        area_id = ids[0]
 
     raw = client._render_template(f"{{{{ area_entities({area_id!r}) | list | tojson }}}}")
     if raw is None:

@@ -232,7 +232,10 @@ def plan_assets(resolved: dict, models_dir: str = "./data/models") -> list:
         if spec.hf_snapshots:
             if spec.backend == "pocket-tts-pytorch":
                 from core.backends import pocket_pytorch_snapshots
-                snapshots = pocket_pytorch_snapshots(cfg["opts"].get("language", "english_2026-04"))
+                language = cfg["opts"].get("language", "english")
+                if (cfg["opts"].get("language_models") or {}).get(language):
+                    continue  # User supplies all three local files.
+                snapshots = pocket_pytorch_snapshots(language)
             else:
                 snapshots = spec.hf_snapshots
             for index, (repo, allow, revision) in enumerate(snapshots):
@@ -249,7 +252,7 @@ def plan_assets(resolved: dict, models_dir: str = "./data/models") -> list:
                         repo=repo,
                         allow=list(allow),
                         revision=revision,
-                        size_gb=(0.75 if spec.backend == "pocket-tts-pytorch" and cfg["opts"].get("language") == "french_24l" else spec.download_size_gb) if index == 0 else None,
+                        size_gb=spec.download_size_gb if index == 0 else None,
                     )
                 )
             continue

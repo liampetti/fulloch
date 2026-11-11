@@ -53,20 +53,16 @@ def test_check_disk_passes_for_zero_download_tier():
 # --- check_network ---------------------------------------------------------
 
 
-def test_check_network_passes_against_real_huggingface():
-    """Real HEAD against huggingface.co. Skip if no network in CI."""
-    pytest = __import__("pytest")
-    try:
+def test_check_network_passes_on_successful_head():
+    """A successful model hub response is handled without a real request."""
+    with patch("urllib.request.urlopen") as urlopen:
+        urlopen.return_value.__enter__.return_value.status = 200
         ok, msg = pf.check_network(timeout=5.0)
-    except Exception as e:  # noqa: BLE001
-        pytest.skip(f"network check skipped: {e}")
-    if not ok:
-        # The CI sandbox might block outbound. Treat connection failure
-        # as a skip so this test doesn't fail when there's no network.
-        if "can't reach" in msg or "timeout" in msg:
-            pytest.skip(f"network check skipped: {msg}")
     assert ok is True
     assert msg == ""
+    request = urlopen.call_args.args[0]
+    assert request.get_method() == "HEAD"
+    assert urlopen.call_args.kwargs["timeout"] == 5.0
 
 
 def test_check_network_fails_on_unreachable_host():

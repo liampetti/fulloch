@@ -9,7 +9,6 @@ import importlib.resources
 import logging
 import os
 import queue
-import re
 import subprocess
 import sys
 import tempfile
@@ -50,7 +49,7 @@ _torch = None
 _voice_state = None
 _voice_binding = None
 _model_lock = threading.RLock()
-_default_language = "english_2026-04"
+_default_language = "english"
 _load_options = {}
 # Alternates stay on CPU: Premium's default GPU model remains the only Pocket
 # model occupying VRAM. The serial synthesis worker owns this single slot.
@@ -62,47 +61,90 @@ _load_failures = {}
 _RETRY_SECONDS = 300
 _ALTERNATE_RAM_HEADROOM = 2 * 1024 ** 3
 
-MIRROR_REPO = "lunahr/pocket-tts-ungated"
-MIRROR_REVISION = "d03cd73415a8d46d8eb115c7b524aebb0a729f4a"
+MIRROR_REPO = "lookbe/pocket-tts-6l"
+MIRROR_REVISION = "eda74b8dfa99876b660e95088fbf30f8af6e1f44"
 
 
 def _load_model(language: str, device: str, opts: dict):
     """Load one model using the pinned cloning weights and tokenizer."""
+    import yaml
     from pocket_tts import TTSModel
 
     from .backends import pocket_pytorch_snapshots
 
-    pocket_pytorch_snapshots(language)
+    overrides = opts.get("language_models") or {}
+    override = overrides.get(language)
+    if override:
+        if not isinstance(override, dict) or set(override) != {"config", "weights", "tokenizer"}:
+            raise ValueError(f"Pocket TTS override for {language} needs config, weights and tokenizer paths")
+        paths = {key: Path(value).expanduser().resolve() for key, value in override.items()}
+        if not all(path.is_file() for path in paths.values()):
+            raise FileNotFoundError(f"Pocket TTS override files for {language} must exist locally")
+        config = yaml.safe_load(paths["config"].read_text(encoding="utf-8"))
+        weights, tokenizer = str(paths["weights"]), str(paths["tokenizer"])
+    else:
+        repo, files, revision = pocket_pytorch_snapshots(language)[0]
+        config = yaml.safe_load(importlib.resources.files("pocket_tts").joinpath("config/english_2026-04.yaml").read_text(encoding="utf-8"))
+        weights, tokenizer = (f"hf://{repo}/{name}@{revision}" for name in files)
+        # These fine-tunes use vocabularies different from Kyutai's 4k.
+        config["flow_lm"]["lookup_table"]["n_bins"] = {
+            "chinese": 9174, "egyptian": 79, "wolof": 3000,
+        }.get(language, 4000)
     temperature = opts.get("temperature")
-    config = importlib.resources.files("pocket_tts").joinpath(f"config/{language}.yaml").read_text(encoding="utf-8")
-    base = f"hf://{MIRROR_REPO}/languages/{language}"
-    config, weights_count = re.subn(r"(?m)^weights_path: hf://kyutai/pocket-tts/\S+[ \t]*$", f"weights_path: {base}/model.safetensors@{MIRROR_REVISION}", config)
-    config, tokenizer_count = re.subn(r"(?m)^([ \t]*tokenizer_path:) hf://kyutai/pocket-tts-without-voice-cloning/[^\s]+", rf"\1 {base}/tokenizer.model@{MIRROR_REVISION}", config)
-    if weights_count != 1 or tokenizer_count != 1:
-        raise RuntimeError("Unsupported Pocket TTS config: expected Kyutai weights and tokenizer URIs")
+    config["weights_path"] = weights
+    config["flow_lm"]["lookup_table"]["tokenizer_path"] = tokenizer
     # Do not allow an inaccessible mirror to silently switch to non-cloning
     # weights: setup should report the actual download/load failure instead.
-    config = "\n".join(line for line in config.splitlines() if not line.startswith("weights_path_without_voice_cloning:")) + "\n"
+    config.pop("weights_path_without_voice_cloning", None)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8") as file:
-        file.write(config)
+        yaml.safe_dump(config, file)
         file.flush()
-        model = TTSModel.load_model(
-            config=file.name,
-            temp=0.7 if temperature is None else float(temperature),
-            lsd_decode_steps=int(opts.get("lsd_decode_steps", 1)),
-        ).to(device)
+        # Pocket 2.1 constructs its SentencePiece tokenizer inside the model.
+        # These two checkpoints ship HF tokenizer JSON instead. Replace that
+        # constructor only while loading, under the model lock, and restore it
+        # immediately; existing model instances keep their own tokenizer.
+        with _model_lock:
+            if not override and language in {"egyptian", "wolof"}:
+                import torch
+                from pocket_tts.conditioners import text as text_module
+                from pocket_tts.conditioners.base import TokenizedText
+                from pocket_tts.utils.utils import download_if_necessary
+                from tokenizers import Tokenizer
+
+                class JsonTokenizer:
+                    def __init__(self, nbins, tokenizer_path):
+                        self.tokenizer = Tokenizer.from_file(str(download_if_necessary(tokenizer_path)))
+                        self.sp = self.tokenizer  # Pocket's sentence splitter calls .sp.decode().
+                        if self.tokenizer.get_vocab_size() != nbins:
+                            raise ValueError("Pocket TTS tokenizer vocabulary does not match model")
+
+                    def __call__(self, text):
+                        return TokenizedText(torch.tensor(self.tokenizer.encode(text).ids)[None, :])
+
+                original = text_module.SentencePieceTokenizer
+                text_module.SentencePieceTokenizer = JsonTokenizer
+            else:
+                original = None
+            try:
+                model = TTSModel.load_model(
+                    config=file.name,
+                    temp=0.7 if temperature is None else float(temperature),
+                    lsd_decode_steps=int(opts.get("lsd_decode_steps", 1)),
+                ).to(device)
+            finally:
+                if original is not None:
+                    text_module.SentencePieceTokenizer = original
     model.eval()
     return model
 
 
-def load_tts(model_id=None, language: str = "english_2026-04", device: Optional[str] = None, **opts):
+def load_tts(model_id=None, language: str = "english", device: Optional[str] = None, **opts):
     """Load the configured default model on CPU or CUDA."""
     global _model, _torch, _default_language, _load_options, _alternate
     import torch
 
     from .backends import variant
 
-    language = "english_2026-04" if language == "english" else language
     if device is None:
         device = "cuda" if variant() != "cpu" and torch.cuda.is_available() else "cpu"
     if device != "cpu" and not (device.startswith("cuda") and torch.cuda.is_available()):
@@ -149,7 +191,8 @@ def _language_model(language: Optional[str]) -> Optional[str]:
 
     base = (language or "").replace("_", "-").split("-", 1)[0].lower()
     name = {"en": "english", "fr": "french", "de": "german", "it": "italian",
-            "pt": "portuguese", "es": "spanish"}.get(base)
+            "pt": "portuguese", "es": "spanish", "nl": "dutch", "zh": "chinese", "hi": "hindi",
+            "ar": "egyptian", "wo": "wolof"}.get(base)
     return TTS_MODEL_LANGUAGES["pocket-tts-pytorch"].get(name)
 
 
@@ -251,7 +294,7 @@ def _select_job_model(job):
     if time.monotonic() - _load_failures.get(language, -_RETRY_SECONDS) < _RETRY_SECONDS:
         return _model, job.voice_state
     try:
-        if not _weights_cached(language):
+        if not (_load_options.get("language_models") or {}).get(language) and not _weights_cached(language):
             _request_language_download(language)
             return _model, job.voice_state
         if not _enough_alternate_ram():

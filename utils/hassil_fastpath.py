@@ -15,6 +15,8 @@ from pathlib import Path
 from hassil import Intents, recognize, recognize_all
 from hassil.intents import TextSlotList, WildcardSlotList
 
+from utils.voice_fastpath import fastpath_pattern as _pattern
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,36 +62,10 @@ _MEDIA_ACTIONS = {
     "FullochVolumeUp": "ha_volume_up",
     "FullochVolumeDown": "ha_volume_down",
 }
-_LOCAL_SUPPLEMENTS = {
-    "de": {
-        # Common ASR substitution for "wie viel Uhr ist es". Keep it
-        # narrowly anchored to the entire question; don't consume locations or
-        # future-time qualifiers.
-        "HassGetCurrentTime": ["(wie viel|wieviel) uhr ist das", "wie spät ist das"],
-        "HassMediaPause": ["stopp", "(pausiere|stoppe) [die|meine] musik", "halte [die|meine] musik an"],
-        "HassMediaUnpause": ["(spiele|spiel) [die|meine] musik weiter", "setze [die|meine] musik fort"],
-        "FullochVolumeUp": ["lauter", "(mach|mache|stell|stelle) [die] musik lauter"],
-        "FullochVolumeDown": ["leiser", "(mach|mache|stell|stelle) [die] musik leiser"],
-    },
-    "fr": {
-        "HassMediaSearchAndPlay": ["(joue|lance) {search_query}"],
-        "FullochVolumeUp": ["plus fort", "(mets|monte) [la] musique plus fort"],
-        "FullochVolumeDown": ["moins fort", "(mets|baisse) [la] musique moins fort"],
-    },
-    "es": {
-        "HassMediaPause": ["(pausa|para|detén) [la|mi] música"],
-        "HassMediaUnpause": ["(reanuda|continúa) [la|mi] música"],
-        "HassMediaSearchAndPlay": ["(reproduce|pon) {search_query}"],
-        "FullochVolumeUp": ["(sube|aumenta) [el] volumen", "más fuerte"],
-        "FullochVolumeDown": ["(baja|reduce) [el] volumen", "más bajo"],
-    },
-}
 _GENERIC_MUSIC = frozenset({
     "music", "musik", "musique", "la musique", "música", "la música", "musica", "muziek",
 })
-_QUERY_LOCATION = re.compile(r"\s(?:in|im|on|at|am|um|dans|sur|en|nell[ao]|na|em)\s", re.IGNORECASE)
-
-
+_QUERY_LOCATION = _pattern("hassil_location_guard")
 def _supplemental_intents(language, skip_words, supplements, names):
     return Intents.from_dict({
         "language": language,
@@ -102,7 +78,7 @@ def _supplemental_intents(language, skip_words, supplements, names):
 def _transcript_variants(text):
     # Retry a leading English hesitation that multilingual ASR commonly
     # produces. Do not strip "um" within an utterance (e.g. "um acht Uhr").
-    stripped = re.sub(r"^\s*(?:um|uh)\s*[,;]?\s+", "", text, flags=re.IGNORECASE)
+    stripped = _pattern("hassil_leading_hesitation").sub("", text)
     return (text, stripped) if stripped != text else (text,)
 
 
@@ -111,6 +87,9 @@ class HassilFastPath:
 
     def __init__(self, languages: list[str], intents_dir: str = "./data/intents"):
         from server.downloader import HASSIL_REVISION
+        from utils.voice_fastpath import VoiceFastPath, load_hassil_supplements
+
+        self.voice_fastpath = VoiceFastPath(languages, intents_dir)
 
         tables = []
         for language in languages:
@@ -119,12 +98,15 @@ class HassilFastPath:
                 raise FileNotFoundError(f"Intent pack not installed: {language}")
             tables.append((language, Intents.from_files([path])))
         self.tables = tuple(tables)
+        supplements_by_language = {
+            language: load_hassil_supplements(language, intents_dir) for language, _ in tables
+        }
         # Default media sentences in HA's tables expect an area in their
         # conversation context. Use a separate table so that synthetic default
         # context cannot broaden Home Assistant device-control matches.
         local_tables = []
         for language, table in tables:
-            supplements = _LOCAL_SUPPLEMENTS.get(language, {})
+            supplements = supplements_by_language[language].get("local", {})
             specific = [name for name in supplements if name != "HassMediaSearchAndPlay"]
             if specific:
                 local_tables.append((language, _supplemental_intents(language, table.skip_words, supplements, specific)))
@@ -132,6 +114,16 @@ class HassilFastPath:
             if "HassMediaSearchAndPlay" in supplements:
                 local_tables.append((language, _supplemental_intents(language, table.skip_words, supplements, ["HassMediaSearchAndPlay"])))
         self.local_tables = tuple(local_tables)
+        self.light_level_tables = tuple(
+            (language, _supplemental_intents(language, table.skip_words, supplements_by_language[language]["light_level"],
+                                              list(supplements_by_language[language]["light_level"])))
+            for language, table in tables if supplements_by_language[language].get("light_level")
+        )
+        self.area_light_tables = tuple(
+            (language, _supplemental_intents(language, table.skip_words, supplements_by_language[language]["area_light"],
+                                             list(supplements_by_language[language]["area_light"])))
+            for language, table in tables if supplements_by_language[language].get("area_light")
+        )
         self._discovery_lock = threading.Lock()
         self._discovery_thread = None
 
@@ -223,6 +215,45 @@ class HassilFastPath:
         # a broader area command through another sentence pattern.
         if blocked:
             return None
+        for language, table in self.area_light_tables:
+            for variant in _transcript_variants(text):
+                try:
+                    result = recognize(variant, table, slot_lists=slots)
+                except Exception:  # noqa: BLE001
+                    logger.exception("HassIL area light matching failed for %s", language)
+                    continue
+                if result:
+                    area = result.entities["area"].value
+                    operation, value, intent = {
+                        "FullochAreaLightsOn": ("on", None, "HassTurnOn"),
+                        "FullochAreaLightsOff": ("off", None, "HassTurnOff"),
+                        "FullochAreaLightsDim": ("brightness", 30, "HassLightSet"),
+                        "FullochAreaLightsBrighten": ("brightness", 100, "HassLightSet"),
+                    }[result.intent.name]
+                    values = {"area": area, "domain": "light"}
+                    if value is not None:
+                        values["brightness"] = value
+                    return FastPathEmission(
+                        {"intent": "ha_hassil_area", "args": ["area", area, "light", operation, value]},
+                        language, intent, values,
+                    )
+        for language, table in self.light_level_tables:
+            for variant in _transcript_variants(text):
+                try:
+                    result = recognize(variant, table, slot_lists=slots)
+                except Exception:  # noqa: BLE001 — a bad pack must not break turns
+                    logger.exception("HassIL light level matching failed for %s", language)
+                    continue
+                if result:
+                    values = {key: entity.value for key, entity in result.entities.items()}
+                    target = values.get("name", "lights")
+                    if target != "lights" and (not isinstance(target, str) or not target.startswith("light.")):
+                        return None
+                    level = 30 if result.intent.name == "FullochDimLights" else 100
+                    return FastPathEmission(
+                        {"intent": "ha_set_brightness", "args": [target, level]},
+                        language, "HassLightSet", {"name": target, "brightness": level},
+                    )
         # HA's language packs contain room-local light sentences that require
         # an area in conversation context. Supply a sentinel, not a real area:
         # only accept matches which explicitly copy it into the area slot, and
@@ -247,6 +278,13 @@ class HassilFastPath:
                                     and result.intent.name in {"HassTurnOn", "HassTurnOff"}):
                                 action = {"intent": "turn_on" if result.intent.name == "HassTurnOn" else "turn_off", "args": ["lights"]}
                                 return FastPathEmission(action, language, result.intent.name, {"name": "@satellite-lights"})
+                            if (values.get("area") == _SATELLITE_AREA
+                                    and values.get("domain") == "light"
+                                    and set(values) == {"area", "domain", "brightness"}
+                                    and result.intent.name == "HassLightSet"):
+                                action = {"intent": "ha_set_brightness", "args": ["lights", values["brightness"]]}
+                                return FastPathEmission(action, language, result.intent.name,
+                                                        {"name": "@satellite-lights", "brightness": values["brightness"]})
                     except Exception:  # noqa: BLE001
                         logger.exception("HassIL room matching failed for %s", language)
         for language, table in self.tables:
@@ -313,6 +351,10 @@ class HassilFastPath:
             return False
         try:
             current = self.match(text)
+            if current != emission or getattr(current, "metadata", None) != metadata:
+                from core.satellite_context import current_satellite_ha_area
+
+                current = self.voice_fastpath.command(text, current_satellite_ha_area.get(), self)
             if current != emission or getattr(current, "metadata", None) != metadata:
                 return False
             languages = {language for language, _ in self.tables}

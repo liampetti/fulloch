@@ -1,0 +1,141 @@
+# Command patterns and pronunciation-specific voice repairs.
+light_clarification:
+  bare: '\s*(?:the\s+)?lights?\s*[?.!]*\s*'
+  on: '\s*on\s*[?.!]*\s*'
+  off: '\s*off\s*[?.!]*\s*'
+  room: '\s*(?:the\s+)?(?P<room>[\w ]+?)(?:\s+lights?)?\s*[?.!]*\s*'
+  question: 'Turn the light on or off?'
+  missing_room: 'Which room?'
+routes:
+  - {extractor: area_light_state, operation: area_light_state}
+  - {extractor: light_brightness, operation: brightness}
+  - {extractor: dim_brighten, operation: brightness}
+  - {extractor: color, operation: color}
+  - {extractor: volume_up_target, operation: volume_up_target}
+  - {extractor: volume_up, operation: volume_up}
+  - {extractor: volume_down_target, operation: volume_down_target}
+  - {extractor: volume_down, operation: volume_down}
+  - {extractor: lock, operation: lock}
+  - {extractor: cover, operation: cover}
+  - {extractor: turn_onoff, operation: turn_onoff}
+  - {extractor: toggle, operation: toggle}
+  - {extractor: play, operation: play}
+  - {extractor: satellite_message, operation: satellite_message}
+  - {extractor: stop, operation: pause}
+  - {extractor: time, operation: time}
+  - {extractor: weather, operation: weather}
+  - {extractor: skip, operation: skip}
+  - {extractor: resume, operation: resume}
+  - {extractor: currency, operation: currency}
+  - {extractor: timer, operation: timer}
+  - {extractor: cancel_timer, operation: cancel_timer}
+  - {extractor: list_timers, operation: timer_status}
+  - {extractor: deep_think, operation: deep_think}
+patterns:
+  play: '^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|will\s+you\s+|i\s+want\s+you\s+to\s+|i\s+want\s+to\s+|i\s+wanna\s+|go\s+ahead\s+and\s+)*play\s+(.+)$'
+  stop: '^\s*(?:(?:please|just|okay)\s+)*(?:stop|pause|halt)\b(?:\s+(?:the\s+)?(?:music|song|playback))?(?:\s+(?:then|now|please))?\s*[.!?]*\s*$'
+  skip: '^\s*skip\b'
+  resume: '^\s*resume\b'
+  time: "(?:what time is it|what'?s the time|what time it is)(?:\\s+(?:right\\s+now|now|currently|today|please|exactly))?\\s*[?.!]*\\s*$"
+  date: "(?:what(?:'?s| is) (?:the )?date|what day is it|what(?:'?s| is) today(?:'?s)? date)(?:\\s+(?:right\\s+now|now|today|please|exactly))?\\s*[?.!]*\\s*$"
+  weather: "^\\s*(?:please\\s+|can\\s+you\\s+|could\\s+you\\s+|would\\s+you\\s+)*(?:(?:what(?:'?s|\\s+is)\\s+(?:the\\s+)?weather(?:\\s+forecast)?)|(?:weather\\s+forecast)|(?:forecast)|(?:what\\s+will\\s+the\\s+weather\\s+be\\s+like)|(?:(?:give|tell)\\s+me\\s+(?:the\\s+)?weather\\s+forecast))\\s*[?!.,]*\\s*$"
+  timer: '^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*(?:start|set)\s+(?:(?:a|the)\s+)?(?:timer|time)\s+(?:(?:for|to)\s+)?(.+?)(?:\s+please)?$'
+  cancel_timer: '^\s*(?:atticus\s+)?(?:please\s+)?(?:cancel|stop|stops|end)\s+(?:(?:the|a)\s+)?(?:active\s+)?(?:timer|countdown)(?:\s+(?P<timer_id>timer_\d+))?\s*(?:now|please)?\s*[.!?]*\s*$'
+  satellite_message: '^\s*(?:please\s+)?(?:tell|announce(?:\s+to)?|send\s+(?:a\s+)?message\s+to)\s+(?P<target>.+?)\s+(?:that|saying)\s+(?P<message>.+?)\s*[.!?]*\s*$'
+  list_timers: '^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*get\s+(?:a\s+)?(?:timers|timer|time)(?:\s+(.*?))?(?:\s+status)?$'
+  area_light_state: '^\s*(?:what|which)\s+(?:of\s+(?:the\s+)?)?lights?\s+(?:are|is)\s+(?:currently\s+|right\s+now\s+)?(?P<state>on|off)\s+(?:in\s+)?(?P<area>.+?)\s*[?.!]*\s*$'
+  compound: '\b(?:and|then)\b'
+  compound_split: '\s+(?:and\s+then|and|then)\s+'
+  leading_discourse: '^\s*(?:okay|ok|alright|sure|well)[,.!\s]+'
+  compound_anaphora: '\b(?:it|that|this|them|those|these)\b'
+  satellite_target_article: '^the\s+'
+  percentage_digits: '\d{1,3}'
+  volume_or_sound: '\b(?:volume|sound)\b'
+  hassil_location_guard: '\s(?:in|im|on|at|am|um|dans|sur|en|nell[ao]|na|em)\s'
+  hassil_leading_hesitation: '^\s*(?:um|uh)\s*[,;]?\s+'
+  laya_timer_reminder: '\b(?:remind|reminder|so that)\b|\bto\s+(?!\d|\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b)[a-z]'
+  laya_weather_argument: '\b(?:today|tomorrow|yesterday|tonight|this\s+(?:week|weekend)|next\s+\w+|monday|tuesday|wednesday|thursday|friday|saturday|sunday|in|near|at)\b'
+  laya_media_target: '\b(?:in|on|at)\s+(?:the\s+)?[a-z]'
+  laya_number_word: '\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b'
+  light_brightness: '^\s*(?:please\s+)?(?:set|change|put|turn|adjust|dim|brighten)\s+(?:the\s+)?(.+?)\s+(?:to|at|down\s+to|up\s+to)\s+(.+?)\s*(?:percent|%)\s*$'
+  turn_onoff: '^\s*(?:please\s+)?turn\s+(on|off)\s+(?:the\s+)?(.+?)\s*$'
+  turn_onoff_reversed: '^\s*(?:please\s+)?turn\s+(?:the\s+)?(.+?)\s+(on|off)(?:\s+again)?\s*$'
+  redo_adverb: '\s+(?:back|again)\s*$'
+  toggle: '^\s*(?:please\s+)?toggle\s+(?:the\s+)?(.+?)\s*$'
+  dim: '^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*(dim|brighten|brighton)\b(.*)$'
+  dim_filler: '^(?:the\s+)?(?:lights?\s+|lamps?\s+)?(?:in\s+(?:the\s+)?)?'
+  lock: '^\s*(?:please\s+)?(lock|unlock)\s+(?:the\s+)?(.+?)\s*$'
+  cover: '^\s*(?:please\s+)?(open|close|shut)\s+(?:the\s+)?(.+?)\s*$'
+  color: '^\s*(?:please\s+)?(?:set|change|make|turn)\s+(?:the\s+)?(.+?)\s+(?:to\s+|into\s+)?(warm white|cool white|white|red|green|blue|yellow|orange|purple|pink|cyan|magenta)\s*$'
+  volume_up: '^\s*(?:please\s+)?(?:louder|volume\s+up|turn\s+up(?:\s+the)?\s+(?:volume|sound)|turn\s+(?:it|the\s+(?:volume|sound))\s+up)\s*$'
+  volume_up_target: '^\s*(?:please\s+)?(?:louder|volume\s+up|turn\s+up(?:\s+the)?\s+(?:volume|sound)|turn\s+(?:it|the\s+(?:volume|sound))\s+up)\s+(?:in|on)\s+(?:the\s+)?(.+?)\s*[.!?]*\s*$'
+  volume_down: '^\s*(?:please\s+)?(?:quieter|softer|volume\s+down|turn\s+down(?:\s+the)?\s+(?:volume|sound)|turn\s+(?:it|the\s+(?:volume|sound))\s+down)\s*$'
+  volume_down_target: '^\s*(?:please\s+)?(?:quieter|softer|volume\s+down|turn\s+down(?:\s+the)?\s+(?:volume|sound)|turn\s+(?:it|the\s+(?:volume|sound))\s+down)\s+(?:in|on)\s+(?:the\s+)?(.+?)\s*[.!?]*\s*$'
+  currency: '^\s*(?:convert\s+)?(?:(\d+(?:\.\d+)?)\s+)?(.+?)\s+(?:to|in|into)\s+(.+?)\s*[.?!]?\s*$'
+  output_language: "\\b(?:in|into|to|auf|en)\\s+(?P<language>brazilian\\ portuguese|französisch|portuguese|português|norwegian|englisch|français|allemand|spanisch|espagnol|italiano|japanese|english|anglais|deutsch|spanish|español|italian|chinese|swedish|french|german|arabic|danish|dutch)(?:\\s+please)?(?=\\s*(?:[?.!,;]|$))"
+  translate_verb: '\b(?:translate|translation|übersetze|übersetzen|traduire|traduis)\b'
+  output_verb: '\b(?:say|speak|answer|reply|respond|tell|translate|übersetze|antworte|sage|réponds|dis|traduis)\b'
+  media_request: '^\s*(?:(?:please|can you|could you)\s+)*(?:play|spiele|spiel|joue|lance|reproduce|pon)\b'
+  contextual_web: '^\s*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:search\s+(?:the\s+)?(?:web|internet|online)(?:\s+and\s+cross[- ]?check\s+(?:it|that|your information))?|look\s+(?:it|that)\s+up|double[- ]?check(?:\s+(?:it|that|your information))?|cross[- ]?check(?:\s+(?:it|that|your information))?|do\s+a\s+new\s+search(?:\s+and\s+check)?)\s*[?.!]*\s*$'
+  deep_think_1: '^\s*(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?(?:think|consider|reflect|ponder)\s+(?:carefully\s+|deeply\s+|hard\s+)?(?:about|on|over|through)\s+(.+)$'
+  deep_think_2: "^\\s*(?:please\\s+)?(?:let\\s+me|let\\'?s)\\s+think\\s+(?:about\\s+|through\\s+|over\\s+)(.+)$"
+  deep_think_3: '^\s*(?:please\s+)?what\s+do\s+you\s+think\s+about\s+(.+)$'
+  note_delete: "^\\s*(?:please\\s+|hey\\s+|can\\s+you\\s+|could\\s+you\\s+|would\\s+you\\s+|will\\s+you\\s+|i\\s+(?:want|need|'?d\\s+like)\\s+you\\s+to\\s+|just\\s+)*(?:delete|remove|erase|clear|wipe|scrub|undo|forget|get\\s+rid\\s+of|take\\s+out|edit|change|modify|update|rewrite|amend)\\b.*\\b(?:notes?|facts?|journal)\\b"
+  laya_context_light: '^\s*(?:now\s+)?(?:please\s+)?(?:turn\s+)?(?:it|them|that|those|these)\s+(?:back\s+)?(?P<state>on|off)\s*(?:again)?[.!?]*\s*$'
+  laya_context_brightness: '^\s*(?:now\s+)?(?:please\s+)?(?P<verb>dim|brighten|brighton)\s+(?:it|them|that|those|these)(?:\s+again)?[.!?]*\s*$'
+  laya_context_volume: '^\s*(?:now\s+)?(?:please\s+)?(?:turn\s+)?(?:it|them|that|those|these)\s+(?P<direction>up|down)\s*[.!?]*\s*$'
+  laya_context_transport: '^\s*(?:now\s+)?(?:please\s+)?(?P<action>pause|resume|skip)\s+(?:it|them|that|those|these)\s*[.!?]*\s*$'
+  laya_context_cover: '^\s*(?:now\s+)?(?:please\s+)?(?P<action>open|close|stop|halt)\s+(?:it|them|that|those|these)\s*[.!?]*\s*$'
+  laya_context_lock: '^\s*(?:now\s+)?(?:please\s+)?(?P<action>lock|unlock)\s+(?:it|them|that|those|these)\s*[.!?]*\s*$'
+  contextual_turn_onoff: '^\s*(?:please\s+)?(?:turn|switch)\s+(?:them|those|these|it|that)(?:\s+(?:lights?|ones?))?\s+(?:back\s+)?(?P<state>on|off)(?:\s+again)?[.!?]*\s*$'
+  laya_hint_turn_on: '\b(?:turn|switch|power)\s+on\b'
+  laya_hint_turn_off: '\b(?:turn|switch|power|shut)\s+(?:off|down)\b'
+  laya_hint_toggle: '\b(?:toggle|switch)\b'
+  laya_hint_get_entity_state: '\b(?:state|status|on or off)\b'
+  laya_hint_ha_set_brightness: '\b(?:dim|brighten|brighton|brighter|brightness|percent)\b'
+  laya_hint_ha_set_color: '\b(?:color|colour|red|blue|green|yellow|white|purple|pink)\b'
+  laya_hint_ha_volume_set: '\b(?:volume|louder|quieter|percent)\b'
+  laya_hint_ha_volume_up: '\b(?:louder|volume up|turn up)\b'
+  laya_hint_ha_volume_down: '\b(?:quieter|volume down|turn down)\b'
+  laya_hint_ha_lock: '\b(?:lock)\b'
+  laya_hint_ha_unlock: '\b(?:unlock)\b'
+  laya_hint_ha_open_cover: '\b(?:open|raise)\b'
+  laya_hint_ha_close_cover: '\b(?:close|lower)\b'
+  laya_hint_get_temperature: '\b(?:temperature|temp|how warm|how cold)\b'
+  laya_hint_get_home_overview: '\b(?:home|house)\s+(?:status|overview|check)\b'
+  laya_hint_get_energy_overview: '\b(?:energy|power usage|solar status)\b'
+  laya_hint_get_security_overview: '\b(?:security|secure|security check)\b'
+  laya_hint_ha_stop_cover: '\b(?:stop|halt)\b.*\b(?:blind|curtain|shade|shutter|garage|cover|valve)\b'
+  laya_hint_ha_set_cover_position: '\b(?:blind|curtain|shade|shutter|garage|cover|valve)\b.*\b(?:percent|%|halfway)\b'
+  laya_hint_ha_set_fan_speed: '\b(?:fan)\b.*\b(?:speed|percent|%)\b'
+  laya_hint_ha_run_script: '\b(?:run|start)\b.*\b(?:script|automation)\b'
+  laya_hint_ha_activate_scene: '\b(?:activate|set|turn on)\b.*\bscene\b'
+hassil:
+  light_level:
+    FullochDimLights: ['dim [the] (light|lights)', 'dim [the] {name}']
+    FullochBrightenLights: ['brighten [the] (light|lights)', 'brighten [the] {name}']
+  area_light:
+    FullochAreaLightsOn: ['turn on [the] {area} lights', 'turn [the] {area} lights on']
+    FullochAreaLightsOff: ['turn off [the] {area} lights', 'turn [the] {area} lights off']
+    FullochAreaLightsDim: ['dim [the] {area} lights']
+    FullochAreaLightsBrighten: ['brighten [the] {area} lights']
+hold_partial:
+  - '\s*(?:please\s+)?(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?(?P<area>[\w ]+?)\s*[.!?]*\s*'
+corrections:
+  - pattern: '(?P<prefix>\s*(?:please\s+)?(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?[\w ]+?\s+)(?P<word>slides)(?P<suffix>\s*[.!?]*\s*)'
+    replacement: '\g<prefix>lights\g<suffix>'
+  - pattern: '(?P<prefix>\s*(?:please\s+)?(?:dim|brighten)\s+(?:the\s+)?[\w ]+?\s+)(?P<word>slides)(?P<suffix>\s*[.!?]*\s*)'
+    replacement: '\g<prefix>lights\g<suffix>'
+followups:
+  - {pattern: '\s*(?:set (?:it|them) (?:to|at)\s+)?(?P<value>\d{1,3})\s*(?:percent|%)\s*[.!?]*\s*', operation: brightness, value: capture}
+  - {pattern: '\s*(?:one\s+)?hundred\s+per\s*cent\s*[.!?]*\s*', operation: brightness, value: 100}
+  - pattern: '\s*(?:(?:now|please|can you|could you)\s+)*(?:brighten|brighton)\s+(?:them|then|it|those)(?:\s+again)?\s*[.!?]*\s*'
+    operation: brightness_step
+    value: 20
+  - pattern: '\s*(?:(?:now|please|can you|could you)\s+)*dim\s+(?:them|it|those)(?:\s+again)?\s*[.!?]*\s*'
+    operation: brightness_step
+    value: -20
+  - pattern: '\s*(?:(?:now|please|can you|could you)\s+)*(?:turn|switch)\s+(?:them|it|those)\s+(?:back\s+)?on(?:\s+again)?\s*[.!?]*\s*'
+    operation: on
+  - pattern: '\s*(?:(?:now|please|can you|could you)\s+)*(?:turn|switch)\s+(?:them|it|those)\s+(?:back\s+)?off(?:\s+again)?\s*[.!?]*\s*'
+    operation: off

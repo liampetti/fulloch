@@ -170,3 +170,18 @@ def test_seed_dir_from_env(tmp_path, monkeypatch):
     data = tmp_path / "data"
     ensure_scaffolding(str(data))  # seed_dir defaults to the env var
     assert (data / "config.yml").is_file()
+def test_fastpath_upgrade_merges_missing_defaults_without_overwriting_customizations(tmp_path):
+    from core.bootstrap import _merge_fastpath_defaults
+
+    source = tmp_path / "default.yaml"
+    target = tmp_path / "user.yaml"
+    source.write_text("patterns:\n  play: default\n  stop: stop-default\nhassil:\n  local:\n    clock: [default]\n")
+    target.write_text("# my config\npatterns:\n  play: custom\ncorrections: []\n")
+    _merge_fastpath_defaults(source, target)
+    from ruamel.yaml import YAML
+
+    updated = YAML(typ="safe").load(target.read_text())
+    assert updated["patterns"] == {"play": "custom", "stop": "stop-default"}
+    assert updated["corrections"] == []
+    assert updated["hassil"]["local"]["clock"] == ["default"]
+    assert "# my config" in target.read_text()

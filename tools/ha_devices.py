@@ -288,6 +288,22 @@ def set_ha_brightness(entity: str, brightness: int | str) -> str:
 
 
 @client.tool(
+    name="ha_adjust_light_brightness",
+    description="Adjust a light's brightness by a relative percentage",
+)
+def adjust_light_brightness(entity: str, step: int) -> str:
+    """Adjust brightness relative to its current level, not an absolute level."""
+    if type(step) is not int or not -100 <= step <= 100 or step == 0:
+        return _failure(response("device_invalid_brightness"), "invalid_brightness", entity=entity)
+    area_lights = _bare_light_area_entities(entity)
+    if isinstance(area_lights, str):
+        return area_lights
+    target = area_lights[0] if area_lights is not None else client._resolve_entity(entity, domain="light")
+    return client._call_service("light", "turn_on", target, {"brightness_step_pct": step},
+                                success_message="Done.")
+
+
+@client.tool(
     name="ha_hassil_area",
     description="Control supported devices in one Home Assistant area or floor",
 )
@@ -313,6 +329,11 @@ def hassil_area(scope: str, location: str, domain: str, operation: str, value=No
             data = {"brightness": int(parse_percentage(value) * 255 / 100)}
         except ValueError:
             return _failure("I couldn't read that brightness percentage. No command was sent.", "invalid_brightness", location=location)
+        service = "turn_on"
+    elif operation == "brightness_step" and domain == "light":
+        if type(value) is not int or not -100 <= value <= 100 or value == 0:
+            return _failure("I couldn't read that brightness change. No command was sent.", "invalid_brightness", location=location)
+        data = {"brightness_step_pct": value}
         service = "turn_on"
     elif operation == "temperature" and domain == "climate":
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not -50 <= value <= 100:

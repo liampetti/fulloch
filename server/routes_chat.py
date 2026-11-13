@@ -146,6 +146,10 @@ class SpeakRequest(BaseModel):
     text: str
 
 
+class ReplayRequest(SpeakRequest):
+    satellite_id: str = Field(min_length=1, max_length=256)
+
+
 class MicRequest(BaseModel):
     enabled: bool
 
@@ -675,12 +679,14 @@ def register_chat_routes(
         return {"ok": True}
 
     @app.post("/replay")
-    def replay(req: SpeakRequest) -> dict:
+    def replay(req: ReplayRequest) -> dict:
         require_ready()
         text = (req.text or "").strip()
         if not text:
             raise HTTPException(status_code=400, detail="empty text")
-        if not _start_proactive(text=text, emit_event=False):
+        if not req.satellite_id.strip():
+            raise HTTPException(status_code=400, detail="empty satellite id")
+        if not _start_proactive(text=text, emit_event=False, satellite_id=req.satellite_id):
             raise HTTPException(status_code=429, detail="too many pending speech requests")
         return {"ok": True}
 

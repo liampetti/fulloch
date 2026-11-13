@@ -30,6 +30,28 @@ def _endpoint(pcm, capture_id, *, early=False):
     return (pcm, 1.0, -20.0, False, "sat-a", 2.0, False, early, None, None, early, None, capture_id)
 
 
+def test_soft_probe_decodes_snapshot_without_retiring_live_capture(monkeypatch):
+    monkeypatch.setattr("core.asr_parakeet.PARTIAL_INITIAL_SECONDS", 60)
+    model = _Model()
+    worker = ParakeetLiveWorker(model)
+    frame = np.ones(4, dtype=np.float32)
+    item = (np.ones(8, dtype=np.float32), 1.0, -20.0, True, "sat-a", 2.0,
+            False, False, None, None, False, None, 1)
+    try:
+        worker.start("sat-a", frame, capture_id=1)
+        assert worker.probe(item)
+        event = worker.get_event(timeout=1)
+        assert event is not None and not event.final
+        assert event.item == item
+        np.testing.assert_array_equal(event.result.pcm, item[0])
+        assert worker.finish(_endpoint(np.ones(12, dtype=np.float32), 1))
+        final = worker.get_event(timeout=1)
+        assert final is not None and final.final
+        np.testing.assert_array_equal(final.result.pcm, np.ones(12, dtype=np.float32))
+    finally:
+        worker.close()
+
+
 @pytest.mark.parametrize("scoped", [False, True])
 def test_discard_retires_active_buffer_and_already_emitted_results(monkeypatch, scoped):
     monkeypatch.setattr("core.asr_parakeet.PARTIAL_INITIAL_SECONDS", 0)

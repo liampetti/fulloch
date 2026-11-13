@@ -78,6 +78,8 @@ class VadEndpointer:
         # next `{'start'}`, so each pause yields one soft endpoint. Always False
         # when the soft iterator is disabled.
         self.soft_endpointed = False
+        self.soft_pause_samples = 0
+        self.soft_pause_generation = 0
         self._residual = np.empty(0, dtype=np.float32)
         # True once VADIterator has emitted a `{'start'}` for the current
         # utterance; `endpointed` only after a subsequent `{'end'}`.
@@ -131,8 +133,14 @@ class VadEndpointer:
                 if soft_event:
                     if "start" in soft_event:
                         self.soft_endpointed = False
+                        self.soft_pause_samples = 0
+                        self.soft_pause_generation += 1
                     if "end" in soft_event:
                         self.soft_endpointed = True
+                        self.soft_pause_samples = 0
+                        self.soft_pause_generation += 1
+                if self.soft_endpointed:
+                    self.soft_pause_samples += VAD_WINDOW_SAMPLES
             event = self._iterator(window)
             if not event:
                 # Accumulate the RMS of windows inside the current speech
@@ -193,6 +201,8 @@ class VadEndpointer:
         if self._soft_iterator is not None:
             self._soft_iterator.reset_states()
         self.soft_endpointed = False
+        self.soft_pause_samples = 0
+        self.soft_pause_generation += 1
         self._residual = np.empty(0, dtype=np.float32)
         self.speech_started = False
         self.endpointed = False

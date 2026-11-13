@@ -122,6 +122,20 @@ class ParakeetLiveWorker:
         except queue.Full:
             return False
 
+    def probe(self, item) -> bool:
+        """Transcribe a soft endpoint without ending its live capture."""
+        satellite_id = item[4]
+        generation = self._generation(satellite_id)
+        capture_id = item[12] if len(item) > 12 else None
+        if not self._is_current(satellite_id, generation, capture_id):
+            return True
+        with self._frames.mutex:
+            if self._frames.maxsize > 0 and len(self._frames.queue) >= self._frames.maxsize:
+                return False
+            self._frames.queue.appendleft(("probe", satellite_id, generation, capture_id, item))
+            self._frames.not_empty.notify()
+        return True
+
     def discard(self, satellite_id) -> None:
         """Immediately invalidate pending live work for an abandoned capture."""
         with self._generation_lock:
@@ -318,11 +332,11 @@ class ParakeetLiveWorker:
                     self._emit(LiveAsrFailure(exc))
                     self._closed.set()
                     return
-            elif kind == "final":
+            elif kind in {"final", "probe"}:
                 item = payload
                 pcm = np.asarray(item[0], dtype=np.float32)
                 early_verification = len(item) > 10 and item[10]
-                if not early_verification and (
+                if kind == "final" and not early_verification and (
                     capture_id is None or self._capture_ids.get(satellite_id) == capture_id
                 ):
                     self._reset_capture(satellite_id)
@@ -332,7 +346,7 @@ class ParakeetLiveWorker:
                         self._emit(
                             LiveAsrEvent(
                                 LiveAsrResult(text, pcm, transcribe_seconds, generation, capture_id),
-                                item, True,
+                                item, kind == "final",
                             )
                         )
                 except Exception as exc:

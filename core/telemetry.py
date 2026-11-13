@@ -10,5 +10,5 @@ logger.propagate = False
 
 
 def event(kind: str, **fields) -> None:
-    """Write one JSON event without retaining audio or transcript content."""
+    """Write one JSON event; light_turn events may contain transcripts and replies."""
     logger.info(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "event": kind, **fields}, separators=(",", ":")))

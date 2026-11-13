@@ -47,7 +47,7 @@ general:
   vad_threshold: 0.6             # raise toward 0.7 in noisy rooms.
   vad_endpoint_silence_ms: 1500  # low-VAD duration before end-of-speech.
   vad_min_speech_ms: 300         # filter coughs/taps the VAD scores as speech.
-  vad_soft_endpoint_silence_ms: 100  # early-commit pause; 0 disables. Locks/media/timers always wait for the hard endpoint.
+  vad_soft_endpoint_silence_ms: 100  # early-commit pause; 0 disables. Timers/area actions require an additional 150ms pause; locks and music wait for the hard endpoint.
 
   # === Dashboard ============================================================
   dashboard_theme: "auto"       # auto | dark | light; auto follows the browser/OS preference.
@@ -179,8 +179,11 @@ thinking:
 #       tools: [search]
 #       credential_key: paper_search_api_key
 
-# Research automatically prefers Semantic Scholar, then falls back to arXiv
-# and OpenAlex. semantic_scholar_api_key and wolfram_app_id are optional
+# Academic paper search is disabled by default. Opt in to sending paper queries
+# to Semantic Scholar, arXiv and OpenAlex (in that fallback order):
+# research:
+#   enabled: true
+# semantic_scholar_api_key and wolfram_app_id are optional
 # credentials; Wolfram is exposed only when its key is present.
 # Travel planning is always available when serpapi_api_key is present. It uses
 # fixed, bounded Google Flights/Hotels searches in AUD and never books.

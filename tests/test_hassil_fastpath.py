@@ -37,7 +37,6 @@ def matcher(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("text", [
-    "turn on the kitchen lights",
     "allume la lumière de la cuisine",
     "schalte das küchenlicht ein",
     "um schalte das küchenlicht ein",
@@ -89,15 +88,12 @@ def test_room_context_does_not_override_explicitly_named_light(matcher):
     token = current_satellite_ha_area.set("office")
     try:
         result = matcher.match("turn off the kitchen lights")
-        assert result is None or result == {
-            "actions": [{"intent": "turn_off", "args": ["light.kitchen_lights"]}]
-        }
+        assert result == {"actions": [{"intent": "ha_hassil_area", "args": ["area", "kitchen", "light", "off", None]}]}
     finally:
         current_satellite_ha_area.reset(token)
 
 
 @pytest.mark.parametrize("text, language", [
-    ("turn on the kitchen lights", "en"),
     ("allume la lumière de la cuisine", "fr"),
     ("schalte das küchenlicht ein", "de"),
 ])
@@ -200,6 +196,22 @@ def test_brightness_and_unsafe_slot_combinations(matcher):
     }
     assert matcher._action("HassTurnOn", {"area": "kitchen", "domain": "light", "device_class": "garage"}) is None
     assert matcher._action("HassTurnOn", {"name": "light.kitchen_lights", "area": "kitchen"}) is None
+
+
+@pytest.mark.parametrize("text,target,level", [
+    ("dim the lights", "lights", 30),
+    ("brighten the lights", "lights", 100),
+    ("tamise la lumière", "lights", 30),
+    ("augmente la lumière", "lights", 100),
+    ("tamise la lumière de la cuisine", "light.kitchen_lights", 30),
+    ("dimme das licht", "lights", 30),
+    ("mach das licht heller", "lights", 100),
+    ("dimme küchenlicht", "light.kitchen_lights", 30),
+])
+def test_default_light_brightness_matches_in_each_language(matcher, text, target, level):
+    emission = catch_with_hassil(text, matcher)
+    assert emission == {"actions": [{"intent": "ha_set_brightness", "args": [target, level]}]}
+    assert should_commit_provisional(text, emission)
 
 
 @pytest.mark.parametrize("text, alias, entity, intent, args", [

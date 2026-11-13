@@ -2,6 +2,7 @@
 # Python
 # =============================================================================
 .venv/
+.venv-ci-*/
 venv/
 env/
 .venv-wakeword-train
@@ -44,6 +45,7 @@ data/research-tasks.json
 !/data/intents/*/
 /data/intents/*/*
 !/data/intents/*/fulloch-responses.yaml
+!/data/intents/*/fulloch-fastpath.yaml
 data/conversations.sqlite3
 
 # =============================================================================

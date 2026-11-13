@@ -53,6 +53,9 @@ from .ha_devices import (
     activate_scene as activate_scene,
 )
 from .ha_devices import (
+    adjust_light_brightness as adjust_light_brightness,
+)
+from .ha_devices import (
     call_ha_service as call_ha_service,
 )
 from .ha_devices import (

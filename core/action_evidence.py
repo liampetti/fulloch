@@ -12,7 +12,7 @@ from utils.intents import StepKind, reactive_to_speech
 from utils.prompts import ACTION_EXECUTION_REPAIR_PROMPT
 
 OPERATION_TOOLS = frozenset({
-    "turn_on", "turn_off", "toggle", "ha_set_brightness", "ha_set_color",
+    "turn_on", "turn_off", "toggle", "ha_set_brightness", "ha_adjust_light_brightness", "ha_set_color",
     "ha_service", "ha_set_climate", "ha_lock", "ha_unlock", "ha_open_cover",
     "ha_close_cover", "ha_stop_cover", "ha_set_cover_position", "ha_set_fan_speed",
     "ha_vacuum", "ha_run_script", "ha_activate_scene", "ha_volume_set",

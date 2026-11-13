@@ -287,6 +287,7 @@ class WakewordCandidates:
         endpoint_t,
         wake_probe=False,
         diagnostic_pcm=None,
+        guarded_pause=False,
     ):
         if session.audio_capture_id and session.audio_capture_id <= session.committed_capture_id:
             # Continue recorder endpoint/reset bookkeeping, but do not transcribe
@@ -297,6 +298,14 @@ class WakewordCandidates:
             return
         if session.kws_candidate:
             if provisional:
+                if session.kws_verified and not wake_probe:
+                    self.put_utterance(
+                        (buf, onset, loudness_db, True, session.id, endpoint_t,
+                         False, True, None, session.protocol_state_generation, False,
+                         session.kws_capture_id, session.audio_capture_id or None,
+                         None, guarded_pause),
+                        satellite_id=session.id, kind="provisional", candidate=True,
+                    )
                 return
             # The trigger-time snapshot may end mid-word. Always admit the
             # complete endpoint for authoritative verification, even after an
@@ -358,6 +367,7 @@ class WakewordCandidates:
                 (
                     buf, onset, loudness_db, provisional, session.id, endpoint_t,
                     False, False, None, None, False, None, session.audio_capture_id or None,
+                    None, guarded_pause,
                 ),
                 satellite_id=session.id,
                 kind="provisional" if provisional else "final",

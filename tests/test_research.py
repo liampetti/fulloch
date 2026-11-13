@@ -11,7 +11,19 @@ def _module(monkeypatch):
     fake_arxiv = types.SimpleNamespace(Client=lambda **_kwargs: None, Search=lambda **_kwargs: None)
     monkeypatch.setitem(sys.modules, "arxiv", fake_arxiv)
     sys.modules.pop("tools.research", None)
-    return importlib.import_module("tools.research")
+    module = importlib.import_module("tools.research")
+    monkeypatch.setattr(module, "config", {"research": {"enabled": True}})
+    return module
+
+
+@pytest.mark.parametrize("settings", [{}, {"research": {}}, {"research": {"enabled": "true"}}, {"research": {"enabled": False}}])
+def test_paper_search_requires_explicit_opt_in(monkeypatch, settings):
+    research = _module(monkeypatch)
+    monkeypatch.setattr(research, "config", settings)
+    monkeypatch.setattr(research.requests, "get", lambda *_args, **_kwargs: pytest.fail("unexpected network request"))
+    result = research.search_papers("attention")
+    assert result.thinking_status == "unavailable"
+    assert "research.enabled" in result
 
 
 def test_auto_uses_semantic_scholar_before_fallback(monkeypatch):

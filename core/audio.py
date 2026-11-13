@@ -89,9 +89,8 @@ VAD_ENDPOINT_SILENCE_MS = SILENCE_DURATION_MS
 # commit before the full 1.5s hard endpoint elapses. 0 disables the early-commit
 # path entirely. 200ms is safe here specifically because this path is
 # speculation-gated (should_commit_provisional) — only regex-catchable,
-# non-destructive commands (lights/timers/etc.) can commit early;
-# notes/locks/media/thinking-mode turns always fall through to the hard
-# endpoint below regardless of this value.
+# safe commands can commit early. Timers and selected area actions require an
+# additional guarded pause; notes, locks, music and thinking wait for hard.
 VAD_SOFT_ENDPOINT_SILENCE_MS = 100
 # A single provisional ASR snapshot is sent shortly after VAD detects speech,
 # without waiting for a pause. It is wakeword-only: it can update a native
@@ -393,6 +392,8 @@ class AudioCapture:
         if not _live_result and self.live_asr_backend is not None:
             if kind in ("final", "wake_candidate", "wake_verification"):
                 return self.live_asr_backend.finish(item)
+            if kind == "provisional" and hasattr(self.live_asr_backend, "probe"):
+                return self.live_asr_backend.probe(item)
             if kind in ("provisional", "wake_probe"):
                 return True
         if isinstance(self.audio_queue, AsrWorkQueue):

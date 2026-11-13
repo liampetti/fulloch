@@ -73,6 +73,7 @@ def test_safe_regex_intent_commits_immediately():
     assert should_commit_provisional("turn off the lights", _actions("turn_off")) is True
     assert should_commit_provisional("what time is it", _actions("get_current_time")) is True
     assert should_commit_provisional("louder", _actions("ha_volume_up")) is True
+    assert should_commit_provisional("ライトを消して", _actions("turn_off")) is True
 
 
 def test_safe_regex_intent_waits_for_a_dangling_request():
@@ -92,6 +93,20 @@ def test_unsafe_regex_intent_waits():
 
 def test_mixed_actions_with_any_unsafe_waits():
     assert should_commit_provisional("x", _actions("turn_on", "play_song")) is False
+
+
+def test_guarded_pause_enables_only_bounded_ambiguous_actions():
+    timer = {"actions": [{"intent": "start_countdown", "args": ["five minutes"]}]}
+    area = {"actions": [{"intent": "ha_hassil_area", "args": ["area", "office", "light", "on", None]}]}
+    assert not should_commit_provisional("set a timer for five minutes", timer)
+    assert should_commit_provisional("set a timer for five minutes", timer, guarded_pause=True)
+    assert should_commit_provisional("turn on office lights", area, guarded_pause=True)
+    timer["actions"][0]["args"] = ["five"]
+    assert not should_commit_provisional("set a timer for five", timer, guarded_pause=True)
+    assert not should_commit_provisional("unlock door", _actions("ha_unlock"), guarded_pause=True)
+    assert not should_commit_provisional("play music", _actions("play_song"), guarded_pause=True)
+    assert not should_commit_provisional("send message", _actions("send_satellite_message"), guarded_pause=True)
+    assert not should_commit_provisional("do unknown", _actions("unknown"), guarded_pause=True)
 
 
 def test_freeform_waits_for_the_hard_endpoint():

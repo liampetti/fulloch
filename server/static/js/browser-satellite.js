@@ -254,7 +254,7 @@ registerProcessor('fulloch-resample', ResampleTo16k);
         satDisconnect();
         return satConnect();
       }
-      if (playbackOnly && satWs.readyState === WebSocket.OPEN) return true;
+      if (playbackOnly && satWs.readyState === WebSocket.OPEN && mySatelliteId) return true;
       if (playbackOnly && satWs.readyState === WebSocket.CONNECTING) {
         return new Promise(resolve => {
           const finish = result => {
@@ -386,7 +386,6 @@ registerProcessor('fulloch-resample', ResampleTo16k);
         ws.send(JSON.stringify({ type: 'conversation_mode.set', enabled: satPendingConversationMode }));
         satPendingConversationMode = null;
       }
-      resolveConnected(true);
     };
 
     ws.onmessage = (e) => {
@@ -400,6 +399,7 @@ registerProcessor('fulloch-resample', ResampleTo16k);
             setConversationModePreference(!!msg.conversation_mode);
             satSetAudioProcessing(conversationMode);
             syncSatBtn();
+            resolveConnected(!!mySatelliteId);
           } else if (msg.type === 'conversation_mode.result') {
             if (msg.enabled) {
               setConversationModePreference(true);

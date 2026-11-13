@@ -7,7 +7,6 @@ This module does not import Assistant, keeping the dependency one-way.
 import json
 import logging
 import random
-import re
 import threading
 import time
 import uuid
@@ -358,13 +357,9 @@ def _contextual_turn_onoff(
     user_prompt: str, history: list[dict], *, ha_area: Optional[str] = None,
 ) -> Optional[dict]:
     """Resolve a short on/off pronoun only from the immediately prior success."""
-    match = re.fullmatch(
-        r"\s*(?:please\s+)?(?:turn|switch)\s+"
-        r"(?:them|those|these|it|that)(?:\s+(?:lights?|ones?))?\s+"
-        r"(?:back\s+)?(?P<state>on|off)(?:\s+again)?[.!?]*\s*",
-        user_prompt,
-        re.IGNORECASE,
-    )
+    from utils.voice_fastpath import fastpath_pattern
+
+    match = fastpath_pattern("contextual_turn_onoff").fullmatch(user_prompt)
     if not match:
         return None
 
@@ -427,6 +422,35 @@ def _contextual_turn_onoff(
                          "args": [last_success[1]]}]}
 
 
+def _record_fastpath_light_context(satellite, ha_area, action, step):
+    """Remember only a verified, single light service call from this turn."""
+    if satellite is None:
+        return
+    outcome = step.operation_outcome
+    if (step.kind is not StepKind.NORMAL or step.should_replan
+            or not isinstance(outcome, OperationOutcome) or not outcome.success
+            or outcome.code != "service_called" or outcome.values.get("domain") != "light"):
+        return
+    args = action.get("args") or []
+    ids = outcome.values.get("entity_id")
+    if action.get("intent") == "ha_hassil_area" and len(args) >= 4 and args[0] == "area":
+        scope, target = "area", args[1]
+    elif isinstance(ids, str) and ids.startswith("light."):
+        scope, target = "entity", ids
+    elif isinstance(ids, list) and ids and ha_area:
+        from tools import ha_client
+
+        matches = [key for key, name in ha_client._AREA_MAP.items()
+                   if ha_area.casefold() in {key.casefold(), name.casefold()}]
+        if len(matches) != 1:
+            return
+        scope, target = "area", matches[0]
+    else:
+        return
+    satellite.fastpath_light_context = {"scope": scope, "target": target,
+                                       "satellite_area": ha_area, "time": time.monotonic()}
+
+
 def _personality(host) -> Optional[str]:
     """Get the configured personality without coupling test hosts to Assistant."""
     getter = getattr(host, "_personality_for_prompt", None)
@@ -484,6 +508,22 @@ class AgentLoop:
         self.satellite = satellite
         self.ha_area = ha_area if ha_area is not None else getattr(satellite, "ha_area", None)
         self.turn_id = getattr(stats, "turn_id", None) or uuid.uuid4().hex
+        self._light_trace = []
+        self._light_clarification = False
+
+    def _trace_light_action(self, action, step):
+        outcome = step.operation_outcome
+        args = action.get("args") or []
+        is_light = (isinstance(outcome, OperationOutcome) and outcome.values.get("domain") == "light")
+        is_light = is_light or action.get("intent") in {"ha_set_brightness", "ha_adjust_light_brightness", "ha_set_color"}
+        is_light = is_light or (action.get("intent") == "ha_hassil_area" and isinstance(args, list)
+                                and len(args) >= 3 and args[2] == "light")
+        if is_light:
+            self._light_trace.append({"intent": action.get("intent"), "args": args,
+                                      "success": outcome.success if isinstance(outcome, OperationOutcome) else None,
+                                      "outcome": outcome.code if isinstance(outcome, OperationOutcome) else None,
+                                      "entity_id": outcome.values.get("entity_id") if isinstance(outcome, OperationOutcome) else None,
+                                      "result": step.text})
 
     def run(self, user_prompt: str) -> str:
         """Drive the agent loop for `user_prompt` and return the spoken text.
@@ -498,15 +538,24 @@ class AgentLoop:
         cancel_check = self.cancel_check
         if session is not None and session.cancelled:
             return ""
+        self._light_trace = []
+        self._light_clarification = False
         token = _current_satellite_id.set(self.satellite_id)
         area_token = _current_satellite_ha_area.set(self.ha_area)
         from utils.response_language import detect_response_language
 
-        language_token = current_response_language.set(detect_response_language(user_prompt))
+        language = detect_response_language(user_prompt)
+        language_token = current_response_language.set(language)
         intents_token = current_response_intents_dir.set(getattr(host, "_hassil_intents_dir", "./data/intents"))
         try:
             spoken = self._run(host, session, source, stats, on_slm_start, cancel_check, user_prompt)
-            return "" if session is not None and session.cancelled else spoken
+            spoken = "" if session is not None and session.cancelled else spoken
+            if self._light_trace or self._light_clarification:
+                telemetry_event("light_turn", turn_id=self.turn_id, satellite_id=self.satellite_id,
+                                source=source, transcript=user_prompt, language=language,
+                                route=getattr(stats, "route", None), actions=self._light_trace,
+                                response=spoken, cancelled=bool(session is not None and session.cancelled))
+            return spoken
         finally:
             current_response_intents_dir.reset(intents_token)
             current_response_language.reset(language_token)
@@ -530,7 +579,23 @@ class AgentLoop:
             if task_reply:
                 return task_reply
         matcher = getattr(host, "_hassil_fastpath", None)
-        catch_intent = (lambda text: catch_with_hassil(text, matcher)) if matcher else catchAll
+        satellite = getattr(self, "satellite", None)
+        context = getattr(satellite, "fastpath_light_context", None)
+        from .light_clarification import clarify_light
+
+        voice_rules = getattr(matcher, "voice_fastpath", None)
+        languages = [rule[0] for rule in getattr(voice_rules, "rules", [])]
+        clarification, clarified_action = clarify_light(
+            satellite, user_prompt, getattr(self, "ha_area", None), languages, getattr(host, "_hassil_intents_dir", "./data/intents"),
+        ) if source == "voice" else (None, None)
+        if clarification:
+            self._light_clarification = True
+            return clarification
+        if satellite is not None:
+            satellite.fastpath_light_context = None
+        catch_intent = (lambda text: catch_with_hassil(
+            text, matcher, voice=source == "voice", context=context, ha_area=getattr(self, "ha_area", None),
+        )) if matcher else catchAll
         report_route = route_report_follow_up(
             user_prompt, satellite_id=self.satellite_id, cancel_check=cancel_check, stats=stats,
             consume_report=getattr(host, "consume_completed_thinking_report", None),
@@ -539,7 +604,7 @@ class AgentLoop:
         )
         if report_route.reply:
             return report_route.reply
-        caught = report_route.caught
+        caught = clarified_action or report_route.caught
         # Compact finished turns while retaining short tool traces for follow-ups.
         host._compact_completed_turns()
 
@@ -563,6 +628,14 @@ class AgentLoop:
         if regex_emission is None and contextual_action is not None:
             regex_emission = contextual_action
             logger.debug("Resolved contextual device follow-up: %s", contextual_action)
+        if (regex_emission is None and not host.llm_enabled and getattr(host, "laya_enabled", False)
+                and self.satellite_id in (None, "dashboard-text")):
+            # Laya's existing conversational context is dashboard-scoped. Keep
+            # deterministic follow-ups outside model selection and never share
+            # that context with a voice satellite.
+            from utils.voice_fastpath import contextual_followup
+
+            regex_emission = contextual_followup(user_prompt, getattr(host, "_laya_context", None))
         first_emission = regex_emission
         if should_style_satellite_message(
             regex_emission, llm_enabled=getattr(host, "llm_enabled", False),
@@ -1201,7 +1274,10 @@ class AgentLoop:
                     step = _localized_time_step(action, step)
                 plan.record(planned_step, step, reused=reused)
                 if not reused:
+                    self._trace_light_action(action, step)
                     evidence.record({**action, "intent": intent_name}, step)
+                    if len(emission.get("actions", [])) == 1:
+                        _record_fastpath_light_context(self.satellite, self.ha_area, action, step)
                 host._history_for(self.satellite).append(
                     {
                         "role": "tool",
@@ -1435,6 +1511,9 @@ class AgentLoop:
             if step.kind is StepKind.ERROR:
                 needs_model = True
             plan.record(planned_step, step)
+            self._trace_light_action(action, step)
+            if len(actions) == 1:
+                _record_fastpath_light_context(self.satellite, self.ha_area, action, step)
             host._history_for(self.satellite).append(
                 {
                     "role": "tool",

@@ -84,7 +84,11 @@ class AsrWorkQueue:
 
     @staticmethod
     def _payload(item: AsrWorkItem) -> tuple:
-        return (*item.payload, item.expires_at) if item.candidate else item.payload
+        if item.candidate:
+            if len(item.payload) > 13:
+                return (*item.payload[:13], item.expires_at, *item.payload[14:])
+            return (*item.payload, item.expires_at)
+        return item.payload
 
     def _expired(self, item: AsrWorkItem) -> bool:
         if item.expires_at is None or time.monotonic() < item.expires_at:

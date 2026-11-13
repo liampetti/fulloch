@@ -167,6 +167,7 @@ class SatelliteRecorder:
                 if chunk is not FLUSH and not self.sat_buf:
                     session.audio_capture_id += 1
                     session.soft_probe_emitted = False
+                    session.guarded_soft_probe_emitted = False
 
                 wakeword_matched = False
                 if (
@@ -346,10 +347,6 @@ class SatelliteRecorder:
                         endpointer.soft_endpointed
                         and not endpointer.endpointed
                         and endpointer.speech_started
-                        # An early probe already covers this in-progress speech
-                        # segment. Keep the hard endpoint for verification, but
-                        # do not queue another provisional ASR request.
-                        and not session.early_wake_probe_emitted
                         # Once a provisional has committed, the recorder may
                         # observe resumed speech (including speaker residue)
                         # before the matching hard endpoint is transcribed. Do
@@ -382,6 +379,24 @@ class SatelliteRecorder:
                                     secs,
                                     session.id,
                                 )
+                        # A second snapshot after a sustained pause permits a
+                        # small set of more ambiguous actions (e.g. timers).
+                        # Count audio samples, not wall time, so backlog cannot
+                        # masquerade as silence. The transcriber rechecks that
+                        # speech has not resumed before committing it.
+                        if (session.soft_probe_emitted and not session.guarded_soft_probe_emitted
+                                and getattr(endpointer, "soft_pause_samples", 0)
+                                >= int(self.config.sample_rate * 0.15)):
+                            buf = _utterance_mono(self.sat_buf)
+                            onset = endpointer.speech_onset or time.monotonic()
+                            rms = endpointer.voiced_rms
+                            if rms is None:
+                                rms = _buf_rms(buf)
+                            self.candidates._enqueue(
+                                session, buf, onset, rms_to_dbfs(rms), True,
+                                time.monotonic(), guarded_pause=endpointer.soft_pause_generation,
+                            )
+                            session.guarded_soft_probe_emitted = True
                     elif not endpointer.soft_endpointed:
                         # Once a provisional has committed, its recorder buffer
                         # remains live only to produce the matching hard endpoint.
@@ -390,6 +405,7 @@ class SatelliteRecorder:
                         # repeatedly before that hard endpoint arrives.
                         if not capture_committed():
                             session.soft_probe_emitted = False
+                            session.guarded_soft_probe_emitted = False
 
                     hit_silence = endpointer.endpointed
                     hit_max = buffer_samples >= self.config.max_utterance_samples

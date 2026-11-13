@@ -21,15 +21,63 @@ _SUBDIRS = (
 )
 
 
+def _merge_fastpath_defaults(source: Path, target: Path) -> None:
+    """Add missing mapping keys without replacing any user-defined values."""
+    from ruamel.yaml import YAML
+
+    try:
+        yaml = YAML()
+        defaults = yaml.load(source.read_text(encoding="utf-8"))
+        original = target.read_text(encoding="utf-8")
+        existing = yaml.load(original)
+        if not isinstance(defaults, dict) or not isinstance(existing, dict):
+            logger.warning("Cannot merge invalid fast-path file %s", target)
+            return
+
+        def merge(current, baseline):
+            changed = False
+            for key, value in baseline.items():
+                if key not in current:
+                    current[key] = value
+                    changed = True
+                elif isinstance(current[key], dict) and isinstance(value, dict):
+                    changed = merge(current[key], value) or changed
+            return changed
+
+        if merge(existing, defaults):
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
+                                                 prefix=".fastpath-", delete=False) as output:
+                    temporary = Path(output.name)
+                    yaml.dump(existing, output)
+                if target.read_text(encoding="utf-8") != original:
+                    logger.warning("Fast-path file changed during merge; leaving it unchanged: %s", target)
+                    return
+                os.chmod(temporary, target.stat().st_mode & 0o777)
+                os.replace(temporary, target)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+            logger.info("Added missing fast-path defaults to %s", target)
+    except Exception:  # noqa: BLE001 — preserve startup if an edited file is invalid
+        logger.exception("Could not merge fast-path defaults into %s", target)
+
+
 def _seed_response_files(data: Path, seed: Path, *, native_fallback: bool) -> None:
     """Publish bundled defaults only when missing, without replacing edits."""
     source_root = seed / "intents"
     if native_fallback and not source_root.is_dir():
         source_root = Path(__file__).resolve().parent.parent / "data" / "intents"
-    for language in ("en", "fr", "de"):
-        source = source_root / language / "fulloch-responses.yaml"
-        target = data / "intents" / language / "fulloch-responses.yaml"
-        if target.exists() or not source.is_file():
+    for language, filename in ((language, filename) for language in ("en", "fr", "de")
+                               for filename in ("fulloch-responses.yaml", "fulloch-fastpath.yaml")):
+        source = source_root / language / filename
+        target = data / "intents" / language / filename
+        if not source.is_file():
+            continue
+        if target.exists():
+            if filename == "fulloch-fastpath.yaml" and source.resolve() != target.resolve():
+                _merge_fastpath_defaults(source, target)
             continue
         temporary = None
         try:

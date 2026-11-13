@@ -1,7 +1,17 @@
 # Files excluded from `git archive` exports (used by transfer_to_pub_dir.sh).
 CLAUDE.md export-ignore
+AGENTS.md export-ignore
 docs/ export-ignore
 scripts/wakeword/** export-ignore
+scripts/bump_version.py export-ignore
+scripts/compare_thinking_sources.py export-ignore
+scripts/generate_thinking_report.py export-ignore
+scripts/probe_calendar_thinking.py export-ignore
+scripts/probe_deep_think_semantics.py export-ignore
+scripts/probe_incremental_thinking.py export-ignore
+scripts/probe_thinking_scale.py export-ignore
+scripts/replay_deep_think.py export-ignore
+tests/test_deep_think_semantic_probe.py export-ignore
 transfer_to_pub_dir.sh export-ignore
 sat_prebuild.sh export-ignore
 tests/test_sat_prebuild.py export-ignore

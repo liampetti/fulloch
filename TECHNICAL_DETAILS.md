@@ -25,7 +25,7 @@ automatic ownership repair. Read-only, root-squashed network mounts, and host
 security policies can also prevent the repair.
 
 ## Obsidian Information
-> The optional Obsidian mount exposes your vault to Fulloch so voice notes can read/write it. Add it before the image name, edit the host path, and add a matching `obsidian.path_translation` entry in `data/config.yml`, see the Obsidian section below.
+> The optional Obsidian mount exposes your vault to Fulloch so voice notes can read/write it. Add it before the image name and set the notes directory to the container path. The optional plugin needs `obsidian.path_translation` when host and container paths differ; see below.
 
 ## SearXNG sidecar (optional, for live web answers)
 
@@ -55,8 +55,8 @@ What the first two minutes of a fresh install actually look like, so
 nothing in the timeline surprises you:
 
 1. **`docker run` returns in a second.** The container starts and the
-   entrypoint chowns the data dir (a no-op on bind mounts; fixes named
-   volumes on first boot). The image is ~2 GB for the CPU stack and ~6
+   entrypoint repairs the data directory's ownership when needed (including
+   bind mounts and named volumes). The image is ~2 GB for the CPU stack and ~6
    GB for the GPU stack; only download size, not memory.
 2. **Open `https://localhost:8765`.** The server logs show the dashboard URL.
    Click through the self-signed certificate warning; it's
@@ -101,9 +101,9 @@ python scripts/create_local_ca.py --force --host fulloch.home --ip 192.168.1.20
 
 ## Configuration
 
-The **setup wizard** configures Fulloch on first boot. Settings exposes Presets, General, Models, Dashboard, Wakeword, Voice, Home Assistant and Web Search. Other options—including wakeword regex/tuning, barge-in, timezone overrides, Spotify OAuth, native `satellite_tokens`, and external-LLM timeouts—remain in [`data/config.example.yml`](data/config.example.yml). The setup browser seeds `general.timezone` only when unset. Ordinary dashboard visits never change the household timezone. Saving an unrelated visible control preserves hidden configuration.
+The **setup wizard** configures Fulloch on first boot. Settings exposes Presets, General, Models, Dashboard, Wakeword, Voice, Home Assistant and Web Search. Other options—including academic paper search (`research.enabled`), wakeword regex/tuning, barge-in, timezone overrides, Spotify OAuth, native `satellite_tokens`, and external-LLM timeouts—remain in [`data/config.example.yml`](data/config.example.yml). Restart after changing the research setting. The setup browser seeds `general.timezone` only when unset. Ordinary dashboard visits never change the household timezone. Saving an unrelated visible control preserves hidden configuration.
 
-Secrets are stored in `data/credentials.json`. The wizard saves the HA token; Settings also saves API keys and the dashboard password. Advanced Obsidian setup uses the script below. Add integration API tokens manually. Copying `data/` to a new machine transfers everything. To configure headlessly, copy [`data/credentials.example.json`](data/credentials.example.json) to `data/credentials.json` and fill in the values, or set the equivalent env vars (`HA_TOKEN`, `LLM_API_KEY`, `DASHBOARD_PASSWORD`, `OBSIDIAN_TOKEN`) in `.env`.
+Most secrets are stored in `data/credentials.json`; native satellite tokens and provisioning state are currently stored in `data/config.yml`, so protect both files. The wizard saves the HA token; Settings also saves API keys and the dashboard password. Advanced Obsidian setup uses the script below. Create Home Assistant integration tokens in Settings or add them manually. Copying `data/` to a new machine transfers everything. To configure headlessly, copy [`data/credentials.example.json`](data/credentials.example.json) to `data/credentials.json` and fill in the values, or set the equivalent env vars (`HA_TOKEN`, `LLM_API_KEY`, `DASHBOARD_PASSWORD`, `OBSIDIAN_TOKEN`) in `.env`.
 
 ## Web Dashboard
 
@@ -153,7 +153,9 @@ normal wakeword-gated operation with `conversation_mode.disable`; the server
 confirms either request with `conversation_mode.changed`.
 
 When the optional openWakeWord gate is enabled, it gives a native satellite
-immediate wake feedback, then ASR verifies the final endpointed utterance.
+immediate wake feedback. ASR normally verifies the final endpointed utterance;
+Moonshine Base/Tiny and Parakeet ONNX instead trust the acoustic gate by default.
+The `verify_asr` configuration can override this policy.
 Verification work has priority in the bounded, single-consumer ASR scheduler,
 with one pending candidate per satellite. A new candidate may replace the
 oldest ordinary queued request rather than wait behind stale speech. A candidate

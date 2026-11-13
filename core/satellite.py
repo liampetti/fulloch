@@ -50,6 +50,8 @@ class SatelliteSession:
     active_session: Optional[TtsSession] = None  # drives get_state(); None when idle
     turn_thread: Optional[threading.Thread] = None
     last_turn_end: float = 0.0
+    fastpath_light_context: Optional[dict] = None
+    pending_light_clarification: Optional[dict] = None
     last_spoken_text: str = ""  # self-echo suppression compares against this
     higgs_delivery: str = ""  # explicit active/follow-up delivery control (Higgs or Breeze syntax)
     tts_gain: float = 1.0  # per-turn output gain for explicit quiet/whisper requests
@@ -88,6 +90,7 @@ class SatelliteSession:
     # VAD is unavailable/disabled (the RMS fallback is used instead).
     vad_endpointer: Optional["VadEndpointer"] = None
     soft_probe_emitted: bool = False
+    guarded_soft_probe_emitted: bool = False
     # A single ASR snapshot sent after VAD speech onset. It may establish the
     # native lifecycle early, but never dispatches an incomplete command.
     early_wake_probe_started_at: float = 0.0

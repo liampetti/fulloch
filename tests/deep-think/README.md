@@ -17,5 +17,5 @@ provider responses; create artificial examples instead.
 
 The synthetic fixtures check offline record handling, not whether tools can
 retrieve real data or whether the report is useful. Validate real provider and
-Home Assistant behavior separately with the scenarios in `dev/test-scenarios.md`.
+Home Assistant behavior separately using appropriate non-sensitive scenarios.
 Do not add real private household or conversation history to the repository.

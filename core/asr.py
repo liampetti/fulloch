@@ -135,6 +135,7 @@ def stream_generator(
     kws_capture_id_sink: Optional[dict] = None,
     capture_id_sink: Optional[dict] = None,
     candidate_expiration_sink: Optional[dict] = None,
+    guarded_pause_sink: Optional[dict] = None,
     candidate_is_current: Optional[
         Callable[[str, int | None, float | None, Optional[str], Optional[int], bool], bool]
     ] = None,
@@ -176,6 +177,7 @@ def stream_generator(
         kws_capture_id = item[11] if len(item) > 11 else None
         capture_id = item[12] if len(item) > 12 else None
         candidate_expires_at = item[13] if len(item) > 13 else None
+        guarded_pause = item[14] if len(item) > 14 else False
         if kws_candidate and candidate_is_current is not None:
             if not candidate_is_current(
                 satellite_id, wake_generation, candidate_expires_at, kws_wav_path,
@@ -210,4 +212,6 @@ def stream_generator(
             capture_id_sink["value"] = capture_id
         if candidate_expiration_sink is not None:
             candidate_expiration_sink["value"] = candidate_expires_at
+        if guarded_pause_sink is not None:
+            guarded_pause_sink["flag"] = guarded_pause
         yield AsrInput(buf, verification_context) if kws_candidate else buf

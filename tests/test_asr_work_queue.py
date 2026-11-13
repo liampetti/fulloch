@@ -29,6 +29,15 @@ def test_wake_candidate_evicts_oldest_ordinary_work_and_runs_first():
     assert work.get_nowait() == ("second",)
 
 
+def test_candidate_expiry_preserves_guarded_pause_metadata():
+    work = AsrWorkQueue(maxsize=2)
+    payload = (None,) * 13 + (None, 7)
+    assert work.offer(AsrWorkItem(payload, "sat-a", "provisional", candidate=True))[0]
+    result = work.get_nowait()
+    assert isinstance(result[13], float)
+    assert result[14] == 7
+
+
 def test_wake_candidate_queue_allows_one_pending_item_per_satellite():
     work = AsrWorkQueue(maxsize=2)
     first = AsrWorkItem(("first",), "sat-a", "wake_candidate", candidate=True)

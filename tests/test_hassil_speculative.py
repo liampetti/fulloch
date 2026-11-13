@@ -7,12 +7,13 @@ so tests need neither a model nor a network and do not depend on wall-clock slee
 import shutil
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 import pytest
 
-from core.asr import stream_generator
+from core.asr import AsrInput, stream_generator
 from core.asr_parakeet import LiveAsrEvent, LiveAsrResult
 from core.audio import AudioCapture
 from core.satellite import SatelliteSession
@@ -79,6 +80,7 @@ def voice_route(tmp_path, monkeypatch):
         monkeypatch.setattr(tool_registry, attr, {})
     for name, fn in (
         ("turn_on", ha_devices.turn_on), ("turn_off", ha_devices.turn_off),
+        ("ha_set_brightness", ha_devices.set_ha_brightness),
         ("ha_lock", ha_devices.lock), ("ha_unlock", ha_devices.unlock),
         ("ha_close_cover", ha_devices.close_cover), ("ha_set_climate", ha_devices.set_climate),
         ("ha_hassil_area", ha_devices.hassil_area),
@@ -165,10 +167,265 @@ def test_safe_multilingual_partial_dispatches_once_before_final(voice_route, liv
     def check_early():
         assistant._start_turn.assert_called_once()
         assert assistant._start_turn.call_args.kwargs["endpoint_kind"] == "soft"
-        http.assert_called_once_with("/api/services/light/turn_on", json={"entity_id": "light.kitchen_lights"})
+        target = ["light.kitchen_lights"] if command == "turn on the kitchen lights" else "light.kitchen_lights"
+        http.assert_called_once_with("/api/services/light/turn_on", json={"entity_id": target})
 
     _drive(assistant, text, text, live=live, before_final=check_early)
     assistant._start_turn.assert_called_once()
+    http.assert_called_once()
+
+
+@pytest.mark.parametrize("command,service", [
+    ("turn on the kitchen lights", "/api/services/light/turn_on"),
+    ("allume la lumière de la cuisine", "/api/services/light/turn_on"),
+    ("schalte das küchenlicht ein", "/api/services/light/turn_on"),
+    ("set the kitchen lights to 50 percent", "/api/services/light/turn_on"),
+    ("règle la luminosité de la lumière de la cuisine à 25 pour cent", "/api/services/light/turn_on"),
+    ("dimme küchenlicht auf 25 prozent", "/api/services/light/turn_on"),
+])
+def test_conversation_mode_dispatches_resolved_light_partial_immediately(voice_route, command, service):
+    assistant, http = voice_route
+    assistant.satellites["sat-a"].conversation_mode = True
+    assistant._queue_conversation_turn = Mock()
+    text = f"atticus {command}"
+
+    def check_early():
+        assistant._start_turn.assert_called_once()
+        assistant._queue_conversation_turn.assert_not_called()
+        assert assistant._start_turn.call_args.kwargs["endpoint_kind"] == "soft"
+        assert http.call_count == 1
+        assert http.call_args.args[0] == service
+
+    _drive(assistant, text, text, live=True, before_final=check_early)
+    assistant._start_turn.assert_called_once()
+    http.assert_called_once()
+
+
+def test_conversation_mode_light_area_dispatches_before_hard_endpoint(voice_route):
+    assistant, http = voice_route
+    assistant.satellites["sat-a"].conversation_mode = True
+    assistant._queue_conversation_turn = Mock()
+    text = "atticus turn on the lights in the kitchen"
+
+    def check_early():
+        assistant._start_turn.assert_called_once()
+        assistant._queue_conversation_turn.assert_not_called()
+        http.assert_called_once()
+
+    _drive(assistant, text, text, live=True, before_final=check_early)
+    assistant._start_turn.assert_called_once()
+    assistant._queue_conversation_turn.assert_not_called()
+    assert assistant._start_turn.call_args.kwargs["endpoint_kind"] == "soft"
+    http.assert_called_once()
+
+
+@pytest.mark.parametrize("command,brightness", [
+    ("dim the lights", 76), ("brighten the lights", 255),
+    ("tamise la lumière", 76), ("augmente la lumière", 255),
+    ("dimme das licht", 76), ("mach das licht heller", 255),
+])
+def test_default_brightness_dispatches_immediately_once(voice_route, monkeypatch, command, brightness):
+    assistant, http = voice_route
+    assistant.satellites["sat-a"].conversation_mode = True
+    assistant._queue_conversation_turn = Mock()
+    monkeypatch.setattr(ha_devices, "_bare_light_area_entities", lambda _: (["light.kitchen_lights"], "kitchen"))
+    text = f"atticus {command}"
+
+    def check_early():
+        assistant._start_turn.assert_called_once()
+        assistant._queue_conversation_turn.assert_not_called()
+        http.assert_called_once_with("/api/services/light/turn_on", json={
+            "entity_id": ["light.kitchen_lights"], "brightness": brightness,
+        })
+
+    _drive(assistant, text, text, live=True, before_final=check_early)
+    http.assert_called_once()
+
+
+@pytest.mark.parametrize("still_paused", [True, False])
+def test_guarded_pause_commits_timer_only_if_speaker_has_not_resumed(voice_route, still_paused):
+    assistant, _ = voice_route
+    timer = Mock(return_value="Timer started")
+    tool_registry.register_tool(timer, name="start_countdown")
+    assistant.satellites["sat-a"].vad_endpointer = SimpleNamespace(
+        soft_endpointed=still_paused, soft_pause_generation=3,
+    )
+    text = "atticus set a timer for five minutes"
+    item = (*_item(text, provisional=True), None, 3)
+    assistant.audio_capture._put_utterance(item, satellite_id="sat-a", kind="provisional")
+    assistant.audio_capture.audio_queue.close()
+    assistant.asr_pipe = lambda stream, **kw: ({"text": audio} for audio in stream)
+    assistant._run_transcriber_loop()
+    assert timer.call_count == int(still_paused)
+    assert assistant._start_turn.call_count == int(still_paused)
+
+
+def test_verified_wakeword_soft_snapshot_dispatches_once(voice_route):
+    assistant, http = voice_route
+    sat = assistant.satellites["sat-a"]
+    sat.kws_candidate = True
+    sat.kws_verified = True
+    sat.kws_capture_id = 7
+    sat.audio_capture_id = 1
+    text = "atticus turn on the kitchen lights"
+    item = (text, 10.0, -20.0, True, "sat-a", None, False, True, None,
+            sat.protocol_state_generation, False, 7, 1, None, False)
+    assistant.audio_capture._put_utterance(item, satellite_id="sat-a", kind="provisional", candidate=True)
+    assistant.audio_capture.audio_queue.close()
+    assistant.asr_pipe = lambda stream, **kw: (
+        {"text": audio.pcm if isinstance(audio, AsrInput) else audio} for audio in stream
+    )
+    assistant._run_transcriber_loop()
+    assistant._start_turn.assert_called_once()
+    assert assistant._start_turn.call_args.kwargs["endpoint_kind"] == "soft"
+    http.assert_called_once()
+
+
+@pytest.mark.parametrize("conversation", [False, True], ids=["wakeword", "conversation"])
+@pytest.mark.parametrize("command", [
+    "turn on lights", "turn off the lights", "licht einschalten", "schalte das licht aus",
+    "allume la lumière", "éteins la lumière",
+])
+def test_satellite_room_light_commands_dispatch_on_partial(voice_route, monkeypatch, conversation, command):
+    assistant, http = voice_route
+    sat = assistant.satellites["sat-a"]
+    sat.ha_area = "kitchen"
+    sat.conversation_mode = conversation
+    assistant._queue_conversation_turn = Mock()
+    monkeypatch.setattr(ha_devices, "_bare_light_area_entities", lambda _: (["light.kitchen_lights"], "kitchen"))
+    text = f"atticus {command}"
+
+    def check_early():
+        assistant._start_turn.assert_called_once()
+        assistant._queue_conversation_turn.assert_not_called()
+        assert assistant._start_turn.call_args.kwargs["endpoint_kind"] == "soft"
+        assert http.call_count == 1
+
+    _drive(assistant, text, text, live=True, before_final=check_early)
+    http.assert_called_once()
+
+
+@pytest.mark.parametrize("command,service,brightness", [
+    ("turn off light", "turn_off", None),
+    ("turn off lights", "turn_off", None),
+    ("licht ausschalten", "turn_off", None),
+    ("éteins la lumière", "turn_off", None),
+    ("dim light", "turn_on", 76),
+    ("dim lights", "turn_on", 76),
+    ("dimme das licht", "turn_on", 76),
+    ("tamise la lumière", "turn_on", 76),
+])
+def test_bare_light_commands_control_all_satellite_room_lights_early(voice_route, monkeypatch, command, service, brightness):
+    assistant, http = voice_route
+    assistant.satellites["sat-a"].ha_area = "kitchen"
+    monkeypatch.setitem(ha_client._ENTITY_ALIASES, "pendant", "light.pendant")
+    monkeypatch.setattr(ha_client, "_render_template", lambda _: '["light.kitchen_lights", "light.pendant", "switch.other"]')
+    text = f"atticus {command}"
+
+    def check_early():
+        assistant._start_turn.assert_called_once()
+        assert assistant._start_turn.call_args.kwargs["endpoint_kind"] == "soft"
+        data = {"entity_id": ["light.kitchen_lights", "light.pendant"]}
+        if brightness is not None:
+            data["brightness"] = brightness
+        http.assert_called_once_with(f"/api/services/light/{service}", json=data)
+
+    _drive(assistant, text, text, live=True, before_final=check_early)
+    http.assert_called_once()
+
+
+@pytest.mark.parametrize("command,operation,value", [
+    ("turn on downstairs office lights", "on", None),
+    ("turn off downstairs office lights", "off", None),
+    ("dim downstairs office lights", "brightness", 76),
+])
+def test_named_area_lights_dispatch_early_to_all_lights(voice_route, monkeypatch, command, operation, value):
+    assistant, http = voice_route
+    assistant.satellites["sat-a"].ha_area = "kitchen"
+    monkeypatch.setattr(ha_client, "_AREA_MAP", {"kitchen": "kitchen", "downstairs_office": "downstairs office"})
+    monkeypatch.setitem(ha_client._ENTITY_ALIASES, "office fixture", "light.office")
+    monkeypatch.setitem(ha_client._ENTITY_ALIASES, "pendant", "light.pendant")
+    monkeypatch.setattr(ha_client, "_area_entities", lambda area, domain: ["light.office", "light.pendant"])
+    text = f"atticus {command}"
+
+    def check_early():
+        assistant._start_turn.assert_called_once()
+        assert assistant._start_turn.call_args.kwargs["endpoint_kind"] == "soft"
+        data = {"entity_id": ["light.office", "light.pendant"]}
+        if value is not None:
+            data["brightness"] = value
+        service = "turn_off" if operation == "off" else "turn_on"
+        http.assert_called_once_with(f"/api/services/light/{service}", json=data)
+
+    _drive(assistant, text, text, live=True, before_final=check_early)
+    http.assert_called_once()
+
+
+@pytest.mark.parametrize("llm_enabled", [False, True])
+def test_repaired_area_command_and_contextual_followup_use_live_fastpath(voice_route, monkeypatch, llm_enabled):
+    assistant, http = voice_route
+    assistant.llm_enabled = llm_enabled
+    assistant._generate_with_context_recovery = Mock(side_effect=AssertionError("must not call the LLM"))
+    satellite = assistant.satellites["sat-a"]
+    satellite.ha_area = "kitchen"
+    monkeypatch.setattr(ha_client, "_AREA_MAP", {"kitchen": "kitchen", "downstairs_office": "downstairs office"})
+    monkeypatch.setitem(ha_client._ENTITY_ALIASES, "office fixture", "light.office")
+    monkeypatch.setitem(ha_client._ENTITY_ALIASES, "pendant", "light.pendant")
+    monkeypatch.setattr(ha_client, "_area_entities", lambda area, domain: ["light.office", "light.pendant"])
+    first = "atticus turn on downstairs office slides"
+
+    def check_first():
+        assert assistant._start_turn.call_args.kwargs["endpoint_kind"] == "soft"
+        http.assert_called_once_with("/api/services/light/turn_on", json={"entity_id": ["light.office", "light.pendant"]})
+
+    _drive(assistant, first, first, live=True, before_final=check_first)
+    assert satellite.fastpath_light_context["target"] == "downstairs_office"
+    assistant.audio_capture = AudioCapture(use_vad=False)
+    assistant._start_turn.reset_mock()
+    http.reset_mock()
+    satellite.committed_capture_id = 0
+    second = "atticus brighton then"
+
+    def check_second():
+        assert assistant._start_turn.call_args.kwargs["endpoint_kind"] == "soft"
+        http.assert_called_once_with("/api/services/light/turn_on", json={
+            "entity_id": ["light.office", "light.pendant"], "brightness_step_pct": 20,
+        })
+
+    _drive(assistant, second, second, live=True, before_final=check_second)
+    http.assert_called_once()
+    assistant._generate_with_context_recovery.assert_not_called()
+
+
+@pytest.mark.parametrize("command", ["licht ausschalten", "éteins la lumière"])
+def test_language_yaml_command_targets_satellite_room_early(voice_route, monkeypatch, command):
+    assistant, http = voice_route
+    assistant.satellites["sat-a"].ha_area = "kitchen"
+    monkeypatch.setattr(ha_devices, "_bare_light_area_entities", lambda _: (["light.kitchen_lights"], "kitchen"))
+    text = f"atticus {command}"
+
+    def check_early():
+        assistant._start_turn.assert_called_once()
+        assert assistant._start_turn.call_args.kwargs["endpoint_kind"] == "soft"
+        http.assert_called_once_with("/api/services/light/turn_off", json={"entity_id": ["light.kitchen_lights"]})
+
+    _drive(assistant, text, text, live=True, before_final=check_early)
+    http.assert_called_once()
+
+
+def test_area_entity_prefix_waits_for_complete_plural_target(voice_route, monkeypatch):
+    assistant, http = voice_route
+    monkeypatch.setattr(ha_client, "_AREA_MAP", {"downstairs_office": "downstairs office"})
+    monkeypatch.setitem(ha_client._ENTITY_ALIASES, "downstairs office", "light.office")
+    monkeypatch.setitem(ha_client._ENTITY_ALIASES_MULTI, "downstairs office", ["light.office"])
+    monkeypatch.setattr(ha_client, "_area_entities", lambda *_: ["light.office"])
+
+    def held():
+        assistant._start_turn.assert_not_called()
+        http.assert_not_called()
+
+    _drive(assistant, "atticus turn on downstairs office", "atticus turn on downstairs office lights", live=True, before_final=held)
+    assert assistant._start_turn.call_args.kwargs["endpoint_kind"] == "hard"
     http.assert_called_once()
 
 
@@ -179,7 +436,6 @@ def test_safe_multilingual_partial_dispatches_once_before_final(voice_route, liv
     ("set thermostat to 21 degrees", "/api/services/climate/set_temperature"),
     ("turn on movie night", "/api/services/scene/turn_on"),
     ("run morning routine", "/api/services/script/turn_on"),
-    ("turn on the lights in the kitchen", "/api/services/light/turn_on"),
 ])
 def test_unsafe_partial_waits_for_hard_endpoint(voice_route, command, service):
     assistant, http = voice_route

@@ -461,6 +461,17 @@ class BrowserModules(unittest.TestCase):
         self.assertEqual(self.page.evaluate("boundary.logoFrames.at(-1)"), 0)
         self.assertTrue(self.page.evaluate("boundary.sources[1].stopped"))
 
+    def test_replay_waits_for_and_targets_browser_session(self):
+        self.open_chat()
+        self.page.locator('.msg-play').click()
+        self.page.wait_for_function('boundary.sockets.length === 1 && boundary.sockets[0].readyState === 1')
+        self.assertFalse(any(path == '/replay' for path, _, _ in self.requests))
+        self.page.evaluate("boundary.sockets[0].emit({type: 'session', satellite_id: 'browser-1'})")
+        self.page.wait_for_function("!document.querySelector('.msg-play').disabled")
+        requests = [json.loads(body) for path, _, body in self.requests if path == '/replay']
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]['satellite_id'], 'browser-1')
+
     def test_logo_respects_reduced_motion_and_hidden_tabs(self):
         self.page.emulate_media(reduced_motion="reduce")
         self.open_chat()

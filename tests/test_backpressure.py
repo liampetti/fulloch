@@ -175,6 +175,25 @@ def test_dashboard_limits_pending_proactive_request_threads():
         release.set()
 
 
+def test_replay_requires_a_target_and_routes_only_to_that_satellite():
+    from fastapi.testclient import TestClient
+
+    context, entered, release = _blocking_context()
+    client = TestClient(create_app(context=context))
+    try:
+        assert client.post('/replay', json={'text': 'hello'}).status_code == 422
+        assert client.post('/replay', json={'text': 'hello', 'satellite_id': ' '}).status_code == 400
+        context.assistant.speak_proactive.assert_not_called()
+        response = client.post('/replay', json={'text': 'hello', 'satellite_id': 'browser-1'})
+        assert response.status_code == 200
+        assert entered.wait(timeout=1)
+        context.assistant.speak_proactive.assert_called_once_with(
+            text='hello', emit_event=False, satellite_id='browser-1'
+        )
+    finally:
+        release.set()
+
+
 def test_integration_limits_pending_proactive_request_threads(monkeypatch):
     from fastapi.testclient import TestClient
 

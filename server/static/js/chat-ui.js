@@ -494,14 +494,16 @@ export function createChatUI({ connectSpeaker, onThinking, getChatContext = () =
       play.addEventListener('click', async () => {
         play.disabled = true;
         try {
-          if (!await connectSpeaker()) {
+          const satelliteId = await connectSpeaker();
+          if (!satelliteId) {
             throw new Error('speaker connection failed');
           }
-          await fetch('/replay', {
+          const response = await fetch('/replay', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text }),
+            body: JSON.stringify({ text, satellite_id: satelliteId }),
           });
+          if (!response.ok) throw new Error(`replay request failed: ${response.status}`);
         } catch (err) {
           console.warn('replay failed', err);
         } finally {

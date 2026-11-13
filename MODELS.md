@@ -51,9 +51,12 @@ Fulloch downloads model assets during setup. The selected backend determines whi
 
 ## Language Models
 
+- Ornith 1.5 9B GGUF: [ornith-ai/Ornith-1.5-9B-GGUF](https://huggingface.co/ornith-ai/Ornith-1.5-9B-GGUF), using `Ornith-1.5-9B-Q4_K_M.gguf`. Default for Pro, Premium and Economy.
 - Local Qwen 9B GGUF: [unsloth/Qwen3.5-9B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF), using the `UD-Q4_K_XL` quant. MTP speculative decoding is an optional runtime setting.
 - Optional Gemma 4 GGUF: [unsloth/gemma-4-12B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF), using the `UD-Q4_K_XL` quant.
 - Qwen3.8 27B GGUF: [unsloth/Qwen3.8-27B-GGUF](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF), using `Qwen3.8-27B-UD-IQ4_XS.gguf` (the Max tier's "God-tier" agent model; the full Qwen 1.7B ASR/TTS stack targets a 32 GB GPU; no MTP draft head). A custom Orukeet + Pocket speech stack can target 24 GB instead.
+
+Max defaults to Qwen3.8 27B; Lite uses Laya and regex rather than a generative language model. See the preset table in [README.md](README.md#model-options) for the default speech backends.
 
 ## Semantic Command Routing
 

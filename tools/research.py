@@ -10,6 +10,7 @@ from utils.local_time import now
 from utils.response_language import response as localized_response
 
 from . import notes, notes_root
+from ._config import config
 from .thinking_context import get_artifact
 from .thinking_playbooks import thinking_playbook
 from .tool_registry import ThinkingResult, tool
@@ -185,6 +186,13 @@ def search_papers(query: str, source: str = "auto", max_results: int = MAX_RESUL
     order = ["semantic_scholar", "arxiv", "openalex"] if source == "auto" else [source]
     if any(name not in providers for name in order):
         return ThinkingResult(localized_response("research_unknown_source", source=repr(source)), status="needs_input", scope="The requested paper source is unsupported.")
+    settings = config.get("research")
+    if not isinstance(settings, dict) or settings.get("enabled") is not True:
+        return ThinkingResult(
+            "Academic paper search is disabled. Set research.enabled to true in data/config.yml to opt in.",
+            status="unavailable",
+            scope="External academic paper providers are not enabled.",
+        )
     provider_responded = False
     for name in order:
         try:

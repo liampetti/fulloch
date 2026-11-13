@@ -1,0 +1,68 @@
+# Initial German candidates: review and live-test before expanding.
+light_clarification:
+  bare: '\s*(?:(?:das|die)\s+)?(?:licht|lichter)\s*[?.!]*\s*'
+  on: '\s*(?:an|ein)\s*[?.!]*\s*'
+  off: '\s*aus\s*[?.!]*\s*'
+  room: '\s*(?P<room>[\w ]+?)(?:\s+licht(?:er)?)?\s*[?.!]*\s*'
+  question: 'Licht ein- oder ausschalten?'
+  missing_room: 'In welchem Zimmer?'
+commands:
+  - {operation: time, pattern: '\s*(?:wie spät ist es|wie viel uhr ist es)\s*[?.!]*\s*'}
+  - {operation: date, pattern: '\s*(?:welches datum ist heute|was ist das datum)\s*[?.!]*\s*'}
+  - {operation: weather, pattern: '\s*(?:wie ist das wetter|wettervorhersage)\s*[?.!]*\s*'}
+  - {operation: pause, pattern: '\s*(?:pausiere|stoppe)\s+(?:die\s+)?musik\s*[?.!]*\s*'}
+  - {operation: resume, pattern: '\s*(?:spiele|spiel)\s+(?:die\s+)?musik\s+weiter\s*[?.!]*\s*'}
+  - {operation: skip, pattern: '\s*(?:nächstes lied|überspringen)\s*[?.!]*\s*'}
+  - {operation: play, pattern: '\s*(?:spiele|spiel)\s+(?P<query>.+?)\s*[?.!]*\s*'}
+  - {operation: volume_up, pattern: '\s*lauter\s*[?.!]*\s*'}
+  - {operation: volume_down, pattern: '\s*leiser\s*[?.!]*\s*'}
+  - {operation: timer, pattern: '\s*(?:stelle|stell)\s+(?:einen\s+)?timer\s+(?:für|auf)\s+(?P<duration>.+?)\s*[?.!]*\s*'}
+  - {operation: timer_cancel, pattern: '\s*(?:stoppe|beende)\s+(?:den\s+)?timer\s*[?.!]*\s*'}
+  - {operation: timer_status, pattern: '\s*wie lange läuft der timer noch\s*[?.!]*\s*'}
+  - {operation: light_on, pattern: '\s*(?:schalte\s+)?(?:das\s+)?licht\s+ein(?:schalten)?\s*[?.!]*\s*'}
+  - {operation: light_off, pattern: '\s*(?:schalte\s+)?(?:das\s+)?licht\s+aus(?:schalten)?\s*[?.!]*\s*'}
+  - {operation: light_dim, pattern: '\s*dimme\s+(?:das\s+)?(?:licht|lichter)\s*[?.!]*\s*'}
+  - {operation: light_brighten, pattern: '\s*(?:mach|mache)\s+(?:das\s+)?licht\s+heller\s*[?.!]*\s*'}
+  - {operation: light_on, pattern: '\s*schalte\s+(?:das\s+)?licht\s+(?:in|im)\s+(?P<area>.+?)\s+ein\s*[?.!]*\s*'}
+  - {operation: light_off, pattern: '\s*schalte\s+(?:das\s+)?licht\s+(?:in|im)\s+(?P<area>.+?)\s+aus\s*[?.!]*\s*'}
+  - {operation: light_brightness, pattern: '\s*(?:stelle|stell)\s+(?:das\s+)?licht\s+auf\s+(?P<value>\d{1,3})\s*prozent\s*[?.!]*\s*'}
+  - {operation: lock, pattern: '\s*(?:verriegle|schließe)\s+(?:die\s+)?(?P<name>.+?)\s+ab\s*[?.!]*\s*'}
+  - {operation: unlock, pattern: '\s*(?:entriegle|öffne)\s+(?:die\s+)?(?P<name>.+?)\s*[?.!]*\s*'}
+  - {operation: cover_open, pattern: '\s*öffne\s+(?:die\s+)?(?P<name>.+?)\s*[?.!]*\s*'}
+  - {operation: cover_close, pattern: '\s*schließe\s+(?:die\s+)?(?P<name>.+?)\s*[?.!]*\s*'}
+  - {operation: toggle, pattern: '\s*schalte\s+(?:das\s+)?(?P<name>.+?)\s+um\s*[?.!]*\s*'}
+  - {operation: light_color, value: red, pattern: '\s*(?:stelle|stell)\s+(?:das\s+)?(?P<name>.+?)\s+auf\s+rot\s*[?.!]*\s*'}
+  - {operation: area_lights_on, pattern: '\s*welche lichter sind (?:in|im)\s+(?P<area>.+?)\s+an\s*[?.!]*\s*'}
+  - {operation: area_lights_off, pattern: '\s*welche lichter sind (?:in|im)\s+(?P<area>.+?)\s+aus\s*[?.!]*\s*'}
+  - {operation: deep_think, pattern: '\s*(?:denke|denk)\s+(?:gründlich\s+)?über\s+(?P<topic>.+?)\s+nach\s*[?.!]*\s*'}
+  - {operation: satellite_message, pattern: '\s*(?:sage|sag)\s+(?P<target>.+?)\s+dass\s+(?P<message>.+?)\s*[?.!]*\s*'}
+  - operation: currency
+    pattern: '\s*(?P<amount>\d+(?:[.,]\d+)?)\s+(?P<base>euro|usd|aud|eur)\s+in\s+(?P<quote>euro|usd|aud|eur)\s*[?.!]*\s*'
+    value: {euro: EUR}
+hassil:
+  local:
+    HassGetCurrentTime: ['(wie viel|wieviel) uhr ist das', 'wie spät ist das']
+    HassMediaPause: ['stopp', '(pausiere|stoppe) [die|meine] musik', 'halte [die|meine] musik an']
+    HassMediaUnpause: ['(spiele|spiel) [die|meine] musik weiter', 'setze [die|meine] musik fort']
+    FullochVolumeUp: ['lauter', '(mach|mache|stell|stelle) [die] musik lauter']
+    FullochVolumeDown: ['leiser', '(mach|mache|stell|stelle) [die] musik leiser']
+  light_level:
+    FullochDimLights: ['dimme [das|die] (licht|lichter)', 'dimme [das|die] {name}']
+    FullochBrightenLights: ['(erhelle|heller) [das|die] (licht|lichter)', 'erhelle [das|die] {name}', 'mach [das|die] (licht|lichter) heller']
+corrections:
+  - pattern: '\s*(?P<word>liegt)\s+einschalten\s*[.!?]*\s*'
+    replacement: 'licht einschalten'
+  - pattern: '\s*(?P<word>liegt)\s+ausschalten\s*[.!?]*\s*'
+    replacement: 'licht ausschalten'
+  - pattern: '\s*(?P<word>liegt)\s+ausmachen\s*[.!?]*\s*'
+    replacement: 'licht ausmachen'
+  - pattern: '\s*(?P<word>light)\s+(?P<verb>ein|aus)schalten\s*[.!?]*\s*'
+    replacement: 'licht \g<verb>schalten'
+followups:
+  - {pattern: '\s*(?P<value>\d{1,3})\s*(?:prozent|%)\s*[.!?]*\s*', operation: brightness, value: capture}
+  - pattern: '\s*(?:bitte\s+)?(?:mach|mache)\s+sie\s+heller\s*[.!?]*\s*'
+    operation: brightness_step
+    value: 20
+  - pattern: '\s*(?:bitte\s+)?dimme\s+sie\s*[.!?]*\s*'
+    operation: brightness_step
+    value: -20

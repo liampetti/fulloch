@@ -8,7 +8,7 @@ import { createSatelliteSetup } from './satellite-setup.js';
 const lifetime = createLifetime();
 const brandLogo = createBrandLogo(document.getElementById('brand-logo'));
 const chatUI = createChatUI({
-  connectSpeaker: () => satellite.connect(true),
+  connectSpeaker: async () => await satellite.connect(true) ? satellite.id : null,
   getChatContext: () => satellite.chatContext,
   onThinking: ev => {
     const id = ev.job_id || ev.id;

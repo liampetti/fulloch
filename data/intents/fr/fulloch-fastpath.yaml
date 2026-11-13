@@ -1,0 +1,60 @@
+# Initial French candidates: review and live-test before expanding.
+light_clarification:
+  bare: '\s*(?:(?:étendre|itendre)\s+)?(?:(?:la|les|le)\s+)?lumi[eè]res?\s*[?.!]*\s*'
+  on: '\s*(?:allume|allumer)\s*[?.!]*\s*'
+  off: '\s*(?:éteins|éteindre)\s*[?.!]*\s*'
+  room: '\s*(?P<room>[\w ]+?)(?:\s+lumi[eè]res?)?\s*[?.!]*\s*'
+  question: 'Allumer ou éteindre la lumière ?'
+  missing_room: 'Dans quelle pièce ?'
+commands:
+  - {operation: time, pattern: '\s*quelle heure est-il\s*[?.!]*\s*'}
+  - {operation: date, pattern: '\s*quelle est la date\s*[?.!]*\s*'}
+  - {operation: weather, pattern: '\s*quel temps fait-il\s*[?.!]*\s*'}
+  - {operation: pause, pattern: '\s*(?:arrête|mets en pause)\s+la musique\s*[?.!]*\s*'}
+  - {operation: resume, pattern: '\s*reprends\s+la musique\s*[?.!]*\s*'}
+  - {operation: skip, pattern: '\s*(?:passe|saute)\s+(?:la chanson|ce morceau)\s*[?.!]*\s*'}
+  - {operation: play, pattern: '\s*(?:joue|lance)\s+(?P<query>.+?)\s*[?.!]*\s*'}
+  - {operation: volume_up, pattern: '\s*plus fort\s*[?.!]*\s*'}
+  - {operation: volume_down, pattern: '\s*moins fort\s*[?.!]*\s*'}
+  - {operation: timer, pattern: '\s*(?:mets|lance)\s+(?:un\s+)?minuteur\s+(?:pour|de)\s+(?P<duration>.+?)\s*[?.!]*\s*'}
+  - {operation: timer_cancel, pattern: '\s*(?:annule|arrête)\s+(?:le\s+)?minuteur\s*[?.!]*\s*'}
+  - {operation: timer_status, pattern: '\s*(?:combien de temps reste-t-il|statut du minuteur)\s*[?.!]*\s*'}
+  - {operation: light_on, pattern: '\s*(?:allume|allumer)\s+(?:la|les)\s+(?:lumière|lumières)\s*[?.!]*\s*'}
+  - {operation: light_off, pattern: '\s*(?:éteins|éteindre)\s+(?:la|les)\s+(?:lumière|lumières)\s*[?.!]*\s*'}
+  - {operation: light_dim, pattern: '\s*tamise\s+(?:la|les)\s+(?:lumière|lumières)\s*[?.!]*\s*'}
+  - {operation: light_brighten, pattern: '\s*augmente\s+(?:la|les)\s+(?:lumière|lumières)\s*[?.!]*\s*'}
+  - {operation: light_on, pattern: '\s*(?:allume|allumer)\s+(?:la|les)\s+(?:lumière|lumières)\s+(?:dans|de)\s+(?:la\s+|le\s+)?(?P<area>.+?)\s*[?.!]*\s*'}
+  - {operation: light_off, pattern: '\s*(?:éteins|éteindre)\s+(?:la|les)\s+(?:lumière|lumières)\s+(?:dans|de)\s+(?:la\s+|le\s+)?(?P<area>.+?)\s*[?.!]*\s*'}
+  - {operation: light_brightness, pattern: '\s*règle\s+(?:la\s+)?lumière\s+à\s+(?P<value>\d{1,3})\s*(?:pour cent|%)\s*[?.!]*\s*'}
+  - {operation: lock, pattern: '\s*verrouille\s+(?:la\s+|le\s+)?(?P<name>.+?)\s*[?.!]*\s*'}
+  - {operation: unlock, pattern: '\s*déverrouille\s+(?:la\s+|le\s+)?(?P<name>.+?)\s*[?.!]*\s*'}
+  - {operation: cover_open, pattern: '\s*ouvre\s+(?:la\s+|le\s+|les\s+)?(?P<name>.+?)\s*[?.!]*\s*'}
+  - {operation: cover_close, pattern: '\s*ferme\s+(?:la\s+|le\s+|les\s+)?(?P<name>.+?)\s*[?.!]*\s*'}
+  - {operation: toggle, pattern: '\s*bascule\s+(?:la\s+|le\s+)?(?P<name>.+?)\s*[?.!]*\s*'}
+  - {operation: light_color, value: red, pattern: '\s*mets\s+(?:la\s+|le\s+)?(?P<name>.+?)\s+en\s+rouge\s*[?.!]*\s*'}
+  - {operation: area_lights_on, pattern: '\s*quelles lumières sont allumées dans (?:la\s+|le\s+)?(?P<area>.+?)\s*[?.!]*\s*'}
+  - {operation: area_lights_off, pattern: '\s*quelles lumières sont éteintes dans (?:la\s+|le\s+)?(?P<area>.+?)\s*[?.!]*\s*'}
+  - {operation: deep_think, pattern: '\s*réfléchis\s+(?:bien\s+)?(?:à|sur)\s+(?P<topic>.+?)\s*[?.!]*\s*'}
+  - {operation: satellite_message, pattern: '\s*dis\s+à\s+(?P<target>.+?)\s+que\s+(?P<message>.+?)\s*[?.!]*\s*'}
+  - operation: currency
+    pattern: '\s*(?P<amount>\d+(?:[.,]\d+)?)\s+(?P<base>euros?|usd|aud|eur)\s+en\s+(?P<quote>euros?|usd|aud|eur)\s*[?.!]*\s*'
+    value: {euro: EUR, euros: EUR}
+hassil:
+  local:
+    HassMediaSearchAndPlay: ['(joue|lance) {search_query}']
+    FullochVolumeUp: ['plus fort', '(mets|monte) [la] musique plus fort']
+    FullochVolumeDown: ['moins fort', '(mets|baisse) [la] musique moins fort']
+  light_level:
+    FullochDimLights: ['(tamise|baisse) [la|les] (lumière|lumières)', '(tamise|baisse) [la|les] {name}']
+    FullochBrightenLights: ['(éclaircis|augmente) [la|les] (lumière|lumières)', '(éclaircis|augmente) [la|les] {name}']
+corrections:
+  - pattern: '(?P<prefix>\s*(?:allume|allumer|éteins|éteindre)\s+(?:la|les)\s+)(?P<word>lumiere)(?P<suffix>\s*[.!?]*\s*)'
+    replacement: '\g<prefix>lumière\g<suffix>'
+followups:
+  - {pattern: '\s*(?P<value>\d{1,3})\s*(?:pour cent|%)\s*[.!?]*\s*', operation: brightness, value: capture}
+  - pattern: '\s*(?:s\x27il te plaît\s+)?(?:éclaircis|augmente)\s+les\s*[.!?]*\s*'
+    operation: brightness_step
+    value: 20
+  - pattern: '\s*(?:s\x27il te plaît\s+)?(?:tamise|baisse)\s+les\s*[.!?]*\s*'
+    operation: brightness_step
+    value: -20

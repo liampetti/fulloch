@@ -134,6 +134,21 @@ def test_wakeword_candidate_waits_for_final_endpoint_before_asr():
     assert session.kws_candidate is True
 
 
+def test_verified_wakeword_candidate_admits_soft_endpoint_without_retiring_candidate():
+    capture = AudioCapture(use_vad=False)
+    session = SatelliteSession("satellite")
+    session.kws_candidate = True
+    session.kws_verified = True
+    session.kws_capture_id = 1
+    session.audio_capture_id = 1
+    capture.wake_candidates._enqueue(
+        session, np.ones(3200, dtype=np.float32), 0.0, -10.0, True, 0.0
+    )
+    item = capture.audio_queue.get_nowait()
+    assert item[3] is True and item[7] is True and item[12] == 1
+    assert session.kws_candidate is True
+
+
 def test_wakeword_activation_queues_a_1250ms_verification_snapshot():
     class Backend:
         def __init__(self):

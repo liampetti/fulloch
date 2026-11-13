@@ -1,5 +1,6 @@
 """Local multilingual intents use existing tools without requiring HA discovery."""
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -12,10 +13,20 @@ PACKS = Path(__file__).parent / "fixtures" / "hassil"
 
 
 @pytest.fixture
-def matchers(monkeypatch):
+def matchers(monkeypatch, tmp_path):
     monkeypatch.setattr(ha_client, "_loaded", False)
     monkeypatch.setattr(ha_client, "HA_TOKEN", "")
-    return {language: HassilFastPath([language], str(PACKS)) for language in ("de", "fr", "es")}
+    shutil.copytree(PACKS, tmp_path, dirs_exist_ok=True)
+    (tmp_path / "es" / "fulloch-fastpath.yaml").write_text(
+        "hassil:\n  local:\n"
+        "    HassMediaPause: ['(pausa|para|detén) [la|mi] música']\n"
+        "    HassMediaUnpause: ['(reanuda|continúa) [la|mi] música']\n"
+        "    HassMediaSearchAndPlay: ['(reproduce|pon) {search_query}']\n"
+        "    FullochVolumeUp: ['(sube|aumenta) [el] volumen', 'más fuerte']\n"
+        "    FullochVolumeDown: ['(baja|reduce) [el] volumen', 'más bajo']\n",
+        encoding="utf-8",
+    )
+    return {language: HassilFastPath([language], str(tmp_path)) for language in ("de", "fr", "es")}
 
 
 @pytest.mark.parametrize("language,text,intent,args", [
@@ -58,6 +69,32 @@ def matchers(monkeypatch):
 ])
 def test_local_intents_without_ha_cache(matchers, language, text, intent, args):
     assert matchers[language].match(text) == {"actions": [{"intent": intent, "args": args}]}
+
+
+def test_user_supplied_language_fastpath_precedes_hassil(tmp_path, monkeypatch):
+    shutil.copytree(PACKS / "es", tmp_path / "es")
+    (tmp_path / "es" / "fulloch-fastpath.yaml").write_text(
+        "commands:\n  - {operation: time, pattern: 'mi forma de pedir la hora'}\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(ha_client, "_loaded", False)
+    monkeypatch.setattr(ha_client, "HA_TOKEN", "")
+    matcher = HassilFastPath(["es"], str(tmp_path))
+    assert catch_with_hassil("mi forma de pedir la hora", matcher, voice=True) == {
+        "actions": [{"intent": "get_current_time", "args": []}],
+    }
+
+
+@pytest.mark.parametrize("language,text,expected", [
+    ("de", "stelle einen timer auf fünf minuten", {"intent": "start_countdown", "args": ["300 seconds"]}),
+    ("fr", "joue du jazz", {"intent": "play_song", "args": ["du jazz"]}),
+])
+def test_yaml_music_and_timer_use_hassil_argument_validation(matchers, language, text, expected):
+    assert catch_with_hassil(text, matchers[language], voice=True) == {"actions": [expected]}
+
+
+def test_yaml_music_does_not_swallow_an_explicit_unknown_room(matchers):
+    text = "spiele jazz in der küche"
+    assert catch_with_hassil(text, matchers["de"], voice=True) == text
 
 
 @pytest.mark.parametrize("text", [

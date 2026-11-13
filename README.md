@@ -8,7 +8,7 @@
 
 _The **Ful**ly **Loc**al **H**ome Voice Assistant, a private voice layer for your notes, your home, and the web._
 
-Fulloch is your privacy-focused local voice assistant running on your own PC or Mac. Ask questions, capture thoughts, and search your **[Obsidian](https://github.com/obsidianmd/obsidian-releases)** vault by voice. Control your home via **[Home Assistant](https://github.com/home-assistant)**. Pull live answers from the web with **[SearXNG](https://github.com/searxng/searxng)**. The local stack keeps speech, language processing, notes, facts, and conversation history on your machine; optional web search, Spotify, and remote language models contact their configured services.
+Fulloch is your privacy-focused local voice assistant running on your own computer. Control your home via **[Home Assistant](https://github.com/home-assistant)**. Ask questions, capture thoughts, and search your **[Obsidian](https://github.com/obsidianmd/obsidian-releases)** vault by voice. Pull live answers from the web with **[SearXNG](https://github.com/searxng/searxng)**. The local stack keeps speech, language processing, notes, facts, and conversation history on your machine; configured web search, academic research, travel, finance, Spotify, and remote language models send requests to their respective services when enabled. Everything is offline by default.
 
 [Click here to see the satellite companion project](https://github.com/liampetti/fulloch-satellite) for running multiple ESP32-S3 satellites around your home.
 
@@ -17,23 +17,21 @@ token migration, revocation and recovery, see the [satellite USB setup and CLI
 guide](server/static/satellite-usb-cli.txt). The dashboard also offers a USB
 wizard on the Satellites tab.
 
+## Development Disclosure
+
+This project was developed with assistance from AI coding tools. If you don't want anything running on your home server that has been coded by AI (even if what you are running is AI itself), then stay away from this project.
+
 ## Features
 
-- **Private, local by default** - speech, language processing, notes, facts, and conversation history stay on your machine; web search, Spotify, and remote language models are explicit opt-ins
+- **Local processing** - speech, language processing, notes, facts, and conversation history stay on your machine unless sent to an external integration; the example configuration includes a local SearXNG endpoint
 - **Natural voice conversations** - use the browser dashboard or connected satellites; Fulloch keeps conversational context, supports follow-up turns, and lets you barge in with the wakeword
-- **Your voice, your way** - GPU and CPU stacks support voice cloning; ask it to whisper or speak quietly for per-turn reduced-volume delivery
-- **Obsidian notes and memory** - read, write, append, and semantically search your vault by voice; remembered facts persist across restarts
 - **Smart-home control** - control Home Assistant lights, locks, covers, climate, media, calendars, todos, weather, and more in natural language
-- **Music and reminders** - find music with Spotify and play it through Home Assistant; create calendar reminders that Fulloch announces at the right time
+- **Fast, responsive multilingual commands** - **[HassIL-powered](https://github.com/OHF-Voice/hassil)** language matching and local fast paths handle common commands without waiting for a language model, bringing near-instant home control to multiple languages
+- **Obsidian notes and memory** - read, write, append, and semantically search your vault by voice; remembered facts persist across restarts
 - **Live answers** - get concise, source-aware summaries from self-hosted SearXNG web search, with the option to save results to your vault
-- **Deliberate research and planning** - queue deeper background investigations for comparisons, academic literature, travel, and finance; research prefers Semantic Scholar and falls back to arXiv and OpenAlex, while optional SerpApi-backed travel and finance tools provide bounded, read-only results
-- **Home Assistant automation** - use the HACS integration for status, mic control, proactive speech, chat, and scheduled deliberate-thinking tasks
-
-> **Higgs TTS 3:** The optional Higgs GPU backend is available only under Boson AI's Research and Non-Commercial License, not Fulloch's MIT license. It requires explicit consent for every voice reference. See [Model Sources and Licenses](MODELS.md#higgs-tts-3-license).
-
-> **Pocket TTS PyTorch:** Premium uses Kyutai's streaming runtime with a pinned, ungated third-party mirror of its multilingual voice-cloning weights. It also runs on CPU. No Hugging Face account or token is required. Only clone voices with explicit, lawful consent. See [Model Sources and Licenses](MODELS.md#pocket-tts-pytorch-provenance-and-consent).
-
-> **openWakeWord feature extractors:** The optional wakeword gate includes unmodified pre-trained feature extractor models from openWakeWord v0.5.1 under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/), not Fulloch's MIT license. See [Model Sources and Licenses](MODELS.md#wakeword).
+- **Smart spotify search** - link in your spotify account to get smarter music search from your connected Home Assistant speakers
+- **Deliberate research and planning** - queue deeper background investigations for comparisons, academic literature, travel, and finance. This is **Work In Progress** and requires configuration file setup.
+- **Home Assistant automation** - use the HACS integration for status, mic control, proactive speech, chat, calender event announcements and scheduled deliberate-thinking tasks
 
 ## Quick installation
 
@@ -238,9 +236,11 @@ Pocket TTS ONNX supports English, French, German, Italian, Portuguese and Spanis
 
 The PyTorch backend can also switch automatically for a supported response language. Missing language weights and tokenizers are downloaded in the background from the pinned Pocket mirror; while downloading or offline, speech uses the configured default model. Once cached, the alternate is loaded on CPU for the next matching utterance, which can add a noticeable first-use delay. At most one alternate is kept in system RAM; it is not loaded onto the GPU, so it does not add another Pocket model to Premium's VRAM usage. Switching depends on language detection/turn metadata and can be imperfect, especially for short or mixed-language responses. The ONNX and GGUF backends do not use this automatic switching.
 
-## Development Disclosure
+> **Higgs TTS 3:** The optional Higgs GPU backend is available only under Boson AI's Research and Non-Commercial License, not Fulloch's MIT license. It requires explicit consent for every voice reference. See [Model Sources and Licenses](MODELS.md#higgs-tts-3-license).
 
-This project was developed with assistance from AI coding tools. Generated contributions are reviewed, tested, and maintained by the project author.
+> **Pocket TTS PyTorch:** Premium uses Kyutai's streaming runtime with a pinned, ungated third-party mirror of its multilingual voice-cloning weights. It also runs on CPU. No Hugging Face account or token is required. Only clone voices with explicit, lawful consent. See [Model Sources and Licenses](MODELS.md#pocket-tts-pytorch-provenance-and-consent).
+
+> **openWakeWord feature extractors:** The optional wakeword gate includes unmodified pre-trained feature extractor models from openWakeWord v0.5.1 under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/), not Fulloch's MIT license. See [Model Sources and Licenses](MODELS.md#wakeword).
 
 ## License
 

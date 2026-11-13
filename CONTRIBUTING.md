@@ -6,23 +6,47 @@ Thank you for your interest in contributing to Fulloch! This document provides g
 
 1. Fork the repository
 2. Clone your fork locally
-3. Set up the development environment:
+3. Set up the development environment. For CPU-only development on Linux,
+   install the CPU PyTorch wheel before the CPU requirements, then install the
+   project without resolving its GPU runtime dependencies:
    ```bash
    python -m venv .venv
    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   pip install -r requirements.txt   # full GPU stack (CPU stack: requirements-cpu.txt)
-   # Install special packages (see requirements.txt for details)
-   pip install --no-deps git+https://github.com/liampetti/Qwen3-TTS-streaming.git@97da215
-   pip install --no-build-isolation --no-deps git+https://github.com/Dao-AILab/flash-attention.git@ef9e6a6
-   pip install -e ".[dev]"  # Install dev dependencies
+   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+   pip install -r requirements-cpu.txt
+   pip install pytest pytest-asyncio pytest-cov ruff mypy
+   pip install --no-deps -e .
    ```
-   The test suite stubs the heavy GPU stack, so `pip install -r requirements-ci.txt`
-   is enough to run `pytest` (no GPU needed).
+   For GPU development, use `requirements.txt` and the special package
+   installation instructions in that file instead. The test suite stubs the
+   heavy GPU stack. For isolated local runs that mirror
+   the CI dependency set and Python versions, see **Local CI checks** below.
 4. Copy configuration files:
    ```bash
    cp data/config.example.yml data/config.yml
    ```
 5. Edit `data/config.yml` with your settings
+
+## Local CI checks
+
+The checked-in CI workflow (`.github/workflows/ci.yml`) runs Ruff and pytest on
+Python 3.11 and 3.12 using `requirements-ci.txt`. Run the same checks locally
+without touching the application's `.venv`:
+
+```bash
+./scripts/ci-local.sh
+```
+
+The script requires [uv](https://docs.astral.sh/uv/) to find or install the two
+Python interpreters. It creates `.venv-ci-3.11` and `.venv-ci-3.12`, installs the
+CI requirements with pip, and runs `ruff check .` and `pytest tests/` in each.
+The environments are ignored by Git and excluded from Docker build contexts.
+Run the script again after changing `requirements-ci.txt` to update them. Like
+CI, the tests block external network access and do not download models. The
+environments are not locked snapshots: unpinned requirements may resolve to
+newer versions on a later install, removed requirements are not automatically
+uninstalled, and the host OS can differ from CI. For a clean dependency
+resolution, recreate the corresponding local CI environment.
 
 ## Building the Docker image locally
 
@@ -151,7 +175,7 @@ logger.error("Error message")
 Tools are dispatched synchronously by `utils/intents.py:handle_action` and must
 return a `str` (the spoken/observed result) or `None`. Returning `None`, raising,
 or returning a string beginning with a `... question:` sentinel triggers the
-agent's replan loop (see the "Unified Agent Loop" section of `CLAUDE.md`). Keep
+agent's replan loop in `core/agent_loop.py`. Keep
 tool bodies blocking and simple — for I/O use `requests`/file calls directly; the
 orchestrator already runs each turn on its own worker thread.
 

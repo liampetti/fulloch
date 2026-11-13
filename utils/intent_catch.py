@@ -9,6 +9,8 @@ import logging
 import re
 from typing import Optional
 
+from utils.voice_fastpath import fastpath_pattern as _pattern
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,37 +25,18 @@ def _match(label: str, pattern: re.Pattern, command: str):
 # so this MUST anchor to the start of the command — an unanchored search grabs
 # a mid-sentence "play" and routes a web-search request to play_song. Only an
 # optional polite prefix may precede the verb ("please play the Beatles").
-_PLAY_RE = re.compile(
-    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|will\s+you\s+|"
-    r"i\s+want\s+you\s+to\s+|i\s+want\s+to\s+|i\s+wanna\s+|go\s+ahead\s+and\s+)*"
-    r"play\s+(.+)$",
-    re.IGNORECASE,
-)
-_STOP_RE = re.compile(
-    r"^\s*(?:(?:please|just|okay)\s+)*(?:stop|pause|halt)\b"
-    r"(?:\s+(?:the\s+)?(?:music|song|playback))?"
-    r"(?:\s+(?:then|now|please))?\s*[.!?]*\s*$",
-    re.IGNORECASE,
-)
-_SKIP_RE = re.compile(r"^\s*skip\b", re.IGNORECASE)
-_RESUME_RE = re.compile(r"^\s*resume\b", re.IGNORECASE)
+_PLAY_RE = _pattern("play")
+_STOP_RE = _pattern("stop")
+_SKIP_RE = _pattern("skip")
+_RESUME_RE = _pattern("resume")
 # Leading context is fine ("do you know what time is it"), so the start stays
 # unanchored — but the phrase must END the question (bar a few benign tail
 # adverbs / trailing punctuation). Without the end-anchor, "what time is it
 # GOING TO BE ON" matched the "what time is it" substring and answered with the
 # current wall-clock time instead of letting the SLM resolve "it" (an event's
 # broadcast time) from context. Same guard rejects "what's the time IN LONDON".
-_TIME_QUERY_RE = re.compile(
-    r"(?:what time is it|what'?s the time|what time it is)"
-    r"(?:\s+(?:right\s+now|now|currently|today|please|exactly))?"
-    r"\s*[?.!]*\s*$",
-    re.IGNORECASE,
-)
-_DATE_QUERY_RE = re.compile(
-    r"(?:what(?:'?s| is) (?:the )?date|what day is it|what(?:'?s| is) today(?:'?s)? date)"
-    r"(?:\s+(?:right\s+now|now|today|please|exactly))?\s*[?.!]*\s*$",
-    re.IGNORECASE,
-)
+_TIME_QUERY_RE = _pattern("time")
+_DATE_QUERY_RE = _pattern("date")
 _OUTPUT_LANGUAGES = {
     "english": "en", "englisch": "en", "anglais": "en",
     "french": "fr", "französisch": "fr", "français": "fr",
@@ -63,15 +46,10 @@ _OUTPUT_LANGUAGES = {
     "brazilian portuguese": "pt-BR", "dutch": "nl", "japanese": "ja", "chinese": "zh",
     "arabic": "ar", "swedish": "sv", "norwegian": "no", "danish": "da",
 }
-_OUTPUT_LANGUAGE_RE = re.compile(
-    r"\b(?:in|into|to|auf|en)\s+(?P<language>"
-    + "|".join(re.escape(name) for name in sorted(_OUTPUT_LANGUAGES, key=len, reverse=True))
-    + r")(?:\s+please)?(?=\s*(?:[?.!,;]|$))",
-    re.IGNORECASE,
-)
-_TRANSLATE_VERB_RE = re.compile(r"\b(?:translate|translation|übersetze|übersetzen|traduire|traduis)\b", re.I)
-_OUTPUT_VERB_RE = re.compile(r"\b(?:say|speak|answer|reply|respond|tell|translate|übersetze|antworte|sage|réponds|dis|traduis)\b", re.I)
-_MEDIA_REQUEST_RE = re.compile(r"^\s*(?:(?:please|can you|could you)\s+)*(?:play|spiele|spiel|joue|lance|reproduce|pon)\b", re.I)
+_OUTPUT_LANGUAGE_RE = _pattern("output_language")
+_TRANSLATE_VERB_RE = _pattern("translate_verb")
+_OUTPUT_VERB_RE = _pattern("output_verb")
+_MEDIA_REQUEST_RE = _pattern("media_request")
 
 
 def requested_output_language(command: str) -> Optional[str]:
@@ -102,40 +80,13 @@ def _english_clock_emission(command: str):
 # The direct weather path is intentionally limited to generic, default-location
 # forecasts. Locations, dates, and conditional questions need the agent to set
 # tool arguments or resolve context, so they must not match this rule.
-_WEATHER_FORECAST_RE = re.compile(
-    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+)*"
-    r"(?:"
-    r"(?:what(?:'?s|\s+is)\s+(?:the\s+)?weather(?:\s+forecast)?)"
-    r"|(?:weather\s+forecast)"
-    r"|(?:forecast)"
-    r"|(?:what\s+will\s+the\s+weather\s+be\s+like)"
-    r"|(?:(?:give|tell)\s+me\s+(?:the\s+)?weather\s+forecast)"
-    r")\s*[?!.,]*\s*$",
-    re.IGNORECASE,
-)
+_WEATHER_FORECAST_RE = _pattern("weather")
 # Anchored like _PLAY_RE so a mid-sentence "set a timer for the eggs" mention
 # can't hijack the turn.
-_TIMER_RE = re.compile(
-    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*"
-    r"(?:start|set)\s+(?:(?:a|the)\s+)?(?:timer|time)\s+(?:(?:for|to)\s+)?(.+?)(?:\s+please)?$",
-    re.IGNORECASE,
-)
-_CANCEL_TIMER_RE = re.compile(
-    r"^\s*(?:atticus\s+)?(?:please\s+)?(?:cancel|stop|stops|end)\s+"
-    r"(?:(?:the|a)\s+)?(?:active\s+)?(?:timer|countdown)"
-    r"(?:\s+(?P<timer_id>timer_\d+))?\s*(?:now|please)?\s*[.!?]*\s*$",
-    re.IGNORECASE,
-)
-_SATELLITE_MESSAGE_RE = re.compile(
-    r"^\s*(?:please\s+)?(?:tell|announce(?:\s+to)?|send\s+(?:a\s+)?message\s+to)\s+"
-    r"(?P<target>.+?)\s+(?:that|saying)\s+(?P<message>.+?)\s*[.!?]*\s*$",
-    re.IGNORECASE,
-)
-_LIST_TIMERS_RE = re.compile(
-    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*"
-    r"get\s+(?:a\s+)?(?:timers|timer|time)(?:\s+(.*?))?(?:\s+status)?$",
-    re.IGNORECASE,
-)
+_TIMER_RE = _pattern("timer")
+_CANCEL_TIMER_RE = _pattern("cancel_timer")
+_SATELLITE_MESSAGE_RE = _pattern("satellite_message")
+_LIST_TIMERS_RE = _pattern("list_timers")
 
 
 def extract_after_play(command: str) -> Optional[str]:
@@ -183,20 +134,12 @@ def extract_satellite_message(command: str) -> Optional[tuple[str, str]]:
     match = _match("Satellite message", _SATELLITE_MESSAGE_RE, command)
     if not match:
         return None
-    target = re.sub(r"^the\s+", "", match.group("target").strip(), flags=re.IGNORECASE)
+    target = _pattern("satellite_target_article").sub("", match.group("target").strip())
     message = match.group("message").strip().rstrip(".!?")
     return (target, message) if target and message else None
 
 
-_CONTEXTUAL_WEB_SEARCH_RE = re.compile(
-    r"^\s*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?"
-    r"(?:search\s+(?:the\s+)?(?:web|internet|online)(?:\s+and\s+cross[- ]?check\s+(?:it|that|your information))?|"
-    r"look\s+(?:it|that)\s+up|double[- ]?check(?:\s+(?:it|that|your information))?|"
-    r"cross[- ]?check(?:\s+(?:it|that|your information))?|"
-    r"do\s+a\s+new\s+search(?:\s+and\s+check)?)"
-    r"\s*[?.!]*\s*$",
-    re.IGNORECASE,
-)
+_CONTEXTUAL_WEB_SEARCH_RE = _pattern("contextual_web")
 
 
 def is_contextual_web_search_request(command: str) -> bool:
@@ -207,12 +150,7 @@ def is_contextual_web_search_request(command: str) -> bool:
 # A status question about all lights in an area needs live state reads, not the
 # inventory-only `list_entities_in_area` flow. Keep this narrow so open-ended
 # room questions still reach the agent.
-_AREA_LIGHT_STATE_RE = re.compile(
-    r"^\s*(?:what|which)\s+(?:of\s+(?:the\s+)?)?lights?\s+(?:are|is)\s+"
-    r"(?:currently\s+|right\s+now\s+)?(?P<state>on|off)\s+(?:in\s+)?"
-    r"(?P<area>.+?)\s*[?.!]*\s*$",
-    re.IGNORECASE,
-)
+_AREA_LIGHT_STATE_RE = _pattern("area_light_state")
 
 
 def extract_area_light_state(command: str) -> Optional[tuple[str, str]]:
@@ -236,10 +174,10 @@ def extract_area_light_state(command: str) -> Optional[tuple[str, str]]:
 # A later generic compound pass combines only clauses that each independently
 # match one of these deterministic rules.
 
-_COMPOUND_RE = re.compile(r"\b(?:and|then)\b", re.IGNORECASE)
-_COMPOUND_SPLIT_RE = re.compile(r"\s+(?:and\s+then|and|then)\s+", re.IGNORECASE)
-_LEADING_DISCOURSE_RE = re.compile(r"^\s*(?:okay|ok|alright|sure|well)[,.!\s]+", re.IGNORECASE)
-_COMPOUND_ANAPHORA_RE = re.compile(r"\b(?:it|that|this|them|those|these)\b", re.IGNORECASE)
+_COMPOUND_RE = _pattern("compound")
+_COMPOUND_SPLIT_RE = _pattern("compound_split")
+_LEADING_DISCOURSE_RE = _pattern("leading_discourse")
+_COMPOUND_ANAPHORA_RE = _pattern("compound_anaphora")
 
 # Entity references too vague to resolve to a single entity_id — let the SLM
 # decide (it may expand "everything" into several actions).
@@ -318,7 +256,7 @@ def _parse_percent(text: str) -> Optional[int]:
     SLM rather than guessing.
     """
     text = text.strip().lower()
-    m = re.search(r"\d{1,3}", text)
+    m = _pattern("percentage_digits").search(text)
     if m:
         return max(0, min(100, int(m.group())))
 
@@ -344,51 +282,30 @@ def _parse_percent(text: str) -> Optional[int]:
 # "set the lights to 50 percent" / "dim downstairs office to a hundred percent".
 # Trailing "percent"/"%" is required so the rule stays scoped to brightness and
 # doesn't swallow unrelated "set X to Y" phrasing.
-_LIGHT_BRIGHTNESS_RE = re.compile(
-    r"^\s*(?:please\s+)?(?:set|change|put|turn|adjust|dim|brighten)\s+"
-    r"(?:the\s+)?(.+?)\s+(?:to|at|down\s+to|up\s+to)\s+"
-    r"(.+?)\s*(?:percent|%)\s*$",
-    re.IGNORECASE,
-)
+_LIGHT_BRIGHTNESS_RE = _pattern("light_brightness")
 
 # "turn on the kitchen lights" and the reversed "turn the kitchen lights on".
-_TURN_ONOFF_RE = re.compile(
-    r"^\s*(?:please\s+)?turn\s+(on|off)\s+(?:the\s+)?(.+?)\s*$",
-    re.IGNORECASE,
-)
+_TURN_ONOFF_RE = _pattern("turn_onoff")
 # Trailing "again" sits after the state ("turn the kitchen lights off again");
 # a "back" re-do adverb sits before it ("...lights back off") and is swept into
 # the entity capture (stripped by _REDO_ADVERB_RE in extract_turn_onoff).
-_TURN_ONOFF_REV_RE = re.compile(
-    r"^\s*(?:please\s+)?turn\s+(?:the\s+)?(.+?)\s+(on|off)(?:\s+again)?\s*$",
-    re.IGNORECASE,
-)
+_TURN_ONOFF_REV_RE = _pattern("turn_onoff_reversed")
 
 # Re-do adverbs that trail a turn on/off command ("turn the lights back off",
 # "turn it off again"). The reversed pattern captures these into the entity
 # ("dining room lights back"), which HA can't resolve — strip them so the real
 # entity survives.
-_REDO_ADVERB_RE = re.compile(r"\s+(?:back|again)\s*$", re.IGNORECASE)
+_REDO_ADVERB_RE = _pattern("redo_adverb")
 
-_TOGGLE_RE = re.compile(
-    r"^\s*(?:please\s+)?toggle\s+(?:the\s+)?(.+?)\s*$",
-    re.IGNORECASE,
-)
+_TOGGLE_RE = _pattern("toggle")
 
 # "dim/brighten" with no explicit percentage → fixed levels (dim=30, full=100).
 # The percentage form ("dim X to 20 percent") is handled earlier by
 # _LIGHT_BRIGHTNESS_RE, which is listed first. \b after the verb stops "dimitri"
 # from matching. Filler ("the", "lights", "in the") is peeled off the remainder
 # so "dim the lights in the downstairs office" → entity "downstairs office".
-_DIM_RE = re.compile(
-    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)*"
-    r"(dim|brighten|brighton)\b(.*)$",
-    re.IGNORECASE,
-)
-_DIM_FILLER_RE = re.compile(
-    r"^(?:the\s+)?(?:lights?\s+|lamps?\s+)?(?:in\s+(?:the\s+)?)?",
-    re.IGNORECASE,
-)
+_DIM_RE = _pattern("dim")
+_DIM_FILLER_RE = _pattern("dim_filler")
 _DIM_LEVELS = {"dim": 30, "brighten": 100, "brighton": 100}
 
 
@@ -405,7 +322,7 @@ def extract_light_brightness(command: str) -> Optional[tuple]:
         return None
     # "set the volume to 50 percent" also matches — but that's a media_player
     # action, not a light. Defer it to the SLM (→ ha_volume_set).
-    if re.search(r"\b(?:volume|sound)\b", entity, re.IGNORECASE):
+    if _pattern("volume_or_sound").search(entity):
         return None
     return (entity, pct)
 
@@ -464,10 +381,7 @@ def extract_toggle(command: str) -> Optional[str]:
 
 
 # "lock the front door" / "unlock the back door" → ha_lock / ha_unlock.
-_LOCK_RE = re.compile(
-    r"^\s*(?:please\s+)?(lock|unlock)\s+(?:the\s+)?(.+?)\s*$",
-    re.IGNORECASE,
-)
+_LOCK_RE = _pattern("lock")
 
 # Leading particles mark a phrasal/idiomatic verb ("lock in", "lock down")
 # rather than a real device name — device names never start with these, so a
@@ -530,10 +444,7 @@ _COVER_KEYWORDS = frozenset(
         "doors",
     }
 )
-_COVER_RE = re.compile(
-    r"^\s*(?:please\s+)?(open|close|shut)\s+(?:the\s+)?(.+?)\s*$",
-    re.IGNORECASE,
-)
+_COVER_RE = _pattern("cover")
 
 
 def extract_cover(command: str) -> Optional[tuple]:
@@ -570,11 +481,7 @@ _COLOR_NAMES = (
     "cyan",
     "magenta",
 )
-_COLOR_RE = re.compile(
-    r"^\s*(?:please\s+)?(?:set|change|make|turn)\s+(?:the\s+)?(.+?)\s+"
-    r"(?:to\s+|into\s+)?(" + "|".join(_COLOR_NAMES) + r")\s*$",
-    re.IGNORECASE,
-)
+_COLOR_RE = _pattern("color")
 
 
 def extract_color(command: str) -> Optional[tuple]:
@@ -594,42 +501,10 @@ def extract_color(command: str) -> Optional[tuple]:
 # "louder" / "volume up" / "turn the volume up" → ha_volume_up (and the
 # symmetric down forms). With no target, the volume tools prefer configured
 # Spotify playback, then AVR, then TV.
-_VOLUME_UP_RE = re.compile(
-    r"^\s*(?:please\s+)?(?:"
-    r"louder"
-    r"|volume\s+up"
-    r"|turn\s+up(?:\s+the)?\s+(?:volume|sound)"
-    r"|turn\s+(?:it|the\s+(?:volume|sound))\s+up"
-    r")\s*$",
-    re.IGNORECASE,
-)
-_VOLUME_UP_TARGET_RE = re.compile(
-    r"^\s*(?:please\s+)?(?:"
-    r"louder"
-    r"|volume\s+up"
-    r"|turn\s+up(?:\s+the)?\s+(?:volume|sound)"
-    r"|turn\s+(?:it|the\s+(?:volume|sound))\s+up"
-    r")\s+(?:in|on)\s+(?:the\s+)?(.+?)\s*[.!?]*\s*$",
-    re.IGNORECASE,
-)
-_VOLUME_DOWN_RE = re.compile(
-    r"^\s*(?:please\s+)?(?:"
-    r"quieter|softer"
-    r"|volume\s+down"
-    r"|turn\s+down(?:\s+the)?\s+(?:volume|sound)"
-    r"|turn\s+(?:it|the\s+(?:volume|sound))\s+down"
-    r")\s*$",
-    re.IGNORECASE,
-)
-_VOLUME_DOWN_TARGET_RE = re.compile(
-    r"^\s*(?:please\s+)?(?:"
-    r"quieter|softer"
-    r"|volume\s+down"
-    r"|turn\s+down(?:\s+the)?\s+(?:volume|sound)"
-    r"|turn\s+(?:it|the\s+(?:volume|sound))\s+down"
-    r")\s+(?:in|on)\s+(?:the\s+)?(.+?)\s*[.!?]*\s*$",
-    re.IGNORECASE,
-)
+_VOLUME_UP_RE = _pattern("volume_up")
+_VOLUME_UP_TARGET_RE = _pattern("volume_up_target")
+_VOLUME_DOWN_RE = _pattern("volume_down")
+_VOLUME_DOWN_TARGET_RE = _pattern("volume_down_target")
 
 
 def extract_volume_up(command: str) -> Optional[bool]:
@@ -657,10 +532,7 @@ _CURRENCY_ALIASES = {
     "gbp": "GBP", "pound": "GBP", "pounds": "GBP", "british pound": "GBP", "british pounds": "GBP",
     "jpy": "JPY", "yen": "JPY",
 }
-_CURRENCY_CONVERSION_RE = re.compile(
-    r"^\s*(?:convert\s+)?(?:(\d+(?:\.\d+)?)\s+)?(.+?)\s+(?:to|in|into)\s+(.+?)\s*[.?!]?\s*$",
-    re.IGNORECASE,
-)
+_CURRENCY_CONVERSION_RE = _pattern("currency")
 
 
 def extract_currency_conversion(command: str) -> Optional[tuple[str, str, float | None]]:
@@ -680,22 +552,9 @@ def extract_currency_conversion(command: str) -> Optional[tuple[str, str, float 
 # raining". Anchored to start of utterance and requires the topic preposition
 # (about/on/over/through) so "consider" alone won't catch "consider it done".
 _DEEP_THINK_PATTERNS = [
-    re.compile(
-        r"^\s*(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?"
-        r"(?:think|consider|reflect|ponder)\s+"
-        r"(?:carefully\s+|deeply\s+|hard\s+)?"
-        r"(?:about|on|over|through)\s+(.+)$",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^\s*(?:please\s+)?(?:let\s+me|let\'?s)\s+think\s+"
-        r"(?:about\s+|through\s+|over\s+)(.+)$",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^\s*(?:please\s+)?what\s+do\s+you\s+think\s+about\s+(.+)$",
-        re.IGNORECASE,
-    ),
+    _pattern("deep_think_1"),
+    _pattern("deep_think_2"),
+    _pattern("deep_think_3"),
 ]
 
 
@@ -721,14 +580,7 @@ def extract_deep_think(command: str) -> Optional[str]:
 # not voice capabilities. Catch explicit phrasings before the SLM can claim it
 # acted when nothing happened. When the user has explicitly enabled that mode,
 # let active-note/cursor requests reach the guarded editor tools instead.
-_NOTE_DELETE_RE = re.compile(
-    r"^\s*(?:please\s+|hey\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|"
-    r"will\s+you\s+|i\s+(?:want|need|'?d\s+like)\s+you\s+to\s+|just\s+)*"
-    r"(?:delete|remove|erase|clear|wipe|scrub|undo|forget|"
-    r"get\s+rid\s+of|take\s+out|edit|change|modify|update|rewrite|amend)\b"
-    r".*\b(?:notes?|facts?|journal)\b",
-    re.IGNORECASE | re.DOTALL,
-)
+_NOTE_DELETE_RE = _pattern("note_delete", re.IGNORECASE | re.DOTALL)
 
 _NOTE_DELETE_REPLY = (
     "I can't delete or edit notes by voice. You can remove or change them "
@@ -748,57 +600,51 @@ def _obsidian_edit_enabled() -> bool:
     return _obsidian_edit_allowed()
 
 
-# Each rule: (extractor, intent_dict_builder). The builder receives the
-# extractor's return value (string or True).
-_INTENT_RULES = [
-    # Smart-home control first — these skip the SLM entirely (HA resolves the
-    # entity; a miss replans into the agent), so let them win the common case.
-    (
-        extract_area_light_state,
-        lambda v: {"intent": "get_entities_in_area_state", "args": [v[0], "light", v[1]]},
-    ),
-    (extract_light_brightness, lambda v: {"intent": "ha_set_brightness", "args": [v[0], v[1]]}),
-    (extract_dim_brighten, lambda v: {"intent": "ha_set_brightness", "args": [v[0], v[1]]}),
-    (extract_color, lambda v: {"intent": "ha_set_color", "args": [v[0], v[1]]}),
-    (extract_volume_up_target, lambda v: {"intent": "ha_volume_up", "args": [v]}),
-    (extract_volume_up, lambda _: {"intent": "ha_volume_up", "args": []}),
-    (extract_volume_down_target, lambda v: {"intent": "ha_volume_down", "args": [v]}),
-    (extract_volume_down, lambda _: {"intent": "ha_volume_down", "args": []}),
-    (
-        extract_lock,
-        lambda v: {"intent": "ha_lock" if v[0] == "lock" else "ha_unlock", "args": [v[1]]},
-    ),
-    (
-        extract_cover,
-        lambda v: {
-            "intent": "ha_open_cover" if v[0] == "open" else "ha_close_cover",
-            "args": [v[1]],
-        },
-    ),
-    (
-        extract_turn_onoff,
-        lambda v: {"intent": "turn_on" if v[0] == "on" else "turn_off", "args": [v[1]]},
-    ),
-    (extract_toggle, lambda v: {"intent": "toggle", "args": [v]}),
-    (extract_after_play, lambda v: {"intent": "play_song", "args": [v]}),
-    (
-        extract_satellite_message,
-        lambda v: {"intent": "send_satellite_message", "args": [v[0], v[1]]},
-    ),
-    (extract_stop, lambda _: {"intent": "pause", "args": []}),
-    (has_time_query, lambda _: {"intent": "get_current_time", "args": []}),
-    (has_default_weather_forecast, lambda _: {"intent": "get_weather_forecast", "args": []}),
-    (extract_skip, lambda _: {"intent": "skip", "args": []}),
-    (extract_resume, lambda _: {"intent": "resume", "args": []}),
-    (
-        extract_currency_conversion,
-        lambda v: {"intent": "get_exchange_rate", "args": [v[0], v[1], v[2]]},
-    ),
-    (extract_timer, lambda v: {"intent": "start_countdown", "args": [v]}),
-    (extract_cancel_timer, lambda v: {"intent": "cancel_timer", "args": [v[0]] if v[0] else []}),
-    (list_timers, lambda _: {"intent": "get_timer_status", "args": []}),
-    (extract_deep_think, lambda v: {"intent": "deep_think", "args": [v]}),
-]
+# The YAML chooses the ordering and canonical operations; Python retains a
+# bounded registry of extractors and argument adapters, never arbitrary tools.
+_ROUTE_ADAPTERS = {
+    "area_light_state": (extract_area_light_state, "area_light_state", lambda v: {"intent": "get_entities_in_area_state", "args": [v[0], "light", v[1]]}),
+    "light_brightness": (extract_light_brightness, "brightness", lambda v: {"intent": "ha_set_brightness", "args": [v[0], v[1]]}),
+    "dim_brighten": (extract_dim_brighten, "brightness", lambda v: {"intent": "ha_set_brightness", "args": [v[0], v[1]]}),
+    "color": (extract_color, "color", lambda v: {"intent": "ha_set_color", "args": [v[0], v[1]]}),
+    "volume_up_target": (extract_volume_up_target, "volume_up_target", lambda v: {"intent": "ha_volume_up", "args": [v]}),
+    "volume_up": (extract_volume_up, "volume_up", lambda _: {"intent": "ha_volume_up", "args": []}),
+    "volume_down_target": (extract_volume_down_target, "volume_down_target", lambda v: {"intent": "ha_volume_down", "args": [v]}),
+    "volume_down": (extract_volume_down, "volume_down", lambda _: {"intent": "ha_volume_down", "args": []}),
+    "lock": (extract_lock, "lock", lambda v: {"intent": "ha_lock" if v[0] == "lock" else "ha_unlock", "args": [v[1]]}),
+    "cover": (extract_cover, "cover", lambda v: {"intent": "ha_open_cover" if v[0] == "open" else "ha_close_cover", "args": [v[1]]}),
+    "turn_onoff": (extract_turn_onoff, "turn_onoff", lambda v: {"intent": "turn_on" if v[0] == "on" else "turn_off", "args": [v[1]]}),
+    "toggle": (extract_toggle, "toggle", lambda v: {"intent": "toggle", "args": [v]}),
+    "play": (extract_after_play, "play", lambda v: {"intent": "play_song", "args": [v]}),
+    "satellite_message": (extract_satellite_message, "satellite_message", lambda v: {"intent": "send_satellite_message", "args": [v[0], v[1]]}),
+    "stop": (extract_stop, "pause", lambda _: {"intent": "pause", "args": []}),
+    "time": (has_time_query, "time", lambda _: {"intent": "get_current_time", "args": []}),
+    "weather": (has_default_weather_forecast, "weather", lambda _: {"intent": "get_weather_forecast", "args": []}),
+    "skip": (extract_skip, "skip", lambda _: {"intent": "skip", "args": []}),
+    "resume": (extract_resume, "resume", lambda _: {"intent": "resume", "args": []}),
+    "currency": (extract_currency_conversion, "currency", lambda v: {"intent": "get_exchange_rate", "args": [v[0], v[1], v[2]]}),
+    "timer": (extract_timer, "timer", lambda v: {"intent": "start_countdown", "args": [v]}),
+    "cancel_timer": (extract_cancel_timer, "cancel_timer", lambda v: {"intent": "cancel_timer", "args": [v[0]] if v[0] else []}),
+    "list_timers": (list_timers, "timer_status", lambda _: {"intent": "get_timer_status", "args": []}),
+    "deep_think": (extract_deep_think, "deep_think", lambda v: {"intent": "deep_think", "args": [v]}),
+}
+
+
+def _configured_routes():
+    from utils.voice_fastpath import fastpath_section
+
+    routes = fastpath_section("routes") or []
+    result = []
+    for route in routes:
+        adapter = _ROUTE_ADAPTERS.get(route.get("extractor")) if isinstance(route, dict) else None
+        if adapter is None or route.get("operation") != adapter[1]:
+            logger.warning("Ignoring invalid fast-path route: %r", route)
+            continue
+        result.append((adapter[0], adapter[2]))
+    return result
+
+
+_INTENT_RULES = _configured_routes()
 
 
 def extract_compound_actions(command: str, rules=None) -> Optional[list[dict]]:
@@ -836,12 +682,17 @@ _HA_DEVICE_EXTRACTORS = frozenset({
 _LOCAL_RULES = [(extract, build) for extract, build in _INTENT_RULES if extract not in _HA_DEVICE_EXTRACTORS]
 
 
-def catch_with_hassil(user_message: str, matcher):
+def catch_with_hassil(user_message: str, matcher, *, voice=False, context=None, ha_area=None):
     """Prefer local rules, then try the multilingual device matcher."""
     if extract_note_delete(user_message) and not _obsidian_edit_enabled():
         return {"reply": _NOTE_DELETE_REPLY}
     if requests_translation(user_message):
         return user_message
+    voice_rules = getattr(matcher, "voice_fastpath", None) if voice else None
+    if voice_rules and (followup := voice_rules.followup(user_message, context, ha_area)):
+        return followup
+    if voice_rules and (command := voice_rules.command(user_message, ha_area, matcher)):
+        return command
     if actions := extract_compound_actions(user_message, _LOCAL_RULES):
         return {"actions": actions}
     if emission := _english_clock_emission(user_message):
@@ -850,7 +701,12 @@ def catch_with_hassil(user_message: str, matcher):
         value = extract(user_message)
         if value is not None:
             return {"actions": [build(value)]}
-    return matcher.match(user_message) or user_message
+    exact = matcher.match(user_message)
+    if exact:
+        return exact
+    if voice_rules:
+        return voice_rules.corrected_match(user_message, matcher, area=ha_area) or user_message
+    return user_message
 
 
 def catchAll(user_message: str):

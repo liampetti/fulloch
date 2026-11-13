@@ -14,6 +14,8 @@ from typing import Any, Callable, Optional
 from tools.tool_registry import tool_registry
 from utils.duration import duration_components, normalise_duration
 from utils.value_parsing import parse_percentage
+from utils.voice_fastpath import contextual_followup
+from utils.voice_fastpath import fastpath_pattern as _pattern
 
 logger = logging.getLogger(__name__)
 
@@ -29,84 +31,22 @@ _TARGET_WORDS = frozenset(
         "my", "now", "on", "please", "the", "this", "to", "turn", "what", "with", "you",
     }
 )
-_NUMBER_WORD = (
-    r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
-    r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|"
-    r"seventy|eighty|ninety|hundred|thousand)\b"
-)
-_TIMER_REMINDER_RE = re.compile(
-    rf"\b(?:remind|reminder|so that)\b|\bto\s+(?!\d|{_NUMBER_WORD})[a-z]",
-    re.I,
-)
-_WEATHER_ARGUMENT_RE = re.compile(
-    r"\b(?:today|tomorrow|yesterday|tonight|this\s+(?:week|weekend)|next\s+\w+|"
-    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|in|near|at)\b",
-    re.I,
-)
-_MEDIA_TARGET_RE = re.compile(r"\b(?:in|on|at)\s+(?:the\s+)?[a-z]", re.I)
+_TIMER_REMINDER_RE = _pattern("laya_timer_reminder")
+_WEATHER_ARGUMENT_RE = _pattern("laya_weather_argument")
+_MEDIA_TARGET_RE = _pattern("laya_media_target")
 _MEDIA_GENERIC_WORDS = frozenset(
     {"a", "all", "and", "audio", "back", "continue", "music", "next", "now", "pause", "playback",
      "please", "previous", "resume", "skip", "song", "stop", "the", "this", "whatever", "is", "playing"}
 )
 _ACTION_HINTS = {
-    "turn_on": re.compile(r"\b(?:turn|switch|power)\s+on\b", re.I),
-    "turn_off": re.compile(r"\b(?:turn|switch|power|shut)\s+(?:off|down)\b", re.I),
-    "toggle": re.compile(r"\b(?:toggle|switch)\b", re.I),
-    "get_entity_state": re.compile(r"\b(?:state|status|on or off)\b", re.I),
-    "ha_set_brightness": re.compile(r"\b(?:dim|brighten|brighton|brighter|brightness|percent)\b", re.I),
-    "ha_set_color": re.compile(r"\b(?:color|colour|red|blue|green|yellow|white|purple|pink)\b", re.I),
-    "ha_volume_set": re.compile(r"\b(?:volume|louder|quieter|percent)\b", re.I),
-    "ha_volume_up": re.compile(r"\b(?:louder|volume up|turn up)\b", re.I),
-    "ha_volume_down": re.compile(r"\b(?:quieter|volume down|turn down)\b", re.I),
-    "ha_lock": re.compile(r"\b(?:lock)\b", re.I),
-    "ha_unlock": re.compile(r"\b(?:unlock)\b", re.I),
-    "ha_open_cover": re.compile(r"\b(?:open|raise)\b", re.I),
-    "ha_close_cover": re.compile(r"\b(?:close|lower)\b", re.I),
-    "get_temperature": re.compile(r"\b(?:temperature|temp|how warm|how cold)\b", re.I),
-    "get_home_overview": re.compile(r"\b(?:home|house)\s+(?:status|overview|check)\b", re.I),
-    "get_energy_overview": re.compile(r"\b(?:energy|power usage|solar status)\b", re.I),
-    "get_security_overview": re.compile(r"\b(?:security|secure|security check)\b", re.I),
-    "ha_stop_cover": re.compile(r"\b(?:stop|halt)\b.*\b(?:blind|curtain|shade|shutter|garage|cover|valve)\b", re.I),
-    "ha_set_cover_position": re.compile(
-        r"\b(?:blind|curtain|shade|shutter|garage|cover|valve)\b.*\b(?:percent|%|halfway)\b", re.I
-    ),
-    "ha_set_fan_speed": re.compile(r"\b(?:fan)\b.*\b(?:speed|percent|%)\b", re.I),
-    "ha_run_script": re.compile(r"\b(?:run|start)\b.*\b(?:script|automation)\b", re.I),
-    "ha_activate_scene": re.compile(r"\b(?:activate|set|turn on)\b.*\bscene\b", re.I),
+    name: _pattern(f"laya_hint_{name}") for name in (
+        "turn_on", "turn_off", "toggle", "get_entity_state", "ha_set_brightness", "ha_set_color",
+        "ha_volume_set", "ha_volume_up", "ha_volume_down", "ha_lock", "ha_unlock", "ha_open_cover",
+        "ha_close_cover", "get_temperature", "get_home_overview", "get_energy_overview",
+        "get_security_overview", "ha_stop_cover", "ha_set_cover_position", "ha_set_fan_speed",
+        "ha_run_script", "ha_activate_scene",
+    )
 }
-
-_CONTEXT_PRONOUN_RE = r"(?:it|them|that|those|these)"
-_CONTEXT_LIGHT_RE = re.compile(
-    rf"^\s*(?:now\s+)?(?:please\s+)?(?:turn\s+)?{_CONTEXT_PRONOUN_RE}\s+"
-    r"(?:back\s+)?(?P<state>on|off)\s*(?:again)?[.!?]*\s*$",
-    re.I,
-)
-_CONTEXT_BRIGHTNESS_RE = re.compile(
-    rf"^\s*(?:now\s+)?(?:please\s+)?(?P<verb>dim|brighten|brighton)\s+{_CONTEXT_PRONOUN_RE}"
-    r"(?:\s+again)?[.!?]*\s*$",
-    re.I,
-)
-_CONTEXT_VOLUME_RE = re.compile(
-    rf"^\s*(?:now\s+)?(?:please\s+)?(?:turn\s+)?{_CONTEXT_PRONOUN_RE}\s+"
-    r"(?P<direction>up|down)\s*[.!?]*\s*$",
-    re.I,
-)
-_CONTEXT_TRANSPORT_RE = re.compile(
-    rf"^\s*(?:now\s+)?(?:please\s+)?(?P<action>pause|resume|skip)\s+{_CONTEXT_PRONOUN_RE}"
-    r"\s*[.!?]*\s*$",
-    re.I,
-)
-_CONTEXT_COVER_RE = re.compile(
-    rf"^\s*(?:now\s+)?(?:please\s+)?(?P<action>open|close|stop|halt)\s+{_CONTEXT_PRONOUN_RE}"
-    r"\s*[.!?]*\s*$",
-    re.I,
-)
-_CONTEXT_LOCK_RE = re.compile(
-    rf"^\s*(?:now\s+)?(?:please\s+)?(?P<action>lock|unlock)\s+{_CONTEXT_PRONOUN_RE}"
-    r"\s*[.!?]*\s*$",
-    re.I,
-)
-
 
 @dataclass(frozen=True)
 class _Action:
@@ -182,7 +122,7 @@ def _percentage_candidates(command: str) -> dict[str, str]:
     candidates = {}
     for match in re.finditer(r"\b\d{1,3}\s*(?:percent|%)\b", command, re.I):
         candidates[match.group(0)] = match.group(0)
-    for match in re.finditer(_NUMBER_WORD, command, re.I):
+    for match in _pattern("laya_number_word").finditer(command):
         phrase = match.group(0)
         if re.match(r"\s*(?:percent\b|%)", command[match.end() :], re.I):
             phrase += " percent"
@@ -320,38 +260,7 @@ class LayaRouter:
         deny-list checks while avoiding a confidence-sensitive model hop for
         commands such as ``now dim them`` or ``turn it back on``.
         """
-        if not isinstance(context, dict):
-            return None
-        target = context.get("target")
-        prior = context.get("intent")
-        if not isinstance(target, str) or not target:
-            return None
-        light_intents = {"turn_on", "turn_off", "ha_set_brightness", "ha_set_color"}
-        media_intents = {"pause", "resume", "skip", "previous", "ha_volume_set", "ha_volume_up", "ha_volume_down"}
-        cover_intents = {"ha_open_cover", "ha_close_cover", "ha_stop_cover", "ha_set_cover_position"}
-        lock_intents = {"ha_lock", "ha_unlock"}
-        def emission(intent: str, args: list[Any]) -> Optional[dict]:
-            return {"actions": [{"intent": intent, "args": args}]} if tool_registry.is_available(intent) else None
-
-        if prior in light_intents:
-            if match := _CONTEXT_LIGHT_RE.match(command):
-                return emission(f"turn_{match.group('state').lower()}", [target])
-            if match := _CONTEXT_BRIGHTNESS_RE.match(command):
-                level = 30 if match.group("verb").lower() == "dim" else 100
-                return emission("ha_set_brightness", [target, level])
-        if prior in media_intents:
-            if match := _CONTEXT_VOLUME_RE.match(command):
-                intent = "ha_volume_up" if match.group("direction").lower() == "up" else "ha_volume_down"
-                return emission(intent, [target])
-            if match := _CONTEXT_TRANSPORT_RE.match(command):
-                return emission(match.group("action").lower(), [target])
-        if prior in cover_intents and (match := _CONTEXT_COVER_RE.match(command)):
-            action = match.group("action").lower()
-            intent = {"open": "ha_open_cover", "close": "ha_close_cover", "stop": "ha_stop_cover", "halt": "ha_stop_cover"}[action]
-            return emission(intent, [target])
-        if prior in lock_intents and (match := _CONTEXT_LOCK_RE.match(command)):
-            return emission(f"ha_{match.group('action').lower()}", [target])
-        return None
+        return contextual_followup(command, context)
 
     def _available_actions(self, command: str, context: Optional[dict] = None) -> list[_Action]:
         actions = [a for a in _ACTION_TEMPLATES if tool_registry.is_available(a.intent)]

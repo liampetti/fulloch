@@ -507,6 +507,7 @@ class Assistant:
         # result may only commit a turn at the dispatch gate — never trigger the
         # follow-up/stand-down/baseline side effects — and is ignored mid-turn.
         self._asr_provisional: dict = {"flag": False}
+        self._asr_guarded_pause: dict = {"flag": False}
         # Optional recorder identity shared by snapshots and live rolling ASR.
         self._asr_capture_id: dict = {"value": None}
         # Written by the ASR stream generator: the raw audio buffer currently
@@ -3916,6 +3917,8 @@ class Assistant:
             stream_kwargs["capture_id_sink"] = self._asr_capture_id
         if "candidate_expiration_sink" in stream_params:
             stream_kwargs["candidate_expiration_sink"] = self._asr_candidate_expiration
+        if "guarded_pause_sink" in stream_params:
+            stream_kwargs["guarded_pause_sink"] = self._asr_guarded_pause
         if "candidate_is_current" in stream_params:
             stream_kwargs["candidate_is_current"] = self._is_asr_candidate_current
         else:
@@ -4042,6 +4045,9 @@ class Assistant:
                     # The recorder only tags an utterance after openWakeWord
                     # fires; this transcript used the normal ASR term context.
                     if self.verify_asr_wakeword and self._wakeword_re.search(text.lower()) is None:
+                        if provisional:
+                            logger.debug("Holding incomplete wakeword candidate until another transcript")
+                            continue
                         self.wakeword_metrics["rejected"] += 1
                         self.audio_capture.mark_wakeword_wav(kws_wav_path, accepted=False)
                         logger.info("openWakeWord activation rejected by ASR")
@@ -4411,12 +4417,29 @@ class Assistant:
                 if provisional:
                     matcher = getattr(self, "_hassil_fastpath", None)
                     if matcher:
+                        from core.satellite_context import current_satellite_ha_area
                         from utils.intent_catch import catch_with_hassil
 
-                        caught = catch_with_hassil(user_prompt, matcher)
+                        area_token = current_satellite_ha_area.set(sat.ha_area)
+                        try:
+                            caught = catch_with_hassil(user_prompt, matcher, voice=True,
+                                                       context=sat.fastpath_light_context, ha_area=sat.ha_area)
+                        finally:
+                            current_satellite_ha_area.reset(area_token)
                     else:
                         caught = catchAll(user_prompt)
-                    if not should_commit_provisional(user_prompt, caught):
+                    guarded_generation = self._asr_guarded_pause.get("flag")
+                    endpointer = sat.vad_endpointer
+                    guarded_pause = bool(
+                        guarded_generation and endpointer is not None
+                        and endpointer.soft_endpointed
+                        and endpointer.soft_pause_generation == guarded_generation
+                    )
+                    voice_rules = getattr(matcher, "voice_fastpath", None) if matcher else None
+                    if voice_rules and not guarded_pause and voice_rules.hold_partial(user_prompt):
+                        logger.debug("Provisional held for possible area target continuation: %r", user_prompt)
+                        continue
+                    if not should_commit_provisional(user_prompt, caught, guarded_pause=guarded_pause):
                         logger.debug(f"Provisional held (awaiting hard endpoint): {user_prompt!r}")
                         continue
                     if capture_id is None:
@@ -4457,14 +4480,49 @@ class Assistant:
                 elif in_follow_up:
                     self._begin_satellite_follow_up_turn(sat)
                 if sat.conversation_mode:
-                    self._satellite_thinking(sat)
-                    self._queue_conversation_turn(
-                        user_prompt,
-                        turn_satellite_id,
-                        stt_seconds=stt_seconds,
-                        endpoint_wait_seconds=endpoint_wait_seconds,
-                        endpoint_kind=endpoint_kind,
-                    )
+                    # Provisional actions have already passed the common safety
+                    # gate. For a hard endpoint, independently match only known
+                    # deterministic commands; free-form conversation still settles.
+                    if not provisional:
+                        matcher = getattr(self, "_hassil_fastpath", None)
+                        if matcher:
+                            from core.satellite_context import current_satellite_ha_area
+                            from utils.intent_catch import catch_with_hassil
+
+                            area_token = current_satellite_ha_area.set(sat.ha_area)
+                            try:
+                                caught = catch_with_hassil(user_prompt, matcher, voice=True,
+                                                           context=sat.fastpath_light_context, ha_area=sat.ha_area)
+                            finally:
+                                current_satellite_ha_area.reset(area_token)
+                        else:
+                            caught = catchAll(user_prompt)
+                    actions = caught.get("actions", []) if isinstance(caught, dict) else []
+                    action = actions[0] if len(actions) == 1 else {}
+                    immediate = action.get("intent") in {
+                        "turn_on", "turn_off", "ha_set_brightness", "ha_set_color",
+                        "ha_hassil_area", "ha_set_climate", "ha_open_cover", "ha_close_cover",
+                        "ha_set_cover_position", "ha_volume_up", "ha_volume_down", "ha_volume_set",
+                        "ha_mute", "pause", "resume", "skip", "previous", "get_current_time",
+                        "get_weather_forecast", "get_exchange_rate", "get_timer_status",
+                        "start_countdown", "cancel_timer", "play_song", "get_entities_in_area_state",
+                    }
+                    if immediate:
+                        self._clear_pending_conversation_turn(sat)
+                        self._start_turn(
+                            user_prompt, satellite_id=turn_satellite_id,
+                            stt_seconds=stt_seconds, endpoint_wait_seconds=endpoint_wait_seconds,
+                            endpoint_kind=endpoint_kind,
+                        )
+                    else:
+                        self._satellite_thinking(sat)
+                        self._queue_conversation_turn(
+                            user_prompt,
+                            turn_satellite_id,
+                            stt_seconds=stt_seconds,
+                            endpoint_wait_seconds=endpoint_wait_seconds,
+                            endpoint_kind=endpoint_kind,
+                        )
                 elif self.barge_in == "off":
                     self._run_half_duplex(
                         user_prompt,
